@@ -7,16 +7,17 @@ use crate::{
     lint::Level,
     rules::{
         CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
-        ClientRoleBypassesRowLevelSecurity, CompatibleForeignKey, CredentialFreeWrite,
-        DeadPermissivePolicy, DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath,
-        ExposedDefinerOverProtectedTable, ExtensionForeignKeyOnDeleteCascade,
-        GrantOptionToClientRole, HasPrimaryKey, LatentPolicyReadCycle, LowercaseColumnName,
-        LowercaseForeignKeyName, LowercaseTableName, NoForbiddenColumnInExtension,
-        NoNegationCheckRule, NoRustKeywordColumnName, NoRustKeywordForeignKeyName,
-        NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule,
-        NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule, NonRedundantExtensionDag,
-        PastTimeColumnRule, PluralTableName, PoliciesRequireRowLevelSecurity, PolicyReadCycle,
-        PolicyToCreatingRole, PrimaryKeyReferenceEndsWithId, ReachableMaterializedView,
+        ClientRoleBypassesRowLevelSecurity, CompatibleForeignKey, CorrelatedPolicySubquery,
+        CredentialFreeWrite, DeadPermissivePolicy, DefinerTemporarySchemaNotLast,
+        DefinerWithoutSearchPath, ExposedDefinerOverProtectedTable,
+        ExtensionForeignKeyOnDeleteCascade, GrantOptionToClientRole, HasPrimaryKey,
+        LatentPolicyReadCycle, LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName,
+        NoForbiddenColumnInExtension, NoNegationCheckRule, NoRustKeywordColumnName,
+        NoRustKeywordForeignKeyName, NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension,
+        NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule,
+        NonRedundantExtensionDag, PastTimeColumnRule, PluralTableName,
+        PoliciesRequireRowLevelSecurity, PolicyReadCycle, PolicyToCreatingRole,
+        PrimaryKeyReferenceEndsWithId, ReachableMaterializedView,
         ReachableTableWithoutRowLevelSecurity, ReferencesGrantedToClientRole,
         RoleKeyedPolicyWhenPooled, SettableMembershipInBypassingRole, SingularColumnName,
         SnakeCaseColumnName, SnakeCaseTableName, TautologicalWithCheck, TextualColumnRule,
@@ -59,7 +60,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 26] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 27] = [
             Box::new(HasPrimaryKey::default()),
             Box::new(LowercaseTableName::default()),
             Box::new(SnakeCaseTableName::default()),
@@ -77,6 +78,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(DeadPermissivePolicy::default()),
             Box::new(TautologicalWithCheck::default()),
             Box::new(UnforcedRowLevelSecurity::default()),
+            Box::new(CorrelatedPolicySubquery::default()),
             Box::new(ReachableTableWithoutRowLevelSecurity::default()),
             Box::new(TruncateGrantedToAnonymousRole::default()),
             Box::new(TruncateGrantedToAppRole::default()),

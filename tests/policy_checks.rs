@@ -282,6 +282,7 @@ fn a_tautology_for_a_declared_role_leaves_a_creating_role_policy_decided() {
 fn row_independent_filters_include_nested_subqueries_and_session_values() {
     for using in [
         "current_user = 'admin'",
+        "no_such_column = 1",
         "EXISTS (SELECT 1 FROM members m WHERE m.team IN (SELECT team FROM members WHERE member = current_user))",
     ] {
         assert_eq!(

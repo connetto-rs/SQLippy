@@ -50,3 +50,5 @@ mod role_keyed_policy;
 pub use role_keyed_policy::{PolicyToCreatingRole, RoleKeyedPolicyWhenPooled};
 mod credential_free_write;
 pub use credential_free_write::CredentialFreeWrite;
+mod correlated_policy_subquery;
+pub use correlated_policy_subquery::CorrelatedPolicySubquery;
