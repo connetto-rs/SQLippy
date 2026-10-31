@@ -5,14 +5,16 @@ use std::{collections::BTreeSet, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    traits::{DataStatementLike, DatabaseLike, PolicyLike, Relation, RoleLike, TableLike},
+    traits::{
+        DataStatementLike, DatabaseLike, PolicyLike, Relation, RoleLike, TableLike, ViewLike,
+    },
 };
 use sqlparser::ast::{CreatePolicyCommand, Expr, Query, Visit, Visitor};
 
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::policy_support::{Command, held_roles, policy_roles},
+    rules::policy_support::{Command, held_by_name, held_roles, policy_roles},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
 
@@ -21,9 +23,31 @@ const SOURCE: Option<&str> = Some(
     "https://supabase.com/docs/guides/database/postgres/row-level-security#avoid-recursive-policies",
 );
 
+/// The role whose policies apply to a read.
+#[derive(PartialEq)]
+enum Checker {
+    /// The role the expansion runs as when the clause reads the table.
+    Current,
+    /// The querying role, through views that run with their reader's rights.
+    Caller,
+    /// The owner of a view that runs with its owner's rights.
+    Owner(Holder),
+}
+
+/// The rights a view reads its relations with.
+enum Rights<'db, R> {
+    /// The reader's, for a view with `security_invoker`.
+    Reader,
+    /// Those of the named owner and its role, when declared.
+    Owner(&'db str, Option<&'db R>),
+    /// Those of an owner that bypasses row-level security or that the schema does not name.
+    Bypassing,
+}
+
 /// A base table read by a sublink of a policy clause.
 struct Read<'db, DB: DatabaseLike> {
     table: &'db DB::Table,
+    checker: Checker,
     subquery: String,
 }
 
@@ -34,6 +58,60 @@ struct SublinkReads<'db, DB: DatabaseLike> {
     depth: usize,
     found: bool,
     reads: Vec<Read<'db, DB>>,
+}
+
+impl<'db, DB: DatabaseLike> SublinkReads<'db, DB> {
+    fn push(&mut self, table: &'db DB::Table, checker: Checker, query: &Query) {
+        if !self
+            .reads
+            .iter()
+            .any(|read| read.table == table && read.checker == checker)
+        {
+            self.reads.push(Read {
+                table,
+                checker,
+                subquery: query.to_string(),
+            });
+        }
+    }
+
+    /// Adds the base tables a view reads, each with the role checked on it.
+    ///
+    /// A view nested in it decides its own rights, so it is followed even when
+    /// this view's owner reads its tables past their policies.
+    fn view(&mut self, view: &'db DB::View, query: &Query) -> Result<(), LookupError> {
+        let database = self.database;
+        // An owner the schema does not name is whoever ran it, which may bypass every policy.
+        let rights = match view.owner(database)? {
+            _ if view.is_security_invoker() => Rights::Reader,
+            Some(owner) => match database.role(owner) {
+                Some(role) if role.can_bypass_rls() || role.is_superuser() => Rights::Bypassing,
+                role => Rights::Owner(owner, role),
+            },
+            None => Rights::Bypassing,
+        };
+        for relation in DataStatementLike::<DB>::referenced_relations(view.definition(), database)?
+        {
+            match (relation, &rights) {
+                (Relation::View(inner), _) => self.view(inner, query)?,
+                (Relation::Table(table), Rights::Reader) => {
+                    self.push(table, Checker::Caller, query);
+                }
+                (Relation::Table(table), &Rights::Owner(owner, role)) => {
+                    let owns = table.owner(database)?.is_some_and(|table_owner| {
+                        table_owner == owner
+                            || role.is_some_and(|role| database.role(table_owner) == Some(role))
+                    });
+                    if !owns || table.has_forced_row_level_security(database)? {
+                        let held = held_by_name(database, owner);
+                        self.push(table, Checker::Owner(Holder::Roles(held)), query);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<DB: DatabaseLike> Visitor for SublinkReads<'_, DB> {
@@ -49,16 +127,17 @@ impl<DB: DatabaseLike> Visitor for SublinkReads<'_, DB> {
             Ok(relations) => relations,
             Err(error) => return ControlFlow::Break(error),
         };
-        // A view reads its base tables with its owner's rights, which may bypass their policies.
         for relation in relations {
-            let Relation::Table(table) = relation else {
-                continue;
+            let outcome = match relation {
+                Relation::Table(table) => {
+                    self.push(table, Checker::Current, query);
+                    Ok(())
+                }
+                Relation::View(view) => self.view(view, query),
+                _ => Ok(()),
             };
-            if !self.reads.iter().any(|read| read.table == table) {
-                self.reads.push(Read {
-                    table,
-                    subquery: query.to_string(),
-                });
+            if let Err(error) = outcome {
+                return ControlFlow::Break(error);
             }
         }
         ControlFlow::Continue(())
@@ -104,6 +183,7 @@ struct PolicyFacts<'db, DB: DatabaseLike> {
 }
 
 /// The roles a querying role holds the privileges of.
+#[derive(PartialEq)]
 enum Holder {
     /// Every policy applies, whatever its roles.
     Everyone,
@@ -244,29 +324,36 @@ impl<'db, DB: DatabaseLike> Analysis<'db, DB> {
         }
     }
 
+    /// Expands `steps`, taken as `current` for a query `caller` runs.
     fn expand(
         &self,
-        holder: &Holder,
+        caller: &Holder,
+        current: &Holder,
         active: &mut Vec<&'db DB::Table>,
         path: &mut Vec<Step>,
         steps: Vec<Step>,
         found: &mut Vec<(Vec<Step>, &'db DB::Table)>,
     ) {
         for step in steps {
-            let table = self.read(step).table;
-            if !self.secured(table) {
+            let read = self.read(step);
+            if !self.secured(read.table) {
                 continue;
             }
-            let (has_sublinks, next) = self.steps(table, Command::Select, holder);
+            let holder = match &read.checker {
+                Checker::Current => current,
+                Checker::Owner(owner) if *caller != Holder::Everyone => owner,
+                Checker::Caller | Checker::Owner(_) => caller,
+            };
+            let (has_sublinks, next) = self.steps(read.table, Command::Select, holder);
             if !has_sublinks {
                 continue;
             }
             path.push(step);
-            if let Some(start) = active.iter().position(|relation| *relation == table) {
-                found.push((path[start..].to_vec(), table));
+            if let Some(start) = active.iter().position(|relation| *relation == read.table) {
+                found.push((path[start..].to_vec(), read.table));
             } else {
-                active.push(table);
-                self.expand(holder, active, path, next, found);
+                active.push(read.table);
+                self.expand(caller, holder, active, path, next, found);
                 active.pop();
             }
             path.pop();
@@ -280,7 +367,14 @@ impl<'db, DB: DatabaseLike> Analysis<'db, DB> {
             for command in Command::ALL {
                 let (has_sublinks, steps) = self.steps(table, command, holder);
                 if has_sublinks {
-                    self.expand(holder, &mut vec![table], &mut Vec::new(), steps, &mut found);
+                    self.expand(
+                        holder,
+                        holder,
+                        &mut vec![table],
+                        &mut Vec::new(),
+                        steps,
+                        &mut found,
+                    );
                 }
             }
         }
@@ -382,6 +476,11 @@ impl<'db, DB: DatabaseLike> Analysis<'db, DB> {
 /// hold, applying each read relation's `SELECT` policies in turn. Meeting a
 /// relation it is already expanding, whose applicable policies hold a sublink,
 /// fails the statement with `infinite recursion detected in policy`.
+///
+/// A sublink reading a view reads the view's base tables. A view with
+/// `security_invoker` applies the querying role's policies to them. Any other
+/// view applies its owner's, and none when the owner bypasses row-level
+/// security, owns the table without `FORCE`, or is not named in the schema.
 ///
 /// # Example
 ///

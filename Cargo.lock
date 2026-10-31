@@ -441,7 +441,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#ad998f25f2c75ceb6b970460fe765bc68ca401f2"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#5b2a92af6a4754bb0b18c1ff70788a85969dfc85"
 dependencies = [
  "geometric-traits",
  "sha2",
