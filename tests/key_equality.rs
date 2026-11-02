@@ -46,9 +46,12 @@ fn every_key_kind_over_an_interval_or_a_float_is_reported() {
              CREATE TABLE samples_by_mark (mark FLOAT8 PRIMARY KEY);
              CREATE TABLE marks (mark FLOAT8 REFERENCES samples_by_mark);
              CREATE TABLE weights (id INT PRIMARY KEY, weight FLOAT4);
-             CREATE UNIQUE INDEX weights_weight ON weights (weight);",
+             CREATE UNIQUE INDEX weights_weight ON weights (weight);
+             CREATE TABLE lengths (id INT PRIMARY KEY, length INTERVAL);
+             CREATE UNIQUE INDEX lengths_length ON lengths ((lengths.length));",
         ),
         [
+            "lengths.length",
             "marks.mark",
             "readings.value",
             "samples.at",
