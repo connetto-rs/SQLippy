@@ -12,7 +12,8 @@ const SCHEMA: &str = "
     CREATE TABLE admins (member TEXT);
     ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     CREATE FUNCTION my_teams() RETURNS SETOF INT LANGUAGE sql STABLE
-      AS 'SELECT team FROM public.members';";
+      AS 'SELECT team FROM public.members';
+    CREATE VIEW member_teams AS SELECT team, member FROM members;";
 
 const DOCS: &str = "CREATE POLICY docs_p ON docs TO readers USING (
     team IN (SELECT team FROM members WHERE member = current_user));";
@@ -91,14 +92,20 @@ fn flat_policies_writes_other_roles_unprotected_tables_and_calls_pass() {
             "{members}"
         );
     }
-    assert_eq!(
-        reported(
-            "ALTER TABLE members ENABLE ROW LEVEL SECURITY;
-             CREATE POLICY members_p ON members USING (member IN (SELECT member FROM admins));
-             CREATE POLICY docs_p ON docs USING (team IN (SELECT my_teams()));"
-        ),
-        Vec::<String>::new()
-    );
+    for docs in [
+        "team IN (SELECT my_teams())",
+        "team IN (SELECT team FROM member_teams)",
+    ] {
+        assert_eq!(
+            reported(&format!(
+                "ALTER TABLE members ENABLE ROW LEVEL SECURITY;
+                 CREATE POLICY members_p ON members USING (member IN (SELECT member FROM admins));
+                 CREATE POLICY docs_p ON docs USING ({docs});"
+            )),
+            Vec::<String>::new(),
+            "{docs}"
+        );
+    }
 }
 
 #[test]
