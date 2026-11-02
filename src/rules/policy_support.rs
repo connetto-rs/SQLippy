@@ -139,11 +139,35 @@ struct RowReferences<'db, DB: DatabaseLike> {
     database: &'db DB,
     table: ColumnScope<'db, 'db, DB>,
     depth: usize,
+    until_first: bool,
+    outside: bool,
+    correlated: Vec<String>,
 }
 
 impl<DB: DatabaseLike> RowReferences<'_, DB> {
     fn reads_table(&self, expression: &Expr) -> Result<bool, LookupError> {
         Ok(self.table.resolve_column_definition(expression)?.is_some())
+    }
+
+    /// Lets `mark` record a row reference, then stops after the first one when
+    /// only its existence matters.
+    fn record(
+        &mut self,
+        reads: Result<bool, LookupError>,
+        mark: impl FnOnce(&mut Self),
+    ) -> ControlFlow<Option<LookupError>> {
+        match reads {
+            Ok(false) => ControlFlow::Continue(()),
+            Ok(true) => {
+                mark(self);
+                if self.until_first {
+                    ControlFlow::Break(None)
+                } else {
+                    ControlFlow::Continue(())
+                }
+            }
+            Err(error) => ControlFlow::Break(Some(error)),
+        }
     }
 }
 
@@ -192,21 +216,28 @@ fn decide(reads_row: Result<bool, LookupError>) -> ControlFlow<Result<(), Lookup
 }
 
 impl<DB: DatabaseLike> Visitor for RowReferences<'_, DB> {
-    type Break = Result<(), LookupError>;
+    /// A lookup failure, or `None` after the first row reference.
+    type Break = Option<LookupError>;
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
         self.depth += 1;
         if self.depth > 1 {
             return ControlFlow::Continue(());
         }
-        match ColumnScope::from_query(query, self.database, IdentifierCase::Folded) {
-            Ok(local) => query.visit(&mut SublinkReferences {
+        let reads = match ColumnScope::from_query(query, self.database, IdentifierCase::Folded) {
+            Ok(local) => match query.visit(&mut SublinkReferences {
                 outer: self,
                 local,
                 depth: 0,
-            }),
-            Err(error) => decide(Err(error)),
-        }
+            }) {
+                ControlFlow::Continue(()) => Ok(false),
+                ControlFlow::Break(outcome) => outcome.map(|()| true),
+            },
+            Err(error) => Err(error),
+        };
+        self.record(reads, |references| {
+            references.correlated.push(query.to_string());
+        })
     }
 
     fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
@@ -218,7 +249,8 @@ impl<DB: DatabaseLike> Visitor for RowReferences<'_, DB> {
         if self.depth != 0 || !is_column_reference(expression) {
             return ControlFlow::Continue(());
         }
-        decide(self.reads_table(expression))
+        let reads = self.reads_table(expression);
+        self.record(reads, |references| references.outside = true)
     }
 }
 
@@ -229,6 +261,27 @@ fn is_column_reference(expression: &Expr) -> bool {
     )
 }
 
+/// Row references of a policy expression on `table`.
+fn row_references<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    table: &'db DB::Table,
+    expression: &Expr,
+    until_first: bool,
+) -> Result<RowReferences<'db, DB>, LookupError> {
+    let mut references = RowReferences {
+        database,
+        table: ColumnScope::for_table(table, database, IdentifierCase::Folded),
+        depth: 0,
+        until_first,
+        outside: false,
+        correlated: Vec::new(),
+    };
+    match expression.visit(&mut references) {
+        ControlFlow::Break(Some(error)) => Err(error),
+        ControlFlow::Continue(()) | ControlFlow::Break(None) => Ok(references),
+    }
+}
+
 /// Returns whether a policy expression on `table` depends on the row it is
 /// evaluated for.
 pub(crate) fn reads_row<DB: DatabaseLike>(
@@ -236,15 +289,18 @@ pub(crate) fn reads_row<DB: DatabaseLike>(
     table: &DB::Table,
     expression: &Expr,
 ) -> Result<bool, LookupError> {
-    let mut references = RowReferences {
-        database,
-        table: ColumnScope::for_table(table, database, IdentifierCase::Folded),
-        depth: 0,
-    };
-    match expression.visit(&mut references) {
-        ControlFlow::Continue(()) => Ok(false),
-        ControlFlow::Break(outcome) => outcome.map(|()| true),
-    }
+    let references = row_references(database, table, expression, true)?;
+    Ok(references.outside || !references.correlated.is_empty())
+}
+
+/// Returns every sublink of a policy expression on `table` whose top-level
+/// query references the row being checked, rendered as SQL.
+pub(crate) fn correlated_subqueries<DB: DatabaseLike>(
+    database: &DB,
+    table: &DB::Table,
+    expression: &Expr,
+) -> Result<Vec<String>, LookupError> {
+    Ok(row_references(database, table, expression, false)?.correlated)
 }
 
 /// Returns whether PostgreSQL can prove the expression true for every row.
