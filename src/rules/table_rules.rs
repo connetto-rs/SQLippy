@@ -54,3 +54,5 @@ mod correlated_policy_subquery;
 pub use correlated_policy_subquery::CorrelatedPolicySubquery;
 mod key_without_exact_equality;
 pub use key_without_exact_equality::KeyWithoutExactEquality;
+mod uncached_policy_call;
+pub use uncached_policy_call::UncachedPolicyCall;
