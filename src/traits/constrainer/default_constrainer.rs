@@ -16,11 +16,12 @@ use crate::{
         NoNegationCheckRule, NoRustKeywordColumnName, NoRustKeywordForeignKeyName,
         NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule,
         NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule, NonRedundantExtensionDag,
-        PastTimeColumnRule, PluralTableName, PoliciesRequireRowLevelSecurity, PolicyReadCycle,
-        PolicyToCreatingRole, PrimaryKeyReferenceEndsWithId, ReachableMaterializedView,
-        ReachableTableWithoutRowLevelSecurity, ReferencesGrantedToClientRole,
-        RoleKeyedPolicyWhenPooled, SettableMembershipInBypassingRole, SingularColumnName,
-        SnakeCaseColumnName, SnakeCaseTableName, TautologicalWithCheck, TextualColumnRule,
+        OwnerRightsView, PastTimeColumnRule, PluralTableName, PoliciesRequireRowLevelSecurity,
+        PolicyReadCycle, PolicyToCreatingRole, PrimaryKeyReferenceEndsWithId,
+        ReachableMaterializedView, ReachableTableWithoutRowLevelSecurity,
+        ReferencesGrantedToClientRole, RoleKeyedPolicyWhenPooled,
+        SettableMembershipInBypassingRole, SingularColumnName, SnakeCaseColumnName,
+        SnakeCaseTableName, TautologicalWithCheck, TextualColumnRule,
         TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, UncachedPolicyCall,
         UnforcedRowLevelSecurity, UniqueCheckRule, UniqueColumnNamesInExtensionGraph,
         UniqueForeignKey, UniqueUniqueIndex,
@@ -120,11 +121,12 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in foreign_key_rules {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
-        let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 6] = [
+        let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 7] = [
             Box::new(PolicyReadCycle::default()),
             Box::new(LatentPolicyReadCycle::default()),
             Box::new(FunctionMediatedPolicyCycle::default()),
             Box::new(ReachableMaterializedView::default()),
+            Box::new(OwnerRightsView::default()),
             Box::new(ClientRoleBypassesRowLevelSecurity::default()),
             Box::new(SettableMembershipInBypassingRole::default()),
         ];

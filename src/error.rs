@@ -24,6 +24,8 @@ pub enum Location<DB: DatabaseLike> {
     ForeignKey(Box<DB::ForeignKey>),
     /// Policy clauses, in the order the finding traverses them.
     Policies(Vec<PolicySite<DB>>),
+    /// A view.
+    View(Box<DB::View>),
     /// A materialized view.
     MaterializedView(Box<DB::MaterializedView>),
     /// A role.
