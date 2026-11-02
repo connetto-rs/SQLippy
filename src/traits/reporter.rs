@@ -176,6 +176,27 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         )
     }
 
+    /// Reports a violation on a view.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn view(
+        &mut self,
+        view: &DB::View,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        let object = view.view_name().to_owned();
+        self.emit(
+            Location::View(Box::new(view.clone())),
+            object,
+            message,
+            resolution,
+        )
+    }
+
     /// Reports a violation on a materialized view.
     ///
     /// # Errors
