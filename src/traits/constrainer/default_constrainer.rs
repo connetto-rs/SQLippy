@@ -11,13 +11,13 @@ use crate::{
         CredentialFreeWrite, DeadPermissivePolicy, DefinerTemporarySchemaNotLast,
         DefinerWithoutSearchPath, ExposedDefinerOverProtectedTable,
         ExtensionForeignKeyOnDeleteCascade, GrantOptionToClientRole, HasPrimaryKey,
-        LatentPolicyReadCycle, LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName,
-        NoForbiddenColumnInExtension, NoNegationCheckRule, NoRustKeywordColumnName,
-        NoRustKeywordForeignKeyName, NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension,
-        NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule,
-        NonRedundantExtensionDag, PastTimeColumnRule, PluralTableName,
-        PoliciesRequireRowLevelSecurity, PolicyReadCycle, PolicyToCreatingRole,
-        PrimaryKeyReferenceEndsWithId, ReachableMaterializedView,
+        KeyWithoutExactEquality, LatentPolicyReadCycle, LowercaseColumnName,
+        LowercaseForeignKeyName, LowercaseTableName, NoForbiddenColumnInExtension,
+        NoNegationCheckRule, NoRustKeywordColumnName, NoRustKeywordForeignKeyName,
+        NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule,
+        NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule, NonRedundantExtensionDag,
+        PastTimeColumnRule, PluralTableName, PoliciesRequireRowLevelSecurity, PolicyReadCycle,
+        PolicyToCreatingRole, PrimaryKeyReferenceEndsWithId, ReachableMaterializedView,
         ReachableTableWithoutRowLevelSecurity, ReferencesGrantedToClientRole,
         RoleKeyedPolicyWhenPooled, SettableMembershipInBypassingRole, SingularColumnName,
         SnakeCaseColumnName, SnakeCaseTableName, TautologicalWithCheck, TextualColumnRule,
@@ -60,8 +60,9 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 27] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 28] = [
             Box::new(HasPrimaryKey::default()),
+            Box::new(KeyWithoutExactEquality::default()),
             Box::new(LowercaseTableName::default()),
             Box::new(SnakeCaseTableName::default()),
             Box::new(PluralTableName::default()),

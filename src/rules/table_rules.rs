@@ -52,3 +52,5 @@ mod credential_free_write;
 pub use credential_free_write::CredentialFreeWrite;
 mod correlated_policy_subquery;
 pub use correlated_policy_subquery::CorrelatedPolicySubquery;
+mod key_without_exact_equality;
+pub use key_without_exact_equality::KeyWithoutExactEquality;
