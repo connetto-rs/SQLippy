@@ -6,10 +6,10 @@ use sql_traits::traits::DatabaseLike;
 use crate::{
     lint::Level,
     rules::{
-        CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
+        ArrayMembershipPolicy, CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
         ClientRoleBypassesRowLevelSecurity, CompatibleForeignKey, CorrelatedPolicySubquery,
         CredentialFreeWrite, DeadPermissivePolicy, DefinerTemporarySchemaNotLast,
-        DefinerWithoutSearchPath, ExposedDefinerOverProtectedTable,
+        DefinerWithoutSearchPath, DenyListPolicy, ExposedDefinerOverProtectedTable,
         ExtensionForeignKeyOnDeleteCascade, FunctionMediatedPolicyCycle, GrantOptionToClientRole,
         HasPrimaryKey, KeyWithoutExactEquality, LatentPolicyReadCycle, LowercaseColumnName,
         LowercaseForeignKeyName, LowercaseTableName, NestedPolicySubquery,
@@ -23,8 +23,8 @@ use crate::{
         RoleKeyedPolicyWhenPooled, SettableMembershipInBypassingRole, SingularColumnName,
         SnakeCaseColumnName, SnakeCaseTableName, TautologicalWithCheck, TextualColumnRule,
         TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, UncachedPolicyCall,
-        UnforcedRowLevelSecurity, UniqueCheckRule, UniqueColumnNamesInExtensionGraph,
-        UniqueForeignKey, UniqueUniqueIndex,
+        UnforcedRowLevelSecurity, UnindexedPolicyFilter, UniqueCheckRule,
+        UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, SchemaRule,
@@ -62,7 +62,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 30] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 33] = [
             Box::new(HasPrimaryKey::default()),
             Box::new(KeyWithoutExactEquality::default()),
             Box::new(LowercaseTableName::default()),
@@ -84,6 +84,9 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(CorrelatedPolicySubquery::default()),
             Box::new(NestedPolicySubquery::default()),
             Box::new(UncachedPolicyCall::default()),
+            Box::new(UnindexedPolicyFilter::default()),
+            Box::new(ArrayMembershipPolicy::default()),
+            Box::new(DenyListPolicy::default()),
             Box::new(ReachableTableWithoutRowLevelSecurity::default()),
             Box::new(TruncateGrantedToAnonymousRole::default()),
             Box::new(TruncateGrantedToAppRole::default()),

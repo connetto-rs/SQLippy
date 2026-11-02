@@ -40,11 +40,11 @@ A rule registered on its own, including a single rule converted with `.into()`, 
 | Group | Default | Rules |
 | :--- | :--- | :--- |
 | `correctness` | `deny` | `PoliciesRequireRowLevelSecurity`, `PolicyReadCycle`, `DeadPermissivePolicy`, `TruncateGrantedToAnonymousRole`, `ClientRoleBypassesRowLevelSecurity`, `DefinerWithoutSearchPath`, `DefinerTemporarySchemaNotLast`, `NoTautologicalCheckRule`, `NoNegationCheckRule`, `NoSurrogatePrimaryKeyInExtension` |
-| `suspicious` | `warn` | `LatentPolicyReadCycle`, `FunctionMediatedPolicyCycle`, `TautologicalWithCheck`, `UnforcedRowLevelSecurity`, `CredentialFreeWrite`, `ReachableTableWithoutRowLevelSecurity`, `OwnerRightsView`, `ReachableMaterializedView`, `TruncateGrantedToAppRole`, `ChildWithoutRowLevelSecurity`, `SettableMembershipInBypassingRole`, `PolicyToCreatingRole`, `RoleKeyedPolicyWhenPooled`, `GrantOptionToClientRole`, `ExposedDefinerOverProtectedTable`, `TextualColumnRule`, `CompatibleForeignKey`, `HasPrimaryKey`, `KeyWithoutExactEquality`, `ExtensionForeignKeyOnDeleteCascade`, `NoForbiddenColumnInExtension`, `UniqueColumnNamesInExtensionGraph` |
-| `perf` | `warn` | `CorrelatedPolicySubquery`, `NestedPolicySubquery`, `UncachedPolicyCall` |
+| `suspicious` | `warn` | `LatentPolicyReadCycle`, `FunctionMediatedPolicyCycle`, `TautologicalWithCheck`, `UnforcedRowLevelSecurity`, `DenyListPolicy`, `CredentialFreeWrite`, `ReachableTableWithoutRowLevelSecurity`, `OwnerRightsView`, `ReachableMaterializedView`, `TruncateGrantedToAppRole`, `ChildWithoutRowLevelSecurity`, `SettableMembershipInBypassingRole`, `PolicyToCreatingRole`, `RoleKeyedPolicyWhenPooled`, `GrantOptionToClientRole`, `ExposedDefinerOverProtectedTable`, `TextualColumnRule`, `CompatibleForeignKey`, `HasPrimaryKey`, `KeyWithoutExactEquality`, `ExtensionForeignKeyOnDeleteCascade`, `NoForbiddenColumnInExtension`, `UniqueColumnNamesInExtensionGraph` |
+| `perf` | `warn` | `CorrelatedPolicySubquery`, `NestedPolicySubquery`, `UncachedPolicyCall`, `UnindexedPolicyFilter` |
 | `complexity` | `warn` | `UniqueForeignKey`, `UniqueCheckRule`, `UniqueUniqueIndex`, `NonRedundantExtensionDag` |
 | `style` | `warn` | `LowercaseTableName`, `LowercaseColumnName`, `LowercaseForeignKeyName`, `SnakeCaseTableName`, `SnakeCaseColumnName`, `PluralTableName`, `SingularColumnName`, `PrimaryKeyReferenceEndsWithId`, `NonCompositePrimaryKeyNamedId` |
-| `pedantic` | `allow` | `ReferencesGrantedToClientRole`, `CascadeIntoRowLevelSecurityTable`, `PastTimeColumnRule`, `NonEmptyTextualColumnRule` |
+| `pedantic` | `allow` | `ArrayMembershipPolicy`, `ReferencesGrantedToClientRole`, `CascadeIntoRowLevelSecurityTable`, `PastTimeColumnRule`, `NonEmptyTextualColumnRule` |
 | `restriction` | `allow` | `NoRustKeywordTableName`, `NoRustKeywordColumnName`, `NoRustKeywordForeignKeyName` |
 
 Each rule's documentation states what it reports, and its violations carry the rationale and source.
