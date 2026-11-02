@@ -3,6 +3,12 @@
 
 use std::fmt::{self, Display};
 
+use sqlparser::{
+    ast::Expr,
+    dialect::PostgreSqlDialect,
+    parser::{Parser, ParserError},
+};
+
 /// Roles and schemas of the deployment a schema serves.
 ///
 /// Role and schema names are compared with the names PostgreSQL stores, so an
@@ -26,6 +32,7 @@ pub struct Deployment {
     anonymous_roles: Vec<String>,
     app_roles: Vec<String>,
     exposed_schemas: Vec<String>,
+    credentials: Vec<Expr>,
     pooled: Option<bool>,
 }
 
@@ -82,6 +89,32 @@ impl Deployment {
         self.exposed_schemas.iter().any(|exposed| exposed == schema)
     }
 
+    /// Declares an expression that identifies the caller, such as
+    /// `current_setting('app.user_id', true)` or `auth.uid()`, which reads
+    /// `NULL` for a caller holding no credential.
+    ///
+    /// The expression is matched as written, so a policy must spell it the
+    /// same way, and a deployment whose credential can read `''` declares it
+    /// wrapped in `NULLIF(..., '')`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parser error when `expression` is not one PostgreSQL SQL
+    /// expression.
+    pub fn with_credential(mut self, expression: &str) -> Result<Self, ParserError> {
+        let parsed = Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(expression)?
+            .parse_expr()?;
+        self.credentials.push(parsed);
+        Ok(self)
+    }
+
+    /// Returns whether `expression` is a declared credential, as written.
+    #[must_use]
+    pub fn is_credential(&self, expression: &Expr) -> bool {
+        self.credentials.contains(expression)
+    }
+
     /// Returns whether the deployment makes the given declaration.
     #[must_use]
     pub fn declares(&self, declaration: Declaration) -> bool {
@@ -90,6 +123,7 @@ impl Deployment {
             Declaration::ClientRoles => {
                 !self.anonymous_roles.is_empty() || !self.app_roles.is_empty()
             }
+            Declaration::Credentials => !self.credentials.is_empty(),
             Declaration::Pooled => self.pooled.is_some(),
         }
     }
@@ -102,6 +136,8 @@ pub enum Declaration {
     AppRoles,
     /// At least one anonymous or app role besides `PUBLIC`.
     ClientRoles,
+    /// At least one credential expression.
+    Credentials,
     /// Whether the deployment is pooled.
     Pooled,
 }
@@ -111,6 +147,7 @@ impl Display for Declaration {
         f.write_str(match self {
             Self::AppRoles => "app roles",
             Self::ClientRoles => "anonymous or app roles",
+            Self::Credentials => "credential expressions",
             Self::Pooled => "whether it is pooled",
         })
     }

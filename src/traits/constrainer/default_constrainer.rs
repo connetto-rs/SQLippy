@@ -7,13 +7,13 @@ use crate::{
     lint::Level,
     rules::{
         CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
-        ClientRoleBypassesRowLevelSecurity, CompatibleForeignKey, DeadPermissivePolicy,
-        ExtensionForeignKeyOnDeleteCascade, GrantOptionToClientRole, HasPrimaryKey,
-        LatentPolicyReadCycle, LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName,
-        NoForbiddenColumnInExtension, NoNegationCheckRule, NoRustKeywordColumnName,
-        NoRustKeywordForeignKeyName, NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension,
-        NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule,
-        NonRedundantExtensionDag, PastTimeColumnRule, PluralTableName,
+        ClientRoleBypassesRowLevelSecurity, CompatibleForeignKey, CredentialFreeWrite,
+        DeadPermissivePolicy, ExtensionForeignKeyOnDeleteCascade, GrantOptionToClientRole,
+        HasPrimaryKey, LatentPolicyReadCycle, LowercaseColumnName, LowercaseForeignKeyName,
+        LowercaseTableName, NoForbiddenColumnInExtension, NoNegationCheckRule,
+        NoRustKeywordColumnName, NoRustKeywordForeignKeyName, NoRustKeywordTableName,
+        NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId,
+        NonEmptyTextualColumnRule, NonRedundantExtensionDag, PastTimeColumnRule, PluralTableName,
         PoliciesRequireRowLevelSecurity, PolicyReadCycle, PolicyToCreatingRole,
         PrimaryKeyReferenceEndsWithId, ReachableMaterializedView,
         ReachableTableWithoutRowLevelSecurity, ReferencesGrantedToClientRole,
@@ -55,7 +55,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 25] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 26] = [
             Box::new(HasPrimaryKey::default()),
             Box::new(LowercaseTableName::default()),
             Box::new(SnakeCaseTableName::default()),
@@ -81,6 +81,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(ChildWithoutRowLevelSecurity::default()),
             Box::new(PolicyToCreatingRole::default()),
             Box::new(RoleKeyedPolicyWhenPooled::default()),
+            Box::new(CredentialFreeWrite::default()),
         ];
         for rule in table_rules {
             constrainer.register_table_rule_with_floor(rule, Level::Allow);

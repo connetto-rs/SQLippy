@@ -14,9 +14,9 @@ use crate::{
 /// table (i.e. it extends another table), then any primary-key column in that
 /// table must not be surrogate.
 ///
-/// This rule treats generated columns (e.g. `SERIAL`, `AUTOINCREMENT`) and
-/// columns with `DEFAULT` values as surrogate-like primary keys for extension
-/// tables.
+/// This rule treats columns the database generates (`SERIAL`, identity
+/// columns, `AUTOINCREMENT`) and columns with `DEFAULT` values as
+/// surrogate-like primary keys for extension tables.
 ///
 /// # Example
 ///
@@ -112,9 +112,9 @@ impl<DB: DatabaseLike> ColumnRule for NoSurrogatePrimaryKeyInExtension<DB> {
 
         let table_name = table.table_name();
         let column_name = column.column_name();
-        let surrogate_reason = match (column.is_generated(), column.has_default()) {
+        let surrogate_reason = match (column.is_generated(database), column.has_default()) {
             (true, true) => "is generated and defines a DEFAULT value",
-            (true, false) => "is generated (e.g. SERIAL/AUTOINCREMENT)",
+            (true, false) => "is generated (serial, identity or AUTOINCREMENT)",
             (false, true) => "defines a DEFAULT value",
             (false, false) => return Ok(()),
         };
@@ -124,7 +124,7 @@ impl<DB: DatabaseLike> ColumnRule for NoSurrogatePrimaryKeyInExtension<DB> {
                 "Primary-key column '{table_name}.{column_name}' belongs to an extension table and {surrogate_reason}."
             ),
             format!(
-                "Use a non-surrogate primary key for '{table_name}.{column_name}' by removing SERIAL/AUTOINCREMENT/DEFAULT and reusing the inherited key value."
+                "Use a non-surrogate primary key for '{table_name}.{column_name}' by removing SERIAL, the identity, AUTOINCREMENT or the DEFAULT and reusing the inherited key value."
             ),
         )?;
         Ok(())

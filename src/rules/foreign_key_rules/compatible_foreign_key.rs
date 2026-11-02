@@ -155,7 +155,7 @@ impl<DB: DatabaseLike> CompatibleForeignKey<DB> {
         host_column: &<DB as DatabaseLike>::Column,
         referenced_column: &<DB as DatabaseLike>::Column,
     ) -> Result<(String, String), LookupError> {
-        if host_column.is_generated() && referenced_column.is_generated() {
+        if host_column.is_generated(database) && referenced_column.is_generated(database) {
             Ok((
                 format!(
                     "Foreign key column `{}.{}` and referenced column `{}.{}` both generate their own values, so they match the referenced row only by coincidence.",
@@ -165,7 +165,7 @@ impl<DB: DatabaseLike> CompatibleForeignKey<DB> {
                     referenced_column.column_name(),
                 ),
                 format!(
-                    "Remove the generative property from `{}.{}` (change from SERIAL/AUTO_INCREMENT to INT/BIGINT) or redesign the foreign key relationship.",
+                    "Remove the generative property from `{}.{}` (drop SERIAL, AUTO_INCREMENT or the identity, keeping INT/BIGINT) or redesign the foreign key relationship.",
                     host_table.table_name(),
                     host_column.column_name(),
                 ),

@@ -281,6 +281,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
         [
             "TruncateGrantedToAppRole",
             "RoleKeyedPolicyWhenPooled",
+            "CredentialFreeWrite",
             "ClientRoleBypassesRowLevelSecurity",
             "SettableMembershipInBypassingRole",
         ]
@@ -292,7 +293,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             .iter()
             .map(|inactive| inactive.rule().name)
             .collect::<Vec<_>>(),
-        ["RoleKeyedPolicyWhenPooled"]
+        ["RoleKeyedPolicyWhenPooled", "CredentialFreeWrite"]
     );
     let database = parse(&format!(
         "{ROLES}{PROTECTED}

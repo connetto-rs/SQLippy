@@ -1,7 +1,7 @@
 //! Submodule providing the `ClientRoleBypassesRowLevelSecurity` and
 //! `SettableMembershipInBypassingRole` rules.
 
-use sql_traits::traits::{DatabaseLike, RoleLike};
+use sql_traits::traits::{DatabaseLike, RoleLike, RoleMembershipLike};
 
 use crate::{
     deployment::{Declaration, Deployment},
@@ -38,8 +38,9 @@ pub struct ClientRoleBypassesRowLevelSecurity<DB>(std::marker::PhantomData<DB>);
 /// memberships.
 ///
 /// Attributes are not inherited, but `SET ROLE` reaches every role along a
-/// membership chain. The rule is inactive until the deployment declares an
-/// anonymous or app role.
+/// chain of memberships granted with the `SET` option, which PostgreSQL
+/// gives a membership unless it is granted `WITH SET FALSE`. The rule is
+/// inactive until the deployment declares an anonymous or app role.
 ///
 /// # Example
 ///
@@ -173,7 +174,11 @@ impl<DB: DatabaseLike> SchemaRule for SettableMembershipInBypassingRole<DB> {
             let mut frontier = vec![role];
             let mut reached = None;
             while let Some(member) = frontier.pop() {
-                for parent in member.member_of(database) {
+                for parent in member
+                    .memberships(database)
+                    .filter(|membership| membership.set_option())
+                    .filter_map(|membership| membership.role(database))
+                {
                     if seen.contains(&parent) {
                         continue;
                     }

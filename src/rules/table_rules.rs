@@ -48,3 +48,5 @@ mod child_without_row_level_security;
 pub use child_without_row_level_security::ChildWithoutRowLevelSecurity;
 mod role_keyed_policy;
 pub use role_keyed_policy::{PolicyToCreatingRole, RoleKeyedPolicyWhenPooled};
+mod credential_free_write;
+pub use credential_free_write::CredentialFreeWrite;

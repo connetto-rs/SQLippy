@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, ops::ControlFlow};
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnScope, IdentifierCase},
-    traits::{DatabaseLike, PolicyLike, RoleLike, TableLike},
+    traits::{DatabaseLike, PolicyLike, RoleLike, RoleMembershipLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{CreatePolicyCommand, Expr, Owner, Query, Visit, Visitor};
@@ -106,17 +106,18 @@ pub(crate) fn policy_roles<DB: DatabaseLike>(
     (!policy.applies_to_public()).then(|| policy.roles(database).map(owner_name).collect())
 }
 
-/// Roles whose privileges `role` holds, itself included, following `IN ROLE`
-/// memberships of roles with `INHERIT`.
+/// Roles whose privileges `role` holds, itself included, following the
+/// memberships granted with the `INHERIT` option.
 pub(crate) fn held_roles<DB: DatabaseLike>(database: &DB, role: &DB::Role) -> BTreeSet<String> {
     let mut held = BTreeSet::from([role.stored_name().into_owned()]);
     let mut frontier = vec![role];
     while let Some(member) = frontier.pop() {
-        if member.inherits() {
-            for parent in member.member_of(database) {
-                if held.insert(parent.stored_name().into_owned()) {
-                    frontier.push(parent);
-                }
+        for membership in member.memberships(database) {
+            if membership.inherit_option()
+                && held.insert(membership.stored_role_name().into_owned())
+                && let Some(parent) = membership.role(database)
+            {
+                frontier.push(parent);
             }
         }
     }
