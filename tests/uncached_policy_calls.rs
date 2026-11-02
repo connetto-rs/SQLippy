@@ -2,7 +2,9 @@
 //! API. The costs the rule cites were measured on PostgreSQL 16.8 over
 //! 300,000 rows: `current_setting` 49 ms unwrapped against 16 ms wrapped, a
 //! `STABLE` plpgsql helper 277 against 17, and a `VOLATILE` plpgsql helper
-//! 347 against 1.8 ms with an index on the compared column.
+//! 347 against 1.8 ms with an index on the compared column. An
+//! `ARRAY(SELECT call)` runs once per statement as an initPlan on PostgreSQL
+//! 17.11 and 18.6.
 
 use sql_rules::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
@@ -101,7 +103,8 @@ fn wrapped_row_dependent_constant_and_sublink_calls_pass() {
              CREATE POLICY constant ON docs USING (owner = lower('ADMIN'));
              CREATE POLICY value_function ON docs USING (owner = current_user);
              CREATE POLICY sublink ON docs USING (
-               team IN (SELECT team FROM members WHERE member = current_setting('app.user_id', true)));",
+               team IN (SELECT team FROM members WHERE member = current_setting('app.user_id', true)));
+             CREATE POLICY array_sublink ON docs USING (owner = ANY (ARRAY(SELECT auth.uid())));",
         ),
         Vec::<(String, bool)>::new()
     );

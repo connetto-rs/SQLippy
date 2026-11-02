@@ -86,7 +86,11 @@ impl<DB: DatabaseLike> RowIndependentCalls<'_, DB> {
         let Expr::Function(call) = expression else {
             return Ok(());
         };
-        if matches!(call.args, FunctionArguments::None) || reads_a_column(expression) {
+        if matches!(
+            call.args,
+            FunctionArguments::None | FunctionArguments::Subquery(_)
+        ) || reads_a_column(expression)
+        {
             return Ok(());
         }
         let mut immutable = true;
@@ -149,12 +153,12 @@ impl<DB: DatabaseLike> Visitor for RowIndependentCalls<'_, DB> {
 /// Struct defining a rule that reports a call in a policy whose arguments read
 /// nothing from the row, written where PostgreSQL evaluates it per row.
 ///
-/// Wrapped as `(SELECT call)`, the planner evaluates it once per statement
-/// as an initPlan. Built-in calls such as `current_setting` count, calls to
-/// `IMMUTABLE` functions are folded by the planner and do not, and the SQL
-/// value functions written without parentheses (`current_user`) do not. A
-/// `VOLATILE` call that PostgreSQL cannot inline also keeps an index from
-/// serving the comparison.
+/// Wrapped as `(SELECT call)`, or as `ARRAY(SELECT call)` for a set, the
+/// planner evaluates it once per statement as an initPlan. Built-in calls such
+/// as `current_setting` count, calls to `IMMUTABLE` functions are folded by
+/// the planner and do not, and the SQL value functions written without
+/// parentheses (`current_user`) do not. A `VOLATILE` call that PostgreSQL
+/// cannot inline also keeps an index from serving the comparison.
 ///
 /// # Example
 ///

@@ -24,8 +24,12 @@ use crate::{
 /// PostgreSQL applies (`WITH CHECK` or its `USING` fallback for `INSERT`,
 /// `USING` for `UPDATE` and `DELETE`). A clause that can be true with every
 /// declared credential `NULL` is reported, unless a restrictive policy
-/// reaching an anonymous role requires a credential for the same command. The
-/// rule is inactive until the deployment declares a credential.
+/// reaching an anonymous role requires a credential for the same command. A
+/// column compared to the set a set-returning `LANGUAGE sql` helper returns,
+/// written `= ANY (ARRAY(SELECT f()))` or `IN (SELECT f())`, requires a
+/// credential when every `UNION` arm of the helper's body does, reading
+/// nested helpers the same way. The rule is inactive until the deployment
+/// declares a credential.
 ///
 /// # Example
 ///
@@ -140,11 +144,7 @@ impl<DB: DatabaseLike> TableRule for CredentialFreeWrite<DB> {
                 {
                     continue;
                 }
-                let judge = CredentialJudge {
-                    database,
-                    policy,
-                    deployment,
-                };
+                let judge = CredentialJudge::new(database, policy, deployment);
                 for clause in applied(database, policy, command) {
                     if clause.stage == stage && judge.requires(clause.expression)? {
                         requires = true;
@@ -159,11 +159,7 @@ impl<DB: DatabaseLike> TableRule for CredentialFreeWrite<DB> {
             if policy.policy_type() == CreatePolicyType::Restrictive {
                 continue;
             }
-            let judge = CredentialJudge {
-                database,
-                policy,
-                deployment,
-            };
+            let judge = CredentialJudge::new(database, policy, deployment);
             let mut commands = Vec::new();
             let mut sites: Vec<PolicySite<DB>> = Vec::new();
             for (command, keyword, stage) in WRITES {
