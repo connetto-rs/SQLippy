@@ -35,11 +35,11 @@ enum Checker {
 }
 
 /// The rights a view reads its relations with.
-enum Rights<'db, R> {
+enum Rights<'db> {
     /// The reader's, for a view with `security_invoker`.
     Reader,
-    /// Those of the named owner and its role, when declared.
-    Owner(&'db str, Option<&'db R>),
+    /// Those of the named owner, which sql-traits reports as PostgreSQL stores it.
+    Owner(&'db str),
     /// Those of an owner that bypasses row-level security or that the schema does not name.
     Bypassing,
 }
@@ -86,7 +86,7 @@ impl<'db, DB: DatabaseLike> SublinkReads<'db, DB> {
             _ if view.is_security_invoker() => Rights::Reader,
             Some(owner) => match database.role(owner) {
                 Some(role) if role.can_bypass_rls() || role.is_superuser() => Rights::Bypassing,
-                role => Rights::Owner(owner, role),
+                _ => Rights::Owner(owner),
             },
             None => Rights::Bypassing,
         };
@@ -97,16 +97,25 @@ impl<'db, DB: DatabaseLike> SublinkReads<'db, DB> {
                 (Relation::Table(table), Rights::Reader) => {
                     self.push(table, Checker::Caller, query);
                 }
-                (Relation::Table(table), &Rights::Owner(owner, role)) => {
-                    let owns = table.owner(database)?.is_some_and(|table_owner| {
-                        table_owner == owner
-                            || role.is_some_and(|role| database.role(table_owner) == Some(role))
-                    });
+                (Relation::Table(table), &Rights::Owner(owner)) => {
+                    let owns = table.owner(database)? == Some(owner);
                     if !owns || table.has_forced_row_level_security(database)? {
                         let held = held_by_name(database, owner);
                         self.push(table, Checker::Owner(Holder::Roles(held)), query);
                     }
                 }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds the tables the outermost query of a sublink reads, through views.
+    fn query(&mut self, query: &Query) -> Result<(), LookupError> {
+        for relation in DataStatementLike::<DB>::referenced_relations(query, self.database)? {
+            match relation {
+                Relation::Table(table) => self.push(table, Checker::Current, query),
+                Relation::View(view) => self.view(view, query)?,
                 _ => {}
             }
         }
@@ -123,24 +132,10 @@ impl<DB: DatabaseLike> Visitor for SublinkReads<'_, DB> {
             return ControlFlow::Continue(());
         }
         self.found = true;
-        let relations = match DataStatementLike::<DB>::referenced_relations(query, self.database) {
-            Ok(relations) => relations,
-            Err(error) => return ControlFlow::Break(error),
-        };
-        for relation in relations {
-            let outcome = match relation {
-                Relation::Table(table) => {
-                    self.push(table, Checker::Current, query);
-                    Ok(())
-                }
-                Relation::View(view) => self.view(view, query),
-                _ => Ok(()),
-            };
-            if let Err(error) = outcome {
-                return ControlFlow::Break(error);
-            }
+        match self.query(query) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(error) => ControlFlow::Break(error),
         }
-        ControlFlow::Continue(())
     }
 
     fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<LookupError> {

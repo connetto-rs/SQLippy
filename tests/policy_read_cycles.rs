@@ -199,7 +199,8 @@ fn a_read_through_a_view_whose_owner_may_bypass_the_table_closes_no_denied_cycle
     assert_eq!(cycles(&cycle_rules(), &database), []);
 }
 
-/// Measured on PostgreSQL 17 and 18 querying `a` as `reader`.
+/// Measured on PostgreSQL 17 and 18 querying `a` as `reader`, the last two
+/// cases on PostgreSQL 16.8.
 #[test]
 fn a_read_through_a_view_expands_the_base_table_as_the_role_the_view_checks() {
     let schema = |views: &str, policies: &str| {
@@ -268,6 +269,16 @@ fn a_read_through_a_view_expands_the_base_table_as_the_role_the_view_checks() {
         (
             "CREATE VIEW inner_v AS SELECT id FROM b; ALTER VIEW inner_v OWNER TO vb;
              CREATE VIEW bv WITH (security_invoker) AS SELECT id FROM inner_v;",
+            cycle,
+            &[],
+        ),
+        (
+            "CREATE MATERIALIZED VIEW bv AS SELECT id FROM b;",
+            cycle,
+            &[],
+        ),
+        (
+            "ALTER TABLE b OWNER TO vt; CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO VT;",
             cycle,
             &[],
         ),
