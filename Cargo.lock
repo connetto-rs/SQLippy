@@ -441,11 +441,12 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#56d654414836baee4e59af2222f0897940f6e6b3"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#60303f368a023c03e8fa80ba80d717c0a388a2f5"
 dependencies = [
  "geometric-traits",
  "sha2",
  "sqlparser",
+ "sqlparser-plpgsql",
  "thiserror",
  "unicode-normalization",
 ]
@@ -458,6 +459,15 @@ dependencies = [
  "log",
  "recursive",
  "sqlparser_derive",
+]
+
+[[package]]
+name = "sqlparser-plpgsql"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#657a7dff12df8ae92bf226218e73a9ec1087dc79"
+dependencies = [
+ "sqlparser",
+ "thiserror",
 ]
 
 [[package]]
