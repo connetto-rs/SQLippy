@@ -3,7 +3,8 @@
 use std::ops::ControlFlow;
 
 use sql_traits::traits::{
-    ColumnLike, DatabaseLike, ForeignKeyLike, PolicyLike, RoleLike, TableLike, ViewLike,
+    ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, PolicyLike, RoleLike, TableLike,
+    ViewLike,
 };
 
 use crate::{
@@ -25,6 +26,13 @@ impl<DB: DatabaseLike> ResolvedAllowance<'_, DB> {
             && self.table == Some(site.table.as_ref())
             && self.policy == site.policy.name()
     }
+}
+
+/// A function's name with its argument types as written, which tells overloads
+/// apart.
+pub(crate) fn signature<DB: DatabaseLike>(function: &DB::Function, database: &DB) -> String {
+    let arguments: Vec<_> = function.argument_type_names(database).collect();
+    format!("{}({})", function.name(), arguments.join(", "))
 }
 
 /// Receives the violations of one rule and stamps them with its identity and
@@ -204,6 +212,28 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         let object = role.name().to_owned();
         self.emit(
             Location::Role(Box::new(role.clone())),
+            object,
+            message,
+            resolution,
+        )
+    }
+
+    /// Reports a violation on a function, named with its argument types so
+    /// overloads stay apart.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn function(
+        &mut self,
+        function: &DB::Function,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        let object = signature(function, self.database);
+        self.emit(
+            Location::Function(Box::new(function.clone())),
             object,
             message,
             resolution,

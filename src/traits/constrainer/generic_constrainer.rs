@@ -12,7 +12,7 @@ use crate::{
     error::{Error, InactiveRule, Interruption, PolicyAllowance},
     lint::{Level, LintGroup, Rule, RuleMetadata},
     traits::{
-        ColumnRule, Constrainer, ForeignKeyRule, Reporter, SchemaRule, TableRule,
+        ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, Reporter, SchemaRule, TableRule,
         reporter::ResolvedAllowance,
     },
 };
@@ -54,6 +54,7 @@ pub struct GenericConstrainer<DB: DatabaseLike> {
     columns: Vec<Registered<dyn ColumnRule<Database = DB>>>,
     foreign_keys: Vec<Registered<dyn ForeignKeyRule<Database = DB>>>,
     schemas: Vec<Registered<dyn SchemaRule<Database = DB>>>,
+    functions: Vec<Registered<dyn FunctionRule<Database = DB>>>,
     levels: Levels,
     allowances: Vec<PolicyAllowance>,
     deployment: Deployment,
@@ -66,6 +67,7 @@ impl<DB: DatabaseLike> Default for GenericConstrainer<DB> {
             columns: Vec::new(),
             foreign_keys: Vec::new(),
             schemas: Vec::new(),
+            functions: Vec::new(),
             levels: Levels::default(),
             allowances: Vec::new(),
             deployment: Deployment::default(),
@@ -186,6 +188,15 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         self.schemas.push(registered);
     }
 
+    pub(crate) fn register_function_rule_with_floor(
+        &mut self,
+        rule: Box<dyn FunctionRule<Database = DB>>,
+        floor: Level,
+    ) {
+        let registered = self.registered(rule, floor);
+        self.functions.push(registered);
+    }
+
     pub(crate) fn set_rule_level(&mut self, rule: &str, level: Level) {
         match self.levels.rules.iter_mut().find(|(name, _)| name == rule) {
             Some(entry) => entry.1 = level,
@@ -217,6 +228,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             .chain(inactive(&self.columns, deployment))
             .chain(inactive(&self.foreign_keys, deployment))
             .chain(inactive(&self.schemas, deployment))
+            .chain(inactive(&self.functions, deployment))
             .collect()
     }
 
@@ -225,6 +237,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         self.levels.refresh(&mut self.columns);
         self.levels.refresh(&mut self.foreign_keys);
         self.levels.refresh(&mut self.schemas);
+        self.levels.refresh(&mut self.functions);
     }
 
     pub(crate) fn visit(
@@ -281,6 +294,13 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
                     }
                 }
                 Err(error) => sink(Error::Lookup(error))?,
+            }
+        }
+        for function in database.functions() {
+            for entry in enabled(&self.functions, deployment) {
+                run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
+                    entry.rule.check_function(database, function, reporter)
+                })?;
             }
         }
         for entry in enabled(&self.schemas, deployment) {

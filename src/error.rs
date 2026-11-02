@@ -28,6 +28,8 @@ pub enum Location<DB: DatabaseLike> {
     MaterializedView(Box<DB::MaterializedView>),
     /// A role.
     Role(Box<DB::Role>),
+    /// A function.
+    Function(Box<DB::Function>),
 }
 
 /// Clause of a policy.
