@@ -8,21 +8,25 @@ use crate::{
     rules::{
         CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
         ClientRoleBypassesRowLevelSecurity, CompatibleForeignKey, CredentialFreeWrite,
-        DeadPermissivePolicy, ExtensionForeignKeyOnDeleteCascade, GrantOptionToClientRole,
-        HasPrimaryKey, LatentPolicyReadCycle, LowercaseColumnName, LowercaseForeignKeyName,
-        LowercaseTableName, NoForbiddenColumnInExtension, NoNegationCheckRule,
-        NoRustKeywordColumnName, NoRustKeywordForeignKeyName, NoRustKeywordTableName,
-        NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId,
-        NonEmptyTextualColumnRule, NonRedundantExtensionDag, PastTimeColumnRule, PluralTableName,
-        PoliciesRequireRowLevelSecurity, PolicyReadCycle, PolicyToCreatingRole,
-        PrimaryKeyReferenceEndsWithId, ReachableMaterializedView,
+        DeadPermissivePolicy, DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath,
+        ExposedDefinerOverProtectedTable, ExtensionForeignKeyOnDeleteCascade,
+        GrantOptionToClientRole, HasPrimaryKey, LatentPolicyReadCycle, LowercaseColumnName,
+        LowercaseForeignKeyName, LowercaseTableName, NoForbiddenColumnInExtension,
+        NoNegationCheckRule, NoRustKeywordColumnName, NoRustKeywordForeignKeyName,
+        NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule,
+        NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule, NonRedundantExtensionDag,
+        PastTimeColumnRule, PluralTableName, PoliciesRequireRowLevelSecurity, PolicyReadCycle,
+        PolicyToCreatingRole, PrimaryKeyReferenceEndsWithId, ReachableMaterializedView,
         ReachableTableWithoutRowLevelSecurity, ReferencesGrantedToClientRole,
         RoleKeyedPolicyWhenPooled, SettableMembershipInBypassingRole, SingularColumnName,
         SnakeCaseColumnName, SnakeCaseTableName, TautologicalWithCheck, TextualColumnRule,
         TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, UnforcedRowLevelSecurity,
         UniqueCheckRule, UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
     },
-    traits::{ColumnRule, Constrainer, ForeignKeyRule, GenericConstrainer, SchemaRule, TableRule},
+    traits::{
+        ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, SchemaRule,
+        TableRule,
+    },
 };
 
 /// A constrainer holding every generic rule at its group's default level.
@@ -120,6 +124,14 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         ];
         for rule in schema_rules {
             constrainer.register_schema_rule_with_floor(rule, Level::Allow);
+        }
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 3] = [
+            Box::new(DefinerWithoutSearchPath::default()),
+            Box::new(DefinerTemporarySchemaNotLast::default()),
+            Box::new(ExposedDefinerOverProtectedTable::default()),
+        ];
+        for rule in function_rules {
+            constrainer.register_function_rule_with_floor(rule, Level::Allow);
         }
         Self { constrainer }
     }

@@ -9,7 +9,7 @@ use crate::{
     deployment::Deployment,
     error::{Error, InactiveRule},
     lint::{Level, LintGroup},
-    traits::{ColumnRule, ForeignKeyRule, SchemaRule, TableRule},
+    traits::{ColumnRule, ForeignKeyRule, FunctionRule, SchemaRule, TableRule},
 };
 
 pub mod generic_constrainer;
@@ -58,6 +58,12 @@ pub trait Constrainer: Default {
     fn register_schema_rule(&mut self, rule: Box<dyn SchemaRule<Database = Self::Database>>) {
         self.constrainer_mut()
             .register_schema_rule_with_floor(rule, Level::Warn);
+    }
+
+    /// Registers a function rule.
+    fn register_function_rule(&mut self, rule: Box<dyn FunctionRule<Database = Self::Database>>) {
+        self.constrainer_mut()
+            .register_function_rule_with_floor(rule, Level::Warn);
     }
 
     /// Excuses the violations of a rule that list the given policy.
