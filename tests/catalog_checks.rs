@@ -19,6 +19,9 @@ fn a_materialized_view_over_a_protected_table_reached_by_a_client_is_reported() 
         "CREATE MATERIALIZED VIEW doc_owners AS SELECT owner FROM docs; GRANT SELECT ON doc_owners TO PUBLIC;",
         "CREATE MATERIALIZED VIEW doc_owners AS SELECT p.id FROM plain p JOIN docs d ON d.id = p.id;
          GRANT SELECT ON doc_owners TO authenticated;",
+        "CREATE VIEW doc_view AS SELECT owner FROM docs;
+         CREATE MATERIALIZED VIEW doc_owners AS SELECT owner FROM doc_view;
+         GRANT SELECT ON doc_owners TO anon;",
     ] {
         assert_eq!(
             findings(ReachableMaterializedView::default(), supabase(), &format!("{DOCS}{sql}")),

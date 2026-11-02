@@ -6,7 +6,7 @@ use std::borrow::Borrow;
 
 use sql_traits::{
     errors::LookupError,
-    traits::{ColumnLike, DatabaseLike, ForeignKeyLike, TableLike},
+    traits::{ColumnLike, DataTypeLike, DatabaseLike, ForeignKeyLike, TableLike},
 };
 
 use crate::{
@@ -170,24 +170,30 @@ impl<DB: DatabaseLike> CompatibleForeignKey<DB> {
                     host_column.column_name(),
                 ),
             ))
-        } else if host_column.normalized_data_type(database)
-            != referenced_column.normalized_data_type(database)
+        } else if host_column.data_type(database).normalized_name(database)
+            != referenced_column
+                .data_type(database)
+                .normalized_name(database)
         {
             Ok((
                 format!(
                     "Foreign key column `{}.{}` has data type '{}', which differs from referenced column `{}.{}` with data type '{}'.",
                     host_table.table_name(),
                     host_column.column_name(),
-                    host_column.normalized_data_type(database),
+                    host_column.data_type(database).normalized_name(database),
                     referenced_table.table_name(),
                     referenced_column.column_name(),
-                    referenced_column.normalized_data_type(database),
+                    referenced_column
+                        .data_type(database)
+                        .normalized_name(database),
                 ),
                 format!(
                     "Change the data type of `{}.{}` to '{}' to match the referenced column.",
                     host_table.table_name(),
                     host_column.column_name(),
-                    referenced_column.normalized_data_type(database),
+                    referenced_column
+                        .data_type(database)
+                        .normalized_name(database),
                 ),
             ))
         } else {

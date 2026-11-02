@@ -5,7 +5,7 @@ use crate::{
     lint::{LintGroup, Rule, RuleMetadata},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
-use sql_traits::traits::{CheckConstraintLike, ColumnLike, DatabaseLike, TableLike};
+use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, TableLike};
 
 /// Struct defining a rule that requires every textual column to have a check
 /// constraint verifying it is not empty.
@@ -63,7 +63,7 @@ impl<DB: DatabaseLike> ColumnRule for NonEmptyTextualColumnRule<DB> {
         column: &<Self::Database as DatabaseLike>::Column,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        if !column.is_textual(database) {
+        if !column.data_type(database).is_textual(database) {
             return Ok(());
         }
 

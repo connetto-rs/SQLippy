@@ -3,8 +3,7 @@
 use std::{cell::LazyCell, collections::BTreeSet};
 
 use sql_traits::traits::{
-    ColumnGrantLike, DataStatementLike, DatabaseLike, TableGrantLike, TableLike, ViewLike,
-    grant::GrantRelation,
+    ColumnGrantLike, DataStatementLike, DatabaseLike, Relation, TableGrantLike, TableLike, ViewLike,
 };
 
 use crate::{
@@ -70,10 +69,10 @@ impl<DB> Rule for ReachableMaterializedView<DB> {
 
 /// Whether the grant relation is the given materialized view.
 fn is_view<DB: DatabaseLike>(
-    relation: Option<GrantRelation<'_, DB>>,
+    relation: Option<Relation<'_, DB>>,
     view: &DB::MaterializedView,
 ) -> bool {
-    matches!(relation, Some(GrantRelation::MaterializedView(granted)) if granted == view)
+    matches!(relation, Some(Relation::MaterializedView(granted)) if granted == view)
 }
 
 impl<DB: DatabaseLike> SchemaRule for ReachableMaterializedView<DB> {

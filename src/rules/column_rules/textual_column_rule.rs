@@ -5,7 +5,7 @@ use crate::{
     lint::{LintGroup, Rule, RuleMetadata},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
-use sql_traits::traits::{CheckConstraintLike, ColumnLike, DatabaseLike, TableLike};
+use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, TableLike};
 
 /// Struct defining a rule that requires every textual column to have an upper
 /// length bound, either an enforced declared length or a length check.
@@ -75,7 +75,12 @@ impl<DB: DatabaseLike> ColumnRule for TextualColumnRule<DB> {
         column: &<Self::Database as DatabaseLike>::Column,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        if !column.is_textual(database) || column.max_character_length(database).is_some() {
+        if !column.data_type(database).is_textual(database)
+            || column
+                .data_type(database)
+                .max_character_length(database)
+                .is_some()
+        {
             return Ok(());
         }
         for check in column.check_constraints(database)? {

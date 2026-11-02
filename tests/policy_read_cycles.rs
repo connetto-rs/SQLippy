@@ -186,6 +186,113 @@ fn a_table_without_row_level_security_breaks_the_cycle() {
 }
 
 #[test]
+fn a_read_through_a_view_whose_owner_may_bypass_the_table_closes_no_denied_cycle() {
+    let database = parse(
+        "CREATE TABLE a (id INT, team INT);
+         CREATE TABLE b (id INT, team INT);
+         ALTER TABLE a ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE b ENABLE ROW LEVEL SECURITY;
+         CREATE VIEW bv AS SELECT team FROM b;
+         CREATE POLICY pb ON b USING (EXISTS (SELECT 1 FROM a WHERE a.team = b.team));
+         CREATE POLICY pa ON a USING (EXISTS (SELECT 1 FROM bv WHERE bv.team = a.team));",
+    );
+    assert_eq!(cycles(&cycle_rules(), &database), []);
+}
+
+/// Measured on PostgreSQL 17 and 18 querying `a` as `reader`, the last two
+/// cases on PostgreSQL 16.8.
+#[test]
+fn a_read_through_a_view_expands_the_base_table_as_the_role_the_view_checks() {
+    let schema = |views: &str, policies: &str| {
+        parse(&format!(
+            "CREATE ROLE reader;
+             CREATE ROLE vo;
+             CREATE ROLE vb BYPASSRLS;
+             CREATE ROLE vt;
+             CREATE TABLE a (id INT);
+             CREATE TABLE b (id INT);
+             ALTER TABLE a ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE b ENABLE ROW LEVEL SECURITY;
+             {views}
+             {policies}"
+        ))
+    };
+    let cycle = "CREATE POLICY pa ON a USING (id IN (SELECT id FROM bv));
+                 CREATE POLICY pb ON b USING (id IN (SELECT id FROM a));";
+    let cases = [
+        (
+            "CREATE VIEW bv WITH (security_invoker) AS SELECT id FROM b;",
+            cycle,
+            &["PolicyReadCycle"][..],
+        ),
+        (
+            "CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO vo;",
+            cycle,
+            &["PolicyReadCycle"],
+        ),
+        (
+            "CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO vb;",
+            cycle,
+            &[],
+        ),
+        (
+            "ALTER TABLE b OWNER TO vt; CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO vt;",
+            cycle,
+            &[],
+        ),
+        (
+            "ALTER TABLE b OWNER TO vt; ALTER TABLE b FORCE ROW LEVEL SECURITY;
+             CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO vt;",
+            cycle,
+            &["PolicyReadCycle"],
+        ),
+        (
+            "CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO vo;",
+            "CREATE POLICY pa ON a USING (id IN (SELECT id FROM bv));
+             CREATE POLICY pb ON b TO reader USING (id IN (SELECT id FROM a));
+             CREATE POLICY pb_vo ON b TO vo USING (true);",
+            &["LatentPolicyReadCycle"],
+        ),
+        (
+            "CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO vo;",
+            "CREATE POLICY pa ON a TO reader USING (id IN (SELECT id FROM bv));
+             CREATE POLICY pa_vo ON a TO vo USING (true);
+             CREATE POLICY pb ON b TO vo USING (id IN (SELECT id FROM a));",
+            &["LatentPolicyReadCycle"],
+        ),
+        (
+            "CREATE VIEW inner_v WITH (security_invoker) AS SELECT id FROM b;
+             CREATE VIEW bv AS SELECT id FROM inner_v; ALTER VIEW bv OWNER TO vb;",
+            cycle,
+            &["PolicyReadCycle"],
+        ),
+        (
+            "CREATE VIEW inner_v AS SELECT id FROM b; ALTER VIEW inner_v OWNER TO vb;
+             CREATE VIEW bv WITH (security_invoker) AS SELECT id FROM inner_v;",
+            cycle,
+            &[],
+        ),
+        (
+            "CREATE MATERIALIZED VIEW bv AS SELECT id FROM b;",
+            cycle,
+            &[],
+        ),
+        (
+            "ALTER TABLE b OWNER TO vt; CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO VT;",
+            cycle,
+            &[],
+        ),
+    ];
+    for (views, policies, expected) in cases {
+        let found: Vec<String> = cycles(&cycle_rules(), &schema(views, policies))
+            .into_iter()
+            .map(|(rule, _, _)| rule)
+            .collect();
+        assert_eq!(found, expected, "{views}\n{policies}");
+    }
+}
+
+#[test]
 fn a_common_table_expression_shadowing_the_table_is_not_a_read() {
     for read in [
         "WITH memberships AS (SELECT 1 AS owner_id) SELECT owner_id FROM memberships",
