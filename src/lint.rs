@@ -2,6 +2,8 @@
 
 use std::fmt::{self, Display};
 
+use crate::deployment::Declaration;
+
 /// Category of a rule, following Clippy's lint groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LintGroup {
@@ -124,4 +126,10 @@ pub struct RuleMetadata {
 pub trait Rule {
     /// Returns the rule's metadata.
     fn metadata(&self) -> &'static RuleMetadata;
+
+    /// Returns the declarations the rule cannot run without. A rule whose
+    /// declaration the deployment lacks is inactive.
+    fn requires(&self) -> &'static [Declaration] {
+        &[]
+    }
 }

@@ -8,7 +8,8 @@ use sql_traits::{
 };
 
 use crate::{
-    error::{Error, Interruption, PolicyAllowance},
+    deployment::Deployment,
+    error::{Error, InactiveRule, Interruption, PolicyAllowance},
     lint::{Level, LintGroup, Rule, RuleMetadata},
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, Reporter, SchemaRule, TableRule,
@@ -46,7 +47,8 @@ impl Levels {
     }
 }
 
-/// A constrainer holding rules, their levels and policy allowances.
+/// A constrainer holding rules, their levels, policy allowances and the
+/// deployment its rules read.
 pub struct GenericConstrainer<DB: DatabaseLike> {
     tables: Vec<Registered<dyn TableRule<Database = DB>>>,
     columns: Vec<Registered<dyn ColumnRule<Database = DB>>>,
@@ -54,6 +56,7 @@ pub struct GenericConstrainer<DB: DatabaseLike> {
     schemas: Vec<Registered<dyn SchemaRule<Database = DB>>>,
     levels: Levels,
     allowances: Vec<PolicyAllowance>,
+    deployment: Deployment,
 }
 
 impl<DB: DatabaseLike> Default for GenericConstrainer<DB> {
@@ -65,6 +68,7 @@ impl<DB: DatabaseLike> Default for GenericConstrainer<DB> {
             schemas: Vec::new(),
             levels: Levels::default(),
             allowances: Vec::new(),
+            deployment: Deployment::default(),
         }
     }
 }
@@ -72,6 +76,7 @@ impl<DB: DatabaseLike> Default for GenericConstrainer<DB> {
 /// Shared state of one traversal, lent to each rule's reporter.
 struct Run<'run, DB: DatabaseLike> {
     database: &'run DB,
+    deployment: &'run Deployment,
     allowances: Vec<ResolvedAllowance<'run, DB>>,
     used: Vec<bool>,
 }
@@ -87,6 +92,7 @@ impl<DB: DatabaseLike> Run<'_, DB> {
     ) -> ControlFlow<()> {
         let outcome = check(&mut Reporter::new(
             self.database,
+            self.deployment,
             rule,
             level,
             &self.allowances,
@@ -101,8 +107,41 @@ impl<DB: DatabaseLike> Run<'_, DB> {
     }
 }
 
-fn enabled<R: ?Sized>(registered: &[Registered<R>]) -> impl Iterator<Item = &Registered<R>> {
-    registered.iter().filter(|entry| entry.level > Level::Allow)
+/// The first declaration a rule reads that the deployment lacks.
+fn missing_declaration<R: Rule + ?Sized>(
+    rule: &R,
+    deployment: &Deployment,
+) -> Option<crate::deployment::Declaration> {
+    rule.requires()
+        .iter()
+        .copied()
+        .find(|declaration| !deployment.declares(*declaration))
+}
+
+/// Registered rules that run: above `allow`, with every declaration they read.
+fn enabled<'a, R: Rule + ?Sized>(
+    registered: &'a [Registered<R>],
+    deployment: &'a Deployment,
+) -> impl Iterator<Item = &'a Registered<R>> {
+    registered.iter().filter(move |entry| {
+        entry.level > Level::Allow && missing_declaration(entry.rule.as_ref(), deployment).is_none()
+    })
+}
+
+/// Registered rules above `allow` that do not run for lack of a declaration.
+fn inactive<R: Rule + ?Sized>(
+    registered: &[Registered<R>],
+    deployment: &Deployment,
+) -> impl Iterator<Item = InactiveRule> {
+    registered
+        .iter()
+        .filter(|entry| entry.level > Level::Allow)
+        .filter_map(|entry| {
+            missing_declaration(entry.rule.as_ref(), deployment).map(|missing| InactiveRule {
+                rule: entry.rule.metadata(),
+                missing,
+            })
+        })
 }
 
 impl<DB: DatabaseLike> GenericConstrainer<DB> {
@@ -168,6 +207,19 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         });
     }
 
+    pub(crate) fn set_deployment(&mut self, deployment: Deployment) {
+        self.deployment = deployment;
+    }
+
+    pub(crate) fn inactive_rules(&self) -> Vec<InactiveRule> {
+        let deployment = &self.deployment;
+        inactive(&self.tables, deployment)
+            .chain(inactive(&self.columns, deployment))
+            .chain(inactive(&self.foreign_keys, deployment))
+            .chain(inactive(&self.schemas, deployment))
+            .collect()
+    }
+
     fn refresh(&mut self) {
         self.levels.refresh(&mut self.tables);
         self.levels.refresh(&mut self.columns);
@@ -180,8 +232,10 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         database: &DB,
         sink: &mut dyn FnMut(Error<DB>) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
+        let deployment = &self.deployment;
         let mut run = Run {
             database,
+            deployment,
             allowances: self
                 .allowances
                 .iter()
@@ -197,7 +251,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             used: vec![false; self.allowances.len()],
         };
         for table in database.tables() {
-            for entry in enabled(&self.tables) {
+            for entry in enabled(&self.tables, deployment) {
                 run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
                     entry.rule.check_table(database, table, reporter)
                 })?;
@@ -205,7 +259,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             match table.columns(database) {
                 Ok(columns) => {
                     for column in columns {
-                        for entry in enabled(&self.columns) {
+                        for entry in enabled(&self.columns, deployment) {
                             run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
                                 entry.rule.check_column(database, column, reporter)
                             })?;
@@ -217,7 +271,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             match table.foreign_keys(database) {
                 Ok(foreign_keys) => {
                     for foreign_key in foreign_keys {
-                        for entry in enabled(&self.foreign_keys) {
+                        for entry in enabled(&self.foreign_keys, deployment) {
                             run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
                                 entry
                                     .rule
@@ -229,7 +283,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
                 Err(error) => sink(Error::Lookup(error))?,
             }
         }
-        for entry in enabled(&self.schemas) {
+        for entry in enabled(&self.schemas, deployment) {
             run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
                 entry.rule.check_schema(database, reporter)
             })?;

@@ -39,11 +39,11 @@ A rule registered on its own, including a single rule converted with `.into()`, 
 
 | Group | Default | Rules |
 | :--- | :--- | :--- |
-| `correctness` | `deny` | `PoliciesRequireRowLevelSecurity`, `PolicyReadCycle`, `DeadPermissivePolicy`, `NoTautologicalCheckRule`, `NoNegationCheckRule`, `NoSurrogatePrimaryKeyInExtension` |
-| `suspicious` | `warn` | `LatentPolicyReadCycle`, `TautologicalWithCheck`, `UnforcedRowLevelSecurity`, `TextualColumnRule`, `CompatibleForeignKey`, `HasPrimaryKey`, `ExtensionForeignKeyOnDeleteCascade`, `NoForbiddenColumnInExtension`, `UniqueColumnNamesInExtensionGraph` |
+| `correctness` | `deny` | `PoliciesRequireRowLevelSecurity`, `PolicyReadCycle`, `DeadPermissivePolicy`, `TruncateGrantedToAnonymousRole`, `NoTautologicalCheckRule`, `NoNegationCheckRule`, `NoSurrogatePrimaryKeyInExtension` |
+| `suspicious` | `warn` | `LatentPolicyReadCycle`, `TautologicalWithCheck`, `UnforcedRowLevelSecurity`, `ReachableTableWithoutRowLevelSecurity`, `TruncateGrantedToAppRole`, `GrantOptionToClientRole`, `TextualColumnRule`, `CompatibleForeignKey`, `HasPrimaryKey`, `ExtensionForeignKeyOnDeleteCascade`, `NoForbiddenColumnInExtension`, `UniqueColumnNamesInExtensionGraph` |
 | `complexity` | `warn` | `UniqueForeignKey`, `UniqueCheckRule`, `UniqueUniqueIndex`, `NonRedundantExtensionDag` |
 | `style` | `warn` | `LowercaseTableName`, `LowercaseColumnName`, `LowercaseForeignKeyName`, `SnakeCaseTableName`, `SnakeCaseColumnName`, `PluralTableName`, `SingularColumnName`, `PrimaryKeyReferenceEndsWithId`, `NonCompositePrimaryKeyNamedId` |
-| `pedantic` | `allow` | `PastTimeColumnRule`, `NonEmptyTextualColumnRule` |
+| `pedantic` | `allow` | `ReferencesGrantedToClientRole`, `PastTimeColumnRule`, `NonEmptyTextualColumnRule` |
 | `restriction` | `allow` | `NoRustKeywordTableName`, `NoRustKeywordColumnName`, `NoRustKeywordForeignKeyName` |
 
 Each rule's documentation states what it reports, and its violations carry the rationale and source.

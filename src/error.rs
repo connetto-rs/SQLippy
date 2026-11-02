@@ -8,7 +8,10 @@ use sql_traits::{
     traits::{DatabaseLike, PolicyLike, TableLike},
 };
 
-use crate::lint::{Level, RuleMetadata};
+use crate::{
+    deployment::Declaration,
+    lint::{Level, RuleMetadata},
+};
 
 /// Schema object a violation was raised on.
 #[derive(Debug)]
@@ -127,6 +130,38 @@ impl Display for PolicyAllowance {
     }
 }
 
+/// A registered rule that does not run because the deployment lacks a
+/// declaration it reads.
+#[derive(Debug, Clone, Copy)]
+pub struct InactiveRule {
+    pub(crate) rule: &'static RuleMetadata,
+    pub(crate) missing: Declaration,
+}
+
+impl InactiveRule {
+    /// Returns the metadata of the inactive rule.
+    #[must_use]
+    pub fn rule(&self) -> &'static RuleMetadata {
+        self.rule
+    }
+
+    /// Returns the declaration the deployment lacks.
+    #[must_use]
+    pub fn missing(&self) -> Declaration {
+        self.missing
+    }
+}
+
+impl Display for InactiveRule {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} does not run because the deployment declares no {}",
+            self.rule.name, self.missing
+        )
+    }
+}
+
 /// One occurrence of a rule violation.
 #[derive(Debug)]
 pub struct Violation<DB: DatabaseLike> {
@@ -219,6 +254,10 @@ pub enum Error<DB: DatabaseLike> {
     /// An allowance excused no violation, so it is stale or misspelled.
     #[error("Unused allowance: {0}")]
     UnusedAllowance(PolicyAllowance),
+    /// A registered rule does not run because the deployment lacks a
+    /// declaration it reads.
+    #[error("Inactive rule: {0}")]
+    Inactive(InactiveRule),
 }
 
 /// Why a rule stopped before checking everything it covers.

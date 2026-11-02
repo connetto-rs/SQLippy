@@ -7,14 +7,16 @@ use crate::{
     lint::Level,
     rules::{
         CompatibleForeignKey, DeadPermissivePolicy, ExtensionForeignKeyOnDeleteCascade,
-        HasPrimaryKey, LatentPolicyReadCycle, LowercaseColumnName, LowercaseForeignKeyName,
-        LowercaseTableName, NoForbiddenColumnInExtension, NoNegationCheckRule,
-        NoRustKeywordColumnName, NoRustKeywordForeignKeyName, NoRustKeywordTableName,
-        NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId,
-        NonEmptyTextualColumnRule, NonRedundantExtensionDag, PastTimeColumnRule, PluralTableName,
-        PoliciesRequireRowLevelSecurity, PolicyReadCycle, PrimaryKeyReferenceEndsWithId,
-        SingularColumnName, SnakeCaseColumnName, SnakeCaseTableName, TautologicalWithCheck,
-        TextualColumnRule, UnforcedRowLevelSecurity, UniqueCheckRule,
+        GrantOptionToClientRole, HasPrimaryKey, LatentPolicyReadCycle, LowercaseColumnName,
+        LowercaseForeignKeyName, LowercaseTableName, NoForbiddenColumnInExtension,
+        NoNegationCheckRule, NoRustKeywordColumnName, NoRustKeywordForeignKeyName,
+        NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule,
+        NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule, NonRedundantExtensionDag,
+        PastTimeColumnRule, PluralTableName, PoliciesRequireRowLevelSecurity, PolicyReadCycle,
+        PrimaryKeyReferenceEndsWithId, ReachableTableWithoutRowLevelSecurity,
+        ReferencesGrantedToClientRole, SingularColumnName, SnakeCaseColumnName, SnakeCaseTableName,
+        TautologicalWithCheck, TextualColumnRule, TruncateGrantedToAnonymousRole,
+        TruncateGrantedToAppRole, UnforcedRowLevelSecurity, UniqueCheckRule,
         UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
     },
     traits::{ColumnRule, Constrainer, ForeignKeyRule, GenericConstrainer, SchemaRule, TableRule},
@@ -50,7 +52,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 17] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 22] = [
             Box::new(HasPrimaryKey::default()),
             Box::new(LowercaseTableName::default()),
             Box::new(SnakeCaseTableName::default()),
@@ -68,6 +70,11 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(DeadPermissivePolicy::default()),
             Box::new(TautologicalWithCheck::default()),
             Box::new(UnforcedRowLevelSecurity::default()),
+            Box::new(ReachableTableWithoutRowLevelSecurity::default()),
+            Box::new(TruncateGrantedToAnonymousRole::default()),
+            Box::new(TruncateGrantedToAppRole::default()),
+            Box::new(ReferencesGrantedToClientRole::default()),
+            Box::new(GrantOptionToClientRole::default()),
         ];
         for rule in table_rules {
             constrainer.register_table_rule_with_floor(rule, Level::Allow);

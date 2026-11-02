@@ -34,3 +34,13 @@ mod tautological_with_check;
 pub use tautological_with_check::TautologicalWithCheck;
 mod unforced_row_level_security;
 pub use unforced_row_level_security::UnforcedRowLevelSecurity;
+mod reachable_table_without_row_level_security;
+pub use reachable_table_without_row_level_security::ReachableTableWithoutRowLevelSecurity;
+mod truncate_granted_to_client_role;
+pub use truncate_granted_to_client_role::{
+    TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
+};
+mod references_granted_to_client_role;
+pub use references_granted_to_client_role::ReferencesGrantedToClientRole;
+mod grant_option_to_client_role;
+pub use grant_option_to_client_role::GrantOptionToClientRole;

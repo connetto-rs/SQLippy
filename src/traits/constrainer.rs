@@ -6,7 +6,8 @@ use std::ops::ControlFlow;
 use sql_traits::{structs::TargetName, traits::DatabaseLike};
 
 use crate::{
-    error::Error,
+    deployment::Deployment,
+    error::{Error, InactiveRule},
     lint::{Level, LintGroup},
     traits::{ColumnRule, ForeignKeyRule, SchemaRule, TableRule},
 };
@@ -80,6 +81,29 @@ pub trait Constrainer: Default {
         self.constrainer_mut().set_group_level(group, level);
     }
 
+    /// Sets the deployment the rules read, replacing any set before.
+    fn set_deployment(&mut self, deployment: Deployment) {
+        self.constrainer_mut().set_deployment(deployment);
+    }
+
+    /// Returns every rule above [`Level::Allow`] that does not run because
+    /// the deployment lacks a declaration it reads.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sql_rules::prelude::*;
+    ///
+    /// let mut constrainer: GenericConstrainer<ParserDB> =
+    ///     TruncateGrantedToAppRole::default().into();
+    /// assert_eq!(constrainer.inactive_rules().len(), 1);
+    /// constrainer.set_deployment(Deployment::default().with_app_role("authenticated"));
+    /// assert!(constrainer.inactive_rules().is_empty());
+    /// ```
+    fn inactive_rules(&self) -> Vec<InactiveRule> {
+        self.constrainer().inactive_rules()
+    }
+
     /// Passes every violation, lookup failure and unused allowance to `sink`
     /// until it breaks.
     ///
@@ -94,8 +118,9 @@ pub trait Constrainer: Default {
         self.constrainer().visit(database, sink)
     }
 
-    /// Returns every violation raised at `warn` or `deny`, every lookup
-    /// failure and every unused allowance, in traversal order.
+    /// Returns every inactive rule, then every violation raised at `warn` or
+    /// `deny`, every lookup failure and every unused allowance, in traversal
+    /// order.
     ///
     /// # Example
     ///
@@ -111,7 +136,11 @@ pub trait Constrainer: Default {
     /// assert_eq!(constrainer.diagnostics(&database).len(), 2);
     /// ```
     fn diagnostics(&self, database: &Self::Database) -> Vec<Error<Self::Database>> {
-        let mut diagnostics = Vec::new();
+        let mut diagnostics: Vec<Error<Self::Database>> = self
+            .inactive_rules()
+            .into_iter()
+            .map(Error::Inactive)
+            .collect();
         let _ = self.visit_schema(database, &mut |error| {
             diagnostics.push(error);
             ControlFlow::Continue(())

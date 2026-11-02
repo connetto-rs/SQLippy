@@ -5,6 +5,7 @@ use std::ops::ControlFlow;
 use sql_traits::traits::{ColumnLike, DatabaseLike, ForeignKeyLike, PolicyLike, TableLike};
 
 use crate::{
+    deployment::Deployment,
     error::{Error, Interruption, Location, PolicySite, Violation},
     lint::{Level, RuleMetadata},
 };
@@ -28,6 +29,7 @@ impl<DB: DatabaseLike> ResolvedAllowance<'_, DB> {
 /// effective level.
 pub struct Reporter<'run, DB: DatabaseLike> {
     database: &'run DB,
+    deployment: &'run Deployment,
     rule: &'static RuleMetadata,
     level: Level,
     allowances: &'run [ResolvedAllowance<'run, DB>],
@@ -38,6 +40,7 @@ pub struct Reporter<'run, DB: DatabaseLike> {
 impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
     pub(crate) fn new(
         database: &'run DB,
+        deployment: &'run Deployment,
         rule: &'static RuleMetadata,
         level: Level,
         allowances: &'run [ResolvedAllowance<'run, DB>],
@@ -46,12 +49,19 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
     ) -> Self {
         Self {
             database,
+            deployment,
             rule,
             level,
             allowances,
             used,
             sink,
         }
+    }
+
+    /// Returns the deployment the constrainer was configured with.
+    #[must_use]
+    pub fn deployment(&self) -> &'run Deployment {
+        self.deployment
     }
 
     /// Reports a violation spanning policy clauses, listed in traversal order,

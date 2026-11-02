@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+pub mod deployment;
 pub mod error;
 pub mod lint;
 pub mod rules;
@@ -10,8 +11,10 @@ pub mod prelude {
     pub use sql_traits::prelude::*;
 
     pub use crate::{
+        deployment::{Declaration, Deployment},
         error::{
-            Error, Interruption, Location, PolicyAllowance, PolicyClause, PolicySite, Violation,
+            Error, InactiveRule, Interruption, Location, PolicyAllowance, PolicyClause, PolicySite,
+            Violation,
         },
         lint::{Level, LintGroup, Rule, RuleMetadata},
         rules::*,

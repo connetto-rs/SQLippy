@@ -8,6 +8,8 @@ fn parse(sql: &str) -> ParserDB {
     ParserDB::parse::<PostgreSqlDialect>(sql).expect("schema parses")
 }
 
+/// Every violation, skipping rules listed as inactive and failing on anything
+/// else.
 fn violations<C: Constrainer<Database = ParserDB>>(
     constrainer: &C,
     database: &ParserDB,
@@ -15,8 +17,9 @@ fn violations<C: Constrainer<Database = ParserDB>>(
     constrainer
         .diagnostics(database)
         .into_iter()
-        .map(|error| match error {
-            Error::Violation(violation) => *violation,
+        .filter_map(|error| match error {
+            Error::Violation(violation) => Some(*violation),
+            Error::Inactive(_) => None,
             other => panic!("unexpected failure: {other}"),
         })
         .collect()
@@ -290,7 +293,7 @@ fn a_lookup_failure_is_reported_and_independent_checks_continue() {
         .iter()
         .filter_map(|error| match error {
             Error::Violation(violation) => Some(violation.object()),
-            Error::Lookup(_) | Error::UnusedAllowance(_) => None,
+            Error::Lookup(_) | Error::UnusedAllowance(_) | Error::Inactive(_) => None,
         })
         .collect();
     flagged.sort_unstable();
