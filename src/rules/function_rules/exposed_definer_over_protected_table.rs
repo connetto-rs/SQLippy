@@ -19,10 +19,10 @@ use crate::{
 /// Every such caller reads and writes those tables as the function's owner.
 /// PostgreSQL grants `PUBLIC` `EXECUTE` on every new function, and default
 /// privileges such as Supabase's grant it to anonymous roles, so the rule reads
-/// the privileges the schema leaves after both. A body whose tables cannot be
-/// read, such as one in a language other than SQL or one running dynamic SQL,
-/// is reported as well, since nothing shows it stays away from protected
-/// tables.
+/// the privileges the schema leaves after both. SQL and PL/pgSQL bodies are
+/// read for the tables they touch. A body whose tables cannot be known, such as
+/// C code or one running dynamic SQL through `EXECUTE`, is reported as well,
+/// since nothing shows it stays away from protected tables.
 ///
 /// # Example
 ///

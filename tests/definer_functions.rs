@@ -170,14 +170,30 @@ fn revoking_from_public_clears_it_unless_an_anonymous_role_still_executes() {
 }
 
 #[test]
-fn a_definer_body_whose_tables_cannot_be_read_is_reported() {
+fn a_plpgsql_definer_is_reported_only_when_its_body_touches_a_protected_table() {
     assert_eq!(
         exposed(
             Deployment::default(),
             "CREATE FUNCTION set_state(p_id INT) RETURNS INT LANGUAGE plpgsql SECURITY DEFINER
-               SET search_path TO '' AS $$ BEGIN UPDATE public.docs SET owner = 'x' WHERE id = p_id; RETURN p_id; END; $$;",
+               SET search_path TO '' AS $$ BEGIN UPDATE public.docs SET owner = 'x' WHERE id = p_id; RETURN p_id; END; $$;
+             CREATE FUNCTION count_notes() RETURNS BIGINT LANGUAGE plpgsql SECURITY DEFINER
+               SET search_path TO '' AS $$ BEGIN RETURN (SELECT count(*) FROM public.open_notes); END; $$;",
         ),
         ["set_state(INT)"]
+    );
+}
+
+#[test]
+fn a_definer_body_whose_tables_cannot_be_read_is_reported() {
+    assert_eq!(
+        exposed(
+            Deployment::default(),
+            "CREATE FUNCTION wipe(t TEXT) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER
+               SET search_path TO '' AS $$ BEGIN EXECUTE 'DELETE FROM public.' || quote_ident(t); END; $$;
+             CREATE FUNCTION native() RETURNS INT LANGUAGE c SECURITY DEFINER
+               AS 'library', 'symbol';",
+        ),
+        ["native()", "wipe(TEXT)"]
     );
 }
 
