@@ -121,7 +121,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in foreign_key_rules {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
-        let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 7] = [
+        let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 8] = [
             Box::new(PolicyReadCycle::default()),
             Box::new(LatentPolicyReadCycle::default()),
             Box::new(FunctionMediatedPolicyCycle::default()),
@@ -129,14 +129,16 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(OwnerRightsView::default()),
             Box::new(ClientRoleBypassesRowLevelSecurity::default()),
             Box::new(SettableMembershipInBypassingRole::default()),
+            Box::new(GrantOptionToClientRole::default()),
         ];
         for rule in schema_rules {
             constrainer.register_schema_rule_with_floor(rule, Level::Allow);
         }
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 3] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 4] = [
             Box::new(DefinerWithoutSearchPath::default()),
             Box::new(DefinerTemporarySchemaNotLast::default()),
             Box::new(ExposedDefinerOverProtectedTable::default()),
+            Box::new(GrantOptionToClientRole::default()),
         ];
         for rule in function_rules {
             constrainer.register_function_rule_with_floor(rule, Level::Allow);

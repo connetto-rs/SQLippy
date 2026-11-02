@@ -242,6 +242,63 @@ fn a_grant_option_kept_from_client_roles_is_not_reported() {
     }
 }
 
+const HELPER: &str =
+    "CREATE FUNCTION helper() RETURNS INT LANGUAGE sql AS 'SELECT 1'; CREATE ROLE privileged;";
+
+/// Measured on PostgreSQL 16.8: a role holding `EXECUTE` with the grant
+/// option granted it on to another role, and one holding `ADMIN OPTION`
+/// granted the membership on.
+#[test]
+fn execute_with_grant_option_or_admin_option_handed_to_a_client_role_is_reported() {
+    for (grant, object) in [
+        (
+            "GRANT EXECUTE ON FUNCTION helper() TO authenticated WITH GRANT OPTION;",
+            "helper()",
+        ),
+        (
+            "GRANT EXECUTE ON FUNCTION helper() TO anon WITH GRANT OPTION;",
+            "helper()",
+        ),
+        (
+            "GRANT privileged TO authenticated WITH ADMIN OPTION;",
+            "privileged",
+        ),
+    ] {
+        assert_eq!(
+            findings(
+                GrantOptionToClientRole::default(),
+                supabase(),
+                &format!("{HELPER}{grant}"),
+            ),
+            [finding("GrantOptionToClientRole", Level::Warn, object)],
+            "{grant}"
+        );
+    }
+}
+
+#[test]
+fn execute_and_membership_kept_from_passing_on_are_not_reported() {
+    for grant in [
+        "GRANT EXECUTE ON FUNCTION helper() TO authenticated;",
+        "GRANT EXECUTE ON FUNCTION helper() TO reporting WITH GRANT OPTION;",
+        "GRANT EXECUTE ON FUNCTION helper() TO anon WITH GRANT OPTION;
+         REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION helper() FROM anon;",
+        "ALTER FUNCTION helper() OWNER TO authenticated;",
+        "GRANT privileged TO authenticated;",
+        "GRANT privileged TO reporting WITH ADMIN OPTION;",
+    ] {
+        assert_eq!(
+            findings(
+                GrantOptionToClientRole::default(),
+                supabase(),
+                &format!("{HELPER}{grant}"),
+            ),
+            [],
+            "{grant}"
+        );
+    }
+}
+
 #[test]
 fn a_rule_missing_its_declaration_is_listed_once_and_never_runs() {
     let mut constrainer: GenericConstrainer<ParserDB> = TruncateGrantedToAppRole::default().into();
