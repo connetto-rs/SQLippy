@@ -1,7 +1,7 @@
 //! Submodule providing rules that span several schema objects.
 
 mod policy_read_cycle;
-pub use policy_read_cycle::{LatentPolicyReadCycle, PolicyReadCycle};
+pub use policy_read_cycle::{FunctionMediatedPolicyCycle, LatentPolicyReadCycle, PolicyReadCycle};
 mod reachable_materialized_view;
 pub use reachable_materialized_view::ReachableMaterializedView;
 mod client_role_bypass;

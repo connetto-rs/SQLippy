@@ -10,8 +10,8 @@ use crate::{
         ClientRoleBypassesRowLevelSecurity, CompatibleForeignKey, CorrelatedPolicySubquery,
         CredentialFreeWrite, DeadPermissivePolicy, DefinerTemporarySchemaNotLast,
         DefinerWithoutSearchPath, ExposedDefinerOverProtectedTable,
-        ExtensionForeignKeyOnDeleteCascade, GrantOptionToClientRole, HasPrimaryKey,
-        KeyWithoutExactEquality, LatentPolicyReadCycle, LowercaseColumnName,
+        ExtensionForeignKeyOnDeleteCascade, FunctionMediatedPolicyCycle, GrantOptionToClientRole,
+        HasPrimaryKey, KeyWithoutExactEquality, LatentPolicyReadCycle, LowercaseColumnName,
         LowercaseForeignKeyName, LowercaseTableName, NoForbiddenColumnInExtension,
         NoNegationCheckRule, NoRustKeywordColumnName, NoRustKeywordForeignKeyName,
         NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule,
@@ -120,9 +120,10 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in foreign_key_rules {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
-        let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 5] = [
+        let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 6] = [
             Box::new(PolicyReadCycle::default()),
             Box::new(LatentPolicyReadCycle::default()),
+            Box::new(FunctionMediatedPolicyCycle::default()),
             Box::new(ReachableMaterializedView::default()),
             Box::new(ClientRoleBypassesRowLevelSecurity::default()),
             Box::new(SettableMembershipInBypassingRole::default()),

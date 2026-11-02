@@ -36,40 +36,33 @@ fn reads_a_column(expression: &Expr) -> bool {
     expression.visit(&mut Names).is_break()
 }
 
+/// Whether a parsed body is one `SELECT` of one expression and nothing else.
+fn scalar_select(statements: &[Statement]) -> bool {
+    matches!(statements, [Statement::Query(query)]
+        if query.with.is_none()
+            && query.order_by.is_none()
+            && query.limit_clause.is_none()
+            && matches!(query.body.as_ref(), SetExpr::Select(select)
+                if select.projection.len() == 1
+                    && select.from.is_empty()
+                    && select.selection.is_none()
+                    && select.having.is_none()))
+}
+
 /// Whether PostgreSQL inlines a call to the function into the calling query,
-/// which a body of one `SELECT` of one expression and nothing else allows.
+/// which a `RETURN` body or a body of one `SELECT` of one expression allows.
 fn inlinable<F: FunctionLike>(function: &F) -> bool {
-    if function
+    function
         .stored_language()
-        .is_some_and(|language| language != "sql")
-        || function.security_mode() == FunctionSecurity::Definer
-        || !function.configuration_parameters().is_empty()
-        || function.returns_set()
-    {
-        return false;
-    }
-    if function.body_expression().is_some() {
-        return true;
-    }
-    let Some(Ok(statements)) = function
-        .body()
-        .map(|body| Parser::parse_sql(&PostgreSqlDialect {}, body))
-    else {
-        return false;
-    };
-    let [Statement::Query(query)] = statements.as_slice() else {
-        return false;
-    };
-    let SetExpr::Select(select) = query.body.as_ref() else {
-        return false;
-    };
-    query.with.is_none()
-        && query.order_by.is_none()
-        && query.limit_clause.is_none()
-        && select.projection.len() == 1
-        && select.from.is_empty()
-        && select.selection.is_none()
-        && select.having.is_none()
+        .is_none_or(|language| language == "sql")
+        && function.security_mode() != FunctionSecurity::Definer
+        && function.configuration_parameters().is_empty()
+        && !function.returns_set()
+        && (function.body_expression().is_some()
+            || function
+                .body()
+                .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok())
+                .is_some_and(|statements| scalar_select(&statements)))
 }
 
 /// One call the rule reports.
@@ -138,10 +131,8 @@ impl<DB: DatabaseLike> Visitor for RowIndependentCalls<'_, DB> {
         if self.depth > 0 || self.within.is_some() {
             return ControlFlow::Continue(());
         }
-        match self.call(expression) {
-            Ok(()) => ControlFlow::Continue(()),
-            Err(error) => ControlFlow::Break(error),
-        }
+        self.call(expression)
+            .map_or_else(ControlFlow::Break, ControlFlow::Continue)
     }
 
     fn post_visit_expr(&mut self, expression: &Expr) -> ControlFlow<LookupError> {
@@ -241,9 +232,10 @@ impl<DB: DatabaseLike> TableRule for UncachedPolicyCall<DB> {
                     within: None,
                     findings: Vec::new(),
                 };
-                if let ControlFlow::Break(error) = expression.visit(&mut calls) {
-                    return Err(error.into());
-                }
+                expression
+                    .visit(&mut calls)
+                    .break_value()
+                    .map_or(Ok(()), Err)?;
                 for Finding { call, volatile } in calls.findings {
                     let (name, table_name) = (policy.name(), table.table_name());
                     let index = if volatile {

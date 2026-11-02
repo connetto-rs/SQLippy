@@ -1,9 +1,6 @@
 //! Submodule providing the `ExposedDefinerOverProtectedTable` rule.
 
-use sql_traits::{
-    errors::LookupError,
-    traits::{DatabaseLike, FunctionLike, TableLike},
-};
+use sql_traits::traits::{DatabaseLike, FunctionLike, TableLike};
 use sqlparser::ast::FunctionSecurity;
 
 use crate::{
@@ -81,18 +78,6 @@ impl<DB> Rule for ExposedDefinerOverProtectedTable<DB> {
     }
 }
 
-/// Whether the error says the body's tables cannot be known, as opposed to a
-/// schema object failing to resolve.
-fn unreadable(error: &LookupError) -> bool {
-    matches!(
-        error,
-        LookupError::FunctionBodyNotSql { .. }
-            | LookupError::FunctionBodyUnavailable { .. }
-            | LookupError::FunctionBodyUnresolvable { .. }
-            | LookupError::FunctionBodyUnparsable { .. }
-    )
-}
-
 impl<DB: DatabaseLike> FunctionRule for ExposedDefinerOverProtectedTable<DB> {
     type Database = DB;
 
@@ -136,7 +121,7 @@ impl<DB: DatabaseLike> FunctionRule for ExposedDefinerOverProtectedTable<DB> {
                     protected.join(", ")
                 )
             }
-            Err(error) if unreadable(&error) => format!(
+            Err(error) if super::unreadable_body(&error) => format!(
                 "has a body whose tables cannot be checked ({error}), so it may read or write tables with row-level security"
             ),
             Err(error) => return Err(error.into()),
