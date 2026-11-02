@@ -34,6 +34,7 @@ fn cycle_rules() -> GenericConstrainer<ParserDB> {
     let mut constrainer = GenericConstrainer::<ParserDB>::default();
     constrainer.register_schema_rule(Box::new(PolicyReadCycle::default()));
     constrainer.register_schema_rule(Box::new(LatentPolicyReadCycle::default()));
+    constrainer.register_schema_rule(Box::new(FunctionMediatedPolicyCycle::default()));
     constrainer
 }
 
@@ -199,7 +200,7 @@ fn a_read_through_a_view_whose_owner_may_bypass_the_table_closes_no_denied_cycle
     assert_eq!(cycles(&cycle_rules(), &database), []);
 }
 
-/// Measured on PostgreSQL 17 and 18 querying `a` as `reader`, the last two
+/// Measured on PostgreSQL 17 and 18 querying `a` as `reader`, the last three
 /// cases on PostgreSQL 16.8.
 #[test]
 fn a_read_through_a_view_expands_the_base_table_as_the_role_the_view_checks() {
@@ -282,6 +283,12 @@ fn a_read_through_a_view_expands_the_base_table_as_the_role_the_view_checks() {
             cycle,
             &[],
         ),
+        (
+            "CREATE MATERIALIZED VIEW m AS SELECT id FROM b;
+             CREATE VIEW bv WITH (security_invoker) AS SELECT id FROM m;",
+            cycle,
+            &[],
+        ),
     ];
     for (views, policies, expected) in cases {
         let found: Vec<String> = cycles(&cycle_rules(), &schema(views, policies))
@@ -290,6 +297,116 @@ fn a_read_through_a_view_expands_the_base_table_as_the_role_the_view_checks() {
             .collect();
         assert_eq!(found, expected, "{views}\n{policies}");
     }
+}
+
+/// Measured on PostgreSQL 16.8 querying `a` as `reader`: each reported shape
+/// failed with `stack depth limit exceeded`, each passing one returned rows.
+#[test]
+fn a_policy_call_reading_back_into_the_table_recurses_as_the_role_the_function_runs_as() {
+    let schema = |functions: &str| {
+        parse(&format!(
+            "CREATE ROLE reader;
+             CREATE ROLE fo;
+             CREATE ROLE fb BYPASSRLS;
+             CREATE TABLE a (id INT);
+             CREATE TABLE b (id INT);
+             ALTER TABLE a ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE b ENABLE ROW LEVEL SECURITY;
+             {functions}
+             CREATE POLICY pa ON a USING (f(id));
+             CREATE POLICY pb ON b USING (id IN (SELECT id FROM a));"
+        ))
+    };
+    let sql = "CREATE FUNCTION f(x INT) RETURNS BOOLEAN LANGUAGE sql STABLE
+                 AS 'SELECT EXISTS (SELECT 1 FROM public.b WHERE b.id = x)';";
+    let plpgsql = |security: &str| {
+        format!(
+            "CREATE FUNCTION f(x INT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE {security}
+               AS 'BEGIN RETURN EXISTS (SELECT 1 FROM public.b WHERE b.id = x); END';"
+        )
+    };
+    let definer = plpgsql("SECURITY DEFINER");
+    let cases = [
+        (sql.to_owned(), &["FunctionMediatedPolicyCycle"][..]),
+        (plpgsql(""), &["FunctionMediatedPolicyCycle"]),
+        (definer.clone(), &[]),
+        (
+            format!("{definer} ALTER FUNCTION f(INT) OWNER TO fo;"),
+            &["FunctionMediatedPolicyCycle"],
+        ),
+        (format!("{definer} ALTER FUNCTION f(INT) OWNER TO fb;"), &[]),
+        (
+            format!("ALTER TABLE b OWNER TO fo; {definer} ALTER FUNCTION f(INT) OWNER TO fo;"),
+            &[],
+        ),
+        (
+            "CREATE VIEW bv WITH (security_invoker) AS SELECT id FROM b;
+             CREATE FUNCTION f(x INT) RETURNS BOOLEAN LANGUAGE sql STABLE
+               AS 'SELECT EXISTS (SELECT 1 FROM public.bv WHERE bv.id = x)';"
+                .to_owned(),
+            &["FunctionMediatedPolicyCycle"],
+        ),
+        (
+            "CREATE MATERIALIZED VIEW m AS SELECT id FROM b;
+             CREATE FUNCTION f(x INT) RETURNS BOOLEAN LANGUAGE sql STABLE
+               AS 'SELECT EXISTS (SELECT 1 FROM public.m WHERE m.id = x)';"
+                .to_owned(),
+            &[],
+        ),
+        (
+            "CREATE FUNCTION g(x INT) RETURNS BOOLEAN LANGUAGE sql STABLE
+               AS 'SELECT EXISTS (SELECT 1 FROM public.b WHERE b.id = x)';
+             CREATE FUNCTION f(x INT) RETURNS BOOLEAN LANGUAGE sql STABLE AS 'SELECT public.g(x)';"
+                .to_owned(),
+            &["FunctionMediatedPolicyCycle"],
+        ),
+        (
+            "CREATE FUNCTION f(x INT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS 'BEGIN
+               IF x > 100 THEN RETURN public.f(x - 1); END IF;
+               RETURN EXISTS (SELECT 1 FROM public.b WHERE b.id = x); END';"
+                .to_owned(),
+            &["FunctionMediatedPolicyCycle"],
+        ),
+    ];
+    for (functions, expected) in cases {
+        let found: Vec<String> = cycles(&cycle_rules(), &schema(&functions))
+            .into_iter()
+            .map(|(rule, _, _)| rule)
+            .collect();
+        assert_eq!(found, expected, "{functions}");
+    }
+}
+
+#[test]
+fn a_call_cycle_over_roles_the_schema_keeps_apart_is_reported_as_latent() {
+    let database = parse(
+        "CREATE ROLE admin;
+         CREATE ROLE reader;
+         CREATE TABLE a (id INT);
+         CREATE TABLE b (id INT);
+         ALTER TABLE a ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE b ENABLE ROW LEVEL SECURITY;
+         CREATE FUNCTION f(x INT) RETURNS BOOLEAN LANGUAGE sql STABLE
+           AS 'SELECT EXISTS (SELECT 1 FROM public.b WHERE b.id = x)';
+         CREATE POLICY pa ON a FOR SELECT TO admin USING (f(id));
+         CREATE POLICY pb ON b FOR SELECT TO reader USING (id IN (SELECT id FROM a));",
+    );
+    let mut constrainer = GenericConstrainer::<ParserDB>::default();
+    constrainer.register_schema_rule(Box::new(FunctionMediatedPolicyCycle::default()));
+    let violations: Vec<String> = constrainer
+        .diagnostics(&database)
+        .into_iter()
+        .map(|error| match error {
+            Error::Violation(violation) => violation.message().to_owned(),
+            other => panic!("unexpected failure: {other}"),
+        })
+        .collect();
+    assert_eq!(violations.len(), 1);
+    assert!(
+        violations[0].contains("which no role in the schema holds together yet"),
+        "{}",
+        violations[0]
+    );
 }
 
 #[test]
