@@ -1,7 +1,7 @@
 //! Facts about grants to the client roles a deployment declares, shared by the
 //! grant rules.
 
-use std::collections::BTreeSet;
+use std::{borrow::Cow, collections::BTreeSet};
 
 use sql_traits::{
     traits::{ColumnGrantLike, DatabaseLike, GrantLike},
@@ -80,6 +80,22 @@ fn names_any<DB: DatabaseLike>(
             }),
         Some(GranteeName::UserHost { .. }) | None => false,
     })
+}
+
+/// The schema a relation sits in: its own, or the first schema on the search
+/// path when it was created unqualified.
+pub(crate) fn schema_of<'a, DB: DatabaseLike>(
+    database: &'a DB,
+    schema: Option<Cow<'a, str>>,
+) -> Cow<'a, str> {
+    schema
+        .or_else(|| {
+            database
+                .search_path()
+                .next()
+                .map(|(name, quoted)| normalize_identifier(name, quoted))
+        })
+        .unwrap_or_default()
 }
 
 /// Grantees of a grant as written, for messages.

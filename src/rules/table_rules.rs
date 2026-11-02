@@ -44,3 +44,7 @@ mod references_granted_to_client_role;
 pub use references_granted_to_client_role::ReferencesGrantedToClientRole;
 mod grant_option_to_client_role;
 pub use grant_option_to_client_role::GrantOptionToClientRole;
+mod child_without_row_level_security;
+pub use child_without_row_level_security::ChildWithoutRowLevelSecurity;
+mod role_keyed_policy;
+pub use role_keyed_policy::{PolicyToCreatingRole, RoleKeyedPolicyWhenPooled};

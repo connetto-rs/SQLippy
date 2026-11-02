@@ -24,11 +24,17 @@ pub enum Location<DB: DatabaseLike> {
     ForeignKey(Box<DB::ForeignKey>),
     /// Policy clauses, in the order the finding traverses them.
     Policies(Vec<PolicySite<DB>>),
+    /// A materialized view.
+    MaterializedView(Box<DB::MaterializedView>),
+    /// A role.
+    Role(Box<DB::Role>),
 }
 
 /// Clause of a policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PolicyClause {
+    /// The `TO` list, which names the roles the policy applies to.
+    To,
     /// The `USING` clause, which filters existing rows.
     Using,
     /// The `WITH CHECK` clause, which checks new rows.
@@ -38,6 +44,7 @@ pub enum PolicyClause {
 impl Display for PolicyClause {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::To => "TO",
             Self::Using => "USING",
             Self::WithCheck => "WITH CHECK",
         })
@@ -156,7 +163,7 @@ impl Display for InactiveRule {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{} does not run because the deployment declares no {}",
+            "{} does not run because the deployment does not declare {}",
             self.rule.name, self.missing
         )
     }

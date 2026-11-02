@@ -1,49 +1,10 @@
 //! Grants that hand client roles operations row-level security does not
 //! govern, observed through the public constrainer API.
 
+mod common;
+
+use common::{ROLES, finding, findings, parse, supabase};
 use sql_rules::prelude::*;
-use sqlparser::dialect::PostgreSqlDialect;
-
-fn parse(sql: &str) -> ParserDB {
-    ParserDB::parse::<PostgreSqlDialect>(sql).expect("schema parses")
-}
-
-fn supabase() -> Deployment {
-    Deployment::default()
-        .with_anonymous_role("anon")
-        .with_app_role("authenticated")
-}
-
-const ROLES: &str = "
-    CREATE ROLE anon;
-    CREATE ROLE authenticated;
-    CREATE ROLE reporting;";
-
-/// Rule name, level and object of every violation, failing on anything else.
-fn findings(
-    constrainer: impl Into<GenericConstrainer<ParserDB>>,
-    deployment: Deployment,
-    sql: &str,
-) -> Vec<(String, Level, String)> {
-    let mut constrainer = constrainer.into();
-    constrainer.set_deployment(deployment);
-    constrainer
-        .diagnostics(&parse(&format!("{ROLES}{sql}")))
-        .into_iter()
-        .map(|error| match error {
-            Error::Violation(violation) => (
-                violation.rule().name.to_owned(),
-                violation.level(),
-                violation.object().to_owned(),
-            ),
-            other => panic!("unexpected failure: {other}"),
-        })
-        .collect()
-}
-
-fn finding(rule: &str, level: Level, object: &str) -> (String, Level, String) {
-    (rule.to_owned(), level, object.to_owned())
-}
 
 #[test]
 fn a_table_without_row_level_security_granted_to_a_client_role_is_reachable() {
@@ -317,9 +278,22 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             .iter()
             .map(|inactive| inactive.rule().name)
             .collect::<Vec<_>>(),
-        ["TruncateGrantedToAppRole"]
+        [
+            "TruncateGrantedToAppRole",
+            "RoleKeyedPolicyWhenPooled",
+            "ClientRoleBypassesRowLevelSecurity",
+            "SettableMembershipInBypassingRole",
+        ]
     );
     constrainer.set_deployment(supabase());
+    assert_eq!(
+        constrainer
+            .inactive_rules()
+            .iter()
+            .map(|inactive| inactive.rule().name)
+            .collect::<Vec<_>>(),
+        ["RoleKeyedPolicyWhenPooled"]
+    );
     let database = parse(&format!(
         "{ROLES}{PROTECTED}
          CREATE TABLE open_data (id INT PRIMARY KEY);

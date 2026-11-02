@@ -120,7 +120,8 @@ impl Holder {
 #[derive(Clone, Copy)]
 struct Step {
     policy: usize,
-    clause: PolicyClause,
+    /// Whether the clause is `WITH CHECK` rather than `USING`.
+    check: bool,
     read: usize,
 }
 
@@ -209,21 +210,21 @@ impl<'db, DB: DatabaseLike> Analysis<'db, DB> {
                 continue;
             }
             has_sublinks |= facts.has_sublinks;
-            let mut add = |clause, reads: &[Read<'db, DB>]| {
+            let mut add = |check, reads: &[Read<'db, DB>]| {
                 steps.extend((0..reads.len()).map(|read| Step {
                     policy: index,
-                    clause,
+                    check,
                     read,
                 }));
             };
             match command {
-                Command::Insert if facts.has_check => add(PolicyClause::WithCheck, &facts.check),
+                Command::Insert if facts.has_check => add(true, &facts.check),
                 Command::Select | Command::Delete | Command::Insert => {
-                    add(PolicyClause::Using, &facts.using);
+                    add(false, &facts.using);
                 }
                 Command::Update => {
-                    add(PolicyClause::Using, &facts.using);
-                    add(PolicyClause::WithCheck, &facts.check);
+                    add(false, &facts.using);
+                    add(true, &facts.check);
                 }
             }
         }
@@ -232,9 +233,10 @@ impl<'db, DB: DatabaseLike> Analysis<'db, DB> {
 
     fn read(&self, step: Step) -> &Read<'db, DB> {
         let facts = &self.facts[step.policy];
-        match step.clause {
-            PolicyClause::Using => &facts.using[step.read],
-            PolicyClause::WithCheck => &facts.check[step.read],
+        if step.check {
+            &facts.check[step.read]
+        } else {
+            &facts.using[step.read]
         }
     }
 
@@ -347,7 +349,11 @@ impl<'db, DB: DatabaseLike> Analysis<'db, DB> {
                 PolicySite {
                     table: Box::new(facts.table.clone()),
                     policy: Box::new(facts.policy.clone()),
-                    clause: step.clause,
+                    clause: if step.check {
+                        PolicyClause::WithCheck
+                    } else {
+                        PolicyClause::Using
+                    },
                     expression: self.read(step).subquery.clone(),
                 }
             })

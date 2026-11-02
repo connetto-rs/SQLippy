@@ -10,3 +10,5 @@ mod primary_key_reference_ends_with_id;
 pub use primary_key_reference_ends_with_id::PrimaryKeyReferenceEndsWithId;
 mod extension_foreign_key_on_delete_cascade;
 pub use extension_foreign_key_on_delete_cascade::ExtensionForeignKeyOnDeleteCascade;
+mod cascade_into_row_level_security_table;
+pub use cascade_into_row_level_security_table::CascadeIntoRowLevelSecurityTable;

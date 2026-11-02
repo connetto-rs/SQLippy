@@ -26,6 +26,7 @@ pub struct Deployment {
     anonymous_roles: Vec<String>,
     app_roles: Vec<String>,
     exposed_schemas: Vec<String>,
+    pooled: Option<bool>,
 }
 
 impl Deployment {
@@ -51,6 +52,20 @@ impl Deployment {
         self
     }
 
+    /// Declares whether every caller shares one database role, so the role
+    /// does not identify the caller.
+    #[must_use]
+    pub fn with_pooled(mut self, pooled: bool) -> Self {
+        self.pooled = Some(pooled);
+        self
+    }
+
+    /// Returns whether the deployment is declared pooled.
+    #[must_use]
+    pub fn is_pooled(&self) -> bool {
+        self.pooled == Some(true)
+    }
+
     /// Returns the declared anonymous roles, `PUBLIC` excluded.
     pub fn anonymous_roles(&self) -> impl Iterator<Item = &str> {
         self.anonymous_roles.iter().map(String::as_str)
@@ -72,6 +87,10 @@ impl Deployment {
     pub fn declares(&self, declaration: Declaration) -> bool {
         match declaration {
             Declaration::AppRoles => !self.app_roles.is_empty(),
+            Declaration::ClientRoles => {
+                !self.anonymous_roles.is_empty() || !self.app_roles.is_empty()
+            }
+            Declaration::Pooled => self.pooled.is_some(),
         }
     }
 }
@@ -81,12 +100,18 @@ impl Deployment {
 pub enum Declaration {
     /// At least one app role.
     AppRoles,
+    /// At least one anonymous or app role besides `PUBLIC`.
+    ClientRoles,
+    /// Whether the deployment is pooled.
+    Pooled,
 }
 
 impl Display for Declaration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::AppRoles => "app roles",
+            Self::ClientRoles => "anonymous or app roles",
+            Self::Pooled => "whether it is pooled",
         })
     }
 }

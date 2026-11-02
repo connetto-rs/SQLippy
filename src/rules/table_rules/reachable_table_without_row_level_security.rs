@@ -2,15 +2,12 @@
 
 use std::{cell::LazyCell, collections::BTreeSet};
 
-use sql_traits::{
-    traits::{DatabaseLike, TableLike},
-    utils::identifier_resolution::normalize_identifier,
-};
+use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::grant_support::{ClientRoles, column_grants_on, grantee_list},
+    rules::grant_support::{ClientRoles, column_grants_on, grantee_list, schema_of},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -93,15 +90,7 @@ impl<DB: DatabaseLike> TableRule for ReachableTableWithoutRowLevelSecurity<DB> {
         let deployment = reporter.deployment();
         let roles = LazyCell::new(|| ClientRoles::new(database, deployment));
         let mut reasons = BTreeSet::new();
-        let schema = table
-            .stored_table_schema()
-            .or_else(|| {
-                database
-                    .search_path()
-                    .next()
-                    .map(|(name, quoted)| normalize_identifier(name, quoted))
-            })
-            .unwrap_or_default();
+        let schema = schema_of(database, table.stored_table_schema());
         if deployment.exposes_schema(&schema) {
             reasons.insert(format!("sits in the exposed schema '{schema}'"));
         }

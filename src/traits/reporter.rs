@@ -2,7 +2,9 @@
 
 use std::ops::ControlFlow;
 
-use sql_traits::traits::{ColumnLike, DatabaseLike, ForeignKeyLike, PolicyLike, TableLike};
+use sql_traits::traits::{
+    ColumnLike, DatabaseLike, ForeignKeyLike, PolicyLike, RoleLike, TableLike, ViewLike,
+};
 
 use crate::{
     deployment::Deployment,
@@ -160,6 +162,48 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         };
         self.emit(
             Location::ForeignKey(Box::new(foreign_key.clone())),
+            object,
+            message,
+            resolution,
+        )
+    }
+
+    /// Reports a violation on a materialized view.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn materialized_view(
+        &mut self,
+        view: &DB::MaterializedView,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        let object = view.view_name().to_owned();
+        self.emit(
+            Location::MaterializedView(Box::new(view.clone())),
+            object,
+            message,
+            resolution,
+        )
+    }
+
+    /// Reports a violation on a role.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn role(
+        &mut self,
+        role: &DB::Role,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        let object = role.name().to_owned();
+        self.emit(
+            Location::Role(Box::new(role.clone())),
             object,
             message,
             resolution,

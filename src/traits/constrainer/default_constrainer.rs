@@ -6,18 +6,21 @@ use sql_traits::traits::DatabaseLike;
 use crate::{
     lint::Level,
     rules::{
-        CompatibleForeignKey, DeadPermissivePolicy, ExtensionForeignKeyOnDeleteCascade,
-        GrantOptionToClientRole, HasPrimaryKey, LatentPolicyReadCycle, LowercaseColumnName,
-        LowercaseForeignKeyName, LowercaseTableName, NoForbiddenColumnInExtension,
-        NoNegationCheckRule, NoRustKeywordColumnName, NoRustKeywordForeignKeyName,
-        NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule,
-        NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule, NonRedundantExtensionDag,
-        PastTimeColumnRule, PluralTableName, PoliciesRequireRowLevelSecurity, PolicyReadCycle,
-        PrimaryKeyReferenceEndsWithId, ReachableTableWithoutRowLevelSecurity,
-        ReferencesGrantedToClientRole, SingularColumnName, SnakeCaseColumnName, SnakeCaseTableName,
-        TautologicalWithCheck, TextualColumnRule, TruncateGrantedToAnonymousRole,
-        TruncateGrantedToAppRole, UnforcedRowLevelSecurity, UniqueCheckRule,
-        UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
+        CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
+        ClientRoleBypassesRowLevelSecurity, CompatibleForeignKey, DeadPermissivePolicy,
+        ExtensionForeignKeyOnDeleteCascade, GrantOptionToClientRole, HasPrimaryKey,
+        LatentPolicyReadCycle, LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName,
+        NoForbiddenColumnInExtension, NoNegationCheckRule, NoRustKeywordColumnName,
+        NoRustKeywordForeignKeyName, NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension,
+        NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule,
+        NonRedundantExtensionDag, PastTimeColumnRule, PluralTableName,
+        PoliciesRequireRowLevelSecurity, PolicyReadCycle, PolicyToCreatingRole,
+        PrimaryKeyReferenceEndsWithId, ReachableMaterializedView,
+        ReachableTableWithoutRowLevelSecurity, ReferencesGrantedToClientRole,
+        RoleKeyedPolicyWhenPooled, SettableMembershipInBypassingRole, SingularColumnName,
+        SnakeCaseColumnName, SnakeCaseTableName, TautologicalWithCheck, TextualColumnRule,
+        TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, UnforcedRowLevelSecurity,
+        UniqueCheckRule, UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
     },
     traits::{ColumnRule, Constrainer, ForeignKeyRule, GenericConstrainer, SchemaRule, TableRule},
 };
@@ -52,7 +55,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 22] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 25] = [
             Box::new(HasPrimaryKey::default()),
             Box::new(LowercaseTableName::default()),
             Box::new(SnakeCaseTableName::default()),
@@ -75,6 +78,9 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(TruncateGrantedToAppRole::default()),
             Box::new(ReferencesGrantedToClientRole::default()),
             Box::new(GrantOptionToClientRole::default()),
+            Box::new(ChildWithoutRowLevelSecurity::default()),
+            Box::new(PolicyToCreatingRole::default()),
+            Box::new(RoleKeyedPolicyWhenPooled::default()),
         ];
         for rule in table_rules {
             constrainer.register_table_rule_with_floor(rule, Level::Allow);
@@ -93,19 +99,23 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in column_rules {
             constrainer.register_column_rule_with_floor(rule, Level::Allow);
         }
-        let foreign_key_rules: [Box<dyn ForeignKeyRule<Database = DB>>; 5] = [
+        let foreign_key_rules: [Box<dyn ForeignKeyRule<Database = DB>>; 6] = [
             Box::new(CompatibleForeignKey::default()),
             Box::new(LowercaseForeignKeyName::default()),
             Box::new(PrimaryKeyReferenceEndsWithId::default()),
             Box::new(ExtensionForeignKeyOnDeleteCascade::default()),
             Box::new(NoRustKeywordForeignKeyName::default()),
+            Box::new(CascadeIntoRowLevelSecurityTable::default()),
         ];
         for rule in foreign_key_rules {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
-        let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 2] = [
+        let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 5] = [
             Box::new(PolicyReadCycle::default()),
             Box::new(LatentPolicyReadCycle::default()),
+            Box::new(ReachableMaterializedView::default()),
+            Box::new(ClientRoleBypassesRowLevelSecurity::default()),
+            Box::new(SettableMembershipInBypassingRole::default()),
         ];
         for rule in schema_rules {
             constrainer.register_schema_rule_with_floor(rule, Level::Allow);
