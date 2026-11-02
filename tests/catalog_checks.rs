@@ -98,6 +98,61 @@ fn a_cascading_delete_into_a_table_with_a_delete_policy_is_reported() {
 }
 
 #[test]
+fn every_referential_action_that_rewrites_rows_past_their_policies_is_reported() {
+    for (action, policy) in [
+        ("ON DELETE SET NULL", "FOR UPDATE USING (false)"),
+        ("ON DELETE SET DEFAULT", "FOR UPDATE USING (false)"),
+        ("ON UPDATE CASCADE", "FOR UPDATE USING (false)"),
+        ("ON UPDATE SET NULL", "FOR UPDATE USING (false)"),
+        ("ON UPDATE SET DEFAULT", "USING (false)"),
+    ] {
+        assert_eq!(
+            findings(
+                CascadeIntoRowLevelSecurityTable::default(),
+                Deployment::default(),
+                &format!(
+                    "{PARENTS}
+                     CREATE TABLE kids (id INT, parent_id INT DEFAULT 0 REFERENCES parents (id) {action});
+                     ALTER TABLE kids ENABLE ROW LEVEL SECURITY;
+                     CREATE POLICY kids_write ON kids {policy};"
+                ),
+            ),
+            [finding(
+                "CascadeIntoRowLevelSecurityTable",
+                Level::Warn,
+                "kids (unnamed foreign key)"
+            )],
+            "{action}"
+        );
+    }
+}
+
+#[test]
+fn an_action_whose_command_has_no_policy_is_not_reported() {
+    for (action, policy) in [
+        ("ON DELETE SET NULL", "FOR DELETE USING (false)"),
+        ("ON UPDATE CASCADE", "FOR DELETE USING (false)"),
+        ("ON DELETE CASCADE", "FOR UPDATE USING (false)"),
+        ("ON DELETE RESTRICT ON UPDATE RESTRICT", "USING (false)"),
+    ] {
+        assert_eq!(
+            findings(
+                CascadeIntoRowLevelSecurityTable::default(),
+                Deployment::default(),
+                &format!(
+                    "{PARENTS}
+                     CREATE TABLE kids (id INT, parent_id INT REFERENCES parents (id) {action});
+                     ALTER TABLE kids ENABLE ROW LEVEL SECURITY;
+                     CREATE POLICY kids_write ON kids {policy};"
+                ),
+            ),
+            [],
+            "{action} with {policy}"
+        );
+    }
+}
+
+#[test]
 fn a_foreign_key_that_cascades_past_no_delete_policy_is_not_reported() {
     for sql in [
         "CREATE TABLE kids (id INT, parent_id INT REFERENCES parents (id));

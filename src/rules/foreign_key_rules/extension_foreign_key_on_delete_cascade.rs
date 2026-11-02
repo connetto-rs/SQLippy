@@ -3,6 +3,7 @@
 //! specified.
 
 use sql_traits::traits::{ColumnLike, DatabaseLike, ForeignKeyLike, TableLike};
+use sqlparser::ast::ReferentialAction;
 
 use crate::{
     error::Interruption,
@@ -130,7 +131,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for ExtensionForeignKeyOnDeleteCascade<DB>
     ) -> Result<(), Interruption> {
         // Only check extension foreign keys
         if foreign_key.is_extension_foreign_key(database)?
-            && !foreign_key.on_delete_cascade(database)
+            && foreign_key.on_delete(database) != ReferentialAction::Cascade
         {
             let host = foreign_key.host_table(database).table_name();
             let referenced = foreign_key.referenced_table(database)?.table_name();
