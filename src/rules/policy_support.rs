@@ -8,9 +8,9 @@ use sql_traits::{
     traits::{DatabaseLike, PolicyLike, RoleLike, RoleMembershipLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
-use sqlparser::ast::{CreatePolicyCommand, Expr, Owner, Query, Visit, Visitor};
+use sqlparser::ast::{CreatePolicyCommand, Expr, FunctionArguments, Owner, Query, Visit, Visitor};
 
-use crate::error::PolicyClause;
+use crate::{deployment::Deployment, error::PolicyClause};
 
 /// Statement command whose policies PostgreSQL applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,18 +254,80 @@ impl<DB: DatabaseLike> Visitor for RowReferences<'_, DB> {
     }
 }
 
-fn is_column_reference(expression: &Expr) -> bool {
+pub(crate) fn is_column_reference(expression: &Expr) -> bool {
     matches!(
         expression,
         Expr::Identifier(_) | Expr::CompoundIdentifier(_)
     )
 }
 
+/// Whether the expression reads the current or session role.
+pub(crate) fn is_role_read(expression: &Expr) -> bool {
+    is_call_to(
+        expression,
+        &["current_user", "current_role", "session_user"],
+        true,
+    )
+}
+
+/// Whether the expression calls one of `names`, written without parentheses
+/// when `bare`.
+fn is_call_to(expression: &Expr, names: &[&str], bare: bool) -> bool {
+    let Expr::Function(function) = expression else {
+        return false;
+    };
+    matches!(function.args, FunctionArguments::None) == bare
+        && function
+            .name
+            .0
+            .last()
+            .and_then(|part| part.as_ident())
+            .is_some_and(|ident| {
+                names
+                    .iter()
+                    .any(|name| ident.value.eq_ignore_ascii_case(name))
+            })
+}
+
+/// Finds a term identifying the caller.
+struct CallerTerm<'a>(&'a Deployment);
+
+impl Visitor for CallerTerm<'_> {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
+        if self.0.is_credential(expression)
+            || is_role_read(expression)
+            || is_call_to(expression, &["current_setting"], false)
+        {
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Whether the node holds a term identifying the caller: a declared
+/// credential, a `current_setting` call or a read of the current role.
+pub(crate) fn holds_caller<V: Visit>(deployment: &Deployment, node: &V) -> bool {
+    node.visit(&mut CallerTerm(deployment)).is_break()
+}
+
+/// Whether a policy operand on `table` is derived from the caller alone,
+/// holding a caller term and no reference to the row being checked.
+pub(crate) fn derives_from_caller<DB: DatabaseLike, V: Visit>(
+    database: &DB,
+    table: &DB::Table,
+    deployment: &Deployment,
+    node: &V,
+) -> Result<bool, LookupError> {
+    Ok(holds_caller(deployment, node) && !reads_row(database, table, node)?)
+}
+
 /// Row references of a policy expression on `table`.
-fn row_references<'db, DB: DatabaseLike>(
+fn row_references<'db, DB: DatabaseLike, V: Visit>(
     database: &'db DB,
     table: &'db DB::Table,
-    expression: &Expr,
+    node: &V,
     until_first: bool,
 ) -> Result<RowReferences<'db, DB>, LookupError> {
     let mut references = RowReferences {
@@ -276,7 +338,7 @@ fn row_references<'db, DB: DatabaseLike>(
         outside: false,
         correlated: Vec::new(),
     };
-    match expression.visit(&mut references) {
+    match node.visit(&mut references) {
         ControlFlow::Break(Some(error)) => Err(error),
         ControlFlow::Continue(()) | ControlFlow::Break(None) => Ok(references),
     }
@@ -284,12 +346,12 @@ fn row_references<'db, DB: DatabaseLike>(
 
 /// Returns whether a policy expression on `table` depends on the row it is
 /// evaluated for.
-pub(crate) fn reads_row<DB: DatabaseLike>(
+pub(crate) fn reads_row<DB: DatabaseLike, V: Visit>(
     database: &DB,
     table: &DB::Table,
-    expression: &Expr,
+    node: &V,
 ) -> Result<bool, LookupError> {
-    let references = row_references(database, table, expression, true)?;
+    let references = row_references(database, table, node, true)?;
     Ok(references.outside || !references.correlated.is_empty())
 }
 

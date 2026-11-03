@@ -4,12 +4,13 @@
 use std::ops::ControlFlow;
 
 use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
-use sqlparser::ast::{Expr, FunctionArguments, Owner, Visit, Visitor};
+use sqlparser::ast::{Expr, Owner, Visit, Visitor};
 
 use crate::{
     deployment::Declaration,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{LintGroup, Rule, RuleMetadata},
+    rules::policy_support::is_role_read,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -161,19 +162,7 @@ impl Visitor for RoleRead {
     type Break = String;
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
-        if let Expr::Function(function) = expression
-            && matches!(function.args, FunctionArguments::None)
-            && function
-                .name
-                .0
-                .last()
-                .and_then(|part| part.as_ident())
-                .is_some_and(|ident| {
-                    ["current_user", "current_role", "session_user"]
-                        .iter()
-                        .any(|role| ident.value.eq_ignore_ascii_case(role))
-                })
-        {
+        if is_role_read(expression) {
             return ControlFlow::Break(expression.to_string());
         }
         ControlFlow::Continue(())
