@@ -90,6 +90,33 @@ fn a_table_without_row_level_security_in_an_exposed_schema_is_reachable_without_
 }
 
 #[test]
+fn foreign_tables_a_client_role_reaches_are_reported() {
+    let foreign = "CREATE SCHEMA api;
+        CREATE FOREIGN TABLE sales (id INT, amount INT) SERVER warehouse;
+        CREATE FOREIGN TABLE api.rates (id INT) SERVER warehouse;
+        CREATE FOREIGN TABLE costs (id INT, amount INT) SERVER warehouse;
+        CREATE FOREIGN TABLE kept (id INT) SERVER warehouse;
+        CREATE TABLE plain (id INT);
+        GRANT SELECT ON sales TO anon;
+        GRANT SELECT (amount) ON costs TO authenticated;
+        GRANT SELECT ON kept TO reporting;
+        GRANT SELECT (id) ON kept TO reporting;
+        GRANT SELECT ON plain TO anon;";
+    assert_eq!(
+        findings(
+            ReachableForeignTable::default(),
+            supabase().with_exposed_schema("api"),
+            foreign,
+        ),
+        [
+            finding("ReachableForeignTable", Level::Warn, "costs"),
+            finding("ReachableForeignTable", Level::Warn, "sales"),
+            finding("ReachableForeignTable", Level::Warn, "rates"),
+        ]
+    );
+}
+
+#[test]
 fn an_unqualified_table_sits_in_the_public_schema() {
     assert_eq!(
         findings(
