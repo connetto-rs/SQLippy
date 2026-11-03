@@ -59,6 +59,11 @@ fn finding(object: &str) -> (String, Level, String) {
 
 /// Findings for one `DELETE` policy on `items` under the connetto deployment.
 fn delete_policy(using: &str) -> Vec<(String, Level, String)> {
+    delete_policy_after("", using)
+}
+
+/// Findings for one `DELETE` policy on `items` declared after `prelude`.
+fn delete_policy_after(prelude: &str, using: &str) -> Vec<(String, Level, String)> {
     findings(
         connetto(),
         &format!(
@@ -66,6 +71,7 @@ fn delete_policy(using: &str) -> Vec<(String, Level, String)> {
              CREATE TABLE items (id INT, owner TEXT, team INT, is_public BOOL);
              ALTER TABLE items ENABLE ROW LEVEL SECURITY;
              CREATE FUNCTION not_(b BOOL) RETURNS BOOL LANGUAGE sql STRICT IMMUTABLE AS 'SELECT NOT b';
+             {prelude}
              CREATE POLICY d ON items FOR DELETE USING ({using});"
         ),
     )
@@ -225,6 +231,73 @@ fn clauses_a_caller_without_a_credential_can_pass_are_reported() {
         "CASE WHEN current_setting('app.user_id', true) IS NULL THEN true ELSE false END",
     ] {
         assert_eq!(delete_policy(using), [finding("items.d")], "{using}");
+    }
+}
+
+const HELPERS: &str = "
+    CREATE SCHEMA authz;
+    CREATE TABLE grants (team INT, member TEXT);
+    CREATE FUNCTION authz.mine() RETURNS SETOF INT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ''
+      AS $$ SELECT g.team FROM public.grants g WHERE g.member = current_setting('app.user_id', true) $$;
+    CREATE FUNCTION authz.nested() RETURNS SETOF INT LANGUAGE sql STABLE AS $$
+      SELECT g.team FROM public.grants g WHERE g.member = current_setting('app.user_id', true)
+      UNION SELECT m.team FROM public.members m WHERE m.team IN (SELECT authz.mine()) $$;
+    CREATE FUNCTION authz.either() RETURNS SETOF INT LANGUAGE sql STABLE
+      AS $$ (SELECT authz.mine()) UNION (SELECT authz.nested() FROM public.members) $$;
+    CREATE FUNCTION authz.everyone() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ SELECT team FROM public.members $$;
+    CREATE FUNCTION authz.half() RETURNS SETOF INT LANGUAGE sql STABLE
+      AS $$ SELECT authz.mine() UNION SELECT team FROM public.members $$;
+    CREATE FUNCTION authz.tally() RETURNS INT LANGUAGE sql STABLE
+      AS $$ SELECT count(*)::INT FROM public.grants WHERE member = current_setting('app.user_id', true) $$;
+    CREATE FUNCTION authz.procedural() RETURNS SETOF INT LANGUAGE plpgsql STABLE AS $$
+      BEGIN RETURN QUERY SELECT team FROM public.grants WHERE member = current_setting('app.user_id', true); END $$;
+    CREATE FUNCTION authz.constant() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ VALUES (1) $$;
+    CREATE FUNCTION authz.last() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ SELECT 1; SELECT 2 $$;
+    CREATE FUNCTION authz.looping() RETURNS SETOF INT LANGUAGE sql STABLE
+      AS $$ SELECT team FROM public.members WHERE team IN (SELECT authz.looping()) $$;";
+
+#[test]
+fn a_set_returning_sql_helper_whose_every_arm_requires_a_credential_passes() {
+    for using in [
+        "team = ANY (ARRAY(SELECT authz.mine()))",
+        "team IN (SELECT authz.nested())",
+        "team = ANY (ARRAY(SELECT authz.either()))",
+    ] {
+        assert_eq!(delete_policy_after(HELPERS, using), [], "{using}");
+    }
+}
+
+#[test]
+fn helpers_returning_a_row_without_a_credential_are_reported() {
+    for using in [
+        "team = ANY (ARRAY(SELECT authz.everyone()))",
+        "team = ANY (ARRAY(SELECT authz.half()))",
+        "team = ANY (ARRAY(SELECT authz.tally()))",
+        "team IN (SELECT authz.constant())",
+        "team IN (SELECT authz.last())",
+        "team = ANY (ARRAY[1, 2])",
+    ] {
+        assert_eq!(
+            delete_policy_after(HELPERS, using),
+            [finding("items.d")],
+            "{using}"
+        );
+    }
+}
+
+/// PostgreSQL deletes nothing through these, but the rule reads only
+/// `LANGUAGE sql` bodies and reads each helper once per path.
+#[test]
+fn plpgsql_and_recursive_helpers_are_not_read() {
+    for using in [
+        "team IN (SELECT authz.procedural())",
+        "team IN (SELECT authz.looping())",
+    ] {
+        assert_eq!(
+            delete_policy_after(HELPERS, using),
+            [finding("items.d")],
+            "{using}"
+        );
     }
 }
 

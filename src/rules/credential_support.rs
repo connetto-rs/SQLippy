@@ -1,29 +1,49 @@
 //! Whether a policy expression can be true for a caller holding no
 //! credential, judged conservatively with every declared credential `NULL`.
 
-use std::ops::ControlFlow;
+use std::{cell::RefCell, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    structs::FunctionKind,
+    structs::{FunctionKind, IdentifierCase},
     traits::{DatabaseLike, FunctionLike, PolicyLike},
 };
-use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr,
-    InTarget, JoinConstraint, JoinOperator, Query, Select, SelectItem, SetExpr, UnaryOperator,
-    Visit, Visitor,
+use sqlparser::{
+    ast::{
+        BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
+        GroupByExpr, InTarget, JoinConstraint, JoinOperator, Query, Select, SelectItem, SetExpr,
+        SetOperator, Statement, UnaryOperator, Visit, Visitor,
+    },
+    dialect::PostgreSqlDialect,
+    parser::Parser,
 };
 
 use crate::deployment::Deployment;
 
 /// Judges the expressions of one policy against the declared credentials.
 pub(crate) struct CredentialJudge<'a, DB: DatabaseLike> {
-    pub(crate) database: &'a DB,
-    pub(crate) policy: &'a DB::Policy,
-    pub(crate) deployment: &'a Deployment,
+    database: &'a DB,
+    policy: &'a DB::Policy,
+    deployment: &'a Deployment,
+    /// Functions whose bodies are being read, so a recursive one is not
+    /// read again.
+    reading: RefCell<Vec<&'a DB::Function>>,
 }
 
-impl<DB: DatabaseLike> CredentialJudge<'_, DB> {
+impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
+    pub(crate) fn new(
+        database: &'a DB,
+        policy: &'a DB::Policy,
+        deployment: &'a Deployment,
+    ) -> Self {
+        Self {
+            database,
+            policy,
+            deployment,
+            reading: RefCell::default(),
+        }
+    }
+
     /// Whether the expression is `NULL` when every credential is `NULL`.
     pub(crate) fn is_null(&self, expression: &Expr) -> Result<bool, LookupError> {
         if self.deployment.is_credential(expression) {
@@ -87,7 +107,24 @@ impl<DB: DatabaseLike> CredentialJudge<'_, DB> {
                 right,
             } => self.requires(left)? && self.requires(right)?,
             Expr::IsNotNull(inner) => self.is_null(inner)?,
-            Expr::AnyOp { left, .. } => self.is_null(left)?,
+            Expr::AnyOp { left, right, .. } => {
+                self.is_null(left)?
+                    || match right.as_ref() {
+                        Expr::Function(Function {
+                            name,
+                            args: FunctionArguments::Subquery(subquery),
+                            ..
+                        }) if name
+                            .0
+                            .last()
+                            .and_then(|part| part.as_ident())
+                            .is_some_and(|ident| ident.value.eq_ignore_ascii_case("array")) =>
+                        {
+                            self.subquery_requires(subquery)?
+                        }
+                        _ => false,
+                    }
+            }
             Expr::In {
                 target: InTarget::List(list),
                 ..
@@ -153,7 +190,7 @@ impl<DB: DatabaseLike> CredentialJudge<'_, DB> {
             return Ok(false);
         }
         let mut reached_any = false;
-        for function in self.policy.functions_reached_by(call, self.database)? {
+        for function in self.reached(call)? {
             reached_any = true;
             if !null_positions
                 .iter()
@@ -167,12 +204,102 @@ impl<DB: DatabaseLike> CredentialJudge<'_, DB> {
 
     /// Whether a subquery returns no row when every credential is `NULL`.
     fn subquery_requires(&self, query: &Query) -> Result<bool, LookupError> {
-        match single_select(query) {
-            Some(select) => {
-                Ok(!self.may_yield_row_from_no_input(select)? && self.filter_requires(select)?)
+        self.set_requires(&query.body)
+    }
+
+    /// Whether a query body returns no row when every credential is `NULL`,
+    /// which a `UNION` does when every arm does.
+    fn set_requires(&self, body: &SetExpr) -> Result<bool, LookupError> {
+        Ok(match body {
+            SetExpr::Select(select) => {
+                !self.may_yield_row_from_no_input(select)?
+                    && (self.filter_requires(select)? || self.projects_no_row(select)?)
             }
-            None => Ok(false),
+            SetExpr::Query(query) => self.subquery_requires(query)?,
+            SetExpr::SetOperation {
+                op: SetOperator::Union,
+                left,
+                right,
+                ..
+            } => self.set_requires(left)? && self.set_requires(right)?,
+            _ => false,
+        })
+    }
+
+    /// Whether a `SELECT` projects one set-returning call that returns no row
+    /// when every credential is `NULL`, so no row survives.
+    fn projects_no_row(&self, select: &Select) -> Result<bool, LookupError> {
+        let [
+            SelectItem::UnnamedExpr(Expr::Function(call))
+            | SelectItem::ExprWithAlias {
+                expr: Expr::Function(call),
+                ..
+            },
+        ] = select.projection.as_slice()
+        else {
+            return Ok(false);
+        };
+        let mut reached = false;
+        for function in self.reached(call)? {
+            reached = true;
+            if !self.body_returns_no_row(function)? {
+                return Ok(false);
+            }
         }
+        Ok(reached)
+    }
+
+    /// Functions a call may reach, resolved by the policy, or by the database
+    /// for a call in a function body being read.
+    fn reached(
+        &self,
+        call: &Function,
+    ) -> Result<impl Iterator<Item = &'a DB::Function>, LookupError> {
+        let in_body = !self.reading.borrow().is_empty();
+        let from_policy = if in_body {
+            None
+        } else {
+            Some(self.policy.functions_reached_by(call, self.database)?)
+        };
+        let from_body = if in_body {
+            Some(
+                self.database
+                    .functions_reached_by(call, IdentifierCase::Folded)?,
+            )
+        } else {
+            None
+        };
+        Ok(from_policy
+            .into_iter()
+            .flatten()
+            .chain(from_body.into_iter().flatten()))
+    }
+
+    /// Whether a set-returning `LANGUAGE sql` function's body, one query,
+    /// returns no row when every credential is `NULL`.
+    fn body_returns_no_row(&self, function: &'a DB::Function) -> Result<bool, LookupError> {
+        if !function.returns_set()
+            || function
+                .stored_language()
+                .is_some_and(|language| language != "sql")
+            || self
+                .reading
+                .borrow()
+                .iter()
+                .any(|reading| std::ptr::eq(*reading, function))
+        {
+            return Ok(false);
+        }
+        let statements = function
+            .body()
+            .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok());
+        let Some([Statement::Query(query)]) = statements.as_deref() else {
+            return Ok(false);
+        };
+        self.reading.borrow_mut().push(function);
+        let requires = self.subquery_requires(query);
+        self.reading.borrow_mut().pop();
+        requires
     }
 
     /// Whether the `WHERE` or the `ON` of an inner join requires a
@@ -269,7 +396,7 @@ impl<DB: DatabaseLike> CredentialJudge<'_, DB> {
     /// it reaches no known function.
     fn may_aggregate(&self, call: &Function) -> Result<bool, LookupError> {
         let mut known = false;
-        for function in self.policy.functions_reached_by(call, self.database)? {
+        for function in self.reached(call)? {
             known = true;
             if function.kind(self.database)? == FunctionKind::Aggregate {
                 return Ok(true);
