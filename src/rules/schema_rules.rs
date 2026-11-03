@@ -7,7 +7,12 @@ pub use reachable_materialized_view::ReachableMaterializedView;
 mod reachable_foreign_table;
 pub use reachable_foreign_table::ReachableForeignTable;
 mod owner_rights_view;
+mod type_rules;
 pub use owner_rights_view::OwnerRightsView;
+pub use type_rules::{
+    BlankPaddedCharacter, ClientWrittenScaledNumeric, JsonType, MoneyType, ScaledNumeric,
+    TimeWithTimeZone, TimestampWithoutTimeZone, ZeroPrecisionTimestamp,
+};
 mod client_role_bypass;
 pub use client_role_bypass::{
     ClientRoleBypassesRowLevelSecurity, SettableMembershipInBypassingRole,

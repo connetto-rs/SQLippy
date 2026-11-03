@@ -3,8 +3,8 @@
 use std::ops::ControlFlow;
 
 use sql_traits::traits::{
-    ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, PolicyLike, RoleLike, TableLike,
-    ViewLike,
+    ColumnLike, DatabaseLike, DomainLike, ForeignKeyLike, FunctionLike, PolicyLike, RoleLike,
+    TableLike, ViewLike,
 };
 
 use crate::{
@@ -233,6 +233,27 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         let object = role.name().to_owned();
         self.emit(
             Location::Role(Box::new(role.clone())),
+            object,
+            message,
+            resolution,
+        )
+    }
+
+    /// Reports a violation on a domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn domain(
+        &mut self,
+        domain: &DB::Domain,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        let object = domain.name().to_owned();
+        self.emit(
+            Location::Domain(Box::new(domain.clone())),
             object,
             message,
             resolution,
