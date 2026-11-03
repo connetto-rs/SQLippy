@@ -6,6 +6,8 @@ mod definer_temporary_schema_not_last;
 pub use definer_temporary_schema_not_last::DefinerTemporarySchemaNotLast;
 mod exposed_definer_over_protected_table;
 pub use exposed_definer_over_protected_table::ExposedDefinerOverProtectedTable;
+mod impure_immutable_function;
+pub use impure_immutable_function::ImpureImmutableFunction;
 
 use sql_traits::{
     errors::LookupError,

@@ -12,21 +12,23 @@ use crate::{
         CredentialFreeWrite, DeadPermissivePolicy, DefinerTemporarySchemaNotLast,
         DefinerWithoutSearchPath, DenyListPolicy, ExposedDefinerOverProtectedTable,
         ExtensionForeignKeyOnDeleteCascade, FunctionMediatedPolicyCycle, GrantOptionToClientRole,
-        HasPrimaryKey, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
-        LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName, MoneyType,
-        NarrowIntegerKey, NestedPolicySubquery, NoForbiddenColumnInExtension, NoNegationCheckRule,
-        NoRustKeywordColumnName, NoRustKeywordForeignKeyName, NoRustKeywordTableName,
-        NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId,
-        NonEmptyTextualColumnRule, NonRedundantExtensionDag, NullableCompositeForeignKey,
-        OwnerRightsView, PastTimeColumnRule, PluralTableName, PoliciesRequireRowLevelSecurity,
-        PolicyReadCycle, PolicyToCreatingRole, PrefixRedundantIndex, PrimaryKeyReferenceEndsWithId,
-        ReachableForeignTable, ReachableMaterializedView, ReachableTableWithoutRowLevelSecurity,
+        HasPrimaryKey, ImpureImmutableFunction, JsonType, KeyWithoutExactEquality,
+        LatentPolicyReadCycle, LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName,
+        MoneyType, NarrowIntegerKey, NestedPolicySubquery, NoForbiddenColumnInExtension,
+        NoNegationCheckRule, NoRustKeywordColumnName, NoRustKeywordForeignKeyName,
+        NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule,
+        NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule, NonRedundantExtensionDag,
+        NotInNullableSubquery, NullableCompositeForeignKey, OwnerRightsView, PastTimeColumnRule,
+        PluralTableName, PoliciesRequireRowLevelSecurity, PolicyReadCycle, PolicyToCreatingRole,
+        PrefixRedundantIndex, PrimaryKeyReferenceEndsWithId, ReachableForeignTable,
+        ReachableMaterializedView, ReachableTableWithoutRowLevelSecurity,
         ReferencesGrantedToClientRole, RoleKeyedPolicyWhenPooled, ScaledNumeric, SerialColumn,
         SettableMembershipInBypassingRole, SingularColumnName, SnakeCaseColumnName,
-        SnakeCaseTableName, TautologicalWithCheck, TextualColumnRule, TimeWithTimeZone,
-        TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
-        UncachedPolicyCall, UnforcedRowLevelSecurity, UnindexedForeignKey, UnindexedPolicyFilter,
-        UniqueCheckRule, UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
+        SnakeCaseTableName, TautologicalWithCheck, TextualColumnRule, TimeDependentCheck,
+        TimeWithTimeZone, TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole,
+        TruncateGrantedToAppRole, UncachedPolicyCall, UnforcedRowLevelSecurity,
+        UnindexedForeignKey, UnindexedPolicyFilter, UniqueCheckRule,
+        UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
         ZeroPrecisionTimestamp,
     },
     traits::{
@@ -65,7 +67,8 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 34] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 35] = [
+            Box::new(TimeDependentCheck::default()),
             Box::new(PrefixRedundantIndex::default()),
             Box::new(HasPrimaryKey::default()),
             Box::new(KeyWithoutExactEquality::default()),
@@ -135,7 +138,8 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
         register_schema_rules(&mut constrainer);
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 4] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 5] = [
+            Box::new(ImpureImmutableFunction::default()),
             Box::new(DefinerWithoutSearchPath::default()),
             Box::new(DefinerTemporarySchemaNotLast::default()),
             Box::new(ExposedDefinerOverProtectedTable::default()),
@@ -150,7 +154,8 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 18] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 19] = [
+        Box::new(NotInNullableSubquery::default()),
         Box::new(TimestampWithoutTimeZone::default()),
         Box::new(TimeWithTimeZone::default()),
         Box::new(ZeroPrecisionTimestamp::default()),
