@@ -34,7 +34,24 @@ pub struct Deployment {
     exposed_schemas: Vec<String>,
     credentials: Vec<Expr>,
     client_written_tables: Vec<(String, String)>,
+    self_asserted_claims: Vec<Expr>,
+    self_asserted_columns: Vec<SelfAssertedColumn>,
     pooled: Option<bool>,
+}
+
+/// A column whose value its row's subject sets, by stored names.
+#[derive(Debug, Clone)]
+struct SelfAssertedColumn {
+    schema: String,
+    table: String,
+    column: String,
+}
+
+/// Parses one PostgreSQL expression.
+fn parse_expression(expression: &str) -> Result<Expr, ParserError> {
+    Parser::new(&PostgreSqlDialect {})
+        .try_with_sql(expression)?
+        .parse_expr()
 }
 
 impl Deployment {
@@ -127,11 +144,66 @@ impl Deployment {
     /// Returns the parser error when `expression` is not one PostgreSQL SQL
     /// expression.
     pub fn with_credential(mut self, expression: &str) -> Result<Self, ParserError> {
-        let parsed = Parser::new(&PostgreSqlDialect {})
-            .try_with_sql(expression)?
-            .parse_expr()?;
-        self.credentials.push(parsed);
+        self.credentials.push(parse_expression(expression)?);
         Ok(self)
+    }
+
+    /// Declares an expression reading a claim the caller can set, such as
+    /// `auth.jwt() -> 'user_metadata'` where end users edit their own
+    /// metadata.
+    ///
+    /// The expression is matched as written, also inside a longer path such
+    /// as `auth.jwt() -> 'user_metadata' ->> 'role'`, so each spelling a
+    /// policy may use is declared.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parser error when `expression` is not one PostgreSQL SQL
+    /// expression.
+    pub fn with_self_asserted_claim(mut self, expression: &str) -> Result<Self, ParserError> {
+        self.self_asserted_claims
+            .push(parse_expression(expression)?);
+        Ok(self)
+    }
+
+    /// Returns whether `expression` is a declared self-asserted claim, as
+    /// written.
+    #[must_use]
+    pub fn is_self_asserted_claim(&self, expression: &Expr) -> bool {
+        self.self_asserted_claims.contains(expression)
+    }
+
+    /// Declares a column whose value the subject of its row sets, by the
+    /// stored names of its schema, table and column, such as `auth`, `users`
+    /// and `raw_user_meta_data`.
+    ///
+    /// The table must be part of the schema the rules read, since a column of
+    /// an unknown table cannot be told apart from another.
+    #[must_use]
+    pub fn with_self_asserted_column(
+        mut self,
+        schema: impl Into<String>,
+        table: impl Into<String>,
+        column: impl Into<String>,
+    ) -> Self {
+        self.self_asserted_columns.push(SelfAssertedColumn {
+            schema: schema.into(),
+            table: table.into(),
+            column: column.into(),
+        });
+        self
+    }
+
+    /// Returns the declared self-asserted columns as stored schema, table and
+    /// column names.
+    pub fn self_asserted_columns(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.self_asserted_columns.iter().map(|column| {
+            (
+                column.schema.as_str(),
+                column.table.as_str(),
+                column.column.as_str(),
+            )
+        })
     }
 
     /// Returns whether `expression` is a declared credential, as written.
@@ -149,6 +221,9 @@ impl Deployment {
                 !self.anonymous_roles.is_empty() || !self.app_roles.is_empty()
             }
             Declaration::Credentials => !self.credentials.is_empty(),
+            Declaration::SelfAssertedSources => {
+                !self.self_asserted_claims.is_empty() || !self.self_asserted_columns.is_empty()
+            }
             Declaration::Pooled => self.pooled.is_some(),
         }
     }
@@ -163,6 +238,8 @@ pub enum Declaration {
     ClientRoles,
     /// At least one credential expression.
     Credentials,
+    /// At least one self-asserted claim or column.
+    SelfAssertedSources,
     /// Whether the deployment is pooled.
     Pooled,
 }
@@ -173,6 +250,7 @@ impl Display for Declaration {
             Self::AppRoles => "app roles",
             Self::ClientRoles => "anonymous or app roles",
             Self::Credentials => "credential expressions",
+            Self::SelfAssertedSources => "self-asserted claims or columns",
             Self::Pooled => "whether it is pooled",
         })
     }

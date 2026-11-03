@@ -69,6 +69,8 @@ pub use type_rules::{
     BlankPaddedCharacter, ClientWrittenScaledNumeric, JsonType, MoneyType, ScaledNumeric,
     TimeWithTimeZone, TimestampWithoutTimeZone, ZeroPrecisionTimestamp,
 };
+mod self_asserted_claim_policy;
+pub use self_asserted_claim_policy::SelfAssertedClaimPolicy;
 mod client_role_bypass;
 pub use client_role_bypass::{
     ClientRoleBypassesRowLevelSecurity, SettableMembershipInBypassingRole,
