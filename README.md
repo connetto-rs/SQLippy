@@ -41,7 +41,7 @@ A rule registered on its own, including a single rule converted with `.into()`, 
 | :--- | :--- | :--- |
 | `correctness` | `deny` | `PoliciesRequireRowLevelSecurity`, `PolicyReadCycle`, `DeadPermissivePolicy`, `TruncateGrantedToAnonymousRole`, `ClientRoleBypassesRowLevelSecurity`, `DefinerWithoutSearchPath`, `DefinerTemporarySchemaNotLast`, `NoTautologicalCheckRule`, `NoNegationCheckRule`, `NoSurrogatePrimaryKeyInExtension` |
 | `suspicious` | `warn` | `LatentPolicyReadCycle`, `FunctionMediatedPolicyCycle`, `TautologicalWithCheck`, `UnforcedRowLevelSecurity`, `CredentialFreeWrite`, `ReachableTableWithoutRowLevelSecurity`, `OwnerRightsView`, `ReachableMaterializedView`, `TruncateGrantedToAppRole`, `ChildWithoutRowLevelSecurity`, `SettableMembershipInBypassingRole`, `PolicyToCreatingRole`, `RoleKeyedPolicyWhenPooled`, `GrantOptionToClientRole`, `ExposedDefinerOverProtectedTable`, `TextualColumnRule`, `CompatibleForeignKey`, `HasPrimaryKey`, `KeyWithoutExactEquality`, `ExtensionForeignKeyOnDeleteCascade`, `NoForbiddenColumnInExtension`, `UniqueColumnNamesInExtensionGraph` |
-| `perf` | `warn` | `CorrelatedPolicySubquery`, `UncachedPolicyCall` |
+| `perf` | `warn` | `CorrelatedPolicySubquery`, `NestedPolicySubquery`, `UncachedPolicyCall` |
 | `complexity` | `warn` | `UniqueForeignKey`, `UniqueCheckRule`, `UniqueUniqueIndex`, `NonRedundantExtensionDag` |
 | `style` | `warn` | `LowercaseTableName`, `LowercaseColumnName`, `LowercaseForeignKeyName`, `SnakeCaseTableName`, `SnakeCaseColumnName`, `PluralTableName`, `SingularColumnName`, `PrimaryKeyReferenceEndsWithId`, `NonCompositePrimaryKeyNamedId` |
 | `pedantic` | `allow` | `ReferencesGrantedToClientRole`, `CascadeIntoRowLevelSecurityTable`, `PastTimeColumnRule`, `NonEmptyTextualColumnRule` |
