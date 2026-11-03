@@ -20,7 +20,7 @@ use sqlparser::{
     parser::Parser,
 };
 
-use crate::{deployment::Deployment, error::PolicyClause, rules::grant_support::schema_of};
+use crate::{deployment::Deployment, error::PolicyClause, rules::grant_support::is_client_written};
 
 /// A type or temporal construct a type rule reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,12 +186,8 @@ impl<DB: DatabaseLike> TypeUse<'_, DB> {
 
     /// Whether the construct belongs to a table clients write.
     pub(crate) fn client_written(&self, database: &DB, deployment: &Deployment) -> bool {
-        self.table(database).is_some_and(|table| {
-            deployment.is_client_written(
-                &schema_of(database, table.stored_table_schema()),
-                &table.stored_table_name(),
-            )
-        })
+        self.table(database)
+            .is_some_and(|table| is_client_written(database, deployment, table))
     }
 }
 

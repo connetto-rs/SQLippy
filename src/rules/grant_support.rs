@@ -99,6 +99,18 @@ pub(crate) fn schema_of<'a, DB: DatabaseLike>(
         .unwrap_or_default()
 }
 
+/// Whether the deployment declares `table` client-written.
+pub(crate) fn is_client_written<DB: DatabaseLike>(
+    database: &DB,
+    deployment: &Deployment,
+    table: &DB::Table,
+) -> bool {
+    deployment.is_client_written(
+        &schema_of(database, table.stored_table_schema()),
+        &table.stored_table_name(),
+    )
+}
+
 /// Grantees of a grant as written, for messages.
 pub(crate) fn grantee_list<DB: DatabaseLike>(
     database: &DB,

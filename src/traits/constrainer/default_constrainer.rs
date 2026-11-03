@@ -7,26 +7,26 @@ use crate::{
     lint::Level,
     rules::{
         ArrayMembershipPolicy, BlankPaddedCharacter, CascadeIntoRowLevelSecurityTable,
-        ChildWithoutRowLevelSecurity, ClientRoleBypassesRowLevelSecurity,
+        ChildWithoutRowLevelSecurity, ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey,
         ClientWrittenScaledNumeric, CompatibleForeignKey, CorrelatedPolicySubquery,
         CredentialFreeWrite, DeadPermissivePolicy, DefinerTemporarySchemaNotLast,
         DefinerWithoutSearchPath, DenyListPolicy, ExposedDefinerOverProtectedTable,
         ExtensionForeignKeyOnDeleteCascade, FunctionMediatedPolicyCycle, GrantOptionToClientRole,
         HasPrimaryKey, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
         LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName, MoneyType,
-        NestedPolicySubquery, NoForbiddenColumnInExtension, NoNegationCheckRule,
+        NarrowIntegerKey, NestedPolicySubquery, NoForbiddenColumnInExtension, NoNegationCheckRule,
         NoRustKeywordColumnName, NoRustKeywordForeignKeyName, NoRustKeywordTableName,
         NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId,
-        NonEmptyTextualColumnRule, NonRedundantExtensionDag, OwnerRightsView, PastTimeColumnRule,
-        PluralTableName, PoliciesRequireRowLevelSecurity, PolicyReadCycle, PolicyToCreatingRole,
-        PrimaryKeyReferenceEndsWithId, ReachableForeignTable, ReachableMaterializedView,
-        ReachableTableWithoutRowLevelSecurity, ReferencesGrantedToClientRole,
-        RoleKeyedPolicyWhenPooled, ScaledNumeric, SettableMembershipInBypassingRole,
-        SingularColumnName, SnakeCaseColumnName, SnakeCaseTableName, TautologicalWithCheck,
-        TextualColumnRule, TimeWithTimeZone, TimestampWithoutTimeZone,
-        TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, UncachedPolicyCall,
-        UnforcedRowLevelSecurity, UnindexedPolicyFilter, UniqueCheckRule,
-        UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
+        NonEmptyTextualColumnRule, NonRedundantExtensionDag, NullableCompositeForeignKey,
+        OwnerRightsView, PastTimeColumnRule, PluralTableName, PoliciesRequireRowLevelSecurity,
+        PolicyReadCycle, PolicyToCreatingRole, PrefixRedundantIndex, PrimaryKeyReferenceEndsWithId,
+        ReachableForeignTable, ReachableMaterializedView, ReachableTableWithoutRowLevelSecurity,
+        ReferencesGrantedToClientRole, RoleKeyedPolicyWhenPooled, ScaledNumeric, SerialColumn,
+        SettableMembershipInBypassingRole, SingularColumnName, SnakeCaseColumnName,
+        SnakeCaseTableName, TautologicalWithCheck, TextualColumnRule, TimeWithTimeZone,
+        TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
+        UncachedPolicyCall, UnforcedRowLevelSecurity, UnindexedForeignKey, UnindexedPolicyFilter,
+        UniqueCheckRule, UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
         ZeroPrecisionTimestamp,
     },
     traits::{
@@ -65,7 +65,8 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 33] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 34] = [
+            Box::new(PrefixRedundantIndex::default()),
             Box::new(HasPrimaryKey::default()),
             Box::new(KeyWithoutExactEquality::default()),
             Box::new(LowercaseTableName::default()),
@@ -103,7 +104,10 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in table_rules {
             constrainer.register_table_rule_with_floor(rule, Level::Allow);
         }
-        let column_rules: [Box<dyn ColumnRule<Database = DB>>; 9] = [
+        let column_rules: [Box<dyn ColumnRule<Database = DB>>; 12] = [
+            Box::new(SerialColumn::default()),
+            Box::new(NarrowIntegerKey::default()),
+            Box::new(ClientWrittenCounterKey::default()),
             Box::new(LowercaseColumnName::default()),
             Box::new(NonCompositePrimaryKeyNamedId::default()),
             Box::new(NoSurrogatePrimaryKeyInExtension::default()),
@@ -117,7 +121,9 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in column_rules {
             constrainer.register_column_rule_with_floor(rule, Level::Allow);
         }
-        let foreign_key_rules: [Box<dyn ForeignKeyRule<Database = DB>>; 6] = [
+        let foreign_key_rules: [Box<dyn ForeignKeyRule<Database = DB>>; 8] = [
+            Box::new(NullableCompositeForeignKey::default()),
+            Box::new(UnindexedForeignKey::default()),
             Box::new(CompatibleForeignKey::default()),
             Box::new(LowercaseForeignKeyName::default()),
             Box::new(PrimaryKeyReferenceEndsWithId::default()),
@@ -128,29 +134,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in foreign_key_rules {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
-        let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 18] = [
-            Box::new(TimestampWithoutTimeZone::default()),
-            Box::new(TimeWithTimeZone::default()),
-            Box::new(ZeroPrecisionTimestamp::default()),
-            Box::new(BlankPaddedCharacter::default()),
-            Box::new(MoneyType::default()),
-            Box::new(JsonType::default()),
-            Box::new(ScaledNumeric::default()),
-            Box::new(ClientWrittenScaledNumeric::default()),
-            Box::new(PolicyReadCycle::default()),
-            Box::new(LatentPolicyReadCycle::default()),
-            Box::new(FunctionMediatedPolicyCycle::default()),
-            Box::new(ReachableMaterializedView::default()),
-            Box::new(ReachableForeignTable::default()),
-            Box::new(ChildWithoutRowLevelSecurity::default()),
-            Box::new(OwnerRightsView::default()),
-            Box::new(ClientRoleBypassesRowLevelSecurity::default()),
-            Box::new(SettableMembershipInBypassingRole::default()),
-            Box::new(GrantOptionToClientRole::default()),
-        ];
-        for rule in schema_rules {
-            constrainer.register_schema_rule_with_floor(rule, Level::Allow);
-        }
+        register_schema_rules(&mut constrainer);
         let function_rules: [Box<dyn FunctionRule<Database = DB>>; 4] = [
             Box::new(DefinerWithoutSearchPath::default()),
             Box::new(DefinerTemporarySchemaNotLast::default()),
@@ -161,6 +145,33 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_function_rule_with_floor(rule, Level::Allow);
         }
         Self { constrainer }
+    }
+}
+
+/// Registers every built-in schema rule at its group's default level.
+fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 18] = [
+        Box::new(TimestampWithoutTimeZone::default()),
+        Box::new(TimeWithTimeZone::default()),
+        Box::new(ZeroPrecisionTimestamp::default()),
+        Box::new(BlankPaddedCharacter::default()),
+        Box::new(MoneyType::default()),
+        Box::new(JsonType::default()),
+        Box::new(ScaledNumeric::default()),
+        Box::new(ClientWrittenScaledNumeric::default()),
+        Box::new(PolicyReadCycle::default()),
+        Box::new(LatentPolicyReadCycle::default()),
+        Box::new(FunctionMediatedPolicyCycle::default()),
+        Box::new(ReachableMaterializedView::default()),
+        Box::new(ReachableForeignTable::default()),
+        Box::new(ChildWithoutRowLevelSecurity::default()),
+        Box::new(OwnerRightsView::default()),
+        Box::new(ClientRoleBypassesRowLevelSecurity::default()),
+        Box::new(SettableMembershipInBypassingRole::default()),
+        Box::new(GrantOptionToClientRole::default()),
+    ];
+    for rule in schema_rules {
+        constrainer.register_schema_rule_with_floor(rule, Level::Allow);
     }
 }
 
