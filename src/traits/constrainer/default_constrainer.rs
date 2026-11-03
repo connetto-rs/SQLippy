@@ -20,16 +20,16 @@ use crate::{
         NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule, NonRedundantExtensionDag,
         NotInNullableSubquery, NullableCompositeForeignKey, OwnerRightsView, PastTimeColumnRule,
         PluralTableName, PoliciesRequireRowLevelSecurity, PolicyReadCycle, PolicyToCreatingRole,
-        PrefixRedundantIndex, PrimaryKeyReferenceEndsWithId, ReachableForeignTable,
-        ReachableMaterializedView, ReachableTableWithoutRowLevelSecurity,
-        ReferencesGrantedToClientRole, RoleKeyedPolicyWhenPooled, ScaledNumeric, SerialColumn,
-        SettableMembershipInBypassingRole, SingularColumnName, SnakeCaseColumnName,
-        SnakeCaseTableName, TautologicalWithCheck, TextualColumnRule, TimeDependentCheck,
-        TimeWithTimeZone, TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole,
-        TruncateGrantedToAppRole, UncachedPolicyCall, UnforcedRowLevelSecurity,
-        UnindexedForeignKey, UnindexedPolicyFilter, UniqueCheckRule,
-        UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
-        ZeroPrecisionTimestamp,
+        PrefixRedundantIndex, PrimaryKeyReferenceEndsWithId, PublicSchemaCreate, QueryRewriteRule,
+        ReachableForeignTable, ReachableMaterializedView, ReachableTableWithoutRowLevelSecurity,
+        ReferencesGrantedToClientRole, ReservedKeywordIdentifier, RoleKeyedPolicyWhenPooled,
+        ScaledNumeric, SerialColumn, SettableMembershipInBypassingRole, SingularColumnName,
+        SnakeCaseColumnName, SnakeCaseTableName, TableInheritance, TautologicalWithCheck,
+        TextualColumnRule, TimeDependentCheck, TimeWithTimeZone, TimestampWithoutTimeZone,
+        TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
+        UncachedPolicyCall, UnforcedRowLevelSecurity, UnindexedForeignKey, UnindexedPolicyFilter,
+        UniqueCheckRule, UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
+        UnloggedTable, UnvalidatedConstraint, WildcardView, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, SchemaRule,
@@ -154,7 +154,15 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 19] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 27] = [
+        Box::new(QueryRewriteRule::default()),
+        Box::new(TableInheritance::default()),
+        Box::new(TruncatedIdentifier::default()),
+        Box::new(ReservedKeywordIdentifier::default()),
+        Box::new(UnvalidatedConstraint::default()),
+        Box::new(PublicSchemaCreate::default()),
+        Box::new(UnloggedTable::default()),
+        Box::new(WildcardView::default()),
         Box::new(NotInNullableSubquery::default()),
         Box::new(TimestampWithoutTimeZone::default()),
         Box::new(TimeWithTimeZone::default()),

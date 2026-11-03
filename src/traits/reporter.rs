@@ -260,6 +260,28 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         )
     }
 
+    /// Reports a violation on a grant, under the name of the object it
+    /// grants on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn grant(
+        &mut self,
+        grant: &DB::TableGrant,
+        object: String,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        self.emit(
+            Location::Grant(Box::new(grant.clone())),
+            object,
+            message,
+            resolution,
+        )
+    }
+
     /// Reports a violation on a function, named with its argument types so
     /// overloads stay apart.
     ///

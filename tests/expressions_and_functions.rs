@@ -2,31 +2,10 @@
 //! immutable functions, observed through the public constrainer API. The
 //! behaviour each rule cites was measured on PostgreSQL 17.11 and 18.6.
 
-use sql_rules::prelude::*;
-use sqlparser::dialect::PostgreSqlDialect;
+mod rule_findings;
 
-/// Object and message of every finding of `constrainer`'s rules named in
-/// `rules`.
-fn findings<C: Constrainer<Database = ParserDB>>(
-    constrainer: &C,
-    rule: &str,
-    sql: &str,
-) -> Vec<(Level, String, String)> {
-    let database = ParserDB::parse::<PostgreSqlDialect>(sql).expect("schema parses");
-    constrainer
-        .diagnostics(&database)
-        .into_iter()
-        .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == rule => Some((
-                violation.level(),
-                violation.object().to_owned(),
-                violation.message().to_owned(),
-            )),
-            Error::Violation(_) | Error::Inactive(_) => None,
-            other => panic!("unexpected failure: {other}"),
-        })
-        .collect()
-}
+use rule_findings::findings;
+use sql_rules::prelude::*;
 
 fn objects<C: Constrainer<Database = ParserDB>>(
     constrainer: &C,
