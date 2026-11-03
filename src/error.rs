@@ -36,6 +36,10 @@ pub enum Location<DB: DatabaseLike> {
     Domain(Box<DB::Domain>),
     /// A grant statement.
     Grant(Box<DB::TableGrant>),
+    /// An extension.
+    Extension(Box<DB::Extension>),
+    /// A sequence.
+    Sequence(Box<DB::Sequence>),
 }
 
 /// Clause of a policy.

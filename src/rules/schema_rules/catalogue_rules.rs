@@ -18,43 +18,6 @@ use crate::{
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
 
-/// Defines a schema rule's struct, constructor, registration and metadata.
-macro_rules! schema_rule {
-    (
-        $(#[$doc:meta])*
-        $name:ident, $group:expr, $rationale:literal, $source:expr
-    ) => {
-        $(#[$doc])*
-        pub struct $name<DB>(std::marker::PhantomData<DB>);
-
-        impl<DB> Default for $name<DB> {
-            fn default() -> Self {
-                Self(std::marker::PhantomData)
-            }
-        }
-
-        impl<DB: DatabaseLike + 'static> From<$name<DB>> for GenericConstrainer<DB> {
-            fn from(rule: $name<DB>) -> Self {
-                let mut constrainer = GenericConstrainer::default();
-                constrainer.register_schema_rule(Box::new(rule));
-                constrainer
-            }
-        }
-
-        impl<DB> Rule for $name<DB> {
-            fn metadata(&self) -> &'static RuleMetadata {
-                static METADATA: RuleMetadata = RuleMetadata {
-                    name: stringify!($name),
-                    group: $group,
-                    rationale: $rationale,
-                    source: $source,
-                };
-                &METADATA
-            }
-        }
-    };
-}
-
 const WIKI: Option<&str> = Some("https://wiki.postgresql.org/wiki/Don%27t_Do_This");
 
 schema_rule!(

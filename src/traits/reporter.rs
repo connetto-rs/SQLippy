@@ -3,8 +3,8 @@
 use std::ops::ControlFlow;
 
 use sql_traits::traits::{
-    ColumnLike, DatabaseLike, DomainLike, ForeignKeyLike, FunctionLike, PolicyLike, RoleLike,
-    TableLike, ViewLike,
+    ColumnLike, DatabaseLike, DomainLike, ExtensionLike, ForeignKeyLike, FunctionLike, PolicyLike,
+    RoleLike, SequenceLike, TableLike, ViewLike,
 };
 
 use crate::{
@@ -276,6 +276,48 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
     ) -> Result<(), Interruption> {
         self.emit(
             Location::Grant(Box::new(grant.clone())),
+            object,
+            message,
+            resolution,
+        )
+    }
+
+    /// Reports a violation on an extension.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn extension(
+        &mut self,
+        extension: &DB::Extension,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        let object = extension.name().to_owned();
+        self.emit(
+            Location::Extension(Box::new(extension.clone())),
+            object,
+            message,
+            resolution,
+        )
+    }
+
+    /// Reports a violation on a sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn sequence(
+        &mut self,
+        sequence: &DB::Sequence,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        let object = sequence.sequence_name().to_owned();
+        self.emit(
+            Location::Sequence(Box::new(sequence.clone())),
             object,
             message,
             resolution,
