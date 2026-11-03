@@ -46,11 +46,13 @@ pub use reachable_foreign_table::ReachableForeignTable;
 mod catalogue_rules;
 mod exposure_rules;
 mod not_in_nullable_subquery;
+mod nullable_unique;
 mod owner_rights_view;
 pub use exposure_rules::{
     ExtensionInExposedSchema, ReachableSequence, SecurityBarrierMissingOnFilteringView,
     SecurityDefinerFunctionExposed,
 };
+pub use nullable_unique::NullableUniqueColumn;
 mod table_hygiene_rules;
 pub use catalogue_rules::{
     PublicSchemaCreate, QueryRewriteRule, ReservedKeywordIdentifier, TableInheritance,

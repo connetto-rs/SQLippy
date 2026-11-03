@@ -44,7 +44,7 @@ A rule registered on its own, including a single rule converted with `.into()`, 
 | `perf` | `warn` | `CorrelatedPolicySubquery`, `NestedPolicySubquery`, `UncachedPolicyCall`, `UnindexedPolicyFilter`, `JsonType`, `UnindexedForeignKey`, `PrefixRedundantIndex`, `MultiplePermissivePolicies`, `AutovacuumDisabledTable` |
 | `complexity` | `warn` | `UniqueForeignKey`, `UniqueCheckRule`, `UniqueUniqueIndex`, `NonRedundantExtensionDag` |
 | `style` | `warn` | `LowercaseTableName`, `LowercaseColumnName`, `LowercaseForeignKeyName`, `SnakeCaseTableName`, `SnakeCaseColumnName`, `PluralTableName`, `SingularColumnName`, `PrimaryKeyReferenceEndsWithId`, `NonCompositePrimaryKeyNamedId`, `SerialColumn`, `ReservedKeywordIdentifier` |
-| `pedantic` | `allow` | `ArrayMembershipPolicy`, `ReferencesGrantedToClientRole`, `CascadeIntoRowLevelSecurityTable`, `PastTimeColumnRule`, `NonEmptyTextualColumnRule`, `ScaledNumeric`, `NarrowIntegerKey`, `UnloggedTable`, `WildcardView`, `SecurityBarrierMissingOnFilteringView` |
+| `pedantic` | `allow` | `ArrayMembershipPolicy`, `ReferencesGrantedToClientRole`, `CascadeIntoRowLevelSecurityTable`, `PastTimeColumnRule`, `NonEmptyTextualColumnRule`, `ScaledNumeric`, `NarrowIntegerKey`, `UnloggedTable`, `WildcardView`, `SecurityBarrierMissingOnFilteringView`, `NullableUniqueColumn` |
 | `restriction` | `allow` | `NoRustKeywordTableName`, `NoRustKeywordColumnName`, `NoRustKeywordForeignKeyName` |
 
 Each rule's documentation states what it reports, and its violations carry the rationale and source.
