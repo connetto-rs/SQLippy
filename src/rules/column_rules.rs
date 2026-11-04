@@ -16,5 +16,7 @@ mod textual_column_rule;
 pub use textual_column_rule::TextualColumnRule;
 mod non_empty_textual_column_rule;
 pub use non_empty_textual_column_rule::NonEmptyTextualColumnRule;
+mod counter_keys;
+pub use counter_keys::{ClientWrittenCounterKey, NarrowIntegerKey, SerialColumn};
 mod past_time_column_rule;
 pub use past_time_column_rule::PastTimeColumnRule;

@@ -33,6 +33,7 @@ pub struct Deployment {
     app_roles: Vec<String>,
     exposed_schemas: Vec<String>,
     credentials: Vec<Expr>,
+    client_written_tables: Vec<(String, String)>,
     pooled: Option<bool>,
 }
 
@@ -87,6 +88,30 @@ impl Deployment {
     #[must_use]
     pub fn exposes_schema(&self, schema: &str) -> bool {
         self.exposed_schemas.iter().any(|exposed| exposed == schema)
+    }
+
+    /// Declares a table whose rows clients author in a local replica and
+    /// push later, by the stored names of its schema and table.
+    #[must_use]
+    pub fn with_client_written_table(
+        mut self,
+        schema: impl Into<String>,
+        table: impl Into<String>,
+    ) -> Self {
+        self.client_written_tables
+            .push((schema.into(), table.into()));
+        self
+    }
+
+    /// Returns whether clients author the rows of the table with these
+    /// stored schema and table names.
+    #[must_use]
+    pub fn is_client_written(&self, schema: &str, table: &str) -> bool {
+        self.client_written_tables
+            .iter()
+            .any(|(written_schema, written_table)| {
+                written_schema == schema && written_table == table
+            })
     }
 
     /// Declares an expression that identifies the caller, such as

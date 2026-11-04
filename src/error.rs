@@ -32,6 +32,14 @@ pub enum Location<DB: DatabaseLike> {
     Role(Box<DB::Role>),
     /// A function.
     Function(Box<DB::Function>),
+    /// A domain.
+    Domain(Box<DB::Domain>),
+    /// A grant statement.
+    Grant(Box<DB::TableGrant>),
+    /// An extension.
+    Extension(Box<DB::Extension>),
+    /// A sequence.
+    Sequence(Box<DB::Sequence>),
 }
 
 /// Clause of a policy.
