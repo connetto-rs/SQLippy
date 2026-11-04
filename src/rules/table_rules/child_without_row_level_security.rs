@@ -1,17 +1,22 @@
 //! Submodule providing the `ChildWithoutRowLevelSecurity` rule.
 
-use sql_traits::traits::{DatabaseLike, TableLike};
+use sql_traits::{
+    errors::LookupError,
+    traits::{DatabaseLike, TableLike},
+};
 
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
-    traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
+    traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, TableRule},
 };
 
 /// Struct defining a rule that reports an inheritance or partition child
 /// without row-level security below an ancestor that has it.
 ///
 /// A query naming the child directly applies only the child's own policies.
+/// A foreign child is reported as well, and since PostgreSQL refuses
+/// row-level security on a foreign table, its fix keeps it out of reach.
 ///
 /// # Example
 ///
@@ -38,9 +43,10 @@ impl<DB> Default for ChildWithoutRowLevelSecurity<DB> {
 }
 
 impl<DB: DatabaseLike + 'static> From<ChildWithoutRowLevelSecurity<DB>> for GenericConstrainer<DB> {
-    fn from(rule: ChildWithoutRowLevelSecurity<DB>) -> Self {
+    fn from(_rule: ChildWithoutRowLevelSecurity<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
-        constrainer.register_table_rule(Box::new(rule));
+        constrainer.register_table_rule(Box::new(ChildWithoutRowLevelSecurity::default()));
+        constrainer.register_schema_rule(Box::new(ChildWithoutRowLevelSecurity::default()));
         constrainer
     }
 }
@@ -57,6 +63,32 @@ impl<DB> Rule for ChildWithoutRowLevelSecurity<DB> {
     }
 }
 
+/// An ancestor of `table` with row-level security, through inheritance and
+/// partitioning.
+fn protected_ancestor<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    table: &'db DB::Table,
+) -> Result<Option<&'db DB::Table>, LookupError> {
+    let mut seen = vec![table];
+    let mut frontier = vec![table];
+    while let Some(child) = frontier.pop() {
+        let parents = child
+            .inherits_from(database)?
+            .chain(child.partition_root(database)?);
+        for parent in parents {
+            if seen.contains(&parent) {
+                continue;
+            }
+            if parent.has_row_level_security(database)? {
+                return Ok(Some(parent));
+            }
+            seen.push(parent);
+            frontier.push(parent);
+        }
+    }
+    Ok(None)
+}
+
 impl<DB: DatabaseLike> TableRule for ChildWithoutRowLevelSecurity<DB> {
     type Database = DB;
 
@@ -69,27 +101,34 @@ impl<DB: DatabaseLike> TableRule for ChildWithoutRowLevelSecurity<DB> {
         if table.has_row_level_security(database)? {
             return Ok(());
         }
-        let mut seen = vec![table];
-        let mut frontier = vec![table];
-        while let Some(child) = frontier.pop() {
-            let parents = child
-                .inherits_from(database)?
-                .chain(child.partition_root(database)?);
-            for parent in parents {
-                if seen.contains(&parent) {
-                    continue;
-                }
-                if parent.has_row_level_security(database)? {
-                    let (name, parent) = (table.table_name(), parent.table_name());
-                    reporter.table(
-                        table,
-                        format!("Table '{name}' descends from '{parent}', which has row-level security, but has none itself, so naming '{name}' directly applies no policy."),
-                        format!("ALTER TABLE {name} ENABLE ROW LEVEL SECURITY; and give it the policies of '{parent}'."),
-                    )?;
-                    return Ok(());
-                }
-                seen.push(parent);
-                frontier.push(parent);
+        if let Some(parent) = protected_ancestor(database, table)? {
+            let (name, parent) = (table.table_name(), parent.table_name());
+            reporter.table(
+                table,
+                format!("Table '{name}' descends from '{parent}', which has row-level security, but has none itself, so naming '{name}' directly applies no policy."),
+                format!("ALTER TABLE {name} ENABLE ROW LEVEL SECURITY; and give it the policies of '{parent}'."),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl<DB: DatabaseLike> SchemaRule for ChildWithoutRowLevelSecurity<DB> {
+    type Database = DB;
+
+    fn check_schema(
+        &self,
+        database: &Self::Database,
+        reporter: &mut Reporter<'_, Self::Database>,
+    ) -> Result<(), Interruption> {
+        for table in database.foreign_tables() {
+            if let Some(parent) = protected_ancestor(database, table)? {
+                let (name, parent) = (table.table_name(), parent.table_name());
+                reporter.table(
+                    table,
+                    format!("Foreign table '{name}' descends from '{parent}', which has row-level security, and PostgreSQL refuses row-level security on a foreign table, so naming '{name}' directly applies no policy."),
+                    format!("Revoke every privilege on '{name}' from roles that may not read all of its remote rows, or detach it from '{parent}'."),
+                )?;
             }
         }
         Ok(())

@@ -1,13 +1,11 @@
 //! Submodule providing the `ReachableTableWithoutRowLevelSecurity` rule.
 
-use std::{cell::LazyCell, collections::BTreeSet};
-
 use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::grant_support::{ClientRoles, column_grants_on, grantee_list, schema_of},
+    rules::grant_support::client_reach,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -87,23 +85,7 @@ impl<DB: DatabaseLike> TableRule for ReachableTableWithoutRowLevelSecurity<DB> {
         if table.has_row_level_security(database)? {
             return Ok(());
         }
-        let deployment = reporter.deployment();
-        let roles = LazyCell::new(|| ClientRoles::new(database, deployment));
-        let mut reasons = BTreeSet::new();
-        let schema = schema_of(database, table.stored_table_schema());
-        if deployment.exposes_schema(&schema) {
-            reasons.insert(format!("sits in the exposed schema '{schema}'"));
-        }
-        for grant in table.grants(database)? {
-            if roles.reach_client(database, grant) {
-                reasons.insert(format!("is granted to {}", grantee_list(database, grant)));
-            }
-        }
-        for grant in column_grants_on(database, table) {
-            if roles.reach_client(database, grant) {
-                reasons.insert(format!("is granted to {}", grantee_list(database, grant)));
-            }
-        }
+        let reasons = client_reach(database, reporter.deployment(), table)?;
         if reasons.is_empty() {
             return Ok(());
         }

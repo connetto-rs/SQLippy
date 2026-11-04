@@ -1,10 +1,11 @@
 //! Facts about grants to the client roles a deployment declares, shared by the
 //! grant rules.
 
-use std::{borrow::Cow, collections::BTreeSet};
+use std::{borrow::Cow, cell::LazyCell, collections::BTreeSet};
 
 use sql_traits::{
-    traits::{ColumnGrantLike, DatabaseLike, GrantLike},
+    errors::LookupError,
+    traits::{ColumnGrantLike, DatabaseLike, GrantLike, Relation, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{Action, GranteeName};
@@ -122,14 +123,41 @@ pub(crate) fn grants_privilege<DB: DatabaseLike>(
     grant.is_all_privileges() || grant.privileges(database).any(wanted)
 }
 
-/// Column grants covering `table`.
+/// Column grants covering `table`, foreign or not.
 pub(crate) fn column_grants_on<'db, DB: DatabaseLike>(
     database: &'db DB,
     table: &'db DB::Table,
 ) -> impl Iterator<Item = &'db DB::ColumnGrant> {
     database.column_grants().filter(move |grant| {
-        grant
-            .table(database)
-            .is_some_and(|granted| granted == table)
+        matches!(
+            grant.relation(database),
+            Some(Relation::Table(granted) | Relation::ForeignTable(granted)) if granted == table
+        )
     })
+}
+
+/// How a client role reaches `table`: an exposed schema, or a table or column
+/// grant reaching a client role, phrased for messages.
+pub(crate) fn client_reach<DB: DatabaseLike>(
+    database: &DB,
+    deployment: &Deployment,
+    table: &DB::Table,
+) -> Result<BTreeSet<String>, LookupError> {
+    let mut reasons = BTreeSet::new();
+    let schema = schema_of(database, table.stored_table_schema());
+    if deployment.exposes_schema(&schema) {
+        reasons.insert(format!("sits in the exposed schema '{schema}'"));
+    }
+    let roles = LazyCell::new(|| ClientRoles::new(database, deployment));
+    for grant in table.grants(database)? {
+        if roles.reach_client(database, grant) {
+            reasons.insert(format!("is granted to {}", grantee_list(database, grant)));
+        }
+    }
+    for grant in column_grants_on(database, table) {
+        if roles.reach_client(database, grant) {
+            reasons.insert(format!("is granted to {}", grantee_list(database, grant)));
+        }
+    }
+    Ok(reasons)
 }

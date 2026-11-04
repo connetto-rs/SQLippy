@@ -18,7 +18,7 @@ use crate::{
         NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule,
         NonRedundantExtensionDag, OwnerRightsView, PastTimeColumnRule, PluralTableName,
         PoliciesRequireRowLevelSecurity, PolicyReadCycle, PolicyToCreatingRole,
-        PrimaryKeyReferenceEndsWithId, ReachableMaterializedView,
+        PrimaryKeyReferenceEndsWithId, ReachableForeignTable, ReachableMaterializedView,
         ReachableTableWithoutRowLevelSecurity, ReferencesGrantedToClientRole,
         RoleKeyedPolicyWhenPooled, SettableMembershipInBypassingRole, SingularColumnName,
         SnakeCaseColumnName, SnakeCaseTableName, TautologicalWithCheck, TextualColumnRule,
@@ -125,11 +125,13 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in foreign_key_rules {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
-        let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 8] = [
+        let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 10] = [
             Box::new(PolicyReadCycle::default()),
             Box::new(LatentPolicyReadCycle::default()),
             Box::new(FunctionMediatedPolicyCycle::default()),
             Box::new(ReachableMaterializedView::default()),
+            Box::new(ReachableForeignTable::default()),
+            Box::new(ChildWithoutRowLevelSecurity::default()),
             Box::new(OwnerRightsView::default()),
             Box::new(ClientRoleBypassesRowLevelSecurity::default()),
             Box::new(SettableMembershipInBypassingRole::default()),

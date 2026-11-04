@@ -196,7 +196,10 @@ fn a_child_without_row_level_security_under_a_protected_ancestor_is_reported() {
                      FOR VALUES FROM ('2026-01-01') TO ('2027-01-01') PARTITION BY RANGE (at);
                  CREATE TABLE events_2026_h1 PARTITION OF events_2026
                      FOR VALUES FROM ('2026-01-01') TO ('2026-07-01');
-                 CREATE TABLE logs_child () INHERITS (logs);"
+                 CREATE TABLE logs_child () INHERITS (logs);
+                 CREATE FOREIGN TABLE events_2025 PARTITION OF events
+                     FOR VALUES FROM ('2025-01-01') TO ('2026-01-01') SERVER archive;
+                 CREATE FOREIGN TABLE logs_remote () INHERITS (logs_child) SERVER archive;"
             ),
         ),
         [
@@ -207,6 +210,8 @@ fn a_child_without_row_level_security_under_a_protected_ancestor_is_reported() {
                 "events_2026_h1"
             ),
             finding("ChildWithoutRowLevelSecurity", Level::Warn, "logs_child"),
+            finding("ChildWithoutRowLevelSecurity", Level::Warn, "events_2025"),
+            finding("ChildWithoutRowLevelSecurity", Level::Warn, "logs_remote"),
         ]
     );
 }
@@ -224,7 +229,9 @@ fn a_protected_child_or_a_child_of_an_open_parent_is_not_reported() {
              CREATE TABLE notes (at DATE);
              CREATE TABLE notes_child () INHERITS (notes);
              CREATE TABLE drafts () INHERITS (notes);
-             CREATE TABLE notes_draft () INHERITS (notes_child, drafts);",
+             CREATE TABLE notes_draft () INHERITS (notes_child, drafts);
+             CREATE FOREIGN TABLE notes_remote () INHERITS (notes) SERVER archive;
+             CREATE FOREIGN TABLE standalone (id INT) SERVER archive;",
         ),
         []
     );
