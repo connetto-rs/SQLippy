@@ -34,7 +34,8 @@ use crate::{
         TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
         UncachedPolicyCall, UnforcedRowLevelSecurity, UnindexedForeignKey, UnindexedPolicyFilter,
         UniqueCheckRule, UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
-        UnloggedTable, UnvalidatedConstraint, WildcardView, ZeroPrecisionTimestamp,
+        UnloggedTable, UnscopedUniqueConstraintOnRowLevelSecurityTable, UnvalidatedConstraint,
+        WildcardView, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, SchemaRule,
@@ -159,7 +160,8 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 39] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 40] = [
+        Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
         Box::new(SecurityDefinerFunctionExposed::default()),
         Box::new(ExtensionInExposedSchema::default()),

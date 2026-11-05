@@ -30,11 +30,13 @@ pub(crate) struct AuthorityColumns {
     pub(crate) subjects: Vec<TableColumn>,
 }
 
-/// Whether the expression is a declared credential, parenthesised or
+/// Whether the expression is a declared credential, parenthesised, cast or
 /// selected alone.
 fn is_credential_value(deployment: &Deployment, expression: &Expr) -> bool {
     match expression {
-        Expr::Nested(inner) => is_credential_value(deployment, inner),
+        Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => {
+            is_credential_value(deployment, inner)
+        }
         Expr::Subquery(query) => matches!(query.body.as_ref(), SetExpr::Select(select)
             if select.from.is_empty()
                 && matches!(select.projection.as_slice(), [SelectItem::UnnamedExpr(item)]

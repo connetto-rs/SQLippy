@@ -366,6 +366,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             "TruncateGrantedToAppRole",
             "RoleKeyedPolicyWhenPooled",
             "CredentialFreeWrite",
+            "UnscopedUniqueConstraintOnRowLevelSecurityTable",
             "ClientRoleBypassesRowLevelSecurity",
             "SettableMembershipInBypassingRole",
             "SelfAssertedClaimPolicy",
@@ -382,6 +383,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
         [
             "RoleKeyedPolicyWhenPooled",
             "CredentialFreeWrite",
+            "UnscopedUniqueConstraintOnRowLevelSecurityTable",
             "SelfAssertedClaimPolicy",
             "SelfGrantingWrite"
         ]
