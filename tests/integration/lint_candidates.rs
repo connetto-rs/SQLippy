@@ -6,9 +6,7 @@
 //! by default or to `PUBLIC`, and saw a hidden row through a leaky function
 //! on a view without `security_barrier` but not on one with it.
 
-mod rule_findings;
-
-use rule_findings::findings;
+use crate::rule_findings::findings;
 use sql_rules::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 

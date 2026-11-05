@@ -1,9 +1,7 @@
 //! Grants that hand client roles operations row-level security does not
 //! govern, observed through the public constrainer API.
 
-mod common;
-
-use common::{ROLES, finding, findings, parse, supabase};
+use crate::common::{ROLES, finding, findings, parse, supabase};
 use sql_rules::prelude::*;
 
 #[test]

@@ -2,9 +2,7 @@
 //! immutable functions, observed through the public constrainer API. The
 //! behaviour each rule cites was measured on PostgreSQL 17.11 and 18.6.
 
-mod rule_findings;
-
-use rule_findings::findings;
+use crate::rule_findings::findings;
 use sql_rules::prelude::*;
 
 fn objects<C: Constrainer<Database = ParserDB>>(
