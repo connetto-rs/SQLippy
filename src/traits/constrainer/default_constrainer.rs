@@ -27,14 +27,14 @@ use crate::{
         ReachableTableWithoutRowLevelSecurity, ReferencesGrantedToClientRole, RegColumnType,
         ReservedKeywordIdentifier, RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies,
         ScaledNumeric, SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
-        SelfAssertedClaimPolicy, SerialColumn, SettableMembershipInBypassingRole,
-        SingularColumnName, SnakeCaseColumnName, SnakeCaseTableName, TableInheritance,
-        TautologicalWithCheck, TextualColumnRule, TimeDependentCheck, TimeWithTimeZone,
-        TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
-        TruncatedIdentifier, UncachedPolicyCall, UnforcedRowLevelSecurity, UnindexedForeignKey,
-        UnindexedPolicyFilter, UniqueCheckRule, UniqueColumnNamesInExtensionGraph,
-        UniqueForeignKey, UniqueUniqueIndex, UnloggedTable, UnvalidatedConstraint, WildcardView,
-        ZeroPrecisionTimestamp,
+        SelfAssertedClaimPolicy, SelfGrantingWrite, SerialColumn,
+        SettableMembershipInBypassingRole, SingularColumnName, SnakeCaseColumnName,
+        SnakeCaseTableName, TableInheritance, TautologicalWithCheck, TextualColumnRule,
+        TimeDependentCheck, TimeWithTimeZone, TimestampWithoutTimeZone,
+        TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
+        UncachedPolicyCall, UnforcedRowLevelSecurity, UnindexedForeignKey, UnindexedPolicyFilter,
+        UniqueCheckRule, UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex,
+        UnloggedTable, UnvalidatedConstraint, WildcardView, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, SchemaRule,
@@ -159,7 +159,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 37] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 38] = [
         Box::new(NullableUniqueColumn::default()),
         Box::new(SecurityDefinerFunctionExposed::default()),
         Box::new(ExtensionInExposedSchema::default()),
@@ -197,6 +197,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(SettableMembershipInBypassingRole::default()),
         Box::new(GrantOptionToClientRole::default()),
         Box::new(SelfAssertedClaimPolicy::default()),
+        Box::new(SelfGrantingWrite::default()),
     ];
     for rule in schema_rules {
         constrainer.register_schema_rule_with_floor(rule, Level::Allow);

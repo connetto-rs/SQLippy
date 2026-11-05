@@ -8,17 +8,13 @@ use sql_traits::{
     structs::{FunctionKind, IdentifierCase},
     traits::{DatabaseLike, FunctionLike, PolicyLike},
 };
-use sqlparser::{
-    ast::{
-        BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-        GroupByExpr, InTarget, JoinConstraint, JoinOperator, Query, Select, SelectItem, SetExpr,
-        SetOperator, Statement, UnaryOperator, Visit, Visitor,
-    },
-    dialect::PostgreSqlDialect,
-    parser::Parser,
+use sqlparser::ast::{
+    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr,
+    InTarget, JoinConstraint, JoinOperator, Query, Select, SelectItem, SetExpr, SetOperator,
+    UnaryOperator, Visit, Visitor,
 };
 
-use crate::deployment::Deployment;
+use crate::{deployment::Deployment, rules::policy_support::sql_set_body};
 
 /// Judges the expressions of one policy against the declared credentials.
 pub(crate) struct CredentialJudge<'a, DB: DatabaseLike> {
@@ -278,26 +274,16 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     /// Whether a set-returning `LANGUAGE sql` function's body, one query,
     /// returns no row when every credential is `NULL`.
     fn body_returns_no_row(&self, function: &'a DB::Function) -> Result<bool, LookupError> {
-        if !function.returns_set()
-            || function
-                .stored_language()
-                .is_some_and(|language| language != "sql")
-            || self
-                .reading
-                .borrow()
-                .iter()
-                .any(|reading| std::ptr::eq(*reading, function))
-        {
-            return Ok(false);
-        }
-        let statements = function
-            .body()
-            .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok());
-        let Some([Statement::Query(query)]) = statements.as_deref() else {
+        let reading = self
+            .reading
+            .borrow()
+            .iter()
+            .any(|reading| std::ptr::eq(*reading, function));
+        let Some(query) = sql_set_body(function).filter(|_| !reading) else {
             return Ok(false);
         };
         self.reading.borrow_mut().push(function);
-        let requires = self.subquery_requires(query);
+        let requires = self.subquery_requires(&query);
         self.reading.borrow_mut().pop();
         requires
     }

@@ -71,6 +71,8 @@ pub use type_rules::{
 };
 mod self_asserted_claim_policy;
 pub use self_asserted_claim_policy::SelfAssertedClaimPolicy;
+mod self_granting_write;
+pub use self_granting_write::SelfGrantingWrite;
 mod client_role_bypass;
 pub use client_role_bypass::{
     ClientRoleBypassesRowLevelSecurity, SettableMembershipInBypassingRole,

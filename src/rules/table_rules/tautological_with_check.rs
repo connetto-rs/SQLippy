@@ -91,7 +91,7 @@ impl<DB: DatabaseLike> TableRule for TautologicalWithCheck<DB> {
             };
             if is_tautology(database, table, check)?
                 && !is_tautology(database, table, using)?
-                && reads_row(database, table, using)?
+                && reads_row(database, table, None, using)?
             {
                 let name = policy.name();
                 reporter.policies(
