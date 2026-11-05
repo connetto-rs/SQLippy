@@ -74,7 +74,9 @@ pub use self_asserted_claim_policy::SelfAssertedClaimPolicy;
 mod self_granting_write;
 pub use self_granting_write::SelfGrantingWrite;
 mod definer_takes_acting_user;
+mod unscoped_unique_constraint;
 pub use definer_takes_acting_user::DefinerTakesActingUser;
+pub use unscoped_unique_constraint::UnscopedUniqueConstraintOnRowLevelSecurityTable;
 mod client_role_bypass;
 pub use client_role_bypass::{
     ClientRoleBypassesRowLevelSecurity, SettableMembershipInBypassingRole,
