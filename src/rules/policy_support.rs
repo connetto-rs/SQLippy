@@ -4,11 +4,18 @@ use std::{collections::BTreeSet, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ColumnScope, IdentifierCase},
-    traits::{DatabaseLike, PolicyLike, RoleLike, RoleMembershipLike, TableLike},
+    structs::{ColumnDefinition, ColumnScope, IdentifierCase},
+    traits::{DatabaseLike, FunctionLike, PolicyLike, RoleLike, RoleMembershipLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
-use sqlparser::ast::{CreatePolicyCommand, Expr, FunctionArguments, Owner, Query, Visit, Visitor};
+use sqlparser::{
+    ast::{
+        BinaryOperator, CreatePolicyCommand, Expr, FunctionArguments, Owner, Query, Statement,
+        Visit, Visitor,
+    },
+    dialect::PostgreSqlDialect,
+    parser::Parser,
+};
 
 use crate::{deployment::Deployment, error::PolicyClause};
 
@@ -133,11 +140,68 @@ pub(crate) fn held_by_name<DB: DatabaseLike>(database: &DB, role: &str) -> BTree
     )
 }
 
-/// Finds column references to the policy's table, outside sublinks or in the
-/// top-level query of a sublink that its own relations do not resolve.
+/// Returns whether a policy for `deciding` roles applies to every role of
+/// `policy`, either role list being `None` for `PUBLIC`.
+pub(crate) fn covers<DB: DatabaseLike>(
+    database: &DB,
+    deciding: Option<&[String]>,
+    policy: Option<&[String]>,
+) -> bool {
+    match (deciding, policy) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(deciding), Some(policy)) => policy.iter().all(|role| {
+            held_by_name(database, role)
+                .iter()
+                .any(|held| deciding.contains(held))
+        }),
+    }
+}
+
+/// The query a set-returning `LANGUAGE sql` function runs, when its body is
+/// one query.
+pub(crate) fn sql_set_body<F: FunctionLike>(function: &F) -> Option<Query> {
+    if !function.returns_set()
+        || function
+            .stored_language()
+            .is_some_and(|language| language != "sql")
+    {
+        return None;
+    }
+    let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, function.body()?).ok()?;
+    match (statements.pop(), statements.is_empty()) {
+        (Some(Statement::Query(query)), true) => Some(*query),
+        _ => None,
+    }
+}
+
+/// Whether the expression holds a sublink or a call with arguments.
+pub(crate) fn holds_sublink_or_call(expression: &Expr) -> bool {
+    struct Found;
+    impl Visitor for Found {
+        type Break = ();
+        fn pre_visit_query(&mut self, _query: &Query) -> ControlFlow<()> {
+            ControlFlow::Break(())
+        }
+        fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
+            match expression {
+                Expr::Function(call) if !matches!(call.args, FunctionArguments::None) => {
+                    ControlFlow::Break(())
+                }
+                _ => ControlFlow::Continue(()),
+            }
+        }
+    }
+    expression.visit(&mut Found).is_break()
+}
+
+/// Finds column references to the policy's table, or to one of its columns,
+/// outside sublinks or in the top-level query of a sublink that its own
+/// relations do not resolve.
 struct RowReferences<'db, DB: DatabaseLike> {
     database: &'db DB,
     table: ColumnScope<'db, 'db, DB>,
+    column: Option<&'db DB::Column>,
     depth: usize,
     until_first: bool,
     outside: bool,
@@ -146,7 +210,14 @@ struct RowReferences<'db, DB: DatabaseLike> {
 
 impl<DB: DatabaseLike> RowReferences<'_, DB> {
     fn reads_table(&self, expression: &Expr) -> Result<bool, LookupError> {
-        Ok(self.table.resolve_column_definition(expression)?.is_some())
+        Ok(self
+            .table
+            .resolve_column_definition(expression)?
+            .is_some_and(|definition| {
+                self.column.is_none_or(|wanted| {
+                    matches!(definition, ColumnDefinition::Base { column, .. } if column == wanted)
+                })
+            }))
     }
 
     /// Lets `mark` record a row reference, then stops after the first one when
@@ -254,6 +325,23 @@ impl<DB: DatabaseLike> Visitor for RowReferences<'_, DB> {
     }
 }
 
+/// The operands of the `AND` chain of an expression.
+pub(crate) fn conjuncts(expression: &Expr) -> Vec<&Expr> {
+    match expression {
+        Expr::Nested(inner) => conjuncts(inner),
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
+            let mut operands = conjuncts(left);
+            operands.extend(conjuncts(right));
+            operands
+        }
+        _ => vec![expression],
+    }
+}
+
 pub(crate) fn is_column_reference(expression: &Expr) -> bool {
     matches!(
         expression,
@@ -320,19 +408,22 @@ pub(crate) fn derives_from_caller<DB: DatabaseLike, V: Visit>(
     deployment: &Deployment,
     node: &V,
 ) -> Result<bool, LookupError> {
-    Ok(holds_caller(deployment, node) && !reads_row(database, table, node)?)
+    Ok(holds_caller(deployment, node) && !reads_row(database, table, None, node)?)
 }
 
-/// Row references of a policy expression on `table`.
+/// Row references of a policy expression on `table`, to `column` alone when
+/// given.
 fn row_references<'db, DB: DatabaseLike, V: Visit>(
     database: &'db DB,
     table: &'db DB::Table,
+    column: Option<&'db DB::Column>,
     node: &V,
     until_first: bool,
 ) -> Result<RowReferences<'db, DB>, LookupError> {
     let mut references = RowReferences {
         database,
         table: ColumnScope::for_table(table, database, IdentifierCase::Folded),
+        column,
         depth: 0,
         until_first,
         outside: false,
@@ -345,13 +436,14 @@ fn row_references<'db, DB: DatabaseLike, V: Visit>(
 }
 
 /// Returns whether a policy expression on `table` depends on the row it is
-/// evaluated for.
-pub(crate) fn reads_row<DB: DatabaseLike, V: Visit>(
-    database: &DB,
-    table: &DB::Table,
+/// evaluated for, or on its `column` alone when given.
+pub(crate) fn reads_row<'db, DB: DatabaseLike, V: Visit>(
+    database: &'db DB,
+    table: &'db DB::Table,
+    column: Option<&'db DB::Column>,
     node: &V,
 ) -> Result<bool, LookupError> {
-    let references = row_references(database, table, node, true)?;
+    let references = row_references(database, table, column, node, true)?;
     Ok(references.outside || !references.correlated.is_empty())
 }
 
@@ -362,7 +454,7 @@ pub(crate) fn correlated_subqueries<DB: DatabaseLike>(
     table: &DB::Table,
     expression: &Expr,
 ) -> Result<Vec<String>, LookupError> {
-    Ok(row_references(database, table, expression, false)?.correlated)
+    Ok(row_references(database, table, None, expression, false)?.correlated)
 }
 
 /// Returns whether PostgreSQL can prove the expression true for every row.

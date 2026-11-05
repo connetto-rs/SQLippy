@@ -8,7 +8,7 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, FunctionLike, PolicyLike, TableLike, ViewLike},
 };
 use sqlparser::{
-    ast::{BinaryOperator, Expr, InTarget, Query, SelectItem, SetExpr, Visit, Visitor},
+    ast::{Expr, InTarget, Query, SelectItem, SetExpr, Visit, Visitor},
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
@@ -16,25 +16,9 @@ use sqlparser::{
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
     lint::{LintGroup, Rule, RuleMetadata},
+    rules::policy_support::conjuncts,
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
-
-/// The operands of the `AND` chain of an expression.
-fn conjuncts(expression: &Expr) -> Vec<&Expr> {
-    match expression {
-        Expr::Nested(inner) => conjuncts(inner),
-        Expr::BinaryOp {
-            left,
-            op: BinaryOperator::And,
-            right,
-        } => {
-            let mut operands = conjuncts(left);
-            operands.extend(conjuncts(right));
-            operands
-        }
-        _ => vec![expression],
-    }
-}
 
 /// The nullable column a `NOT IN` subquery returns, unless its `WHERE`
 /// excludes `NULL`.
