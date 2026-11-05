@@ -73,6 +73,8 @@ mod self_asserted_claim_policy;
 pub use self_asserted_claim_policy::SelfAssertedClaimPolicy;
 mod self_granting_write;
 pub use self_granting_write::SelfGrantingWrite;
+mod subject_settable_attribute;
+pub use subject_settable_attribute::SubjectSettableAttribute;
 mod definer_takes_acting_user;
 mod unscoped_unique_constraint;
 pub use definer_takes_acting_user::DefinerTakesActingUser;

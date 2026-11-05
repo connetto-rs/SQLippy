@@ -10,7 +10,7 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArguments, InTarget, JoinConstraint, JoinOperator,
-    Query, Select, SelectItem, SetExpr, Visit, Visitor,
+    Query, Select, SelectItem, SetExpr, UnaryOperator, Value, Visit, Visitor,
 };
 
 use crate::{
@@ -28,6 +28,9 @@ pub(crate) struct AuthorityColumns {
     /// Columns compared with a credential, by a policy or in an authority
     /// read.
     pub(crate) subjects: Vec<TableColumn>,
+    /// Columns an authority read compares with a literal or tests as a
+    /// boolean.
+    pub(crate) attributes: Vec<TableColumn>,
 }
 
 /// Whether the expression is a declared credential, parenthesised, cast or
@@ -43,6 +46,72 @@ fn is_credential_value(deployment: &Deployment, expression: &Expr) -> bool {
                     if is_credential_value(deployment, item))),
         _ => deployment.is_credential(expression),
     }
+}
+
+/// Whether the expression is a literal, parenthesised or cast. A `$n`
+/// parameter is not one.
+pub(crate) fn is_literal(expression: &Expr) -> bool {
+    match expression {
+        Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => is_literal(inner),
+        Expr::Value(value) => !matches!(value.value, Value::Placeholder(_)),
+        Expr::TypedString(_) => true,
+        _ => false,
+    }
+}
+
+/// The column operands a filter compares with a literal or tests as a
+/// boolean, through `AND`, `OR` and `NOT`.
+fn tested_columns(filter: &Expr) -> Vec<&Expr> {
+    match filter {
+        Expr::Nested(inner)
+        | Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr: inner,
+        } => tested_columns(inner),
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And | BinaryOperator::Or,
+            right,
+        } => {
+            let mut columns = tested_columns(left);
+            columns.extend(tested_columns(right));
+            columns
+        }
+        Expr::BinaryOp {
+            left,
+            op:
+                BinaryOperator::Eq
+                | BinaryOperator::NotEq
+                | BinaryOperator::Lt
+                | BinaryOperator::LtEq
+                | BinaryOperator::Gt
+                | BinaryOperator::GtEq,
+            right,
+        } => [(left, right), (right, left)]
+            .into_iter()
+            .filter(|(column, other)| is_column_reference(column) && is_literal(other))
+            .map(|(column, _)| column.as_ref())
+            .collect(),
+        Expr::In {
+            expr,
+            target: InTarget::List(list),
+            ..
+        } if list.iter().all(is_literal) => vec![expr.as_ref()],
+        Expr::AnyOp { left, right, .. }
+            if matches!(right.as_ref(), Expr::Array(array)
+            if array.elem.iter().all(is_literal)) =>
+        {
+            vec![left.as_ref()]
+        }
+        Expr::IsTrue(inner)
+        | Expr::IsFalse(inner)
+        | Expr::IsNotTrue(inner)
+        | Expr::IsNotFalse(inner) => vec![inner.as_ref()],
+        _ => vec![filter],
+    }
+    .into_iter()
+    .filter(|column| is_column_reference(column))
+    .collect()
 }
 
 /// The `SELECT`s a query body combines.
@@ -161,6 +230,7 @@ impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
             found: AuthorityColumns {
                 scopes: Vec::new(),
                 subjects: Vec::new(),
+                attributes: Vec::new(),
             },
             helpers: Vec::new(),
         };
@@ -168,6 +238,7 @@ impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
         let (found, helpers) = (walk.found, walk.helpers);
         self.columns.scopes.extend(found.scopes);
         self.columns.subjects.extend(found.subjects);
+        self.columns.attributes.extend(found.attributes);
         self.read_helpers(helpers)
     }
 }
@@ -224,29 +295,45 @@ impl<DB: DatabaseLike> PolicyWalk<'_, '_, '_, DB> {
     /// Records a column of the policy's table the expression compares with a
     /// credential.
     fn credential_comparison(&mut self, expression: &Expr) -> Result<(), LookupError> {
-        let Expr::BinaryOp {
-            left,
-            op: BinaryOperator::Eq,
-            right,
-        } = expression
-        else {
-            return Ok(());
-        };
-        for (column, other) in [(left, right), (right, left)] {
-            if is_credential_value(self.authority.deployment, other)
-                && is_column_reference(column)
-                && let Some(ColumnDefinition::Base { table, column }) =
-                    self.table.resolve_column_definition(column)?
-                && let Some(id) = self.authority.database.table_id(table)
-            {
-                self.authority
-                    .columns
-                    .subjects
-                    .push((id, column.stored_column_name().into_owned()));
-            }
-        }
+        let compared = credential_compared(
+            self.authority.database,
+            self.authority.deployment,
+            &self.table,
+            expression,
+        )?;
+        self.authority.columns.subjects.extend(compared);
         Ok(())
     }
+}
+
+/// The stored columns `scope` resolves that the expression compares with a
+/// declared credential by `=`.
+pub(crate) fn credential_compared<DB: DatabaseLike>(
+    database: &DB,
+    deployment: &Deployment,
+    scope: &ColumnScope<'_, '_, DB>,
+    expression: &Expr,
+) -> Result<Vec<TableColumn>, LookupError> {
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = expression
+    else {
+        return Ok(Vec::new());
+    };
+    let mut compared = Vec::new();
+    for (column, other) in [(left, right), (right, left)] {
+        if is_credential_value(deployment, other)
+            && is_column_reference(column)
+            && let Some(ColumnDefinition::Base { table, column }) =
+                scope.resolve_column_definition(column)?
+            && let Some(id) = database.table_id(table)
+        {
+            compared.push((id, column.stored_column_name().into_owned()));
+        }
+    }
+    Ok(compared)
 }
 
 /// Walks one query, recording the scope columns of its authority `SELECT`s
@@ -282,15 +369,16 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
         })
     }
 
-    /// Records the scope columns of one `SELECT` that compares a column of
-    /// an authority table with a credential.
+    /// Records the scope and attribute columns of one `SELECT` that compares
+    /// a column of an authority table with a credential.
     fn select(&mut self, select: &Select, fed: bool) -> Result<(), LookupError> {
         let root = self.root;
         root.scope_for_select(select)
             .map_or(Ok(()), |scope| self.scoped_select(&scope, select, fed))
     }
 
-    /// Records the scope columns of `select`, resolved through `scope`.
+    /// Records the scope and attribute columns of `select`, resolved through
+    /// `scope`.
     fn scoped_select(
         &mut self,
         scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
@@ -309,7 +397,7 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
         }
         let mut subjects: Vec<TableColumn> = Vec::new();
         let mut pairs = Vec::new();
-        for filter in filters {
+        for filter in &filters {
             if let Expr::BinaryOp {
                 left,
                 op: BinaryOperator::Eq,
@@ -347,6 +435,15 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
                     && subjects.iter().any(|(subject, _)| *subject == table)
                 {
                     self.found.scopes.push((table, name));
+                }
+            }
+        }
+        for filter in &filters {
+            for column in tested_columns(filter) {
+                if let Some((table, name)) = self.base(scope, column)?
+                    && subjects.iter().any(|(subject, _)| *subject == table)
+                {
+                    self.found.attributes.push((table, name));
                 }
             }
         }
@@ -396,6 +493,7 @@ pub(crate) fn authority_columns<DB: DatabaseLike>(
         columns: AuthorityColumns {
             scopes: Vec::new(),
             subjects: Vec::new(),
+            attributes: Vec::new(),
         },
     };
     for table in database.tables() {
