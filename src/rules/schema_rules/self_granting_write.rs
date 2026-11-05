@@ -11,7 +11,7 @@ use crate::{
     error::{Interruption, PolicySite},
     lint::{LintGroup, Rule, RuleMetadata},
     rules::{
-        authority_support::scope_columns,
+        authority_support::authority_columns,
         credential_support::CredentialJudge,
         policy_support::{
             Command, Stage, applied, covers, holds_sublink_or_call, policy_roles, reads_row,
@@ -167,7 +167,7 @@ impl<DB: DatabaseLike> SchemaRule for SelfGrantingWrite<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         let deployment = reporter.deployment();
-        let scopes = scope_columns(database, deployment)?;
+        let scopes = authority_columns(database, deployment)?.scopes;
         let tables = database
             .tables()
             .filter_map(|table| database.table_id(table).map(|id| (table, id)));
