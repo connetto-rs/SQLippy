@@ -18,8 +18,17 @@ use crate::{
     rules::policy_support::{conjuncts, is_column_reference, sql_set_body},
 };
 
-/// A scope column, as its table's position and its stored name.
-pub(crate) type ScopeColumn = (usize, String);
+/// A column, as its table's position and its stored name.
+pub(crate) type TableColumn = (usize, String);
+
+/// The columns of the authority tables the schema's policies read.
+pub(crate) struct AuthorityColumns {
+    /// Columns compared with the outer row or returned as the compared set.
+    pub(crate) scopes: Vec<TableColumn>,
+    /// Columns compared with a credential, by a policy or in an authority
+    /// read.
+    pub(crate) subjects: Vec<TableColumn>,
+}
 
 /// Whether the expression is a declared credential, parenthesised or
 /// selected alone.
@@ -90,7 +99,7 @@ struct Authority<'a, 'db, DB: DatabaseLike> {
     database: &'db DB,
     deployment: &'a Deployment,
     read: Vec<&'db DB::Function>,
-    scopes: Vec<ScopeColumn>,
+    columns: AuthorityColumns,
 }
 
 impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
@@ -119,9 +128,11 @@ impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
         Ok(())
     }
 
-    /// Reads a policy expression: its sublinks and the helpers it calls.
-    fn expression(&mut self, expression: &Expr) -> Result<(), LookupError> {
+    /// Reads a policy expression on `table`: its comparisons with a
+    /// credential, its sublinks and the helpers it calls.
+    fn expression(&mut self, table: &'db DB::Table, expression: &Expr) -> Result<(), LookupError> {
         let mut walk = PolicyWalk {
+            table: ColumnScope::for_table(table, self.database, IdentifierCase::Folded),
             authority: self,
             depth: 0,
             fed: Vec::new(),
@@ -145,12 +156,16 @@ impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
             top: std::ptr::from_ref(query),
             top_fed: fed,
             fed: Vec::new(),
-            found: Vec::new(),
+            found: AuthorityColumns {
+                scopes: Vec::new(),
+                subjects: Vec::new(),
+            },
             helpers: Vec::new(),
         };
         query.visit(&mut walk).break_value().map_or(Ok(()), Err)?;
         let (found, helpers) = (walk.found, walk.helpers);
-        self.scopes.extend(found);
+        self.columns.scopes.extend(found.scopes);
+        self.columns.subjects.extend(found.subjects);
         self.read_helpers(helpers)
     }
 }
@@ -158,6 +173,7 @@ impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
 /// Walks a policy expression, reading each top-level sublink.
 struct PolicyWalk<'w, 'a, 'db, DB: DatabaseLike> {
     authority: &'w mut Authority<'a, 'db, DB>,
+    table: ColumnScope<'db, 'db, DB>,
     depth: usize,
     fed: Vec<*const Query>,
     helpers: Vec<&'db DB::Function>,
@@ -188,15 +204,46 @@ impl<DB: DatabaseLike> Visitor for PolicyWalk<'_, '_, '_, DB> {
         }
         self.fed
             .extend(compared_set(expression).map(std::ptr::from_ref));
-        let Expr::Function(call) = expression else {
-            return ControlFlow::Continue(());
+        let compared = self.credential_comparison(expression);
+        let reached = match expression {
+            Expr::Function(call) => self.authority.reached(call),
+            _ => Ok(Vec::new()),
         };
-        self.authority
-            .reached(call)
+        compared
+            .and(reached)
             .map_or_else(ControlFlow::Break, |helpers| {
                 self.helpers.extend(helpers);
                 ControlFlow::Continue(())
             })
+    }
+}
+
+impl<DB: DatabaseLike> PolicyWalk<'_, '_, '_, DB> {
+    /// Records a column of the policy's table the expression compares with a
+    /// credential.
+    fn credential_comparison(&mut self, expression: &Expr) -> Result<(), LookupError> {
+        let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } = expression
+        else {
+            return Ok(());
+        };
+        for (column, other) in [(left, right), (right, left)] {
+            if is_credential_value(self.authority.deployment, other)
+                && is_column_reference(column)
+                && let Some(ColumnDefinition::Base { table, column }) =
+                    self.table.resolve_column_definition(column)?
+                && let Some(id) = self.authority.database.table_id(table)
+            {
+                self.authority
+                    .columns
+                    .subjects
+                    .push((id, column.stored_column_name().into_owned()));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -208,7 +255,7 @@ struct QueryWalk<'w, 'a, 'db, 'g, 'q, DB: DatabaseLike> {
     top: *const Query,
     top_fed: bool,
     fed: Vec<*const Query>,
-    found: Vec<ScopeColumn>,
+    found: AuthorityColumns,
     helpers: Vec<&'db DB::Function>,
 }
 
@@ -258,7 +305,7 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
                 }
             }
         }
-        let mut subjects = Vec::new();
+        let mut subjects: Vec<TableColumn> = Vec::new();
         let mut pairs = Vec::new();
         for filter in filters {
             if let Expr::BinaryOp {
@@ -273,9 +320,9 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
         }
         for (column, other) in &pairs {
             if is_credential_value(self.authority.deployment, other)
-                && let Some((table, _)) = self.base(scope, column)?
+                && let Some(subject) = self.base(scope, column)?
             {
-                subjects.push(table);
+                subjects.push(subject);
             }
         }
         for (column, other) in pairs {
@@ -286,8 +333,8 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
                 && self
                     .base(scope, other)?
                     .is_none_or(|(owner, _)| owner != table);
-            if subjects.contains(&table) && outer {
-                self.found.push((table, name));
+            if subjects.iter().any(|(subject, _)| *subject == table) && outer {
+                self.found.scopes.push((table, name));
             }
         }
         if fed {
@@ -295,12 +342,13 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
                 if let SelectItem::UnnamedExpr(item) | SelectItem::ExprWithAlias { expr: item, .. } =
                     item
                     && let Some((table, name)) = self.base(scope, item)?
-                    && subjects.contains(&table)
+                    && subjects.iter().any(|(subject, _)| *subject == table)
                 {
-                    self.found.push((table, name));
+                    self.found.scopes.push((table, name));
                 }
             }
         }
+        self.found.subjects.extend(subjects);
         Ok(())
     }
 }
@@ -332,18 +380,21 @@ impl<DB: DatabaseLike> Visitor for QueryWalk<'_, '_, '_, '_, '_, DB> {
     }
 }
 
-/// The scope columns of the authority tables the schema's policies read,
-/// through their sublinks and the set-returning `LANGUAGE sql` helpers they
-/// call.
-pub(crate) fn scope_columns<DB: DatabaseLike>(
+/// The columns of the authority tables the schema's policies read, through
+/// their own comparisons, their sublinks and the set-returning
+/// `LANGUAGE sql` helpers they call.
+pub(crate) fn authority_columns<DB: DatabaseLike>(
     database: &DB,
     deployment: &Deployment,
-) -> Result<Vec<ScopeColumn>, LookupError> {
+) -> Result<AuthorityColumns, LookupError> {
     let mut authority = Authority {
         database,
         deployment,
         read: Vec::new(),
-        scopes: Vec::new(),
+        columns: AuthorityColumns {
+            scopes: Vec::new(),
+            subjects: Vec::new(),
+        },
     };
     for table in database.tables() {
         for policy in table.policies(database)? {
@@ -354,9 +405,9 @@ pub(crate) fn scope_columns<DB: DatabaseLike>(
             .into_iter()
             .flatten()
             {
-                authority.expression(expression)?;
+                authority.expression(table, expression)?;
             }
         }
     }
-    Ok(authority.scopes)
+    Ok(authority.columns)
 }

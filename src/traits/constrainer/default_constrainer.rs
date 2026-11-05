@@ -10,8 +10,8 @@ use crate::{
         CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
         ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
         CompatibleForeignKey, CorrelatedPolicySubquery, CredentialFreeWrite, DeadPermissivePolicy,
-        DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
-        ExposedDefinerOverProtectedTable, ExtensionForeignKeyOnDeleteCascade,
+        DefinerTakesActingUser, DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath,
+        DenyListPolicy, ExposedDefinerOverProtectedTable, ExtensionForeignKeyOnDeleteCascade,
         ExtensionInExposedSchema, FunctionMediatedPolicyCycle, GrantOptionToClientRole,
         HasPrimaryKey, ImpureImmutableFunction, JsonType, KeyWithoutExactEquality,
         LatentPolicyReadCycle, LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName,
@@ -159,7 +159,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 38] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 39] = [
         Box::new(NullableUniqueColumn::default()),
         Box::new(SecurityDefinerFunctionExposed::default()),
         Box::new(ExtensionInExposedSchema::default()),
@@ -198,6 +198,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(GrantOptionToClientRole::default()),
         Box::new(SelfAssertedClaimPolicy::default()),
         Box::new(SelfGrantingWrite::default()),
+        Box::new(DefinerTakesActingUser::default()),
     ];
     for rule in schema_rules {
         constrainer.register_schema_rule_with_floor(rule, Level::Allow);
