@@ -2,9 +2,7 @@
 //! policies that get around row-level security, observed through the public
 //! constrainer API.
 
-mod common;
-
-use common::{finding, findings, parse, supabase};
+use crate::common::{finding, findings, parse, supabase};
 use sql_rules::prelude::*;
 
 const DOCS: &str = "
