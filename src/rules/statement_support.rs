@@ -154,6 +154,16 @@ fn selects(body: &SetExpr) -> Vec<&Select> {
     }
 }
 
+/// Whether `expression` calls `random`.
+pub(crate) fn is_random(expression: &Expr) -> bool {
+    matches!(expression, Expr::Function(function) if function
+        .name
+        .0
+        .last()
+        .and_then(|part| part.as_ident())
+        .is_some_and(|name| name.value.eq_ignore_ascii_case("random")))
+}
+
 /// Calls its function with every query of a statement's root query.
 struct Queries<F>(F);
 
@@ -163,6 +173,50 @@ impl<F: FnMut(&Query) -> Result<(), LookupError>> Visitor for Queries<F> {
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<LookupError> {
         (self.0)(query).map_or_else(ControlFlow::Break, ControlFlow::Continue)
     }
+}
+
+/// Calls `check` with every query of a statement, from its root query down,
+/// together with the root query's scope.
+///
+/// # Errors
+///
+/// Returns the first lookup failure of the scope or of `check`.
+pub(crate) fn check_queries<DB: DatabaseLike>(
+    database: &DB,
+    statement: &Statement,
+    mut check: impl FnMut(&ColumnScope<'_, '_, DB>, &Query) -> Result<(), LookupError>,
+) -> Result<(), LookupError> {
+    let Some(root) = root_query(statement) else {
+        return Ok(());
+    };
+    let scope = ColumnScope::from_query(&root, database, IdentifierCase::Folded)?;
+    root.visit(&mut Queries(|query: &Query| check(&scope, query)))
+        .break_value()
+        .map_or(Ok(()), Err)
+}
+
+/// Calls `check` with every `SELECT` of a statement, the query it belongs to
+/// and the scope its names resolve in.
+///
+/// # Errors
+///
+/// Returns the first lookup failure of the scope or of `check`.
+pub(crate) fn check_selects<DB: DatabaseLike>(
+    database: &DB,
+    statement: &Statement,
+    mut check: impl FnMut(
+        &ColumnDefinitionScope<'_, '_, '_, DB>,
+        &Query,
+        &Select,
+    ) -> Result<(), LookupError>,
+) -> Result<(), LookupError> {
+    check_queries(database, statement, |scope, query| {
+        selects(&query.body).into_iter().try_for_each(|select| {
+            scope
+                .scope_for_select(select)
+                .map_or(Ok(()), |local| check(&local, query, select))
+        })
+    })
 }
 
 /// Calls `check` with every expression of every `SELECT` in a statement, at
@@ -176,24 +230,14 @@ pub(crate) fn check_select_expressions<DB: DatabaseLike>(
     statement: &Statement,
     mut check: impl FnMut(&ColumnDefinitionScope<'_, '_, '_, DB>, &Expr) -> Result<(), LookupError>,
 ) -> Result<(), LookupError> {
-    let Some(root) = root_query(statement) else {
-        return Ok(());
-    };
-    let scope = ColumnScope::from_query(&root, database, IdentifierCase::Folded)?;
-    root.visit(&mut Queries(|query: &Query| {
-        selects(&query.body).into_iter().try_for_each(|select| {
-            scope.scope_for_select(select).map_or(Ok(()), |local| {
-                let mut own = OwnLevel::new(|expression: &Expr| check(&local, expression));
-                own.over(&select.projection)?;
-                own.over(&select.from)?;
-                own.over(&select.selection)?;
-                own.over(&select.group_by)?;
-                own.over(&select.having)
-            })
-        })
-    }))
-    .break_value()
-    .map_or(Ok(()), Err)
+    check_selects(database, statement, |local, _, select| {
+        let mut own = OwnLevel::new(|expression: &Expr| check(local, expression));
+        own.over(&select.projection)?;
+        own.over(&select.from)?;
+        own.over(&select.selection)?;
+        own.over(&select.group_by)?;
+        own.over(&select.having)
+    })
 }
 
 /// A finding of a query rule: the text of the statement it names, what the

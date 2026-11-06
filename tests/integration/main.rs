@@ -27,6 +27,7 @@ mod policy_read_cycles;
 mod role_memberships;
 mod self_asserted_claims;
 mod self_granting_writes;
+mod statement_keys;
 mod statement_lints;
 mod statement_shapes;
 mod statement_types;

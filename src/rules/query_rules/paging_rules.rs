@@ -10,6 +10,7 @@ use sqlparser::ast::{
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
+    rules::statement_support::is_random,
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
 
@@ -36,16 +37,6 @@ fn queries(statement: &Statement, pick: impl FnMut(&Query) -> Option<String>) ->
     };
     let _ = statement.visit(&mut queries);
     queries.found
-}
-
-/// Whether `expression` calls `random`.
-fn is_random(expression: &Expr) -> bool {
-    matches!(expression, Expr::Function(function) if function
-        .name
-        .0
-        .last()
-        .and_then(|part| part.as_ident())
-        .is_some_and(|name| name.value.eq_ignore_ascii_case("random")))
 }
 
 /// `ORDER BY` and the row cap of a query ordered by `random()` with a cap.

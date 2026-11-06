@@ -12,15 +12,15 @@ use crate::{
         CompatibleForeignKey, CorrelatedPolicySubquery, CredentialFreeWrite,
         CredentialSettingWrite, DeadPermissivePolicy, DefinerTakesActingUser,
         DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
-        ExposedDefinerOverProtectedTable, ExtensionForeignKeyOnDeleteCascade,
-        ExtensionInExposedSchema, FunctionMediatedPolicyCycle, GrantOptionToClientRole,
-        HasPrimaryKey, ImpureImmutableFunction, JsonType, KeyWithoutExactEquality,
-        LatentPolicyReadCycle, LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName,
-        MoneyType, MultiplePermissivePolicies, NarrowIntegerKey, NestedPolicySubquery,
-        NoForbiddenColumnInExtension, NoNegationCheckRule, NoRustKeywordColumnName,
-        NoRustKeywordForeignKeyName, NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension,
-        NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule,
-        NonRedundantExtensionDag, NotInNullableSubquery, NotInSubquery,
+        DistinctOverReferencedSide, ExposedDefinerOverProtectedTable,
+        ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FunctionMediatedPolicyCycle,
+        GrantOptionToClientRole, HasPrimaryKey, ImpureImmutableFunction, JsonType,
+        KeyWithoutExactEquality, LatentPolicyReadCycle, LowercaseColumnName,
+        LowercaseForeignKeyName, LowercaseTableName, MoneyType, MultiplePermissivePolicies,
+        NarrowIntegerKey, NestedPolicySubquery, NoForbiddenColumnInExtension, NoNegationCheckRule,
+        NoRustKeywordColumnName, NoRustKeywordForeignKeyName, NoRustKeywordTableName,
+        NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId,
+        NonEmptyTextualColumnRule, NonRedundantExtensionDag, NotInNullableSubquery, NotInSubquery,
         NullableCompositeForeignKey, NullableUniqueColumn, OffsetPaging, OuterColumnCapture,
         OwnerRightsView, PastTimeColumnRule, PluralTableName, PoliciesRequireRowLevelSecurity,
         PolicyReadCycle, PolicyToCreatingRole, PrefixRedundantIndex, PrimaryKeyReferenceEndsWithId,
@@ -36,7 +36,8 @@ use crate::{
         TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
         TruncatedIdentifier, TruncatingIntegerDivision, UncachedPolicyCall, UnfilteredWrite,
         UnforcedRowLevelSecurity, UnindexedForeignKey, UnindexedPolicyFilter, UniqueCheckRule,
-        UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex, UnloggedTable,
+        UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex, UnlinkedFromItem,
+        UnloggedTable, UnorderedDistinctOn, UnorderedLimit,
         UnscopedUniqueConstraintOnRowLevelSecurityTable, UnvalidatedConstraint, WildcardView,
         ZeroPrecisionTimestamp,
     },
@@ -157,22 +158,31 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in function_rules {
             constrainer.register_function_rule_with_floor(rule, Level::Allow);
         }
-        let query_rules: [Box<dyn QueryRule<Database = DB>>; 10] = [
-            Box::new(NotInNullableSubquery::default()),
-            Box::new(NotInSubquery::default()),
-            Box::new(RandomOrderLimit::default()),
-            Box::new(OffsetPaging::default()),
-            Box::new(UnfilteredWrite::default()),
-            Box::new(CredentialSettingWrite::default()),
-            Box::new(OuterColumnCapture::default()),
-            Box::new(TimestampBetween::default()),
-            Box::new(SessionTimeZoneDependence::default()),
-            Box::new(TruncatingIntegerDivision::default()),
-        ];
-        for rule in query_rules {
-            constrainer.register_query_rule_with_floor(rule, Level::Allow);
-        }
+        register_query_rules(&mut constrainer);
         Self { constrainer }
+    }
+}
+
+/// Registers every built-in query rule at its group's default level.
+fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 14] = [
+        Box::new(NotInNullableSubquery::default()),
+        Box::new(NotInSubquery::default()),
+        Box::new(RandomOrderLimit::default()),
+        Box::new(OffsetPaging::default()),
+        Box::new(UnfilteredWrite::default()),
+        Box::new(CredentialSettingWrite::default()),
+        Box::new(OuterColumnCapture::default()),
+        Box::new(TimestampBetween::default()),
+        Box::new(SessionTimeZoneDependence::default()),
+        Box::new(TruncatingIntegerDivision::default()),
+        Box::new(UnorderedLimit::default()),
+        Box::new(UnorderedDistinctOn::default()),
+        Box::new(UnlinkedFromItem::default()),
+        Box::new(DistinctOverReferencedSide::default()),
+    ];
+    for rule in query_rules {
+        constrainer.register_query_rule_with_floor(rule, Level::Allow);
     }
 }
 
