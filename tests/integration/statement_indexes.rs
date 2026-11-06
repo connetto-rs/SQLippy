@@ -21,7 +21,7 @@ const USERS: &str = "
     CREATE INDEX users_team ON users (team_id);
     CREATE INDEX users_created ON users (created_at);
     CREATE INDEX users_lower_name ON users (lower(name));
-    CREATE INDEX users_upper_handle ON users (upper(handle));
+    CREATE INDEX users_upper_handle ON users (UPPER(handle));
     CREATE TABLE plain (a INT, b INT);";
 
 /// Checks the objects `rule` reports on each `(statement, objects)` case.
@@ -68,6 +68,21 @@ fn an_expression_around_an_indexed_column_is_reported() {
                 &["lower(email)"],
             ),
             ("SELECT id FROM users WHERE email = lower($1)", &[]),
+            (
+                "SELECT id FROM users WHERE score = (SELECT max(team_id) FROM teams)",
+                &[],
+            ),
+            ("SELECT id FROM users WHERE (email) = $1", &[]),
+            (
+                "SELECT id FROM users WHERE lower(\"email\") = $1",
+                &["lower(\"email\")"],
+            ),
+            ("SELECT id FROM users WHERE (upper(handle)) = $1", &[]),
+            ("SELECT id FROM users WHERE Upper(HANDLE) = $1", &[]),
+            (
+                "SELECT id FROM users WHERE lower(email) = $1 AND lower(email) = $1",
+                &["lower(email)"],
+            ),
             ("SELECT id FROM users WHERE handle::TEXT = $1", &[]),
             ("SELECT id FROM users WHERE lower(name) = $1", &[]),
             ("SELECT u.id FROM users AS u WHERE lower(u.name) = $1", &[]),
@@ -108,6 +123,37 @@ fn a_where_no_index_can_serve_is_reported() {
                 &["team_id = score"],
             ),
             ("SELECT id FROM users WHERE team_id = 7", &[]),
+            ("SELECT id FROM users WHERE lower(name) = $1", &[]),
+            ("SELECT id FROM users WHERE (upper(handle)) = $1", &[]),
+            ("SELECT id FROM users WHERE lower($1) = email", &[]),
+            (
+                "SELECT id FROM teams AS t WHERE t.id = 3 AND EXISTS (SELECT 1 FROM users AS u WHERE t.id = $1)",
+                &["t.id = $1"],
+            ),
+            ("SELECT id FROM users WHERE id BETWEEN 500 AND 600", &[]),
+            ("SELECT id FROM users WHERE team_id IS NOT NULL", &[]),
+            (
+                "SELECT id FROM users WHERE score BETWEEN 1 AND 2",
+                &["score BETWEEN 1 AND 2"],
+            ),
+            (
+                "SELECT id FROM users WHERE id NOT BETWEEN 1 AND 2",
+                &["id NOT BETWEEN 1 AND 2"],
+            ),
+            (
+                "SELECT id FROM users WHERE team_id IN (SELECT id FROM teams WHERE id = users.id)",
+                &["team_id IN (SELECT id FROM teams WHERE id = users.id)"],
+            ),
+            (
+                "SELECT id FROM users WHERE team_id = coalesce((SELECT max(id) FROM teams WHERE teams.id = users.score), 0)",
+                &[
+                    "team_id = coalesce((SELECT max(id) FROM teams WHERE teams.id = users.score), 0)",
+                ],
+            ),
+            (
+                "SELECT id FROM teams AS t WHERE t.id = 3 AND EXISTS (SELECT 1 FROM users AS u WHERE lower(t.name) = $1)",
+                &["lower(t.name) = $1"],
+            ),
             ("SELECT id FROM users WHERE team_id = 7 AND score = 1", &[]),
             ("SELECT id FROM users WHERE team_id = 7 OR email = $1", &[]),
             (

@@ -1,57 +1,35 @@
 //! Submodule providing the query rules that read indexes.
 
-use std::ops::ControlFlow;
-
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinition, ColumnDefinitionScope, ColumnScope, IdentifierCase},
-    traits::{ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableLike},
+    traits::{ColumnLike, DataTypeLike, DatabaseLike, TableLike},
 };
-use sqlparser::ast::{
-    BinaryOperator, DataType, Expr, SelectItem, SetExpr, Statement, Visit, Visitor,
-    visit_expressions_mut,
-};
+use sqlparser::ast::{BinaryOperator, DataType, Expr, InTarget, SelectItem, SetExpr, Statement};
 
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
     rules::{
-        index_support::{Side, comparison_sides, indexed, leading},
+        index_support::{Side, comparison_sides, expression_indexed, indexed, leading},
         key_support::{Instance, instances, named},
         policy_support::{conjuncts, is_column_reference},
-        statement_support::{OwnLevel, check_queries, check_selects},
+        statement_support::{OwnLevel, check_queries, check_selects, reads_outer, selects},
     },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
 
-/// Collects the column references of an expression.
-#[derive(Default)]
-struct Columns(Vec<Expr>);
-
-impl Visitor for Columns {
-    type Break = ();
-
-    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
-        if is_column_reference(expression) {
-            self.0.push(expression.clone());
+/// The column references of an expression, outside the queries it nests.
+fn own_columns(expression: &Expr) -> Result<Vec<Expr>, LookupError> {
+    let mut columns = Vec::new();
+    OwnLevel::new(|node: &Expr| {
+        if is_column_reference(node) {
+            columns.push(node.clone());
         }
-        ControlFlow::Continue(())
-    }
-}
-
-/// `expression` with every qualified column written by its name alone, the
-/// way an expression index stores it.
-fn unqualified(expression: &Expr) -> String {
-    let mut expression = expression.clone();
-    let _ = visit_expressions_mut(&mut expression, |node| {
-        if let Expr::CompoundIdentifier(parts) = node
-            && let Some(name) = parts.last()
-        {
-            *node = Expr::Identifier(name.clone());
-        }
-        ControlFlow::<()>::Continue(())
-    });
-    expression.to_string()
+        Ok(())
+    })
+    .over(expression)?;
+    Ok(columns)
 }
 
 /// The column, rendered as `table.column`, whose leading index an
@@ -61,15 +39,15 @@ fn defeated<DB: DatabaseLike>(
     scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
     expression: &Expr,
 ) -> Result<Option<String>, LookupError> {
+    let expression = leading(expression);
     if is_column_reference(expression) {
         return Ok(None);
     }
-    let mut columns = Columns::default();
-    let _ = expression.visit(&mut columns);
-    let [reference] = columns.0.as_slice() else {
+    let columns = own_columns(expression)?;
+    let [reference] = columns.as_slice() else {
         return Ok(None);
     };
-    let Some(ColumnDefinition::Base { table, column }) =
+    let Some(ColumnDefinition::Base { table, column, .. }) =
         scope.resolve_column_definition(reference)?
     else {
         return Ok(None);
@@ -82,14 +60,11 @@ fn defeated<DB: DatabaseLike>(
         } => is_column_reference(expr) && column.data_type(database).is_textual(database),
         _ => false,
     };
-    if coercible || !indexed(database, table, column)? {
+    if coercible
+        || !indexed(database, table, column)?
+        || expression_indexed(database, table, expression)?
+    {
         return Ok(None);
-    }
-    let shape = unqualified(expression);
-    for index in table.indices(database)? {
-        if leading(index.expression(database)?).to_string() == shape {
-            return Ok(None);
-        }
     }
     Ok(Some(format!(
         "{}.{}",
@@ -109,7 +84,8 @@ query_rule!(
     /// `created_at::date = …` each ran a `Seq Scan` where the bare column
     /// used its index, and `CREATE INDEX ON users (lower(email))` turned the
     /// lookup into an index scan. A cast between `varchar` and `text` keeps
-    /// the index and is not reported.
+    /// the index and is not reported, and an expression index matches
+    /// regardless of parentheses, qualifiers and the case of unquoted names.
     ///
     /// # Example
     ///
@@ -144,14 +120,16 @@ impl<DB: DatabaseLike> QueryRule for ExpressionDefeatsIndex<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let mut found = Vec::new();
+        let mut found: Vec<(String, String)> = Vec::new();
         check_selects(database, statement, |scope, _, select| {
             OwnLevel::new(|expression: &Expr| {
                 comparison_sides(expression, |column_side, _| {
-                    found.extend(
-                        defeated(database, scope, column_side)?
-                            .map(|column| (column_side.to_string(), column)),
-                    );
+                    if let Some(column) = defeated(database, scope, column_side)? {
+                        let finding = (column_side.to_string(), column);
+                        if !found.contains(&finding) {
+                            found.push(finding);
+                        }
+                    }
                     Ok(())
                 })
             })
@@ -171,19 +149,33 @@ impl<DB: DatabaseLike> QueryRule for ExpressionDefeatsIndex<DB> {
     }
 }
 
-/// Whether `expression` names a column of `instance`.
-fn mentions<DB: DatabaseLike>(
+/// Whether `expression` reads a column of `instance`, itself or through a
+/// subquery it holds.
+fn reads<DB: DatabaseLike>(
+    database: &DB,
+    full: &ColumnScope<'_, '_, DB>,
     scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
     instance: &Instance<'_, DB>,
     expression: &Expr,
 ) -> Result<bool, LookupError> {
-    let mut mentioned = false;
+    let mut read = false;
     OwnLevel::new(|node: &Expr| {
-        mentioned |= named(scope, node)?.is_some_and(|(relation, _)| relation == instance.name);
+        read |= named(scope, node)?.is_some_and(|(relation, _)| relation == instance.name);
+        if let Expr::Subquery(query)
+        | Expr::Exists {
+            subquery: query, ..
+        }
+        | Expr::In {
+            target: InTarget::Subquery(query),
+            ..
+        } = node
+        {
+            read |= reads_outer(database, full, query, &instance.name)?;
+        }
         Ok(())
     })
     .over(expression)?;
-    Ok(mentioned)
+    Ok(read)
 }
 
 /// Whether `column` is a column of `instance` that leads an index.
@@ -195,7 +187,7 @@ fn leads_index<DB: DatabaseLike>(
 ) -> Result<bool, LookupError> {
     if let Some((relation, _)) = named(scope, column)?
         && relation == instance.name
-        && let Some(ColumnDefinition::Base { table, column }) =
+        && let Some(ColumnDefinition::Base { table, column, .. }) =
             scope.resolve_column_definition(column)?
     {
         return indexed(database, table, column);
@@ -203,15 +195,43 @@ fn leads_index<DB: DatabaseLike>(
     Ok(false)
 }
 
+/// Whether an index of `instance` leads with `side`: a column that leads an
+/// index, or an expression over the table's columns that an expression
+/// index leads with.
+fn serves<DB: DatabaseLike>(
+    database: &DB,
+    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    instance: &Instance<'_, DB>,
+    side: &Expr,
+) -> Result<bool, LookupError> {
+    let side = leading(side);
+    if is_column_reference(side) {
+        return leads_index(database, scope, instance, side);
+    }
+    let columns = own_columns(side)?;
+    let mut own = !columns.is_empty();
+    for column in &columns {
+        own &= named(scope, column)?.is_some_and(|(relation, _)| relation == instance.name);
+    }
+    Ok(own && expression_indexed(database, instance.table, side)?)
+}
+
 /// Whether an index of `instance` can serve `condition`: one of its
-/// conjuncts compares a leading column with a value free of the table's own
-/// columns, or is an `OR` whose every arm an index can serve.
+/// conjuncts compares what an index leads with against a value free of the
+/// table's own columns, bounds it with `BETWEEN`, tests it `IS NULL` or
+/// `IS NOT NULL`, or is an `OR` whose every arm an index can serve.
 fn servable<DB: DatabaseLike>(
     database: &DB,
+    full: &ColumnScope<'_, '_, DB>,
     scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
     instance: &Instance<'_, DB>,
     condition: &Expr,
 ) -> Result<bool, LookupError> {
+    // Expression evaluator: every expression free of the table's own columns
+    // counts as a value, volatile calls included. The evaluator tells values
+    // an index can look up from calls such as `random()`.
+    let value =
+        |other: &Expr| Ok::<_, LookupError>(!reads(database, full, scope, instance, other)?);
     for conjunct in conjuncts(condition) {
         let served = match conjunct {
             Expr::BinaryOp {
@@ -219,29 +239,31 @@ fn servable<DB: DatabaseLike>(
                 op: BinaryOperator::Or,
                 right,
             } => {
-                servable(database, scope, instance, left)?
-                    && servable(database, scope, instance, right)?
+                servable(database, full, scope, instance, left)?
+                    && servable(database, full, scope, instance, right)?
             }
-            Expr::IsNull(column) => leads_index(database, scope, instance, column)?,
+            Expr::IsNull(side) | Expr::IsNotNull(side) => serves(database, scope, instance, side)?,
+            Expr::Between {
+                expr,
+                negated: false,
+                low,
+                high,
+            } => value(low)? && value(high)? && serves(database, scope, instance, expr)?,
             _ => {
                 let mut served = false;
-                comparison_sides(conjunct, |column, side| {
-                    // Expression evaluator: every expression free of the
-                    // table's own columns counts as a value, volatile calls
-                    // included. The evaluator tells values an index can
-                    // look up from calls such as `random()`.
-                    let value = match side {
-                        Side::Expr(other) => !mentions(scope, instance, other)?,
+                comparison_sides(conjunct, |side, other| {
+                    let other = match other {
+                        Side::Expr(other) => value(other)?,
                         Side::List(list) => {
-                            let mut value = true;
+                            let mut all = true;
                             for item in list {
-                                value &= !mentions(scope, instance, item)?;
+                                all &= value(item)?;
                             }
-                            value
+                            all
                         }
-                        Side::Query(_) => true,
+                        Side::Query(query) => !reads_outer(database, full, query, &instance.name)?,
                     };
-                    served |= value && leads_index(database, scope, instance, column)?;
+                    served |= other && serves(database, scope, instance, side)?;
                     Ok(())
                 })?;
                 served
@@ -256,11 +278,14 @@ fn servable<DB: DatabaseLike>(
 
 query_rule!(
     /// Struct defining a rule that reports a `WHERE` over one table with no
-    /// condition an index can serve, so PostgreSQL reads the whole table.
+    /// condition an index without a predicate can serve, so PostgreSQL reads
+    /// the whole table.
     ///
-    /// A condition counts when it compares a column that leads an index with
-    /// a value free of the table's own columns, or tests it `IS NULL`, and an
-    /// `OR` counts when every arm does. Measured on PostgreSQL 17.11 and
+    /// A condition counts when it compares a column, or an expression an
+    /// expression index leads with, against a value free of the table's own
+    /// columns, bounds it with `BETWEEN`, or tests it `IS NULL` or
+    /// `IS NOT NULL`, and an `OR` counts when every arm does. A subquery that
+    /// reads the table's own row is no value. Measured on PostgreSQL 17.11 and
     /// 18.6, `team_id = 7` without an index ran a `Seq Scan` over 100,000
     /// rows in 5.3 ms, and with one a bitmap index scan in 1.2 to 1.4 ms.
     /// The schema cannot tell a small lookup table from a large one, so the
@@ -301,15 +326,19 @@ impl<DB: DatabaseLike> QueryRule for UnindexedFilter<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         let mut found = Vec::new();
-        check_selects(database, statement, |scope, _, select| {
-            if let (Some(selection), Some([instance])) =
-                (&select.selection, instances(database, select).as_deref())
-                && !servable(database, scope, instance, selection)?
-            {
-                found.push((
-                    selection.to_string(),
-                    instance.table.table_name().to_owned(),
-                ));
+        check_queries(database, statement, |full, query, _| {
+            for select in selects(&query.body) {
+                if let (Some(scope), Some(selection), Some([instance])) = (
+                    full.scope_for_select(select),
+                    &select.selection,
+                    instances(database, select).as_deref(),
+                ) && !servable(database, full, &scope, instance, selection)?
+                {
+                    found.push((
+                        selection.to_string(),
+                        instance.table.table_name().to_owned(),
+                    ));
+                }
             }
             Ok(())
         })?;
@@ -318,7 +347,7 @@ impl<DB: DatabaseLike> QueryRule for UnindexedFilter<DB> {
                 statement,
                 selection.clone(),
                 format!(
-                    "The WHERE `{selection}` has no condition an index can serve, so PostgreSQL reads all of '{table}'."
+                    "The WHERE `{selection}` has no condition an index of '{table}' without a predicate can serve, so PostgreSQL reads the whole table."
                 ),
                 "Add an index on a column the WHERE compares with a value, or keep the scan for a small table.".to_owned(),
             )?;
@@ -354,7 +383,7 @@ fn unindexed_correlation<DB: DatabaseLike>(
             continue;
         };
         for (inner, other) in [(left, right), (right, left)] {
-            if let Some(ColumnDefinition::Base { table, column }) =
+            if let Some(ColumnDefinition::Base { table, column, .. }) =
                 local.resolve_column_definition(inner)?
                 && local.resolve_column_definition(other)?.is_none()
                 && outer.resolve_column_definition(other)?.is_some()

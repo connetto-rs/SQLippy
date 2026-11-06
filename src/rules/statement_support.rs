@@ -7,6 +7,7 @@ use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinitionScope, ColumnScope, IdentifierCase},
     traits::DatabaseLike,
+    utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::{
     ast::{
@@ -142,7 +143,7 @@ impl<F: FnMut(&Expr) -> Result<(), LookupError>> Visitor for OwnLevel<F> {
 
 /// The `SELECT`s a query body combines through set operations, leaving
 /// parenthesized queries to the visitor that reaches them.
-fn selects(body: &SetExpr) -> Vec<&Select> {
+pub(crate) fn selects(body: &SetExpr) -> Vec<&Select> {
     match body {
         SetExpr::Select(select) => vec![select],
         SetExpr::SetOperation { left, right, .. } => {
@@ -165,6 +166,56 @@ pub(crate) fn row_limit(query: &Query) -> Option<String> {
     }
 }
 
+/// Whether `subquery` reads a column of the enclosing relation the query
+/// refers to as `relation`: a reference no relation of the subquery's own
+/// resolves and the statement's scope `full` resolves to `relation`.
+///
+/// # Errors
+///
+/// Returns the first lookup failure of either scope.
+pub(crate) fn reads_outer<DB: DatabaseLike>(
+    database: &DB,
+    full: &ColumnScope<'_, '_, DB>,
+    subquery: &Query,
+    relation: &str,
+) -> Result<bool, LookupError> {
+    let local = ColumnScope::from_query(subquery, database, IdentifierCase::Folded)?;
+    let mut reads = false;
+    subquery
+        .visit(&mut Queries {
+            check: |query: &Query, _| {
+                selects(&query.body).into_iter().try_for_each(|select| {
+                    let scopes = local
+                        .scope_for_select(select)
+                        .zip(full.scope_for_select(select));
+                    scopes.map_or(Ok(()), |(inner, outer)| {
+                        let mut own = OwnLevel::new(|expression: &Expr| {
+                            if crate::rules::policy_support::is_column_reference(expression)
+                                && inner.resolve_column_definition(expression)?.is_none()
+                            {
+                                reads |= outer
+                                    .resolve_column_binding(expression)?
+                                    .and_then(|(_, binding)| binding.relation())
+                                    .is_some_and(|(name, quoted)| {
+                                        normalize_identifier(name, quoted) == relation
+                                    });
+                            }
+                            Ok(())
+                        });
+                        own.over(&select.projection)?;
+                        own.over(&select.from)?;
+                        own.over(&select.selection)?;
+                        own.over(&select.group_by)?;
+                        own.over(&select.having)
+                    })
+                })
+            },
+            existence: Vec::new(),
+        })
+        .break_value()
+        .map_or(Ok(()), Err)?;
+    Ok(reads)
+}
 /// Whether `expression` calls `random`.
 pub(crate) fn is_random(expression: &Expr) -> bool {
     matches!(expression, Expr::Function(function) if function
