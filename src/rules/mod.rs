@@ -13,6 +13,7 @@ pub use function_rules::*;
 mod authority_support;
 mod credential_support;
 mod grant_support;
+mod not_in_support;
 mod policy_support;
 pub mod rust_keywords;
 mod type_support;
