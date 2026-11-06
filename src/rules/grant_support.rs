@@ -8,7 +8,7 @@ use sql_traits::{
     traits::{ColumnGrantLike, DatabaseLike, GrantLike, Relation, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
-use sqlparser::ast::{Action, GranteeName};
+use sqlparser::ast::{Action, Grantee, GranteeName};
 
 use crate::{deployment::Deployment, rules::policy_support::held_by_name};
 
@@ -32,7 +32,7 @@ impl ClientRoles {
         database: &DB,
         grant: &impl GrantLike<DB = DB>,
     ) -> bool {
-        grant.applies_to_public() || names_any(database, grant, &self.anonymous)
+        reaches_any(database, grant, &self.anonymous)
     }
 
     /// Whether the grant reaches a declared app role.
@@ -64,12 +64,20 @@ fn held_by_any<'a, DB: DatabaseLike>(
         .collect()
 }
 
+/// Whether the grant names one of `roles`.
 fn names_any<DB: DatabaseLike>(
     database: &DB,
     grant: &impl GrantLike<DB = DB>,
     roles: &BTreeSet<String>,
 ) -> bool {
-    grant.grantees(database).any(|grantee| match &grantee.name {
+    grant
+        .grantees(database)
+        .any(|grantee| grantee_names(grantee, roles))
+}
+
+/// Whether the grantee names one of `roles`.
+pub(crate) fn grantee_names(grantee: &Grantee, roles: &BTreeSet<String>) -> bool {
+    match &grantee.name {
         Some(GranteeName::ObjectName(name)) => name
             .0
             .last()
@@ -80,7 +88,16 @@ fn names_any<DB: DatabaseLike>(
                 )
             }),
         Some(GranteeName::UserHost { .. }) | None => false,
-    })
+    }
+}
+
+/// Whether the grant reaches `PUBLIC` or names one of `roles`.
+pub(crate) fn reaches_any<DB: DatabaseLike>(
+    database: &DB,
+    grant: &impl GrantLike<DB = DB>,
+    roles: &BTreeSet<String>,
+) -> bool {
+    grant.applies_to_public() || names_any(database, grant, roles)
 }
 
 /// The schema a relation sits in: its own, or the first schema on the search

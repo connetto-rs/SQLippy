@@ -369,6 +369,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             "SettableMembershipInBypassingRole",
             "SelfAssertedClaimPolicy",
             "SelfGrantingWrite",
+            "SubjectSettableAttribute",
         ]
     );
     constrainer.set_deployment(supabase());
@@ -383,7 +384,8 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             "CredentialFreeWrite",
             "UnscopedUniqueConstraintOnRowLevelSecurityTable",
             "SelfAssertedClaimPolicy",
-            "SelfGrantingWrite"
+            "SelfGrantingWrite",
+            "SubjectSettableAttribute"
         ]
     );
     let database = parse(&format!(
