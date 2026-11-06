@@ -212,6 +212,11 @@ impl Deployment {
         self.credentials.contains(expression)
     }
 
+    /// Returns the declared credential expressions.
+    pub(crate) fn credentials(&self) -> &[Expr] {
+        &self.credentials
+    }
+
     /// Returns whether the deployment makes the given declaration.
     #[must_use]
     pub fn declares(&self, declaration: Declaration) -> bool {
