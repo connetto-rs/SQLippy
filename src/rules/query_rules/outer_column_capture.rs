@@ -1,137 +1,22 @@
 //! Submodule providing the `OuterColumnCapture` rule.
 
-use std::{borrow::Cow, ops::ControlFlow};
+use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinition, ColumnDefinitionScope, ColumnScope, IdentifierCase},
     traits::DatabaseLike,
 };
-use sqlparser::{
-    ast::{
-        Delete, Expr, FromTable, Ident, InTarget, Insert, ObjectName, Query, Select, SetExpr,
-        Statement, Update, UpdateTableFromKind, Visit, Visitor, With,
-    },
-    dialect::PostgreSqlDialect,
-    parser::Parser,
+use sqlparser::ast::{
+    Expr, Ident, InTarget, ObjectName, Query, Select, SetExpr, Statement, Visit, Visitor,
 };
 
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
+    rules::statement_support::{OwnLevel, root_query},
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
-
-/// A `SELECT` over `relations` with `projection` and `selection` under
-/// `with`, parsed from its rendering, which gives the subqueries of an
-/// `UPDATE` or `DELETE` the enclosing query they resolve against.
-fn select_over(
-    with: Option<&With>,
-    projection: &str,
-    relations: &[String],
-    selection: Option<&Expr>,
-) -> Option<Query> {
-    let with = with.map_or_else(String::new, |with| format!("{with} "));
-    let filter = selection.map_or_else(String::new, |selection| format!(" WHERE {selection}"));
-    let sql = format!(
-        "{with}SELECT {projection} FROM {}{filter}",
-        relations.join(", ")
-    );
-    let mut parser = Parser::new(&PostgreSqlDialect {}).try_with_sql(&sql).ok()?;
-    parser.parse_query().ok().map(|query| *query)
-}
-
-/// The query whose expression subqueries the rule reads.
-fn root_query(statement: &Statement) -> Option<Cow<'_, Query>> {
-    under(statement, None)
-}
-
-/// The query of `statement` written under `with`, the `WITH` clause of a
-/// query whose body is the data-modifying statement.
-fn under<'s>(statement: &'s Statement, with: Option<&With>) -> Option<Cow<'s, Query>> {
-    match statement {
-        Statement::Query(query) => match query.body.as_ref() {
-            SetExpr::Update(inner) | SetExpr::Delete(inner) | SetExpr::Insert(inner) => {
-                under(inner, query.with.as_ref())
-            }
-            _ => Some(Cow::Borrowed(query)),
-        },
-        Statement::Insert(Insert {
-            source: Some(query),
-            ..
-        }) => Some(with.map_or(Cow::Borrowed(query.as_ref()), |with| {
-            let mut query = query.as_ref().clone();
-            query.with.get_or_insert_with(|| with.clone());
-            Cow::Owned(query)
-        })),
-        Statement::Update(Update {
-            table,
-            assignments,
-            from,
-            selection,
-            ..
-        }) => {
-            let mut relations = vec![table.to_string()];
-            if let Some(
-                UpdateTableFromKind::BeforeSet(from) | UpdateTableFromKind::AfterSet(from),
-            ) = from
-            {
-                relations.extend(from.iter().map(ToString::to_string));
-            }
-            let values: Vec<String> = assignments
-                .iter()
-                .map(|assignment| assignment.value.to_string())
-                .collect();
-            select_over(with, &values.join(", "), &relations, selection.as_ref()).map(Cow::Owned)
-        }
-        Statement::Delete(Delete {
-            from: FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables),
-            using,
-            selection,
-            ..
-        }) => {
-            let relations: Vec<String> = tables
-                .iter()
-                .chain(using.iter().flatten())
-                .map(ToString::to_string)
-                .collect();
-            select_over(with, "1", &relations, selection.as_ref()).map(Cow::Owned)
-        }
-        _ => None,
-    }
-}
-
-/// Collects the unqualified names a `SELECT` reads at its own level, outside
-/// its nested queries.
-#[derive(Default)]
-struct OwnNames {
-    depth: usize,
-    names: Vec<Ident>,
-}
-
-impl Visitor for OwnNames {
-    type Break = ();
-
-    fn pre_visit_query(&mut self, _query: &Query) -> ControlFlow<()> {
-        self.depth += 1;
-        ControlFlow::Continue(())
-    }
-
-    fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<()> {
-        self.depth -= 1;
-        ControlFlow::Continue(())
-    }
-
-    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
-        if let Expr::Identifier(name) = expression
-            && self.depth == 0
-            && !self.names.iter().any(|seen| seen.value == name.value)
-        {
-            self.names.push(name.clone());
-        }
-        ControlFlow::Continue(())
-    }
-}
 
 /// Collects, for every expression subquery of a query, the unqualified names
 /// the subquery cannot resolve on its own and an enclosing query resolves.
@@ -165,16 +50,24 @@ impl<DB: DatabaseLike> Captures<'_, '_, '_, DB> {
         local: &ColumnScope<'_, '_, DB>,
         select: &Select,
     ) -> Result<(), LookupError> {
-        let mut names = OwnNames::default();
-        let _ = select.projection.visit(&mut names);
-        let _ = select.selection.visit(&mut names);
-        let _ = select.having.visit(&mut names);
+        let mut names: Vec<Ident> = Vec::new();
+        let mut own = OwnLevel::new(|expression: &Expr| {
+            if let Expr::Identifier(name) = expression
+                && !names.iter().any(|seen| seen.value == name.value)
+            {
+                names.push(name.clone());
+            }
+            Ok(())
+        });
+        own.over(&select.projection)?;
+        own.over(&select.selection)?;
+        own.over(&select.having)?;
         let full = self.scope;
         local
             .scope_for_select(select)
             .zip(full.scope_for_select(select))
             .map_or(Ok(()), |(local, outer)| {
-                self.check_names(subquery, &names.names, &local, &outer)
+                self.check_names(subquery, &names, &local, &outer)
             })
     }
 

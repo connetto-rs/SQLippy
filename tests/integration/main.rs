@@ -29,6 +29,7 @@ mod self_asserted_claims;
 mod self_granting_writes;
 mod statement_lints;
 mod statement_shapes;
+mod statement_types;
 mod subject_settable_attributes;
 mod tenant_unique_constraints;
 mod uncached_policy_calls;

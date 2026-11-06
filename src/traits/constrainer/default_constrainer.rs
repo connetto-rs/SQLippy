@@ -29,14 +29,14 @@ use crate::{
         ReferencesGrantedToClientRole, RegColumnType, ReservedKeywordIdentifier,
         RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, ScaledNumeric,
         SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
-        SelfAssertedClaimPolicy, SelfGrantingWrite, SerialColumn,
+        SelfAssertedClaimPolicy, SelfGrantingWrite, SerialColumn, SessionTimeZoneDependence,
         SettableMembershipInBypassingRole, SingularColumnName, SnakeCaseColumnName,
         SnakeCaseTableName, SubjectSettableAttribute, TableInheritance, TautologicalWithCheck,
-        TextualColumnRule, TimeDependentCheck, TimeWithTimeZone, TimestampWithoutTimeZone,
-        TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
-        UncachedPolicyCall, UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedForeignKey,
-        UnindexedPolicyFilter, UniqueCheckRule, UniqueColumnNamesInExtensionGraph,
-        UniqueForeignKey, UniqueUniqueIndex, UnloggedTable,
+        TextualColumnRule, TimeDependentCheck, TimeWithTimeZone, TimestampBetween,
+        TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
+        TruncatedIdentifier, TruncatingIntegerDivision, UncachedPolicyCall, UnfilteredWrite,
+        UnforcedRowLevelSecurity, UnindexedForeignKey, UnindexedPolicyFilter, UniqueCheckRule,
+        UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex, UnloggedTable,
         UnscopedUniqueConstraintOnRowLevelSecurityTable, UnvalidatedConstraint, WildcardView,
         ZeroPrecisionTimestamp,
     },
@@ -157,7 +157,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in function_rules {
             constrainer.register_function_rule_with_floor(rule, Level::Allow);
         }
-        let query_rules: [Box<dyn QueryRule<Database = DB>>; 7] = [
+        let query_rules: [Box<dyn QueryRule<Database = DB>>; 10] = [
             Box::new(NotInNullableSubquery::default()),
             Box::new(NotInSubquery::default()),
             Box::new(RandomOrderLimit::default()),
@@ -165,6 +165,9 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(UnfilteredWrite::default()),
             Box::new(CredentialSettingWrite::default()),
             Box::new(OuterColumnCapture::default()),
+            Box::new(TimestampBetween::default()),
+            Box::new(SessionTimeZoneDependence::default()),
+            Box::new(TruncatingIntegerDivision::default()),
         ];
         for rule in query_rules {
             constrainer.register_query_rule_with_floor(rule, Level::Allow);
