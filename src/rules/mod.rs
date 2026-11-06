@@ -53,6 +53,7 @@ pub use query_rules::*;
 mod authority_support;
 mod credential_support;
 mod grant_support;
+mod index_support;
 mod key_support;
 mod not_in_support;
 mod policy_support;

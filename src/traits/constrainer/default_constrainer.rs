@@ -12,7 +12,7 @@ use crate::{
         CompatibleForeignKey, CorrelatedPolicySubquery, CredentialFreeWrite,
         CredentialSettingWrite, DeadPermissivePolicy, DefinerTakesActingUser,
         DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
-        DistinctOverReferencedSide, ExposedDefinerOverProtectedTable,
+        DistinctOverReferencedSide, ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FunctionMediatedPolicyCycle,
         GrantOptionToClientRole, HasPrimaryKey, ImpureImmutableFunction, JsonType,
         KeyWithoutExactEquality, LatentPolicyReadCycle, LowercaseColumnName,
@@ -35,11 +35,11 @@ use crate::{
         TextualColumnRule, TimeDependentCheck, TimeWithTimeZone, TimestampBetween,
         TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
         TruncatedIdentifier, TruncatingIntegerDivision, UncachedPolicyCall, UnfilteredWrite,
-        UnforcedRowLevelSecurity, UnindexedForeignKey, UnindexedPolicyFilter, UniqueCheckRule,
-        UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex, UnlinkedFromItem,
-        UnloggedTable, UnorderedDistinctOn, UnorderedLimit,
-        UnscopedUniqueConstraintOnRowLevelSecurityTable, UnvalidatedConstraint, WildcardView,
-        ZeroPrecisionTimestamp,
+        UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter, UnindexedForeignKey,
+        UnindexedPolicyFilter, UniqueCheckRule, UniqueColumnNamesInExtensionGraph,
+        UniqueForeignKey, UniqueUniqueIndex, UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn,
+        UnorderedLimit, UnscopedUniqueConstraintOnRowLevelSecurityTable, UnvalidatedConstraint,
+        WildcardView, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -165,7 +165,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 14] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 17] = [
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
         Box::new(RandomOrderLimit::default()),
@@ -180,6 +180,9 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(UnorderedDistinctOn::default()),
         Box::new(UnlinkedFromItem::default()),
         Box::new(DistinctOverReferencedSide::default()),
+        Box::new(ExpressionDefeatsIndex::default()),
+        Box::new(UnindexedFilter::default()),
+        Box::new(UnindexedCorrelatedSelect::default()),
     ];
     for rule in query_rules {
         constrainer.register_query_rule_with_floor(rule, Level::Allow);

@@ -1,0 +1,453 @@
+//! Submodule providing the query rules that read indexes.
+
+use std::ops::ControlFlow;
+
+use sql_traits::{
+    errors::LookupError,
+    structs::{ColumnDefinition, ColumnDefinitionScope, ColumnScope, IdentifierCase},
+    traits::{ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableLike},
+};
+use sqlparser::ast::{
+    BinaryOperator, DataType, Expr, SelectItem, SetExpr, Statement, Visit, Visitor,
+    visit_expressions_mut,
+};
+
+use crate::{
+    error::Interruption,
+    lint::{LintGroup, Rule, RuleMetadata},
+    rules::{
+        index_support::{Side, comparison_sides, indexed, leading},
+        key_support::{Instance, instances, named},
+        policy_support::{conjuncts, is_column_reference},
+        statement_support::{OwnLevel, check_queries, check_selects},
+    },
+    traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
+};
+
+/// Collects the column references of an expression.
+#[derive(Default)]
+struct Columns(Vec<Expr>);
+
+impl Visitor for Columns {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
+        if is_column_reference(expression) {
+            self.0.push(expression.clone());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// `expression` with every qualified column written by its name alone, the
+/// way an expression index stores it.
+fn unqualified(expression: &Expr) -> String {
+    let mut expression = expression.clone();
+    let _ = visit_expressions_mut(&mut expression, |node| {
+        if let Expr::CompoundIdentifier(parts) = node
+            && let Some(name) = parts.last()
+        {
+            *node = Expr::Identifier(name.clone());
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    expression.to_string()
+}
+
+/// The column, rendered as `table.column`, whose leading index an
+/// expression around it defeats.
+fn defeated<DB: DatabaseLike>(
+    database: &DB,
+    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    expression: &Expr,
+) -> Result<Option<String>, LookupError> {
+    if is_column_reference(expression) {
+        return Ok(None);
+    }
+    let mut columns = Columns::default();
+    let _ = expression.visit(&mut columns);
+    let [reference] = columns.0.as_slice() else {
+        return Ok(None);
+    };
+    let Some(ColumnDefinition::Base { table, column }) =
+        scope.resolve_column_definition(reference)?
+    else {
+        return Ok(None);
+    };
+    let coercible = match expression {
+        Expr::Cast {
+            expr,
+            data_type: DataType::Text | DataType::Varchar(_) | DataType::String(_),
+            ..
+        } => is_column_reference(expr) && column.data_type(database).is_textual(database),
+        _ => false,
+    };
+    if coercible || !indexed(database, table, column)? {
+        return Ok(None);
+    }
+    let shape = unqualified(expression);
+    for index in table.indices(database)? {
+        if leading(index.expression(database)?).to_string() == shape {
+            return Ok(None);
+        }
+    }
+    Ok(Some(format!(
+        "{}.{}",
+        table.table_name(),
+        column.column_name()
+    )))
+}
+
+query_rule!(
+    /// Struct defining a rule that reports a function, a type-changing cast
+    /// or arithmetic around a column that leads an index, in a comparison of
+    /// the `WHERE`, when no expression index matches it.
+    ///
+    /// PostgreSQL can only use an index for the expression it indexes.
+    /// Measured on PostgreSQL 17.11 and 18.6, `lower(email) = …`,
+    /// `coalesce(team_id, 0) = …`, `team_id + 0 = …` and
+    /// `created_at::date = …` each ran a `Seq Scan` where the bare column
+    /// used its index, and `CREATE INDEX ON users (lower(email))` turned the
+    /// lookup into an index scan. A cast between `varchar` and `text` keeps
+    /// the index and is not reported.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sql_rules::prelude::*;
+    /// use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+    ///
+    /// let constrainer: GenericConstrainer<ParserDB> = ExpressionDefeatsIndex::default().into();
+    /// let database = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE t (email TEXT); CREATE INDEX t_email ON t (email);",
+    /// )
+    /// .unwrap();
+    /// let check = |sql: &str| {
+    ///     let statement = &Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap()[0];
+    ///     constrainer.validate_statement(&database, statement)
+    /// };
+    /// assert!(check("SELECT 1 FROM t WHERE lower(email) = $1").is_err());
+    /// assert!(check("SELECT 1 FROM t WHERE email = lower($1)").is_ok());
+    /// ```
+    ExpressionDefeatsIndex,
+    LintGroup::Perf,
+    "PostgreSQL can only use an index for the expression it indexes, so a function or cast around an indexed column makes it read the whole table.",
+    Some("https://www.postgresql.org/docs/current/indexes-expressional.html")
+);
+
+impl<DB: DatabaseLike> QueryRule for ExpressionDefeatsIndex<DB> {
+    type Database = DB;
+
+    fn check_statement(
+        &self,
+        database: &Self::Database,
+        statement: &Statement,
+        reporter: &mut Reporter<'_, Self::Database>,
+    ) -> Result<(), Interruption> {
+        let mut found = Vec::new();
+        check_selects(database, statement, |scope, _, select| {
+            OwnLevel::new(|expression: &Expr| {
+                comparison_sides(expression, |column_side, _| {
+                    found.extend(
+                        defeated(database, scope, column_side)?
+                            .map(|column| (column_side.to_string(), column)),
+                    );
+                    Ok(())
+                })
+            })
+            .over(&select.selection)
+        })?;
+        for (expression, column) in found {
+            reporter.statement(
+                statement,
+                expression.clone(),
+                format!(
+                    "`{expression}` wraps '{column}', which leads an index, so PostgreSQL cannot use that index for the comparison and reads the whole table."
+                ),
+                "Compare the bare column and move the computation to the other side, or create an index on the expression when it is immutable.".to_owned(),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Whether `expression` names a column of `instance`.
+fn mentions<DB: DatabaseLike>(
+    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    instance: &Instance<'_, DB>,
+    expression: &Expr,
+) -> Result<bool, LookupError> {
+    let mut mentioned = false;
+    OwnLevel::new(|node: &Expr| {
+        mentioned |= named(scope, node)?.is_some_and(|(relation, _)| relation == instance.name);
+        Ok(())
+    })
+    .over(expression)?;
+    Ok(mentioned)
+}
+
+/// Whether `column` is a column of `instance` that leads an index.
+fn leads_index<DB: DatabaseLike>(
+    database: &DB,
+    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    instance: &Instance<'_, DB>,
+    column: &Expr,
+) -> Result<bool, LookupError> {
+    if let Some((relation, _)) = named(scope, column)?
+        && relation == instance.name
+        && let Some(ColumnDefinition::Base { table, column }) =
+            scope.resolve_column_definition(column)?
+    {
+        return indexed(database, table, column);
+    }
+    Ok(false)
+}
+
+/// Whether an index of `instance` can serve `condition`: one of its
+/// conjuncts compares a leading column with a value free of the table's own
+/// columns, or is an `OR` whose every arm an index can serve.
+fn servable<DB: DatabaseLike>(
+    database: &DB,
+    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    instance: &Instance<'_, DB>,
+    condition: &Expr,
+) -> Result<bool, LookupError> {
+    for conjunct in conjuncts(condition) {
+        let served = match conjunct {
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Or,
+                right,
+            } => {
+                servable(database, scope, instance, left)?
+                    && servable(database, scope, instance, right)?
+            }
+            Expr::IsNull(column) => leads_index(database, scope, instance, column)?,
+            _ => {
+                let mut served = false;
+                comparison_sides(conjunct, |column, side| {
+                    // Expression evaluator: every expression free of the
+                    // table's own columns counts as a value, volatile calls
+                    // included. The evaluator tells values an index can
+                    // look up from calls such as `random()`.
+                    let value = match side {
+                        Side::Expr(other) => !mentions(scope, instance, other)?,
+                        Side::List(list) => {
+                            let mut value = true;
+                            for item in list {
+                                value &= !mentions(scope, instance, item)?;
+                            }
+                            value
+                        }
+                        Side::Query(_) => true,
+                    };
+                    served |= value && leads_index(database, scope, instance, column)?;
+                    Ok(())
+                })?;
+                served
+            }
+        };
+        if served {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+query_rule!(
+    /// Struct defining a rule that reports a `WHERE` over one table with no
+    /// condition an index can serve, so PostgreSQL reads the whole table.
+    ///
+    /// A condition counts when it compares a column that leads an index with
+    /// a value free of the table's own columns, or tests it `IS NULL`, and an
+    /// `OR` counts when every arm does. Measured on PostgreSQL 17.11 and
+    /// 18.6, `team_id = 7` without an index ran a `Seq Scan` over 100,000
+    /// rows in 5.3 ms, and with one a bitmap index scan in 1.2 to 1.4 ms.
+    /// The schema cannot tell a small lookup table from a large one, so the
+    /// rule is `pedantic`. A statement without a `WHERE` and a `WHERE` over a
+    /// join are not reported.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sql_rules::prelude::*;
+    /// use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+    ///
+    /// let constrainer: GenericConstrainer<ParserDB> = UnindexedFilter::default().into();
+    /// let database = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE t (id INT PRIMARY KEY, score INT);",
+    /// )
+    /// .unwrap();
+    /// let check = |sql: &str| {
+    ///     let statement = &Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap()[0];
+    ///     constrainer.validate_statement(&database, statement)
+    /// };
+    /// assert!(check("SELECT id FROM t WHERE score = 1").is_err());
+    /// assert!(check("SELECT id FROM t WHERE id = $1").is_ok());
+    /// ```
+    UnindexedFilter,
+    LintGroup::Pedantic,
+    "A WHERE that no index can serve makes PostgreSQL read every row of the table to find the ones it keeps.",
+    Some("https://www.postgresql.org/docs/current/indexes-types.html")
+);
+
+impl<DB: DatabaseLike> QueryRule for UnindexedFilter<DB> {
+    type Database = DB;
+
+    fn check_statement(
+        &self,
+        database: &Self::Database,
+        statement: &Statement,
+        reporter: &mut Reporter<'_, Self::Database>,
+    ) -> Result<(), Interruption> {
+        let mut found = Vec::new();
+        check_selects(database, statement, |scope, _, select| {
+            if let (Some(selection), Some([instance])) =
+                (&select.selection, instances(database, select).as_deref())
+                && !servable(database, scope, instance, selection)?
+            {
+                found.push((
+                    selection.to_string(),
+                    instance.table.table_name().to_owned(),
+                ));
+            }
+            Ok(())
+        })?;
+        for (selection, table) in found {
+            reporter.statement(
+                statement,
+                selection.clone(),
+                format!(
+                    "The WHERE `{selection}` has no condition an index can serve, so PostgreSQL reads all of '{table}'."
+                ),
+                "Add an index on a column the WHERE compares with a value, or keep the scan for a small table.".to_owned(),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The inner table and column a correlated subquery finds its rows through
+/// when no index leads with that column.
+fn unindexed_correlation<DB: DatabaseLike>(
+    database: &DB,
+    full: &ColumnScope<'_, '_, DB>,
+    subquery: &sqlparser::ast::Query,
+) -> Result<Option<(String, String)>, LookupError> {
+    let SetExpr::Select(select) = subquery.body.as_ref() else {
+        return Ok(None);
+    };
+    let local = ColumnScope::from_query(subquery, database, IdentifierCase::Folded)?;
+    let scopes = local
+        .scope_for_select(select)
+        .zip(full.scope_for_select(select));
+    let (Some((local, outer)), Some(selection)) = (scopes, &select.selection) else {
+        return Ok(None);
+    };
+    for conjunct in conjuncts(selection) {
+        let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } = conjunct
+        else {
+            continue;
+        };
+        for (inner, other) in [(left, right), (right, left)] {
+            if let Some(ColumnDefinition::Base { table, column }) =
+                local.resolve_column_definition(inner)?
+                && local.resolve_column_definition(other)?.is_none()
+                && outer.resolve_column_definition(other)?.is_some()
+                && !indexed(database, table, column)?
+            {
+                return Ok(Some((
+                    table.table_name().to_owned(),
+                    column.column_name().to_owned(),
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+query_rule!(
+    /// Struct defining a rule that reports a scalar subquery in the select
+    /// list correlated with the outer row through an inner column that leads
+    /// no index.
+    ///
+    /// The subquery runs once per outer row and reads its whole table each
+    /// time. Measured on PostgreSQL 17.11 and 18.6, a per-team count over
+    /// 100,000 users took 327.5 to 351.7 ms without an index on `team_id`,
+    /// 15.7 to 17.6 ms as a `LEFT JOIN … GROUP BY`, and 4.3 to 5.0 ms as the
+    /// same subquery with the index.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sql_rules::prelude::*;
+    /// use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+    ///
+    /// let constrainer: GenericConstrainer<ParserDB> = UnindexedCorrelatedSelect::default().into();
+    /// let database = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE teams (id INT PRIMARY KEY); CREATE TABLE users (team_id INT);",
+    /// )
+    /// .unwrap();
+    /// let check = |sql: &str| {
+    ///     let statement = &Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap()[0];
+    ///     constrainer.validate_statement(&database, statement)
+    /// };
+    /// assert!(check(
+    ///     "SELECT t.id, (SELECT count(*) FROM users AS u WHERE u.team_id = t.id) FROM teams AS t"
+    /// )
+    /// .is_err());
+    /// assert!(check("SELECT t.id FROM teams AS t").is_ok());
+    /// ```
+    UnindexedCorrelatedSelect,
+    LintGroup::Perf,
+    "A scalar subquery in the select list runs once per outer row, and without an index on the column it correlates on each run reads the whole table.",
+    None
+);
+
+impl<DB: DatabaseLike> QueryRule for UnindexedCorrelatedSelect<DB> {
+    type Database = DB;
+
+    fn check_statement(
+        &self,
+        database: &Self::Database,
+        statement: &Statement,
+        reporter: &mut Reporter<'_, Self::Database>,
+    ) -> Result<(), Interruption> {
+        let mut found = Vec::new();
+        check_queries(database, statement, |full, query, _| {
+            let SetExpr::Select(select) = query.body.as_ref() else {
+                return Ok(());
+            };
+            for item in &select.projection {
+                let (SelectItem::UnnamedExpr(Expr::Subquery(subquery))
+                | SelectItem::ExprWithAlias {
+                    expr: Expr::Subquery(subquery),
+                    ..
+                }) = item
+                else {
+                    continue;
+                };
+                found.extend(
+                    unindexed_correlation(database, full, subquery)?
+                        .map(|column| (subquery.to_string(), column)),
+                );
+            }
+            Ok(())
+        })?;
+        for (subquery, (table, column)) in found {
+            reporter.statement(
+                statement,
+                subquery.clone(),
+                format!(
+                    "`({subquery})` runs once per outer row and finds its rows through '{table}.{column}', which leads no index, so each run reads the whole table."
+                ),
+                format!("Create an index on {table} ({column}), or rewrite the subquery as a join."),
+            )?;
+        }
+        Ok(())
+    }
+}

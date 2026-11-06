@@ -5,67 +5,20 @@ use std::ops::ControlFlow;
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinition, ColumnScope, IdentifierCase},
-    traits::{ColumnLike, DatabaseLike, IndexLike, PolicyLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike},
 };
-use sqlparser::ast::{BinaryOperator, Expr, InTarget, Query, Visit, Visitor};
+use sqlparser::ast::{Expr, Query, Visit, Visitor};
 
 use crate::{
     deployment::Deployment,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::policy_support::{derives_from_caller, holds_caller, is_column_reference},
+    rules::{
+        index_support::{Side, comparison_sides, indexed},
+        policy_support::{derives_from_caller, holds_caller, is_column_reference},
+    },
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
-
-/// Calls `visit` with each column side and caller side a comparison an index
-/// can serve may have.
-fn comparison_sides(
-    expression: &Expr,
-    mut visit: impl FnMut(&Expr, Side<'_>) -> Result<(), LookupError>,
-) -> Result<(), LookupError> {
-    match expression {
-        Expr::BinaryOp {
-            left,
-            op:
-                BinaryOperator::Eq
-                | BinaryOperator::Lt
-                | BinaryOperator::LtEq
-                | BinaryOperator::Gt
-                | BinaryOperator::GtEq,
-            right,
-        } => {
-            visit(left, Side::Expr(right))?;
-            visit(right, Side::Expr(left))
-        }
-        Expr::AnyOp {
-            left,
-            compare_op: BinaryOperator::Eq,
-            right,
-            ..
-        } => visit(left, Side::Expr(right)),
-        Expr::In {
-            expr,
-            target: InTarget::List(list),
-            negated: false,
-            ..
-        } => visit(expr, Side::List(list)),
-        Expr::In {
-            expr,
-            target: InTarget::Subquery(subquery),
-            negated: false,
-            ..
-        } => visit(expr, Side::Query(subquery)),
-        _ => Ok(()),
-    }
-}
-
-/// The side of a comparison facing the column.
-#[derive(Clone, Copy)]
-enum Side<'e> {
-    Expr(&'e Expr),
-    List(&'e Vec<Expr>),
-    Query(&'e Query),
-}
 
 /// Finds a column reference.
 struct ColumnReference;
@@ -79,46 +32,6 @@ impl Visitor for ColumnReference {
         }
         ControlFlow::Continue(())
     }
-}
-
-/// The first element of an index, unwrapped from parentheses.
-fn leading(expression: &Expr) -> &Expr {
-    match expression {
-        Expr::Nested(inner) => leading(inner),
-        Expr::Tuple(elements) => elements.first().map_or(expression, leading),
-        _ => expression,
-    }
-}
-
-/// Whether an index without a predicate leads with `column`.
-fn leads<DB: DatabaseLike, I: IndexLike<DB = DB>>(
-    database: &DB,
-    index: &I,
-    column: &DB::Column,
-) -> Result<bool, LookupError> {
-    Ok(index.predicate().is_none()
-        && is_column_reference(leading(index.expression(database)?))
-        && index.columns(database)?.next() == Some(column))
-}
-
-/// Whether an index without a predicate, a unique constraint or the primary
-/// key of `table` leads with `column`.
-fn indexed<DB: DatabaseLike>(
-    database: &DB,
-    table: &DB::Table,
-    column: &DB::Column,
-) -> Result<bool, LookupError> {
-    for index in table.indices(database)? {
-        if leads(database, index, column)? {
-            return Ok(true);
-        }
-    }
-    for index in table.unique_indices(database)? {
-        if leads(database, index, column)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// A column a policy filters on by the caller with no index leading with it.
