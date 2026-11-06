@@ -3,6 +3,7 @@
 use std::{borrow::Cow, collections::HashMap, ops::ControlFlow};
 
 use sql_traits::{
+    structs::FunctionBody,
     traits::{DatabaseLike, FunctionLike},
     utils::identifier_resolution::normalize_identifier,
 };
@@ -217,17 +218,47 @@ impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
             return *writes;
         }
         self.writers.insert(identity.clone(), false);
-        let writes = function.body().is_some_and(|body| self.body_writes(body))
-            || function.body_expression().is_some_and(|body| {
-                let mut writes = Writes {
-                    credentials: self,
-                    found: Vec::new(),
-                };
-                let _ = body.visit(&mut writes);
-                !writes.found.is_empty()
-            });
+        let writes = match function.written_body() {
+            Some(FunctionBody::Text(body)) => self.body_writes(body),
+            Some(FunctionBody::Statements(statements)) => statements
+                .iter()
+                .any(|statement| self.node_writes(statement)),
+            Some(FunctionBody::Expression(expression)) => self.node_writes(expression),
+            Some(FunctionBody::Select(select)) => self.node_writes(select),
+            Some(
+                FunctionBody::Return(_)
+                | FunctionBody::Atomic(_)
+                | FunctionBody::BoundDefinition(_),
+            )
+            | None => {
+                function
+                    .body_expression(self.database)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|body| self.node_writes(body.as_ref()))
+                    || function
+                        .atomic_statements(self.database)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|statements| {
+                            statements
+                                .iter()
+                                .any(|statement| self.node_writes(statement))
+                        })
+            }
+        };
         self.writers.insert(identity, writes);
         writes
+    }
+
+    /// Whether a parsed body writes a credential setting.
+    fn node_writes<V: Visit + ?Sized>(&mut self, node: &V) -> bool {
+        let mut writes = Writes {
+            credentials: self,
+            found: Vec::new(),
+        };
+        let _ = node.visit(&mut writes);
+        !writes.found.is_empty()
     }
 
     /// Whether a function body, in SQL or PL/pgSQL, writes a credential
@@ -344,8 +375,8 @@ impl<DB: DatabaseLike> Visitor for Writes<'_, '_, DB> {
 /// literal, `SET` and `RESET` of a credential setting, `RESET ALL`,
 /// `DISCARD ALL`, and calls to functions whose SQL or PL/pgSQL bodies call
 /// `set_config` or run `SET` or `RESET` that way, directly or through other
-/// calls. A write built in dynamic SQL is not seen, and neither is a body
-/// written `BEGIN ATOMIC`. It needs the deployment's credentials.
+/// calls. A write built in dynamic SQL is not seen. It needs the
+/// deployment's credentials.
 ///
 /// # Example
 ///

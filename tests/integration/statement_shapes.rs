@@ -137,6 +137,10 @@ const LOGINS: &str = "
       RETURN set_config('app.user_id', who, false);
     CREATE FUNCTION touch() RETURNS VOID LANGUAGE sql
       AS $$ UPDATE notes SET body = 'x' WHERE id = 1 $$;
+    CREATE FUNCTION atomic_login(who TEXT) RETURNS TEXT LANGUAGE sql
+      BEGIN ATOMIC SELECT 1; SELECT set_config('app.user_id', who, false); END;
+    CREATE FUNCTION atomic_theme(theme TEXT) RETURNS TEXT LANGUAGE sql
+      BEGIN ATOMIC SELECT set_config('app.theme', theme, false); END;
     CREATE SCHEMA app;
     CREATE FUNCTION app.become_admin() RETURNS VOID LANGUAGE plpgsql AS $$
       BEGIN SET LOCAL app.user_id = 'admin'; END $$;
@@ -178,6 +182,7 @@ fn statements_writing_a_credential_setting_are_reported() {
                 "SELECT forget()",
                 "SELECT returned_login($1)",
                 "SELECT app.sign_in()",
+                "SELECT atomic_login($1)",
                 "SELECT public.sql_login($1)",
             ]
         ),
@@ -198,6 +203,7 @@ fn statements_writing_a_credential_setting_are_reported() {
             vec!["forget()".to_owned()],
             vec!["returned_login($1)".to_owned()],
             vec!["app.sign_in()".to_owned()],
+            vec!["atomic_login($1)".to_owned()],
             vec!["public.sql_login($1)".to_owned()],
         ]
     );
@@ -217,6 +223,7 @@ fn statements_reading_credentials_or_writing_other_settings_pass() {
         "SELECT spin()",
         "SELECT commented()",
         "SELECT touch()",
+        "SELECT atomic_theme('dark')",
         "SELECT app.sql_login($1)",
         "SELECT body FROM notes WHERE owner = current_setting('app.user_id', true)",
     ] {
@@ -224,6 +231,28 @@ fn statements_reading_credentials_or_writing_other_settings_pass() {
             statement_findings(&constrainer, &database, sql),
             [],
             "{sql}"
+        );
+    }
+}
+
+#[test]
+fn credential_bodies_written_as_an_expression_a_select_or_a_block_are_read() {
+    let constrainer = credential_rule();
+    for database in [
+        ParserDB::parse::<sqlparser::dialect::BigQueryDialect>(
+            "CREATE FUNCTION login() AS (set_config('app.user_id', 'alice', false));",
+        ),
+        ParserDB::parse::<sqlparser::dialect::MsSqlDialect>(
+            "CREATE FUNCTION login() RETURNS TABLE AS RETURN SELECT set_config('app.user_id', 'alice', false) AS c;",
+        ),
+        ParserDB::parse::<sqlparser::dialect::MsSqlDialect>(
+            "CREATE FUNCTION login() RETURNS INT AS BEGIN RETURN set_config('app.user_id', 'alice', false); END;",
+        ),
+    ] {
+        let database = database.expect("schema parses");
+        assert_eq!(
+            reported(&constrainer, &database, &["SELECT login()"]),
+            [vec!["login()".to_owned()]]
         );
     }
 }
