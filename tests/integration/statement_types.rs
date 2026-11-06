@@ -61,6 +61,14 @@ fn between_on_a_time_column_is_reported() {
                 &["at BETWEEN $1 AND $2"],
             ),
             (
+                "UPDATE events SET score = score + 1 WHERE at BETWEEN $1 AND $2",
+                &["at BETWEEN $1 AND $2"],
+            ),
+            (
+                "WITH recent AS (SELECT 1 AS one) UPDATE events SET score = 0 WHERE slot BETWEEN $1 AND $2",
+                &["slot BETWEEN $1 AND $2"],
+            ),
+            (
                 "SELECT d.x FROM (SELECT at AS x FROM events) AS d WHERE d.x BETWEEN $1 AND $2",
                 &["d.x BETWEEN $1 AND $2"],
             ),
@@ -95,6 +103,10 @@ fn results_that_depend_on_the_session_time_zone_are_reported() {
         SessionTimeZoneDependence::default(),
         &[
             ("SELECT at::date FROM events", &["at::DATE"]),
+            (
+                "UPDATE events SET day = at::date WHERE id = $1",
+                &["at::DATE"],
+            ),
             ("SELECT CAST(at AS TIME) FROM events", &["CAST(at AS TIME)"]),
             (
                 "SELECT date_trunc('day', at) FROM events",
