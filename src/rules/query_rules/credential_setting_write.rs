@@ -2,7 +2,10 @@
 
 use std::{borrow::Cow, collections::HashMap, ops::ControlFlow};
 
-use sql_traits::traits::{DatabaseLike, FunctionLike};
+use sql_traits::{
+    traits::{DatabaseLike, FunctionLike},
+    utils::identifier_resolution::normalize_identifier,
+};
 use sqlparser::{
     ast::{
         DiscardObject, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectName,
@@ -10,7 +13,7 @@ use sqlparser::{
     },
     dialect::PostgreSqlDialect,
     keywords::Keyword,
-    tokenizer::{Token, Tokenizer},
+    tokenizer::{Token, Tokenizer, Word},
 };
 
 use crate::{
@@ -55,6 +58,38 @@ fn literal_key(function: &Function) -> Option<&str> {
         return Some(key);
     }
     None
+}
+
+/// A setting name as PostgreSQL looks it up, its parts without their
+/// quotes.
+fn setting_name(name: &ObjectName) -> String {
+    let parts: Vec<&str> = name
+        .0
+        .iter()
+        .filter_map(|part| part.as_ident())
+        .map(|ident| ident.value.as_str())
+        .collect();
+    parts.join(".")
+}
+
+/// The number of arguments of the call whose opening parenthesis starts
+/// `tokens`.
+fn token_arguments(tokens: &[&Token]) -> usize {
+    let mut depth = 0_usize;
+    let mut arguments = 0;
+    for token in tokens {
+        match token {
+            Token::LParen => {
+                arguments = arguments.max(usize::from(depth == 1));
+                depth += 1;
+            }
+            Token::RParen if depth == 1 => break,
+            Token::RParen => depth -= 1,
+            Token::Comma if depth == 1 => arguments += 1,
+            _ => arguments = arguments.max(usize::from(depth == 1)),
+        }
+    }
+    arguments
 }
 
 /// Whether `function` calls the function named `name`, in any schema.
@@ -125,7 +160,7 @@ impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
             Statement::Set(Set::SingleAssignment { variable, .. })
             | Statement::Reset(ResetStatement {
                 reset: Reset::ConfigurationParameter(variable),
-            }) => self.key(&variable.to_string()),
+            }) => self.key(&setting_name(variable)),
             Statement::Reset(ResetStatement { reset: Reset::ALL })
             | Statement::Discard {
                 object_type: DiscardObject::ALL,
@@ -134,18 +169,35 @@ impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
         }
     }
 
-    /// Whether a function named `name`, in `schema` when one is given, writes
-    /// a credential setting.
-    fn calls_writer(&mut self, schema: Option<&str>, name: &str) -> bool {
+    /// Whether the function a call to `name` with `arguments` arguments
+    /// reaches writes a credential setting. A call without a schema reaches
+    /// the first schema on the search path that holds a function of that
+    /// name accepting that many arguments.
+    fn calls_writer(&mut self, schema: Option<&str>, name: &str, arguments: usize) -> bool {
         let database = self.database;
-        database
+        let declared_in = |function: &DB::Function, schema: &str| {
+            schema_of(database, function.target_name().schema().map(Cow::Borrowed))
+                .eq_ignore_ascii_case(schema)
+        };
+        let named: Vec<&DB::Function> = database
             .functions()
             .filter(|function| {
                 function.name().eq_ignore_ascii_case(name)
-                    && schema.is_none_or(|schema| {
-                        schema_of(database, function.target_name().schema().map(Cow::Borrowed))
-                            .eq_ignore_ascii_case(schema)
-                    })
+                    && function.accepts_argument_count(arguments)
+            })
+            .collect();
+        let schema = schema.map(Cow::Borrowed).or_else(|| {
+            database
+                .search_path()
+                .map(|(path, quoted)| normalize_identifier(path, quoted))
+                .find(|path| named.iter().any(|function| declared_in(function, path)))
+        });
+        named
+            .into_iter()
+            .filter(|function| {
+                schema
+                    .as_deref()
+                    .is_some_and(|schema| declared_in(function, schema))
             })
             .any(|function| self.writes(function))
     }
@@ -153,7 +205,14 @@ impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
     /// Whether a function's body writes a credential setting, directly or
     /// through the functions it calls.
     fn writes(&mut self, function: &DB::Function) -> bool {
-        let identity = signature(function, self.database);
+        let identity = format!(
+            "{}.{}",
+            schema_of(
+                self.database,
+                function.target_name().schema().map(Cow::Borrowed)
+            ),
+            signature(function, self.database)
+        );
         if let Some(writes) = self.writers.get(&identity) {
             return *writes;
         }
@@ -206,7 +265,7 @@ impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
                 Some((Token::Word(schema), Token::Period)) => Some(schema.value.as_str()),
                 _ => None,
             };
-            return self.calls_writer(schema, &word.value);
+            return self.calls_writer(schema, &word.value, token_arguments(rest));
         }
         let rest = match (word.keyword, rest.first()) {
             (Keyword::SET, Some(Token::Word(scope)))
@@ -224,8 +283,10 @@ impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
         }
         let mut parts = Vec::new();
         let mut rest = rest.iter();
-        while let Some(Token::Word(part)) = rest.next() {
-            parts.push(part.value.as_str());
+        while let Some(Token::Word(Word { value: part, .. }) | Token::DoubleQuotedString(part)) =
+            rest.next()
+        {
+            parts.push(part.as_str());
             if !matches!(rest.next(), Some(Token::Period)) {
                 break;
             }
@@ -256,8 +317,12 @@ impl<DB: DatabaseLike> Visitor for Writes<'_, '_, DB> {
         };
         let write = self.credentials.set_config(function).or_else(|| {
             let (schema, name) = split(&function.name)?;
+            let arguments = match &function.args {
+                FunctionArguments::List(list) => list.args.len(),
+                _ => 0,
+            };
             self.credentials
-                .calls_writer(schema, name)
+                .calls_writer(schema, name, arguments)
                 .then_some(Write::Call)
         });
         if let Some(write) = write {
@@ -279,8 +344,8 @@ impl<DB: DatabaseLike> Visitor for Writes<'_, '_, DB> {
 /// literal, `SET` and `RESET` of a credential setting, `RESET ALL`,
 /// `DISCARD ALL`, and calls to functions whose SQL or PL/pgSQL bodies call
 /// `set_config` or run `SET` or `RESET` that way, directly or through other
-/// calls. A write built in dynamic SQL is not seen. It needs the deployment's
-/// credentials.
+/// calls. A write built in dynamic SQL is not seen, and neither is a body
+/// written `BEGIN ATOMIC`. It needs the deployment's credentials.
 ///
 /// # Example
 ///

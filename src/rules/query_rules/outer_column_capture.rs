@@ -4,13 +4,13 @@ use std::{borrow::Cow, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ColumnDefinitionScope, ColumnScope, IdentifierCase},
+    structs::{ColumnDefinition, ColumnDefinitionScope, ColumnScope, IdentifierCase},
     traits::DatabaseLike,
 };
 use sqlparser::{
     ast::{
-        Delete, Expr, FromTable, Ident, InTarget, Insert, Query, Select, SetExpr, Statement,
-        Update, UpdateTableFromKind, Visit, Visitor,
+        Delete, Expr, FromTable, Ident, InTarget, Insert, ObjectName, Query, Select, SetExpr,
+        Statement, Update, UpdateTableFromKind, Visit, Visitor, With,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -22,24 +22,48 @@ use crate::{
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
 
-/// A `SELECT` over `relations` with `projection` and `selection`, parsed from
-/// its rendering, which gives the subqueries of an `UPDATE` or `DELETE` the
-/// enclosing query they resolve against.
-fn select_over(projection: &str, relations: &[String], selection: Option<&Expr>) -> Option<Query> {
+/// A `SELECT` over `relations` with `projection` and `selection` under
+/// `with`, parsed from its rendering, which gives the subqueries of an
+/// `UPDATE` or `DELETE` the enclosing query they resolve against.
+fn select_over(
+    with: Option<&With>,
+    projection: &str,
+    relations: &[String],
+    selection: Option<&Expr>,
+) -> Option<Query> {
+    let with = with.map_or_else(String::new, |with| format!("{with} "));
     let filter = selection.map_or_else(String::new, |selection| format!(" WHERE {selection}"));
-    let sql = format!("SELECT {projection} FROM {}{filter}", relations.join(", "));
+    let sql = format!(
+        "{with}SELECT {projection} FROM {}{filter}",
+        relations.join(", ")
+    );
     let mut parser = Parser::new(&PostgreSqlDialect {}).try_with_sql(&sql).ok()?;
     parser.parse_query().ok().map(|query| *query)
 }
 
 /// The query whose expression subqueries the rule reads.
 fn root_query(statement: &Statement) -> Option<Cow<'_, Query>> {
+    under(statement, None)
+}
+
+/// The query of `statement` written under `with`, the `WITH` clause of a
+/// query whose body is the data-modifying statement.
+fn under<'s>(statement: &'s Statement, with: Option<&With>) -> Option<Cow<'s, Query>> {
     match statement {
-        Statement::Query(query)
-        | Statement::Insert(Insert {
+        Statement::Query(query) => match query.body.as_ref() {
+            SetExpr::Update(inner) | SetExpr::Delete(inner) | SetExpr::Insert(inner) => {
+                under(inner, query.with.as_ref())
+            }
+            _ => Some(Cow::Borrowed(query)),
+        },
+        Statement::Insert(Insert {
             source: Some(query),
             ..
-        }) => Some(Cow::Borrowed(query)),
+        }) => Some(with.map_or(Cow::Borrowed(query.as_ref()), |with| {
+            let mut query = query.as_ref().clone();
+            query.with.get_or_insert_with(|| with.clone());
+            Cow::Owned(query)
+        })),
         Statement::Update(Update {
             table,
             assignments,
@@ -58,7 +82,7 @@ fn root_query(statement: &Statement) -> Option<Cow<'_, Query>> {
                 .iter()
                 .map(|assignment| assignment.value.to_string())
                 .collect();
-            select_over(&values.join(", "), &relations, selection.as_ref()).map(Cow::Owned)
+            select_over(with, &values.join(", "), &relations, selection.as_ref()).map(Cow::Owned)
         }
         Statement::Delete(Delete {
             from: FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables),
@@ -71,7 +95,7 @@ fn root_query(statement: &Statement) -> Option<Cow<'_, Query>> {
                 .chain(using.iter().flatten())
                 .map(ToString::to_string)
                 .collect();
-            select_over("1", &relations, selection.as_ref()).map(Cow::Owned)
+            select_over(with, "1", &relations, selection.as_ref()).map(Cow::Owned)
         }
         _ => None,
     }
@@ -165,12 +189,30 @@ impl<DB: DatabaseLike> Captures<'_, '_, '_, DB> {
     ) -> Result<(), LookupError> {
         for name in names {
             let reference = Expr::Identifier(name.clone());
-            if local.resolve_column_definition(&reference)?.is_some() {
-                continue;
-            }
+            let opaque = match local.resolve_column_definition(&reference)? {
+                Some(ColumnDefinition::Opaque) => true,
+                Some(_) => continue,
+                None => false,
+            };
             let Some((_, binding)) = outer.resolve_column_binding(&reference)? else {
                 continue;
             };
+            // A name an opaque relation of the subquery may expose, such as a
+            // CTE whose columns the subquery alone cannot see, stays local
+            // when the statement resolves it to a relation of the subquery's
+            // own `FROM` or to no named relation.
+            if opaque
+                && binding.relation().is_none_or(|(relation, quoted)| {
+                    local
+                        .resolve_relation_binding(&ObjectName::from(vec![Ident {
+                            quote_style: quoted.then_some('"'),
+                            ..Ident::new(relation)
+                        }]))
+                        .is_some()
+                })
+            {
+                continue;
+            }
             let column = binding
                 .exposed()
                 .map_or(name.value.as_str(), |(column, _)| column);

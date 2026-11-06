@@ -246,6 +246,74 @@ fn the_credential_rule_is_inactive_without_declared_credentials() {
     );
 }
 
+const SCHEMAS: &str = "
+    CREATE TABLE notes (id INT PRIMARY KEY);
+    CREATE SCHEMA app;
+    CREATE FUNCTION greet(who TEXT) RETURNS VOID LANGUAGE plpgsql AS $$ BEGIN PERFORM 1; END $$;
+    CREATE FUNCTION app.greet(who TEXT) RETURNS VOID LANGUAGE plpgsql AS $$
+      BEGIN PERFORM set_config('app.user_id', who, false); END $$;
+    CREATE FUNCTION sign() RETURNS INT LANGUAGE sql AS $$ SELECT 1 $$;
+    CREATE FUNCTION sign(who TEXT) RETURNS VOID LANGUAGE plpgsql AS $$
+      BEGIN PERFORM set_config('app.user_id', who, false); END $$;
+    CREATE FUNCTION plain_sign() RETURNS INT LANGUAGE plpgsql AS $$ BEGIN RETURN sign(); END $$;
+    CREATE FUNCTION nested_sign() RETURNS VOID LANGUAGE plpgsql AS $$
+      BEGIN PERFORM sign(lower('A')); END $$;
+    CREATE FUNCTION quoted_admin() RETURNS VOID LANGUAGE plpgsql AS $$
+      BEGIN SET \"app\".user_id = 'admin'; END $$;
+    CREATE FUNCTION pair(a TEXT, b TEXT) RETURNS VOID LANGUAGE plpgsql AS $$
+      BEGIN PERFORM set_config('app.user_id', a || b, false); END $$;
+    CREATE FUNCTION relay() RETURNS VOID LANGUAGE plpgsql AS $$
+      BEGIN PERFORM pair('x', 'y'); END $$;";
+
+#[test]
+fn a_call_reaches_the_overload_and_schema_postgresql_picks() {
+    let constrainer = credential_rule();
+    let database = parse(SCHEMAS);
+    assert_eq!(
+        reported(
+            &constrainer,
+            &database,
+            &[
+                "SELECT greet('bob'), app.greet('alice')",
+                "SELECT app.greet('alice'), greet('bob')",
+                "SELECT sign()",
+                "SELECT sign('alice')",
+                "SELECT plain_sign()",
+                "SELECT nested_sign()",
+                "SELECT relay()",
+                "SELECT CURRENT_TIMESTAMP",
+            ]
+        ),
+        [
+            vec!["app.greet('alice')".to_owned()],
+            vec!["app.greet('alice')".to_owned()],
+            vec![],
+            vec!["sign('alice')".to_owned()],
+            vec![],
+            vec!["nested_sign()".to_owned()],
+            vec!["relay()".to_owned()],
+            vec![],
+        ]
+    );
+}
+
+#[test]
+fn quoted_parts_of_a_credential_setting_name_still_name_it() {
+    let constrainer = credential_rule();
+    let database = parse(SCHEMAS);
+    assert_eq!(
+        reported(
+            &constrainer,
+            &database,
+            &["SET \"app\".user_id = 'alice'", "SELECT quoted_admin()"]
+        ),
+        [
+            vec!["SET \"app\".user_id = 'alice'".to_owned()],
+            vec!["quoted_admin()".to_owned()],
+        ]
+    );
+}
+
 const TEAMS: &str = "CREATE TABLE teams (id INT PRIMARY KEY, name TEXT);
     CREATE TABLE banned (team_id INT);
     CREATE TABLE members (user_id INT, team_id INT);";
@@ -284,6 +352,32 @@ fn an_unqualified_name_resolving_outside_its_subquery_is_reported() {
             vec!["SELECT id FROM banned".to_owned()],
             vec!["(SELECT id FROM banned) UNION (SELECT team_id FROM members)".to_owned()],
             vec!["SELECT team_id FROM teams".to_owned()],
+        ]
+    );
+}
+
+#[test]
+fn captures_under_a_with_clause_are_reported() {
+    let constrainer = only(OuterColumnCapture::default());
+    let database = parse(TEAMS);
+    assert_eq!(
+        reported(
+            &constrainer,
+            &database,
+            &[
+                "WITH x AS (SELECT 1 AS one) DELETE FROM teams WHERE id IN (SELECT id FROM banned)",
+                "WITH x AS (SELECT 1 AS one) UPDATE teams SET name = 'x' WHERE id IN (SELECT id FROM banned)",
+                "WITH x AS (SELECT 1 AS one) INSERT INTO members (user_id, team_id) SELECT 1, id FROM teams WHERE id NOT IN (SELECT id FROM banned)",
+                "WITH listed AS (SELECT team_id FROM banned) SELECT id FROM teams WHERE id IN (SELECT id FROM listed)",
+                "WITH listed AS (SELECT team_id FROM banned) DELETE FROM teams WHERE id IN (SELECT team_id FROM listed)",
+            ]
+        ),
+        [
+            vec!["SELECT id FROM banned".to_owned()],
+            vec!["SELECT id FROM banned".to_owned()],
+            vec!["SELECT id FROM banned".to_owned()],
+            vec!["SELECT id FROM listed".to_owned()],
+            vec![],
         ]
     );
 }
