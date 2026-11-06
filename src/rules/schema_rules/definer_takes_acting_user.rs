@@ -222,9 +222,9 @@ impl<DB: DatabaseLike> SchemaRule for DefinerTakesActingUser<DB> {
                 .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok())
                 .unwrap_or_default();
             let _ = statements.visit(&mut reads);
-            let _ = function
-                .body_expression()
-                .map(|body| body.visit(&mut reads));
+            if let Ok(Some(body)) = function.body_expression(database) {
+                let _ = body.as_ref().visit(&mut reads);
+            }
             let (false, Some(compared)) = (reads.reads_credential, reads.compared) else {
                 continue;
             };

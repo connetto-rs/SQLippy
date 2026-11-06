@@ -139,7 +139,8 @@ impl<DB: DatabaseLike> ColumnRule for SerialColumn<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         let table = column.table(database);
-        if !column.is_serial() || is_client_written(database, reporter.deployment(), table) {
+        if !column.is_serial(database) || is_client_written(database, reporter.deployment(), table)
+        {
             return Ok(());
         }
         let name = column.column_name();
@@ -247,7 +248,7 @@ impl<DB: DatabaseLike> ColumnRule for ClientWrittenCounterKey<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         let table = column.table(database);
-        let counted = column.is_serial()
+        let counted = column.is_serial(database)
             || column.identity_generation(database).is_some()
             || defaults_to_nextval(column)
             || (is_integer(database, column) && column.default_value().is_none());

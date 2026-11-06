@@ -1,16 +1,14 @@
 //! Submodule providing the `SubjectSettableAttribute` rule.
 
-use std::{collections::BTreeSet, ops::ControlFlow};
+use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinition, ColumnScope, IdentifierCase},
-    traits::{ColumnLike, DatabaseLike, GrantLike, PolicyLike, TableLike},
-    utils::identifier_resolution::normalize_identifier,
+    traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike},
 };
 use sqlparser::ast::{
-    Action, BinaryOperator, CreatePolicyType, Expr, Ident, InTarget, Query, UnaryOperator, Value,
-    Visit, Visitor,
+    BinaryOperator, CreatePolicyType, Expr, InTarget, Query, UnaryOperator, Value, Visit, Visitor,
 };
 
 use crate::{
@@ -19,10 +17,8 @@ use crate::{
     lint::{LintGroup, Rule, RuleMetadata},
     rules::{
         authority_support::{TableColumn, authority_columns, credential_compared, is_literal},
-        grant_support::{column_grants_on, grantee_names, grants_privilege, reaches_any},
         policy_support::{
-            Command, Stage, applied, conjuncts, covers, held_by_name, is_column_reference,
-            policy_roles,
+            Command, Stage, applied, conjuncts, covers, is_column_reference, policy_roles,
         },
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
@@ -108,7 +104,7 @@ fn names_attribute<DB: DatabaseLike>(
     }
     Ok(is_column_reference(expression)
         && matches!(scope.resolve_column_definition(expression)?,
-            Some(ColumnDefinition::Base { table, column })
+            Some(ColumnDefinition::Base { table, column, .. })
                 if database.table_id(table) == Some(attribute.0)
                     && column.stored_column_name() == attribute.1))
 }
@@ -177,27 +173,13 @@ fn guarded<DB: DatabaseLike>(
     Ok(false)
 }
 
-/// The columns a privilege for `command` names, when it is one.
-fn privilege_columns(command: Command, action: &Action) -> Option<&[Ident]> {
-    match (command, action) {
-        (Command::Insert, Action::Insert { columns })
-        | (Command::Update, Action::Update { columns }) => {
-            Some(columns.as_deref().unwrap_or_default())
-        }
-        _ => None,
-    }
-}
-
-/// Whether the schema takes `command`'s table-wide privilege on `table` from
-/// every role writing through `policy` and grants none of them that privilege
-/// on `attribute`.
+/// Whether the schema proves that every role writing through `policy` lacks
+/// `command`'s privilege on `attribute` of `table`, for an `INSERT` or an
+/// `UPDATE`.
 ///
 /// The writers are the policy's roles, or the declared client roles for a
-/// policy applying to `PUBLIC`. A revocation counts when it names the writer
-/// itself and either names no grantor or names the table's owner, the
-/// grantor of the privileges PostgreSQL creates for a table. A table-wide
-/// grant or a grant of the column reaching the writer, through `PUBLIC` or a
-/// role it inherits from, gives the privilege back.
+/// policy applying to `PUBLIC`. A writer the schema never creates may hold
+/// the privilege from outside it.
 fn withheld<DB: DatabaseLike>(
     database: &DB,
     deployment: &Deployment,
@@ -216,35 +198,17 @@ fn withheld<DB: DatabaseLike>(
     if writers.is_empty() {
         return Ok(false);
     }
-    let owner = table.owner(database)?;
-    let name = attribute.stored_column_name();
     for writer in writers {
-        let held = held_by_name(database, &writer);
-        let writer = BTreeSet::from([writer]);
-        let revoked = table.revoked_privileges(database)?.any(|revoked| {
-            privilege_columns(command, revoked.privilege()).is_some()
-                && grantee_names(revoked.grantee(), &writer)
-                && revoked
-                    .granted_by()
-                    .is_none_or(|grantor| Some(grantor) == owner)
-        });
-        let granted = table.grants(database)?.any(|grant| {
-            reaches_any(database, grant, &held)
-                && grants_privilege(database, grant, |action| {
-                    privilege_columns(command, action).is_some()
-                })
-        });
-        let column_granted = column_grants_on(database, table).any(|grant| {
-            reaches_any(database, grant, &held)
-                && grant
-                    .privileges(database)
-                    .filter_map(|action| privilege_columns(command, action))
-                    .flatten()
-                    .any(|column| {
-                        normalize_identifier(&column.value, column.quote_style.is_some()) == name
-                    })
-        });
-        if !revoked || granted || column_granted {
+        let Some(role) = database.role(&writer) else {
+            return Ok(false);
+        };
+        let possible = table.possible_privileges(role, database)?;
+        let privilege = if command == Command::Insert {
+            &possible.insert
+        } else {
+            &possible.update
+        };
+        if privilege.on_column(attribute) {
             return Ok(false);
         }
     }
@@ -266,12 +230,13 @@ fn withheld<DB: DatabaseLike>(
 /// reading policies grant.
 ///
 /// A restrictive policy for the same command covering the policy's roles
-/// closes the gap when it fixes the column. So does the schema taking the
-/// command's table-wide privilege from the policy's roles, or from the
-/// declared client roles for a policy applying to `PUBLIC`, with a `REVOKE`
-/// that names no grantor or names the table's owner, and granting them no
-/// privilege on the column. A guarding trigger is not recognised and takes an
-/// allowance.
+/// closes the gap when it fixes the column. So does the source proving that
+/// the policy's roles, or the declared client roles for a policy applying to
+/// `PUBLIC`, lack the command's privilege on the column. A parsed schema
+/// proves it with a `REVOKE` of the table-wide privilege that names no
+/// grantor or names the table's owner and no grant of the column, and a
+/// catalog proves it with its access list. A guarding trigger is not
+/// recognised and takes an allowance.
 ///
 /// # Example
 ///

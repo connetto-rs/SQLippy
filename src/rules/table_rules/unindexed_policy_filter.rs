@@ -167,7 +167,7 @@ impl<DB: DatabaseLike> Judge<'_, '_, DB> {
             if !is_column_reference(column) {
                 return Ok(());
             }
-            let Some(ColumnDefinition::Base { table, column }) =
+            let Some(ColumnDefinition::Base { table, column, .. }) =
                 scope.resolve_column_definition(column)?
             else {
                 return Ok(());

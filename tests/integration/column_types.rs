@@ -65,7 +65,8 @@ fn flawed_column_types_are_reported() {
         reported(
             "CREATE TABLE t (a TIMESTAMP, b TIMESTAMP(3) WITHOUT TIME ZONE, c TIMETZ,
                d TIME WITH TIME ZONE, e TIMESTAMPTZ(0), f CHAR(5), g CHARACTER(2), h MONEY,
-               i JSON, j NUMERIC(10, 2), k DECIMAL(5, 1), l JSON[], m TIMESTAMP(0), n NUMERIC(10));"
+               i JSON, j NUMERIC(10, 2), k DECIMAL(5, 1), l JSON[], m TIMESTAMP(0), n NUMERIC(10),
+               o CHAR);"
         ),
         pairs(&[
             ("TimestampWithoutTimeZone", "t.a"),
@@ -77,6 +78,7 @@ fn flawed_column_types_are_reported() {
             ("ZeroPrecisionTimestamp", "t.m"),
             ("BlankPaddedCharacter", "t.f"),
             ("BlankPaddedCharacter", "t.g"),
+            ("BlankPaddedCharacter", "t.o"),
             ("MoneyType", "t.h"),
             ("JsonType", "t.i"),
             ("JsonType", "t.l"),
