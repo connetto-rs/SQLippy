@@ -164,19 +164,32 @@ pub(crate) fn is_random(expression: &Expr) -> bool {
         .is_some_and(|name| name.value.eq_ignore_ascii_case("random")))
 }
 
-/// Calls its function with every query of a statement's root query.
-struct Queries<F>(F);
+/// Calls its function with every query of a statement's root query, and
+/// whether that query is the body of an `EXISTS`.
+struct Queries<F> {
+    check: F,
+    existence: Vec<*const Query>,
+}
 
-impl<F: FnMut(&Query) -> Result<(), LookupError>> Visitor for Queries<F> {
+impl<F: FnMut(&Query, bool) -> Result<(), LookupError>> Visitor for Queries<F> {
     type Break = LookupError;
 
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<LookupError> {
+        if let Expr::Exists { subquery, .. } = expression {
+            self.existence.push(std::ptr::from_ref(subquery.as_ref()));
+        }
+        ControlFlow::Continue(())
+    }
+
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<LookupError> {
-        (self.0)(query).map_or_else(ControlFlow::Break, ControlFlow::Continue)
+        let existence = self.existence.contains(&std::ptr::from_ref(query));
+        (self.check)(query, existence).map_or_else(ControlFlow::Break, ControlFlow::Continue)
     }
 }
 
 /// Calls `check` with every query of a statement, from its root query down,
-/// together with the root query's scope.
+/// together with the root query's scope and whether the query is the body of
+/// an `EXISTS`, which only asks whether it yields a row.
 ///
 /// # Errors
 ///
@@ -184,15 +197,18 @@ impl<F: FnMut(&Query) -> Result<(), LookupError>> Visitor for Queries<F> {
 pub(crate) fn check_queries<DB: DatabaseLike>(
     database: &DB,
     statement: &Statement,
-    mut check: impl FnMut(&ColumnScope<'_, '_, DB>, &Query) -> Result<(), LookupError>,
+    mut check: impl FnMut(&ColumnScope<'_, '_, DB>, &Query, bool) -> Result<(), LookupError>,
 ) -> Result<(), LookupError> {
     let Some(root) = root_query(statement) else {
         return Ok(());
     };
     let scope = ColumnScope::from_query(&root, database, IdentifierCase::Folded)?;
-    root.visit(&mut Queries(|query: &Query| check(&scope, query)))
-        .break_value()
-        .map_or(Ok(()), Err)
+    root.visit(&mut Queries {
+        check: |query: &Query, existence| check(&scope, query, existence),
+        existence: Vec::new(),
+    })
+    .break_value()
+    .map_or(Ok(()), Err)
 }
 
 /// Calls `check` with every `SELECT` of a statement, the query it belongs to
@@ -210,7 +226,7 @@ pub(crate) fn check_selects<DB: DatabaseLike>(
         &Select,
     ) -> Result<(), LookupError>,
 ) -> Result<(), LookupError> {
-    check_queries(database, statement, |scope, query| {
+    check_queries(database, statement, |scope, query, _| {
         selects(&query.body).into_iter().try_for_each(|select| {
             scope
                 .scope_for_select(select)

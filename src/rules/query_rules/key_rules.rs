@@ -8,8 +8,8 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
-    Distinct, Expr, GroupByExpr, LimitClause, Query, Select, SelectItem, SetExpr, Statement, Visit,
-    Visitor,
+    Distinct, Expr, GroupByExpr, JoinOperator, LimitClause, Query, Select, SelectItem, SetExpr,
+    Statement, Visit, Visitor,
 };
 
 use crate::{
@@ -102,9 +102,11 @@ query_rule!(
     /// and with ties on `prio`, `ORDER BY prio LIMIT 2` returned `3,6` and
     /// then `9,3`. A unique key counts when it is unconditional, over plain
     /// columns, and cannot repeat through `NULL`s, and a joined table counts
-    /// as ordered when its key is equal to ordered columns. The rule does not
-    /// report a `WHERE` that pins a whole unique key, a select list of
-    /// constants, or an aggregate without `GROUP BY`. diesel's `.first()` is
+    /// as ordered when its key is equal to ordered columns. A table the select
+    /// list does not read needs no order, since rows that differ only there
+    /// look the same. The rule does not report a `WHERE` that pins a whole
+    /// unique key, a select list of constants, an aggregate without
+    /// `GROUP BY`, or the body of an `EXISTS`. diesel's `.first()` is
     /// `.limit(1)`, so it is reported without `.order(…)` and not after
     /// `.find(id)`.
     ///
@@ -141,8 +143,8 @@ impl<DB: DatabaseLike> QueryRule for UnorderedLimit<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         let mut found = Vec::new();
-        check_queries(database, statement, |scope, query| {
-            let Some(cap) = cap_of(query) else {
+        check_queries(database, statement, |scope, query, existence| {
+            let Some(cap) = cap_of(query).filter(|_| !existence) else {
                 return Ok(());
             };
             let order = order_of(query);
@@ -404,8 +406,14 @@ fn filtering_join<DB: DatabaseLike>(
     scope: &sql_traits::structs::ColumnDefinitionScope<'_, '_, '_, DB>,
     select: &Select,
 ) -> Result<Option<(String, String)>, LookupError> {
-    let (Some(Distinct::Distinct), Some(instances)) =
-        (&select.distinct, instances(database, select))
+    let inner = select.from.iter().flat_map(|from| &from.joins).all(|join| {
+        matches!(
+            join.join_operator,
+            JoinOperator::Join(_) | JoinOperator::Inner(_) | JoinOperator::CrossJoin(_)
+        )
+    });
+    let (Some(Distinct::Distinct), Some(instances), true) =
+        (&select.distinct, instances(database, select), inner)
     else {
         return Ok(None);
     };

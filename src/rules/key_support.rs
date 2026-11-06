@@ -11,10 +11,10 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     BinaryOperator, Distinct, Expr, GroupByExpr, OrderBy, OrderByKind, Query, Select, SelectItem,
-    TableFactor, Visit, Visitor,
+    SelectItemQualifiedWildcardKind, TableFactor, Value, ValueWithSpan, Visit, Visitor,
 };
 
-use crate::rules::policy_support::conjuncts;
+use crate::rules::{policy_support::conjuncts, statement_support::OwnLevel};
 
 /// A column a `SELECT` names: the folded name its relation goes by in the
 /// query, and the column's stored name.
@@ -240,10 +240,79 @@ fn covers<DB: DatabaseLike>(
     Ok(true)
 }
 
+/// The select-list expression an `ORDER BY` or `GROUP BY` key names, the
+/// way PostgreSQL reads a bare key: an ordinal names the output at that
+/// position, and a name an output alias carries names that output. Any other
+/// key, and an ordinal past a wildcard, stands for itself.
+fn target<'s>(select: &'s Select, key: &'s Expr) -> &'s Expr {
+    let output = |item: &'s SelectItem| match item {
+        SelectItem::UnnamedExpr(expression)
+        | SelectItem::ExprWithAlias {
+            expr: expression, ..
+        } => Some(expression),
+        _ => None,
+    };
+    match key {
+        Expr::Value(ValueWithSpan {
+            value: Value::Number(number, _),
+            ..
+        }) => number
+            .parse::<usize>()
+            .ok()
+            .and_then(|position| select.projection.get(..position))
+            .and_then(|before| before.iter().map(output).collect::<Option<Vec<_>>>())
+            .and_then(|outputs| outputs.last().copied())
+            .unwrap_or(key),
+        Expr::Identifier(name) => select
+            .projection
+            .iter()
+            .find_map(|item| match item {
+                SelectItem::ExprWithAlias { expr, alias }
+                    if normalize_identifier(&alias.value, alias.quote_style.is_some())
+                        == normalize_identifier(&name.value, name.quote_style.is_some()) =>
+                {
+                    Some(expr)
+                }
+                _ => None,
+            })
+            .unwrap_or(key),
+        _ => key,
+    }
+}
+
+/// The relations whose columns the select list of `select` reads.
+fn projected<DB: DatabaseLike>(
+    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    select: &Select,
+    instances: &[Instance<'_, DB>],
+) -> Result<Vec<String>, LookupError> {
+    let mut read = Vec::new();
+    for item in &select.projection {
+        match item {
+            SelectItem::Wildcard(_) => {
+                read.extend(instances.iter().map(|instance| instance.name.clone()));
+            }
+            SelectItem::QualifiedWildcard(SelectItemQualifiedWildcardKind::ObjectName(name), _) => {
+                read.extend(name.0.last().and_then(|part| part.as_ident()).map(|ident| {
+                    normalize_identifier(&ident.value, ident.quote_style.is_some()).into_owned()
+                }));
+            }
+            _ => OwnLevel::new(|expression: &Expr| {
+                read.extend(named(scope, expression)?.map(|(relation, _)| relation));
+                Ok(())
+            })
+            .over(item)?,
+        }
+    }
+    Ok(read)
+}
+
 /// Whether `order` gives every row of `select` its own position: each
-/// relation pinned by a unique key that the order or the equalities cover,
-/// or the group keys or the `DISTINCT` list covered. `None` when a `FROM`
-/// item is not a plain catalog table.
+/// relation the select list reads pinned by a unique key that the order or
+/// the equalities cover, or the group keys or the `DISTINCT` list covered.
+/// Rows that differ only in relations the select list does not read look
+/// the same in the result, so those relations need no pin. `None` when a
+/// `FROM` item is not a plain catalog table.
 pub(crate) fn determined<DB: DatabaseLike>(
     database: &DB,
     scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
@@ -253,16 +322,17 @@ pub(crate) fn determined<DB: DatabaseLike>(
     let Some(instances) = instances(database, select) else {
         return Ok(None);
     };
+    let order: Vec<&Expr> = order.iter().map(|key| target(select, key)).collect();
     let equalities = equalities(scope, select)?;
     let mut known = equalities.pinned;
-    for expression in order {
+    for expression in &order {
         known.extend(named(scope, expression)?);
     }
     if let GroupByExpr::Expressions(keys, _) = &select.group_by
         && !keys.is_empty()
     {
-        let keys: Vec<&Expr> = keys.iter().collect();
-        return covers(scope, &keys, order, &known).map(Some);
+        let keys: Vec<&Expr> = keys.iter().map(|key| target(select, key)).collect();
+        return covers(scope, &keys, &order, &known).map(Some);
     }
     if let Some(Distinct::Distinct) = select.distinct {
         let listed: Vec<&Expr> = select
@@ -276,11 +346,15 @@ pub(crate) fn determined<DB: DatabaseLike>(
                 _ => None,
             })
             .collect();
-        if listed.len() == select.projection.len() && covers(scope, &listed, order, &known)? {
+        if listed.len() == select.projection.len() && covers(scope, &listed, &order, &known)? {
             return Ok(Some(true));
         }
     }
-    let mut pinned = vec![false; instances.len()];
+    let read = projected(scope, select, &instances)?;
+    let mut pinned: Vec<bool> = instances
+        .iter()
+        .map(|instance| !read.contains(&instance.name))
+        .collect();
     let mut changed = true;
     while changed {
         changed = false;

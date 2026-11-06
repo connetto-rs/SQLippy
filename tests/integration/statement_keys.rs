@@ -50,6 +50,50 @@ fn an_ambiguous_order_is_a_lookup_failure() {
 }
 
 #[test]
+fn order_keys_and_unread_tables_are_read_as_postgresql_does() {
+    check(
+        UnorderedLimit::default(),
+        &[
+            (
+                "SELECT prio AS id FROM orders ORDER BY id LIMIT 5",
+                &["LIMIT 5"],
+            ),
+            (
+                "SELECT id, prio FROM orders ORDER BY 2 LIMIT 5",
+                &["LIMIT 5"],
+            ),
+            ("SELECT *, id FROM orders ORDER BY 2 LIMIT 5", &["LIMIT 5"]),
+            (
+                "SELECT o.id, c.email FROM orders AS o JOIN customers AS c ON c.id = o.customer_id ORDER BY c.id LIMIT 3",
+                &["LIMIT 3"],
+            ),
+            ("SELECT id FROM orders ORDER BY 1 LIMIT 5", &[]),
+            ("SELECT id AS k FROM orders ORDER BY k LIMIT 5", &[]),
+            (
+                "SELECT team, count(*) FROM customers GROUP BY 1 ORDER BY team LIMIT 5",
+                &[],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id ORDER BY c.id LIMIT 1",
+                &[],
+            ),
+            (
+                "SELECT c.* FROM customers AS c JOIN orders AS o ON o.customer_id = c.id ORDER BY c.id LIMIT 1",
+                &[],
+            ),
+            (
+                "SELECT * FROM customers AS c JOIN orders AS o ON o.customer_id = c.id ORDER BY c.id LIMIT 1",
+                &["LIMIT 1"],
+            ),
+            (
+                "SELECT id FROM customers WHERE EXISTS (SELECT * FROM orders LIMIT 1)",
+                &[],
+            ),
+        ],
+    );
+}
+
+#[test]
 fn a_row_cap_over_rows_the_order_leaves_tied_is_reported() {
     check(
         UnorderedLimit::default(),
@@ -257,6 +301,10 @@ fn distinct_over_the_referenced_side_of_a_join_is_reported() {
             ),
             (
                 "SELECT DISTINCT c.id FROM customers AS c JOIN orders AS o ON o.prio = c.team",
+                &[],
+            ),
+            (
+                "SELECT DISTINCT c.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id",
                 &[],
             ),
             (
