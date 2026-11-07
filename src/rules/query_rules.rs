@@ -12,6 +12,8 @@ macro_rules! query_rule {
 
 mod credential_setting_write;
 pub use credential_setting_write::CredentialSettingWrite;
+mod index_rules;
+pub use index_rules::{ExpressionDefeatsIndex, UnindexedCorrelatedSelect, UnindexedFilter};
 mod key_rules;
 pub use key_rules::{
     DistinctOverReferencedSide, UnlinkedFromItem, UnorderedDistinctOn, UnorderedLimit,

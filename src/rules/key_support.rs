@@ -30,6 +30,18 @@ pub(crate) struct Instance<'db, DB: DatabaseLike> {
     pub(crate) item: usize,
 }
 
+impl<DB: DatabaseLike> Instance<'_, DB> {
+    /// Whether `expression` names a column of this relation, resolved in
+    /// `scope`.
+    pub(crate) fn names(
+        &self,
+        scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+        expression: &Expr,
+    ) -> Result<bool, LookupError> {
+        Ok(named(scope, expression)?.is_some_and(|(relation, _)| relation == self.name))
+    }
+}
+
 /// The relations a `SELECT`'s `FROM` names, or `None` when one of them is
 /// not a plain catalog table, such as a derived table or a function. The
 /// statement's scope resolves these names first, so a name that fails to
