@@ -15,6 +15,7 @@ use sqlparser::ast::Expr;
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
+    rules::policy_support::unnested,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -102,16 +103,10 @@ fn named_columns<'db, I: IndexLike>(
     };
     let names: Vec<_> = entries
         .iter()
-        .filter_map(|entry| {
-            let mut entry = entry;
-            while let Expr::Nested(inner) = entry {
-                entry = inner;
-            }
-            match entry {
-                Expr::Identifier(ident) => Some(ident),
-                Expr::CompoundIdentifier(parts) => parts.last(),
-                _ => None,
-            }
+        .filter_map(|entry| match unnested(entry) {
+            Expr::Identifier(ident) => Some(ident),
+            Expr::CompoundIdentifier(parts) => parts.last(),
+            _ => None,
         })
         .collect();
     Ok(index

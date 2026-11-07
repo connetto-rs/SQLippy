@@ -9,7 +9,7 @@ use sqlparser::ast::{Expr, IndexType};
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::policy_support::is_column_reference,
+    rules::policy_support::{is_column_reference, unnested},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -31,11 +31,7 @@ impl<'db, DB: DatabaseLike> Shape<'db, DB> {
         index: &'db I,
         unique: bool,
     ) -> Result<Option<Self>, LookupError> {
-        let mut expression = index.expression(database)?;
-        while let Expr::Nested(inner) = expression {
-            expression = inner;
-        }
-        let elements: Vec<&Expr> = match expression {
+        let elements: Vec<&Expr> = match unnested(index.expression(database)?) {
             Expr::Tuple(elements) => elements.iter().collect(),
             single => vec![single],
         };
