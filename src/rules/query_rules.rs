@@ -12,11 +12,15 @@ macro_rules! query_rule {
 
 mod credential_setting_write;
 pub use credential_setting_write::CredentialSettingWrite;
+mod key_rules;
+pub use key_rules::{
+    DistinctOverReferencedSide, UnlinkedFromItem, UnorderedDistinctOn, UnorderedLimit,
+};
 mod outer_column_capture;
 pub use outer_column_capture::OuterColumnCapture;
 mod paging_rules;
 pub use paging_rules::{OffsetPaging, RandomOrderLimit};
 mod type_rules;
-mod unfiltered_write;
 pub use type_rules::{SessionTimeZoneDependence, TimestampBetween, TruncatingIntegerDivision};
+mod unfiltered_write;
 pub use unfiltered_write::UnfilteredWrite;

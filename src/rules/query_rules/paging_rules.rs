@@ -10,6 +10,7 @@ use sqlparser::ast::{
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
+    rules::statement_support::{is_random, row_limit},
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
 
@@ -38,16 +39,6 @@ fn queries(statement: &Statement, pick: impl FnMut(&Query) -> Option<String>) ->
     queries.found
 }
 
-/// Whether `expression` calls `random`.
-fn is_random(expression: &Expr) -> bool {
-    matches!(expression, Expr::Function(function) if function
-        .name
-        .0
-        .last()
-        .and_then(|part| part.as_ident())
-        .is_some_and(|name| name.value.eq_ignore_ascii_case("random")))
-}
-
 /// `ORDER BY` and the row cap of a query ordered by `random()` with a cap.
 fn random_pick(query: &Query) -> Option<String> {
     let order_by = query.order_by.as_ref()?;
@@ -55,19 +46,7 @@ fn random_pick(query: &Query) -> Option<String> {
     {
         return None;
     }
-    let cap = match (&query.limit_clause, &query.fetch) {
-        (
-            Some(
-                LimitClause::LimitOffset {
-                    limit: Some(limit), ..
-                }
-                | LimitClause::OffsetCommaLimit { limit, .. },
-            ),
-            _,
-        ) => format!("LIMIT {limit}"),
-        (_, Some(fetch)) => fetch.to_string(),
-        _ => return None,
-    };
+    let cap = row_limit(query).or_else(|| query.fetch.as_ref().map(ToString::to_string))?;
     Some(format!("{order_by} {cap}"))
 }
 

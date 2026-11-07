@@ -10,7 +10,7 @@ use sql_traits::{
 };
 use sqlparser::{
     ast::{
-        Delete, Expr, FromTable, Insert, Query, Select, SetExpr, Statement, Update,
+        Delete, Expr, FromTable, Insert, LimitClause, Query, Select, SetExpr, Statement, Update,
         UpdateTableFromKind, Visit, Visitor, With,
     },
     dialect::PostgreSqlDialect,
@@ -154,15 +154,96 @@ fn selects(body: &SetExpr) -> Vec<&Select> {
     }
 }
 
-/// Calls its function with every query of a statement's root query.
-struct Queries<F>(F);
+/// The `LIMIT` of a query, as written.
+pub(crate) fn row_limit(query: &Query) -> Option<String> {
+    match query.limit_clause.as_ref()? {
+        LimitClause::LimitOffset {
+            limit: Some(limit), ..
+        }
+        | LimitClause::OffsetCommaLimit { limit, .. } => Some(format!("LIMIT {limit}")),
+        LimitClause::LimitOffset { limit: None, .. } => None,
+    }
+}
 
-impl<F: FnMut(&Query) -> Result<(), LookupError>> Visitor for Queries<F> {
+/// Whether `expression` calls `random`.
+pub(crate) fn is_random(expression: &Expr) -> bool {
+    matches!(expression, Expr::Function(function) if function
+        .name
+        .0
+        .last()
+        .and_then(|part| part.as_ident())
+        .is_some_and(|name| name.value.eq_ignore_ascii_case("random")))
+}
+
+/// Calls its function with every query of a statement's root query, and
+/// whether that query is the body of an `EXISTS`.
+struct Queries<F> {
+    check: F,
+    existence: Vec<*const Query>,
+}
+
+impl<F: FnMut(&Query, bool) -> Result<(), LookupError>> Visitor for Queries<F> {
     type Break = LookupError;
 
-    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<LookupError> {
-        (self.0)(query).map_or_else(ControlFlow::Break, ControlFlow::Continue)
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<LookupError> {
+        if let Expr::Exists { subquery, .. } = expression {
+            self.existence.push(std::ptr::from_ref(subquery.as_ref()));
+        }
+        ControlFlow::Continue(())
     }
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<LookupError> {
+        let existence = self.existence.contains(&std::ptr::from_ref(query));
+        (self.check)(query, existence).map_or_else(ControlFlow::Break, ControlFlow::Continue)
+    }
+}
+
+/// Calls `check` with every query of a statement, from its root query down,
+/// together with the root query's scope and whether the query is the body of
+/// an `EXISTS`, which only asks whether it yields a row.
+///
+/// # Errors
+///
+/// Returns the first lookup failure of the scope or of `check`.
+pub(crate) fn check_queries<DB: DatabaseLike>(
+    database: &DB,
+    statement: &Statement,
+    mut check: impl FnMut(&ColumnScope<'_, '_, DB>, &Query, bool) -> Result<(), LookupError>,
+) -> Result<(), LookupError> {
+    let Some(root) = root_query(statement) else {
+        return Ok(());
+    };
+    let scope = ColumnScope::from_query(&root, database, IdentifierCase::Folded)?;
+    root.visit(&mut Queries {
+        check: |query: &Query, existence| check(&scope, query, existence),
+        existence: Vec::new(),
+    })
+    .break_value()
+    .map_or(Ok(()), Err)
+}
+
+/// Calls `check` with every `SELECT` of a statement, the query it belongs to
+/// and the scope its names resolve in.
+///
+/// # Errors
+///
+/// Returns the first lookup failure of the scope or of `check`.
+pub(crate) fn check_selects<DB: DatabaseLike>(
+    database: &DB,
+    statement: &Statement,
+    mut check: impl FnMut(
+        &ColumnDefinitionScope<'_, '_, '_, DB>,
+        &Query,
+        &Select,
+    ) -> Result<(), LookupError>,
+) -> Result<(), LookupError> {
+    check_queries(database, statement, |scope, query, _| {
+        selects(&query.body).into_iter().try_for_each(|select| {
+            scope
+                .scope_for_select(select)
+                .map_or(Ok(()), |local| check(&local, query, select))
+        })
+    })
 }
 
 /// Calls `check` with every expression of every `SELECT` in a statement, at
@@ -176,24 +257,14 @@ pub(crate) fn check_select_expressions<DB: DatabaseLike>(
     statement: &Statement,
     mut check: impl FnMut(&ColumnDefinitionScope<'_, '_, '_, DB>, &Expr) -> Result<(), LookupError>,
 ) -> Result<(), LookupError> {
-    let Some(root) = root_query(statement) else {
-        return Ok(());
-    };
-    let scope = ColumnScope::from_query(&root, database, IdentifierCase::Folded)?;
-    root.visit(&mut Queries(|query: &Query| {
-        selects(&query.body).into_iter().try_for_each(|select| {
-            scope.scope_for_select(select).map_or(Ok(()), |local| {
-                let mut own = OwnLevel::new(|expression: &Expr| check(&local, expression));
-                own.over(&select.projection)?;
-                own.over(&select.from)?;
-                own.over(&select.selection)?;
-                own.over(&select.group_by)?;
-                own.over(&select.having)
-            })
-        })
-    }))
-    .break_value()
-    .map_or(Ok(()), Err)
+    check_selects(database, statement, |local, _, select| {
+        let mut own = OwnLevel::new(|expression: &Expr| check(local, expression));
+        own.over(&select.projection)?;
+        own.over(&select.from)?;
+        own.over(&select.selection)?;
+        own.over(&select.group_by)?;
+        own.over(&select.having)
+    })
 }
 
 /// A finding of a query rule: the text of the statement it names, what the
