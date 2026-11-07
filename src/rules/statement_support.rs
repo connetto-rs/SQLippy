@@ -17,6 +17,8 @@ use sqlparser::{
     parser::Parser,
 };
 
+use crate::{error::Interruption, traits::Reporter};
+
 /// A `SELECT` over `relations` with `projection` and `selection` under
 /// `with`, parsed from its rendering, which gives the expressions of an
 /// `UPDATE` or `DELETE` the query scope they resolve in.
@@ -192,4 +194,38 @@ pub(crate) fn check_select_expressions<DB: DatabaseLike>(
     }))
     .break_value()
     .map_or(Ok(()), Err)
+}
+
+/// A finding of a query rule: the text of the statement it names, what the
+/// text does, and how to fix it.
+#[derive(PartialEq)]
+pub(crate) struct Finding {
+    pub(crate) object: String,
+    pub(crate) message: String,
+    pub(crate) resolution: String,
+}
+
+/// Reports every finding `find` pushes while it reads `statement`, in the
+/// order it pushes them.
+///
+/// # Errors
+///
+/// Returns the first lookup failure of `find`, or the interruption the
+/// reporter asks for.
+pub(crate) fn report<DB: DatabaseLike>(
+    statement: &Statement,
+    reporter: &mut Reporter<'_, DB>,
+    find: impl FnOnce(&mut Vec<Finding>) -> Result<(), LookupError>,
+) -> Result<(), Interruption> {
+    let mut found = Vec::new();
+    find(&mut found)?;
+    for finding in found {
+        reporter.statement(
+            statement,
+            finding.object,
+            finding.message,
+            finding.resolution,
+        )?;
+    }
+    Ok(())
 }

@@ -2,7 +2,10 @@
 //! constrainer API. The behaviour each rule cites was measured on PostgreSQL
 //! 17.11 and 18.6.
 
-use crate::{common::parse, rule_findings::statement_findings};
+use crate::{
+    common::parse,
+    rule_findings::{check_query_rule, statement_findings},
+};
 use sql_rules::prelude::*;
 
 const EVENTS: &str = "CREATE TABLE events (
@@ -16,24 +19,10 @@ const EVENTS: &str = "CREATE TABLE events (
     ratio NUMERIC
 );";
 
-/// Objects `rule` reports on each `(statement, objects)` case, next to the
-/// expected ones.
-fn check<R: QueryRule<Database = ParserDB> + 'static>(rule: R, cases: &[(&str, &[&str])]) {
-    let mut constrainer = GenericConstrainer::default();
-    constrainer.register_query_rule(Box::new(rule));
-    let database = parse(EVENTS);
-    for (sql, expected) in cases {
-        let found: Vec<String> = statement_findings(&constrainer, &database, sql)
-            .into_iter()
-            .map(|(_, _, object)| object)
-            .collect();
-        assert_eq!(found, *expected, "{sql}");
-    }
-}
-
 #[test]
 fn between_on_a_time_column_is_reported() {
-    check(
+    check_query_rule(
+        EVENTS,
         TimestampBetween::default(),
         &[
             (
@@ -99,7 +88,8 @@ fn between_on_a_time_column_is_reported() {
 
 #[test]
 fn results_that_depend_on_the_session_time_zone_are_reported() {
-    check(
+    check_query_rule(
+        EVENTS,
         SessionTimeZoneDependence::default(),
         &[
             ("SELECT at::date FROM events", &["at::DATE"]),
@@ -143,7 +133,8 @@ fn results_that_depend_on_the_session_time_zone_are_reported() {
 
 #[test]
 fn integer_division_scaled_afterwards_is_reported() {
-    check(
+    check_query_rule(
+        EVENTS,
         TruncatingIntegerDivision::default(),
         &[
             (

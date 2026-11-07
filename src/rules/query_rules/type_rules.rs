@@ -14,7 +14,7 @@ use sqlparser::ast::{
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::statement_support::check_select_expressions,
+    rules::statement_support::{Finding, check_select_expressions, report},
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
 
@@ -146,15 +146,16 @@ fn report_findings<DB: DatabaseLike>(
         &Expr,
     ) -> Result<Option<String>, LookupError>,
 ) -> Result<(), Interruption> {
-    let mut found = Vec::new();
-    check_select_expressions(database, statement, |scope, expression| {
-        found.extend(find(scope, expression)?.map(|message| (expression.to_string(), message)));
-        Ok(())
-    })?;
-    for (expression, message) in found {
-        reporter.statement(statement, expression, message, resolution.to_owned())?;
-    }
-    Ok(())
+    report(statement, reporter, |found| {
+        check_select_expressions(database, statement, |scope, expression| {
+            found.extend(find(scope, expression)?.map(|message| Finding {
+                object: expression.to_string(),
+                message,
+                resolution: resolution.to_owned(),
+            }));
+            Ok(())
+        })
+    })
 }
 
 query_rule!(
