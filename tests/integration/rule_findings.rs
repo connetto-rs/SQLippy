@@ -89,3 +89,14 @@ pub fn statement_levels<C: Constrainer<Database = ParserDB>>(
         .map(|(rule, level, _)| (rule, level))
         .collect()
 }
+
+/// Name and missing declaration of every rule `constrainer` holds inactive.
+pub fn inactive_declarations<C: Constrainer<Database = ParserDB>>(
+    constrainer: &C,
+) -> Vec<(&'static str, Declaration)> {
+    constrainer
+        .inactive_rules()
+        .iter()
+        .map(|inactive| (inactive.rule().name, inactive.missing()))
+        .collect()
+}

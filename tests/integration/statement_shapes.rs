@@ -5,7 +5,8 @@
 use crate::{
     common::parse,
     rule_findings::{
-        query_rule, statement, statement_findings, statement_levels, statement_objects,
+        inactive_declarations, query_rule, statement, statement_findings, statement_levels,
+        statement_objects,
     },
 };
 use sql_rules::prelude::*;
@@ -253,11 +254,7 @@ fn the_credential_rule_is_inactive_without_declared_credentials() {
     let constrainer = query_rule(CredentialSettingWrite::default());
     let database = parse(LOGINS);
     assert_eq!(
-        constrainer
-            .inactive_rules()
-            .iter()
-            .map(|inactive| (inactive.rule().name, inactive.missing()))
-            .collect::<Vec<_>>(),
+        inactive_declarations(&constrainer),
         [("CredentialSettingWrite", Declaration::Credentials)]
     );
     assert_eq!(

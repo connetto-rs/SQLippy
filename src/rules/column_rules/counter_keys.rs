@@ -71,59 +71,27 @@ fn defaults_to_nextval<C: ColumnLike>(column: &C) -> bool {
         })
 }
 
-/// Implements the boilerplate of a column rule.
-macro_rules! column_rule {
-    ($name:ident, $group:expr, $rationale:literal, $source:expr) => {
-        impl<DB> Default for $name<DB> {
-            fn default() -> Self {
-                Self(std::marker::PhantomData)
-            }
-        }
-
-        impl<DB: DatabaseLike + 'static> From<$name<DB>> for GenericConstrainer<DB> {
-            fn from(rule: $name<DB>) -> Self {
-                let mut constrainer = GenericConstrainer::default();
-                constrainer.register_column_rule(Box::new(rule));
-                constrainer
-            }
-        }
-
-        impl<DB> Rule for $name<DB> {
-            fn metadata(&self) -> &'static RuleMetadata {
-                static METADATA: RuleMetadata = RuleMetadata {
-                    name: stringify!($name),
-                    group: $group,
-                    rationale: $rationale,
-                    source: $source,
-                };
-                &METADATA
-            }
-        }
-    };
-}
-
-/// Struct defining a rule that reports a `serial`, `smallserial` or
-/// `bigserial` column outside client-written tables.
-///
-/// # Example
-///
-/// ```rust
-/// use sql_rules::prelude::*;
-/// use sqlparser::dialect::PostgreSqlDialect;
-///
-/// let constrainer: GenericConstrainer<ParserDB> = SerialColumn::default().into();
-/// let serial = ParserDB::parse::<PostgreSqlDialect>("CREATE TABLE t (id BIGSERIAL);").unwrap();
-/// assert!(constrainer.validate_schema(&serial).is_err());
-/// let identity = ParserDB::parse::<PostgreSqlDialect>(
-///     "CREATE TABLE t (id BIGINT GENERATED ALWAYS AS IDENTITY);",
-/// )
-/// .unwrap();
-/// assert!(constrainer.validate_schema(&identity).is_ok());
-/// ```
-pub struct SerialColumn<DB>(std::marker::PhantomData<DB>);
-
-column_rule!(
+rule_definition!(
+    /// Struct defining a rule that reports a `serial`, `smallserial` or
+    /// `bigserial` column outside client-written tables.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sql_rules::prelude::*;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    ///
+    /// let constrainer: GenericConstrainer<ParserDB> = SerialColumn::default().into();
+    /// let serial = ParserDB::parse::<PostgreSqlDialect>("CREATE TABLE t (id BIGSERIAL);").unwrap();
+    /// assert!(constrainer.validate_schema(&serial).is_err());
+    /// let identity = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE t (id BIGINT GENERATED ALWAYS AS IDENTITY);",
+    /// )
+    /// .unwrap();
+    /// assert!(constrainer.validate_schema(&identity).is_ok());
+    /// ```
     SerialColumn,
+    register_column_rule,
     LintGroup::Style,
     "A serial column owns a separate sequence that needs its own grants and dependency handling, while an identity column keeps the counter part of the column.",
     Some("https://wiki.postgresql.org/wiki/Don%27t_Do_This")
@@ -153,25 +121,24 @@ impl<DB: DatabaseLike> ColumnRule for SerialColumn<DB> {
     }
 }
 
-/// Struct defining a rule that reports an `integer` or `smallint` primary
-/// key or identity column outside client-written tables.
-///
-/// # Example
-///
-/// ```rust
-/// use sql_rules::prelude::*;
-/// use sqlparser::dialect::PostgreSqlDialect;
-///
-/// let constrainer: GenericConstrainer<ParserDB> = NarrowIntegerKey::default().into();
-/// let narrow = ParserDB::parse::<PostgreSqlDialect>("CREATE TABLE t (id INT PRIMARY KEY);").unwrap();
-/// assert!(constrainer.validate_schema(&narrow).is_err());
-/// let wide = ParserDB::parse::<PostgreSqlDialect>("CREATE TABLE t (id BIGINT PRIMARY KEY);").unwrap();
-/// assert!(constrainer.validate_schema(&wide).is_ok());
-/// ```
-pub struct NarrowIntegerKey<DB>(std::marker::PhantomData<DB>);
-
-column_rule!(
+rule_definition!(
+    /// Struct defining a rule that reports an `integer` or `smallint` primary
+    /// key or identity column outside client-written tables.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sql_rules::prelude::*;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    ///
+    /// let constrainer: GenericConstrainer<ParserDB> = NarrowIntegerKey::default().into();
+    /// let narrow = ParserDB::parse::<PostgreSqlDialect>("CREATE TABLE t (id INT PRIMARY KEY);").unwrap();
+    /// assert!(constrainer.validate_schema(&narrow).is_err());
+    /// let wide = ParserDB::parse::<PostgreSqlDialect>("CREATE TABLE t (id BIGINT PRIMARY KEY);").unwrap();
+    /// assert!(constrainer.validate_schema(&wide).is_ok());
+    /// ```
     NarrowIntegerKey,
+    register_column_rule,
     LintGroup::Pedantic,
     "An integer key overflows at 2,147,483,647 values over the table's lifetime, and a smallint key at 32,767.",
     Some("https://github.com/sbdchd/squawk/blob/master/docs/docs/prefer-bigint-over-int.md")
@@ -204,35 +171,34 @@ impl<DB: DatabaseLike> ColumnRule for NarrowIntegerKey<DB> {
     }
 }
 
-/// Struct defining a rule that reports a primary key column minted by a
-/// counter on a client-written table.
-///
-/// A `serial` or identity column, a default drawing from `nextval`, or an
-/// integer key with no default is minted by a counter. Each replica mints
-/// its own sequence, so two offline clients mint the same key and the server
-/// refuses the second row when it syncs.
-///
-/// # Example
-///
-/// ```rust
-/// use sql_rules::prelude::*;
-/// use sqlparser::dialect::PostgreSqlDialect;
-///
-/// let mut constrainer: GenericConstrainer<ParserDB> = ClientWrittenCounterKey::default().into();
-/// constrainer.set_deployment(Deployment::default().with_client_written_table("public", "notes"));
-/// let counted =
-///     ParserDB::parse::<PostgreSqlDialect>("CREATE TABLE notes (id BIGSERIAL PRIMARY KEY);").unwrap();
-/// assert!(constrainer.validate_schema(&counted).is_err());
-/// let minted = ParserDB::parse::<PostgreSqlDialect>(
-///     "CREATE TABLE notes (id UUID PRIMARY KEY DEFAULT gen_random_uuid());",
-/// )
-/// .unwrap();
-/// assert!(constrainer.validate_schema(&minted).is_ok());
-/// ```
-pub struct ClientWrittenCounterKey<DB>(std::marker::PhantomData<DB>);
-
-column_rule!(
+rule_definition!(
+    /// Struct defining a rule that reports a primary key column minted by a
+    /// counter on a client-written table.
+    ///
+    /// A `serial` or identity column, a default drawing from `nextval`, or an
+    /// integer key with no default is minted by a counter. Each replica mints
+    /// its own sequence, so two offline clients mint the same key and the server
+    /// refuses the second row when it syncs.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sql_rules::prelude::*;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    ///
+    /// let mut constrainer: GenericConstrainer<ParserDB> = ClientWrittenCounterKey::default().into();
+    /// constrainer.set_deployment(Deployment::default().with_client_written_table("public", "notes"));
+    /// let counted =
+    ///     ParserDB::parse::<PostgreSqlDialect>("CREATE TABLE notes (id BIGSERIAL PRIMARY KEY);").unwrap();
+    /// assert!(constrainer.validate_schema(&counted).is_err());
+    /// let minted = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE notes (id UUID PRIMARY KEY DEFAULT gen_random_uuid());",
+    /// )
+    /// .unwrap();
+    /// assert!(constrainer.validate_schema(&minted).is_ok());
+    /// ```
     ClientWrittenCounterKey,
+    register_column_rule,
     LintGroup::Suspicious,
     "Each replica of a client-written table mints its own counter values, so two offline clients mint the same key and the server refuses the second row when it syncs.",
     None
