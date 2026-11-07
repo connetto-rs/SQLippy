@@ -5,7 +5,7 @@ use std::{cell::RefCell, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{FunctionKind, IdentifierCase},
+    structs::IdentifierCase,
     traits::{DatabaseLike, FunctionLike, PolicyLike},
 };
 use sqlparser::ast::{
@@ -14,7 +14,10 @@ use sqlparser::ast::{
     UnaryOperator, Visit, Visitor,
 };
 
-use crate::{deployment::Deployment, rules::policy_support::sql_set_body};
+use crate::{
+    deployment::Deployment,
+    rules::policy_support::{may_aggregate, sql_set_body},
+};
 
 /// Judges the expressions of one policy against the declared credentials.
 pub(crate) struct CredentialJudge<'a, DB: DatabaseLike> {
@@ -381,14 +384,7 @@ impl<DB: DatabaseLike> CredentialJudge<'_, DB> {
     /// Whether a call may run an aggregate: a function it reaches is one, or
     /// it reaches no known function.
     fn may_aggregate(&self, call: &Function) -> Result<bool, LookupError> {
-        let mut known = false;
-        for function in self.reached(call)? {
-            known = true;
-            if function.kind(self.database)? == FunctionKind::Aggregate {
-                return Ok(true);
-            }
-        }
-        Ok(!known)
+        may_aggregate(self.database, self.reached(call)?)
     }
 }
 

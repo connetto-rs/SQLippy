@@ -5,13 +5,14 @@ use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ColumnDefinitionScope, ColumnScope},
+    structs::{ColumnDefinitionScope, ColumnScope, IdentifierCase},
     traits::{ColumnLike, DatabaseLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{
-    BinaryOperator, Distinct, Expr, GroupByExpr, Join, JoinConstraint, JoinOperator, LimitClause,
-    Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement, Visit, Visitor,
+    BinaryOperator, Distinct, DuplicateTreatment, Expr, FunctionArguments, GroupByExpr, Join,
+    JoinConstraint, JoinOperator, LimitClause, Query, Select, SelectItem,
+    SelectItemQualifiedWildcardKind, SetExpr, Statement, Visit, Visitor,
 };
 
 use crate::{
@@ -21,7 +22,7 @@ use crate::{
         key_support::{
             Instance, determined, equalities, equality_keys, instances, named, order_of, references,
         },
-        policy_support::conjuncts,
+        policy_support::{conjuncts, may_aggregate},
         statement_support::{
             Finding, OwnLevel, check_queries, check_scoped_selects, check_selects, is_random,
             report, row_limit,
@@ -508,10 +509,51 @@ impl<DB: DatabaseLike> QueryRule for DistinctOverReferencedSide<DB> {
     }
 }
 
+/// Whether `part` holds, at its own level, a call whose value depends on how
+/// many rows the `FROM` produces: a window call, or a call that may run an
+/// aggregate, unless it is written with `DISTINCT` or is one of the
+/// aggregates a repeated row cannot change.
+fn counts_rows<DB: DatabaseLike, V: Visit + ?Sized>(
+    database: &DB,
+    part: &V,
+) -> Result<bool, LookupError> {
+    let mut counts = false;
+    OwnLevel::new(|expression: &Expr| {
+        let Expr::Function(call) = expression else {
+            return Ok(());
+        };
+        if call.over.is_some() {
+            counts = true;
+            return Ok(());
+        }
+        let distinct = matches!(&call.args, FunctionArguments::List(list)
+            if list.duplicate_treatment == Some(DuplicateTreatment::Distinct));
+        let ignores_repeats = call
+            .name
+            .0
+            .last()
+            .and_then(|part| part.as_ident())
+            .is_some_and(|name| {
+                matches!(
+                    name.value.to_ascii_lowercase().as_str(),
+                    "min" | "max" | "bool_and" | "bool_or" | "every" | "bit_and" | "bit_or"
+                )
+            });
+        if !distinct && !ignores_repeats {
+            let reached = database.functions_reached_by(call, IdentifierCase::Folded)?;
+            counts |= may_aggregate(database, reached)?;
+        }
+        Ok(())
+    })
+    .over(part)?;
+    Ok(counts)
+}
+
 /// Whether anything in `select` outside the join `skip` reads a
 /// column of `instance`: the select list, a wildcard over it, `WHERE`,
 /// `GROUP BY`, `HAVING`, the windows, `DISTINCT ON`, another join's
-/// condition, or the query's `ORDER BY`.
+/// condition, or the query's `ORDER BY`. A call that counts the rows the
+/// join produces reads it too.
 fn read_outside<DB: DatabaseLike>(
     database: &DB,
     full: &ColumnScope<'_, '_, DB>,
@@ -539,13 +581,17 @@ fn read_outside<DB: DatabaseLike>(
             return Ok(true);
         }
     }
+    let ordered = matches!(query.body.as_ref(), SetExpr::Select(_));
     let mut read = instance.read_in(database, full, scope, &select.selection)?
         || instance.read_in(database, full, scope, &select.group_by)?
         || instance.read_in(database, full, scope, &select.having)?
         || instance.read_in(database, full, scope, &select.named_window)?
-        || instance.read_in(database, full, scope, &select.distinct)?;
-    if matches!(query.body.as_ref(), SetExpr::Select(_)) {
-        read |= instance.read_in(database, full, scope, &query.order_by)?;
+        || instance.read_in(database, full, scope, &select.distinct)?
+        || counts_rows(database, &select.projection)?
+        || counts_rows(database, &select.having)?;
+    if ordered {
+        read |= instance.read_in(database, full, scope, &query.order_by)?
+            || counts_rows(database, &query.order_by)?;
     }
     for join in select.from.iter().flat_map(|from| &from.joins) {
         if !std::ptr::eq(join, skip) {
@@ -606,7 +652,12 @@ query_rule!(
     /// `FULL` join is read, and so is the first relation of a `RIGHT` or
     /// `FULL` join. A unique key over nullable columns counts, since an
     /// equality never matches `NULL`, and a partial unique index does not.
-    /// Only joins with an `ON` condition over plain tables are read.
+    /// A window call, or an aggregate other than `min`, `max`, `bool_and`,
+    /// `bool_or`, `every`, `bit_and` and `bit_or` written without `DISTINCT`,
+    /// counts the rows the join produces and reads it, since `count(*)`
+    /// grouped by customer gave 2 for a customer with two orders and 1
+    /// without the join. Only joins with an `ON` condition over plain tables
+    /// are read.
     ///
     /// # Example
     ///

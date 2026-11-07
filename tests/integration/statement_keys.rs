@@ -356,6 +356,21 @@ fn an_outer_join_read_nowhere_that_can_repeat_rows_is_reported() {
                  ON o.customer_id = c.id AND o.prio > 1",
                 &["orders AS o"],
             ),
+            (
+                "SELECT c.id, max(c.id) FROM customers AS c LEFT JOIN orders AS o \
+                 ON o.customer_id = c.id GROUP BY c.id",
+                &["orders AS o"],
+            ),
+            (
+                "SELECT count(DISTINCT c.id) FROM customers AS c LEFT JOIN orders AS o \
+                 ON o.customer_id = c.id",
+                &["orders AS o"],
+            ),
+            (
+                "SELECT lower(c.email) FROM customers AS c LEFT JOIN orders AS o \
+                 ON o.customer_id = c.id",
+                &["orders AS o"],
+            ),
         ],
     );
 }
@@ -366,6 +381,30 @@ fn an_outer_join_read_elsewhere_or_matching_one_row_passes() {
         SHOP,
         UnreadOuterJoin::default(),
         &[
+            (
+                "SELECT c.id, count(*) FROM customers AS c LEFT JOIN orders AS o \
+                 ON o.customer_id = c.id GROUP BY c.id",
+                &[],
+            ),
+            (
+                "SELECT sum(c.id) FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id",
+                &[],
+            ),
+            (
+                "SELECT c.id, count(*) OVER () FROM customers AS c LEFT JOIN orders AS o \
+                 ON o.customer_id = c.id",
+                &[],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id \
+                 GROUP BY c.id HAVING count(*) > 1",
+                &[],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id \
+                 GROUP BY c.id ORDER BY count(*)",
+                &[],
+            ),
             (
                 "SELECT o.id FROM orders AS o LEFT JOIN customers AS c ON c.id = o.customer_id",
                 &[],
