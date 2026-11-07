@@ -5,7 +5,7 @@ use sql_traits::{
     structs::{ColumnDefinition, ColumnDefinitionScope, ColumnScope, IdentifierCase},
     traits::{ColumnLike, DataTypeLike, DatabaseLike, TableLike},
 };
-use sqlparser::ast::{BinaryOperator, DataType, Expr, InTarget, SelectItem, SetExpr, Statement};
+use sqlparser::ast::{BinaryOperator, DataType, Expr, SelectItem, SetExpr, Statement};
 
 use crate::{
     error::Interruption,
@@ -15,7 +15,8 @@ use crate::{
         key_support::{Instance, instances},
         policy_support::{conjuncts, is_column_reference},
         statement_support::{
-            Finding, OwnLevel, check_queries, check_selects, reads_outer, report, selects,
+            Finding, OwnLevel, check_queries, check_scoped_selects, check_selects, reads_outer,
+            report,
         },
     },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
@@ -147,35 +148,6 @@ impl<DB: DatabaseLike> QueryRule for ExpressionDefeatsIndex<DB> {
     }
 }
 
-/// Whether `expression` reads a column of `instance`, itself or through a
-/// subquery it holds.
-fn reads<DB: DatabaseLike>(
-    database: &DB,
-    full: &ColumnScope<'_, '_, DB>,
-    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
-    instance: &Instance<'_, DB>,
-    expression: &Expr,
-) -> Result<bool, LookupError> {
-    let mut read = false;
-    OwnLevel::new(|node: &Expr| {
-        read |= instance.names(scope, node)?;
-        if let Expr::Subquery(query)
-        | Expr::Exists {
-            subquery: query, ..
-        }
-        | Expr::In {
-            target: InTarget::Subquery(query),
-            ..
-        } = node
-        {
-            read |= reads_outer(database, full, query, &instance.name)?;
-        }
-        Ok(())
-    })
-    .over(expression)?;
-    Ok(read)
-}
-
 /// Whether `column` is a column of `instance` that leads an index.
 fn leads_index<DB: DatabaseLike>(
     database: &DB,
@@ -228,7 +200,7 @@ fn servable<DB: DatabaseLike>(
     // counts as a value, volatile calls included. The evaluator tells values
     // an index can look up from calls such as `random()`.
     let value =
-        |other: &Expr| Ok::<_, LookupError>(!reads(database, full, scope, instance, other)?);
+        |other: &Expr| Ok::<_, LookupError>(!instance.read_in(database, full, scope, other)?);
     for conjunct in conjuncts(condition) {
         let served = match conjunct {
             Expr::BinaryOp {
@@ -323,15 +295,12 @@ impl<DB: DatabaseLike> QueryRule for UnindexedFilter<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         report(statement, reporter, |found| {
-            check_queries(database, statement, |full, query, _| {
-                for select in selects(&query.body) {
-                    if let (Some(scope), Some(selection), Some([instance])) = (
-                        full.scope_for_select(select),
-                        &select.selection,
-                        instances(database, select).as_deref(),
-                    ) && !servable(database, full, &scope, instance, selection)?
-                    {
-                        found.push(Finding {
+            check_scoped_selects(database, statement, |full, scope, _, select| {
+                if let (Some(selection), Some([instance])) =
+                    (&select.selection, instances(database, select).as_deref())
+                    && !servable(database, full, scope, instance, selection)?
+                {
+                    found.push(Finding {
                         object: selection.to_string(),
                         message: format!(
                             "The WHERE `{selection}` has no condition an index of '{}' without a predicate can serve, so PostgreSQL reads the whole table.",
@@ -339,7 +308,6 @@ impl<DB: DatabaseLike> QueryRule for UnindexedFilter<DB> {
                         ),
                         resolution: "Add an index on a column the WHERE compares with a value, or keep the scan for a small table.".to_owned(),
                     });
-                    }
                 }
                 Ok(())
             })

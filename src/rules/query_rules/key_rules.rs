@@ -5,21 +5,26 @@ use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
+    structs::{ColumnDefinitionScope, ColumnScope},
     traits::{ColumnLike, DatabaseLike, TableLike},
+    utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{
-    Distinct, Expr, GroupByExpr, JoinOperator, LimitClause, Query, Select, SelectItem, SetExpr,
-    Statement, Visit, Visitor,
+    BinaryOperator, Distinct, Expr, GroupByExpr, Join, JoinConstraint, JoinOperator, LimitClause,
+    Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement, Visit, Visitor,
 };
 
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
     rules::{
-        key_support::{Instance, determined, equalities, instances, named, order_of, references},
+        key_support::{
+            Instance, determined, equalities, equality_keys, instances, named, order_of, references,
+        },
         policy_support::conjuncts,
         statement_support::{
-            Finding, OwnLevel, check_queries, check_selects, is_random, report, row_limit,
+            Finding, OwnLevel, check_queries, check_scoped_selects, check_selects, is_random,
+            report, row_limit,
         },
     },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
@@ -497,6 +502,196 @@ impl<DB: DatabaseLike> QueryRule for DistinctOverReferencedSide<DB> {
                     ),
                     resolution: format!("Select from {parent} WHERE EXISTS (SELECT 1 FROM {child} WHERE …) and drop DISTINCT."),
                 }));
+                Ok(())
+            })
+        })
+    }
+}
+
+/// Whether anything in `select` outside the join `skip` reads a
+/// column of `instance`: the select list, a wildcard over it, `WHERE`,
+/// `GROUP BY`, `HAVING`, the windows, `DISTINCT ON`, another join's
+/// condition, or the query's `ORDER BY`.
+fn read_outside<DB: DatabaseLike>(
+    database: &DB,
+    full: &ColumnScope<'_, '_, DB>,
+    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    query: &Query,
+    select: &Select,
+    instance: &Instance<'_, DB>,
+    skip: &Join,
+) -> Result<bool, LookupError> {
+    for item in &select.projection {
+        let read = match item {
+            SelectItem::Wildcard(_) => true,
+            SelectItem::QualifiedWildcard(SelectItemQualifiedWildcardKind::ObjectName(name), _) => {
+                name.0
+                    .last()
+                    .and_then(|part| part.as_ident())
+                    .is_some_and(|ident| {
+                        normalize_identifier(&ident.value, ident.quote_style.is_some())
+                            == instance.name
+                    })
+            }
+            item => instance.read_in(database, full, scope, item)?,
+        };
+        if read {
+            return Ok(true);
+        }
+    }
+    let mut read = instance.read_in(database, full, scope, &select.selection)?
+        || instance.read_in(database, full, scope, &select.group_by)?
+        || instance.read_in(database, full, scope, &select.having)?
+        || instance.read_in(database, full, scope, &select.named_window)?
+        || instance.read_in(database, full, scope, &select.distinct)?;
+    if matches!(query.body.as_ref(), SetExpr::Select(_)) {
+        read |= instance.read_in(database, full, scope, &query.order_by)?;
+    }
+    for join in select.from.iter().flat_map(|from| &from.joins) {
+        if !std::ptr::eq(join, skip) {
+            read |= instance.read_in(database, full, scope, &join.join_operator)?;
+        }
+    }
+    Ok(read)
+}
+
+/// Whether the equalities of `condition` pin a key of `instance` through
+/// which each row matches at most one of its rows: every key column equal
+/// to something that does not read `instance` itself.
+fn matches_one<DB: DatabaseLike>(
+    database: &DB,
+    full: &ColumnScope<'_, '_, DB>,
+    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    instance: &Instance<'_, DB>,
+    condition: &Expr,
+) -> Result<bool, LookupError> {
+    let mut pinned = Vec::new();
+    for conjunct in conjuncts(condition) {
+        let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } = conjunct
+        else {
+            continue;
+        };
+        for (side, other) in [(left, right), (right, left)] {
+            if let Some((relation, column)) = named(scope, side)?
+                && relation == instance.name
+                && !instance.read_in(database, full, scope, other.as_ref())?
+            {
+                pinned.push(column);
+            }
+        }
+    }
+    Ok(equality_keys(database, instance.table)?.iter().any(|key| {
+        key.iter().all(|column| {
+            pinned
+                .iter()
+                .any(|pinned| *pinned == column.stored_column_name())
+        })
+    }))
+}
+
+query_rule!(
+    /// Struct defining a rule that reports an outer join whose
+    /// null-extended relation nothing outside the join condition reads,
+    /// when the condition pins no unique key of it.
+    ///
+    /// Each row on the other side then repeats once per matching row and the
+    /// join adds nothing else. Measured on PostgreSQL 17.11 and 18.6, three
+    /// `people` rows `LEFT JOIN teams ON teams.id = people.team` returned 5
+    /// rows when two `teams` rows had id 1, and 3 rows on a primary key, where
+    /// `EXPLAIN` showed the join removed. The joined relation of a `LEFT` or
+    /// `FULL` join is read, and so is the first relation of a `RIGHT` or
+    /// `FULL` join. A unique key over nullable columns counts, since an
+    /// equality never matches `NULL`, and a partial unique index does not.
+    /// Only joins with an `ON` condition over plain tables are read.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sql_rules::prelude::*;
+    /// use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+    ///
+    /// let constrainer: GenericConstrainer<ParserDB> = UnreadOuterJoin::default().into();
+    /// let database = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE a (id INT PRIMARY KEY); CREATE TABLE b (a_id INT);",
+    /// )
+    /// .unwrap();
+    /// let check = |sql: &str| {
+    ///     let statement = &Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap()[0];
+    ///     constrainer.validate_statement(&database, statement)
+    /// };
+    /// assert!(check("SELECT a.id FROM a LEFT JOIN b ON b.a_id = a.id").is_err());
+    /// assert!(check("SELECT b.a_id FROM b LEFT JOIN a ON a.id = b.a_id").is_ok());
+    /// ```
+    UnreadOuterJoin,
+    LintGroup::Suspicious,
+    "An outer join that nothing else reads and whose condition pins no unique key repeats each row once per match while adding nothing else.",
+    None
+);
+
+impl<DB: DatabaseLike> QueryRule for UnreadOuterJoin<DB> {
+    type Database = DB;
+
+    fn check_statement(
+        &self,
+        database: &Self::Database,
+        statement: &Statement,
+        reporter: &mut Reporter<'_, Self::Database>,
+    ) -> Result<(), Interruption> {
+        report(statement, reporter, |found| {
+            check_scoped_selects(database, statement, |full, scope, query, select| {
+                let Some(instances) = instances(database, select) else {
+                    return Ok(());
+                };
+                let mut position = 0;
+                for from in &select.from {
+                    let first = position;
+                    position += 1;
+                    for (index, join) in from.joins.iter().enumerate() {
+                        let joined = position;
+                        position += 1;
+                        let (extends_left, condition) = match &join.join_operator {
+                            JoinOperator::Left(JoinConstraint::On(condition))
+                            | JoinOperator::LeftOuter(JoinConstraint::On(condition)) => {
+                                (None, condition)
+                            }
+                            JoinOperator::Right(JoinConstraint::On(condition))
+                            | JoinOperator::RightOuter(JoinConstraint::On(condition)) => {
+                                (Some(false), condition)
+                            }
+                            JoinOperator::FullOuter(JoinConstraint::On(condition)) => {
+                                (Some(true), condition)
+                            }
+                            _ => continue,
+                        };
+                        let mut sides = Vec::new();
+                        if extends_left != Some(false) {
+                            sides.push((joined, &join.relation));
+                        }
+                        if extends_left.is_some() && index == 0 {
+                            sides.push((first, &from.relation));
+                        }
+                        for (side, factor) in sides {
+                            let instance = &instances[side];
+                            if read_outside(database, full, scope, query, select, instance, join)?
+                                || matches_one(database, full, scope, instance, condition)?
+                            {
+                                continue;
+                            }
+                            let table = instance.table.table_name();
+                            found.push(Finding {
+                                object: factor.to_string(),
+                                message: format!(
+                                    "`{factor}` is outer joined on `{condition}`, which pins no unique key of '{table}', and nothing else reads it, so each row repeats once per matching row of '{table}'."
+                                ),
+                                resolution: "Remove the join, or test for a matching row with EXISTS.".to_owned(),
+                            });
+                        }
+                    }
+                }
                 Ok(())
             })
         })
