@@ -2,8 +2,12 @@
 //! the public constrainer API. The behaviour each rule cites was measured on
 //! PostgreSQL 17.11 and 18.6.
 
-use crate::rule_findings::check_query_rule;
+use crate::{
+    common::parse,
+    rule_findings::{check_query_rule, query_rule},
+};
 use sql_rules::prelude::*;
+use sqlparser::{dialect::GenericDialect, parser::Parser};
 
 const PEOPLE: &str = "
     CREATE TABLE people (id INT PRIMARY KEY, name TEXT, team INT);
@@ -51,6 +55,15 @@ fn a_grouping_or_window_name_bound_to_an_input_column_instead_of_its_alias_is_re
                 "SELECT * FROM (SELECT lower(name) AS name, count(*) FROM people GROUP BY name) AS g",
                 &["name"],
             ),
+            (
+                "SELECT lower(name) AS name, count(*) FROM people GROUP BY GROUPING SETS ((name), (name, team))",
+                &["name"],
+            ),
+            (
+                "SELECT lower(name) AS name, count(*) FROM people GROUP BY name \
+                 UNION SELECT label, 1 FROM teams",
+                &["name"],
+            ),
         ],
     );
 }
@@ -87,11 +100,45 @@ fn names_bound_as_the_author_wrote_them_pass() {
                 &[],
             ),
             (
+                "SELECT lower(name) AS name, count(*) FROM people GROUP BY ROLLUP (lower(name))",
+                &[],
+            ),
+            ("SELECT lower(name) AS name FROM people GROUP BY ALL", &[]),
+            (
+                "SELECT lower(name) AS name, row_number() OVER (PARTITION BY lower(name)) FROM people",
+                &[],
+            ),
+            (
                 "SELECT id, row_number() OVER (PARTITION BY team ORDER BY id) FROM people",
                 &[],
             ),
         ],
     );
+}
+
+/// A dialect that lets one named window refer to another reads the names of
+/// the window it refers to once, under that window's own definition.
+#[test]
+fn a_window_named_after_another_holds_no_names_of_its_own() {
+    let constrainer = query_rule(AliasShadowedByColumn::default());
+    let database = parse(PEOPLE);
+    let [statement] = Parser::parse_sql(
+        &GenericDialect {},
+        "SELECT p.team AS id, row_number() OVER v FROM people AS p \
+         WINDOW w AS (PARTITION BY id), v AS w",
+    )
+    .expect("statement parses")
+    .try_into()
+    .expect("one statement");
+    let found: Vec<String> = constrainer
+        .statement_diagnostics(&database, &statement)
+        .into_iter()
+        .map(|error| match error {
+            Error::Violation(violation) => violation.object().to_owned(),
+            other => panic!("unexpected failure: {other}"),
+        })
+        .collect();
+    assert_eq!(found, ["id"]);
 }
 
 #[test]
