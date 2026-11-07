@@ -4,9 +4,9 @@
 
 use std::ops::ControlFlow;
 
-use crate::rule_findings::findings;
+use crate::rule_findings::{findings, statement};
 use sql_rules::prelude::*;
-use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
+use sqlparser::dialect::PostgreSqlDialect;
 
 const PAIRS: &str = "CREATE TABLE a (id INT NOT NULL, team INT);
     CREATE TABLE b (a_id INT, team INT NOT NULL);";
@@ -15,32 +15,11 @@ fn schema() -> ParserDB {
     ParserDB::parse::<PostgreSqlDialect>(PAIRS).expect("schema parses")
 }
 
-fn statement(sql: &str) -> Statement {
-    let [statement] = Parser::parse_sql(&PostgreSqlDialect {}, sql)
-        .expect("statement parses")
-        .try_into()
-        .expect("one statement");
-    statement
-}
-
-/// Rule, level and object of every violation a statement raises, failing on
-/// anything else.
 fn statement_findings<C: Constrainer<Database = ParserDB>>(
     constrainer: &C,
     sql: &str,
 ) -> Vec<(&'static str, Level, String)> {
-    constrainer
-        .statement_diagnostics(&schema(), &statement(sql))
-        .into_iter()
-        .map(|error| match error {
-            Error::Violation(violation) => (
-                violation.rule().name,
-                violation.level(),
-                violation.object().to_owned(),
-            ),
-            other => panic!("unexpected failure: {other}"),
-        })
-        .collect()
+    crate::rule_findings::statement_findings(constrainer, &schema(), sql)
 }
 
 fn not_in_rules() -> GenericConstrainer<ParserDB> {

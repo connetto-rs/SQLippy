@@ -2,7 +2,10 @@
 //! policies that get around row-level security, observed through the public
 //! constrainer API.
 
-use crate::common::{finding, findings, parse, supabase};
+use crate::{
+    common::{finding, findings, parse, supabase},
+    rule_findings::inactive_declarations,
+};
 use sql_rules::prelude::*;
 
 const DOCS: &str = "
@@ -290,11 +293,7 @@ fn bypass_rules_wait_for_a_declared_client_role() {
         ClientRoleBypassesRowLevelSecurity::default().into();
     constrainer.register_schema_rule(Box::new(SettableMembershipInBypassingRole::default()));
     assert_eq!(
-        constrainer
-            .inactive_rules()
-            .iter()
-            .map(|inactive| (inactive.rule().name, inactive.missing()))
-            .collect::<Vec<_>>(),
+        inactive_declarations(&constrainer),
         [
             (
                 "ClientRoleBypassesRowLevelSecurity",

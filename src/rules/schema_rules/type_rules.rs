@@ -138,34 +138,7 @@ macro_rules! type_rule {
         $name:ident, $group:expr, $rationale:literal, $source:expr,
         $wording:expr
     ) => {
-        $(#[$doc])*
-        pub struct $name<DB>(std::marker::PhantomData<DB>);
-
-        impl<DB> Default for $name<DB> {
-            fn default() -> Self {
-                Self(std::marker::PhantomData)
-            }
-        }
-
-        impl<DB: DatabaseLike + 'static> From<$name<DB>> for GenericConstrainer<DB> {
-            fn from(rule: $name<DB>) -> Self {
-                let mut constrainer = GenericConstrainer::default();
-                constrainer.register_schema_rule(Box::new(rule));
-                constrainer
-            }
-        }
-
-        impl<DB> Rule for $name<DB> {
-            fn metadata(&self) -> &'static RuleMetadata {
-                static METADATA: RuleMetadata = RuleMetadata {
-                    name: stringify!($name),
-                    group: $group,
-                    rationale: $rationale,
-                    source: $source,
-                };
-                &METADATA
-            }
-        }
+        rule_definition!($(#[$doc])* $name, register_schema_rule, $group, $rationale, $source);
 
         impl<DB: DatabaseLike> SchemaRule for $name<DB> {
             type Database = DB;
