@@ -2,7 +2,10 @@
 //! constrainer API. The behaviour each rule cites was measured on PostgreSQL
 //! 17.11 and 18.6.
 
-use crate::{common::parse, rule_findings::statement_findings};
+use crate::{
+    common::parse,
+    rule_findings::{check_query_rule, statement_levels},
+};
 use sql_rules::prelude::*;
 
 const USERS: &str = "
@@ -24,23 +27,10 @@ const USERS: &str = "
     CREATE INDEX users_upper_handle ON users (UPPER(handle));
     CREATE TABLE plain (a INT, b INT);";
 
-/// Checks the objects `rule` reports on each `(statement, objects)` case.
-fn check<R: QueryRule<Database = ParserDB> + 'static>(rule: R, cases: &[(&str, &[&str])]) {
-    let mut constrainer = GenericConstrainer::default();
-    constrainer.register_query_rule(Box::new(rule));
-    let database = parse(USERS);
-    for (sql, expected) in cases {
-        let found: Vec<String> = statement_findings(&constrainer, &database, sql)
-            .into_iter()
-            .map(|(_, _, object)| object)
-            .collect();
-        assert_eq!(found, *expected, "{sql}");
-    }
-}
-
 #[test]
 fn an_expression_around_an_indexed_column_is_reported() {
-    check(
+    check_query_rule(
+        USERS,
         ExpressionDefeatsIndex::default(),
         &[
             (
@@ -104,7 +94,8 @@ fn an_expression_around_an_indexed_column_is_reported() {
 
 #[test]
 fn a_where_no_index_can_serve_is_reported() {
-    check(
+    check_query_rule(
+        USERS,
         UnindexedFilter::default(),
         &[
             ("SELECT id FROM users WHERE score = 1", &["score = 1"]),
@@ -186,7 +177,8 @@ fn a_where_no_index_can_serve_is_reported() {
 
 #[test]
 fn a_correlated_select_list_subquery_over_an_unindexed_column_is_reported() {
-    check(
+    check_query_rule(
+        USERS,
         UnindexedCorrelatedSelect::default(),
         &[
             (
@@ -226,12 +218,8 @@ fn the_default_constrainer_runs_index_rules_at_their_group_levels() {
     let mut constrainer = DefaultConstrainer::<ParserDB>::default();
     let database = parse(USERS);
     let sql = "SELECT id, (SELECT count(*) FROM plain WHERE plain.a = users.id) FROM users WHERE lower(email) = $1";
-    let rules = |constrainer: &DefaultConstrainer<ParserDB>| {
-        statement_findings(constrainer, &database, sql)
-            .into_iter()
-            .map(|(rule, level, _)| (rule, level))
-            .collect::<Vec<_>>()
-    };
+    let rules =
+        |constrainer: &DefaultConstrainer<ParserDB>| statement_levels(constrainer, &database, sql);
     assert_eq!(
         rules(&constrainer),
         [

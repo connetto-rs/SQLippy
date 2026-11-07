@@ -118,6 +118,16 @@ impl<F: FnMut(&Expr) -> Result<(), LookupError>> OwnLevel<F> {
     pub(crate) fn over<V: Visit + ?Sized>(&mut self, part: &V) -> Result<(), LookupError> {
         part.visit(self).break_value().map_or(Ok(()), Err)
     }
+
+    /// Runs `check` over every clause of `select` that holds expressions:
+    /// the select list, `FROM`, `WHERE`, `GROUP BY` and `HAVING`.
+    pub(crate) fn over_select(&mut self, select: &Select) -> Result<(), LookupError> {
+        self.over(&select.projection)?;
+        self.over(&select.from)?;
+        self.over(&select.selection)?;
+        self.over(&select.group_by)?;
+        self.over(&select.having)
+    }
 }
 
 impl<F: FnMut(&Expr) -> Result<(), LookupError>> Visitor for OwnLevel<F> {
@@ -189,7 +199,7 @@ pub(crate) fn reads_outer<DB: DatabaseLike>(
                         .scope_for_select(select)
                         .zip(full.scope_for_select(select));
                     scopes.map_or(Ok(()), |(inner, outer)| {
-                        let mut own = OwnLevel::new(|expression: &Expr| {
+                        OwnLevel::new(|expression: &Expr| {
                             if crate::rules::policy_support::is_column_reference(expression)
                                 && inner.resolve_column_definition(expression)?.is_none()
                             {
@@ -201,12 +211,8 @@ pub(crate) fn reads_outer<DB: DatabaseLike>(
                                     });
                             }
                             Ok(())
-                        });
-                        own.over(&select.projection)?;
-                        own.over(&select.from)?;
-                        own.over(&select.selection)?;
-                        own.over(&select.group_by)?;
-                        own.over(&select.having)
+                        })
+                        .over_select(select)
                     })
                 })
             },
@@ -309,12 +315,7 @@ pub(crate) fn check_select_expressions<DB: DatabaseLike>(
     mut check: impl FnMut(&ColumnDefinitionScope<'_, '_, '_, DB>, &Expr) -> Result<(), LookupError>,
 ) -> Result<(), LookupError> {
     check_selects(database, statement, |local, _, select| {
-        let mut own = OwnLevel::new(|expression: &Expr| check(local, expression));
-        own.over(&select.projection)?;
-        own.over(&select.from)?;
-        own.over(&select.selection)?;
-        own.over(&select.group_by)?;
-        own.over(&select.having)
+        OwnLevel::new(|expression: &Expr| check(local, expression)).over_select(select)
     })
 }
 

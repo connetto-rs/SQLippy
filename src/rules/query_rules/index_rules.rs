@@ -12,9 +12,11 @@ use crate::{
     lint::{LintGroup, Rule, RuleMetadata},
     rules::{
         index_support::{Side, comparison_sides, expression_indexed, indexed, leading},
-        key_support::{Instance, instances, named},
+        key_support::{Instance, instances},
         policy_support::{conjuncts, is_column_reference},
-        statement_support::{OwnLevel, check_queries, check_selects, reads_outer, selects},
+        statement_support::{
+            Finding, OwnLevel, check_queries, check_selects, reads_outer, report, selects,
+        },
     },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
@@ -120,32 +122,28 @@ impl<DB: DatabaseLike> QueryRule for ExpressionDefeatsIndex<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let mut found: Vec<(String, String)> = Vec::new();
-        check_selects(database, statement, |scope, _, select| {
-            OwnLevel::new(|expression: &Expr| {
-                comparison_sides(expression, |column_side, _| {
-                    if let Some(column) = defeated(database, scope, column_side)? {
-                        let finding = (column_side.to_string(), column);
-                        if !found.contains(&finding) {
-                            found.push(finding);
+        report(statement, reporter, |found| {
+            check_selects(database, statement, |scope, _, select| {
+                OwnLevel::new(|expression: &Expr| {
+                    comparison_sides(expression, |column_side, _| {
+                        if let Some(column) = defeated(database, scope, column_side)? {
+                            let finding = Finding {
+                                object: column_side.to_string(),
+                                message: format!(
+                                    "`{column_side}` wraps '{column}', which leads an index, so PostgreSQL cannot use that index for the comparison and reads the whole table."
+                                ),
+                                resolution: "Compare the bare column and move the computation to the other side, or create an index on the expression when it is immutable.".to_owned(),
+                            };
+                            if !found.contains(&finding) {
+                                found.push(finding);
+                            }
                         }
-                    }
-                    Ok(())
+                        Ok(())
+                    })
                 })
+                .over(&select.selection)
             })
-            .over(&select.selection)
-        })?;
-        for (expression, column) in found {
-            reporter.statement(
-                statement,
-                expression.clone(),
-                format!(
-                    "`{expression}` wraps '{column}', which leads an index, so PostgreSQL cannot use that index for the comparison and reads the whole table."
-                ),
-                "Compare the bare column and move the computation to the other side, or create an index on the expression when it is immutable.".to_owned(),
-            )?;
-        }
-        Ok(())
+        })
     }
 }
 
@@ -160,7 +158,7 @@ fn reads<DB: DatabaseLike>(
 ) -> Result<bool, LookupError> {
     let mut read = false;
     OwnLevel::new(|node: &Expr| {
-        read |= named(scope, node)?.is_some_and(|(relation, _)| relation == instance.name);
+        read |= instance.names(scope, node)?;
         if let Expr::Subquery(query)
         | Expr::Exists {
             subquery: query, ..
@@ -185,8 +183,7 @@ fn leads_index<DB: DatabaseLike>(
     instance: &Instance<'_, DB>,
     column: &Expr,
 ) -> Result<bool, LookupError> {
-    if let Some((relation, _)) = named(scope, column)?
-        && relation == instance.name
+    if instance.names(scope, column)?
         && let Some(ColumnDefinition::Base { table, column, .. }) =
             scope.resolve_column_definition(column)?
     {
@@ -211,7 +208,7 @@ fn serves<DB: DatabaseLike>(
     let columns = own_columns(side)?;
     let mut own = !columns.is_empty();
     for column in &columns {
-        own &= named(scope, column)?.is_some_and(|(relation, _)| relation == instance.name);
+        own &= instance.names(scope, column)?;
     }
     Ok(own && expression_indexed(database, instance.table, side)?)
 }
@@ -325,34 +322,28 @@ impl<DB: DatabaseLike> QueryRule for UnindexedFilter<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let mut found = Vec::new();
-        check_queries(database, statement, |full, query, _| {
-            for select in selects(&query.body) {
-                if let (Some(scope), Some(selection), Some([instance])) = (
-                    full.scope_for_select(select),
-                    &select.selection,
-                    instances(database, select).as_deref(),
-                ) && !servable(database, full, &scope, instance, selection)?
-                {
-                    found.push((
-                        selection.to_string(),
-                        instance.table.table_name().to_owned(),
-                    ));
+        report(statement, reporter, |found| {
+            check_queries(database, statement, |full, query, _| {
+                for select in selects(&query.body) {
+                    if let (Some(scope), Some(selection), Some([instance])) = (
+                        full.scope_for_select(select),
+                        &select.selection,
+                        instances(database, select).as_deref(),
+                    ) && !servable(database, full, &scope, instance, selection)?
+                    {
+                        found.push(Finding {
+                        object: selection.to_string(),
+                        message: format!(
+                            "The WHERE `{selection}` has no condition an index of '{}' without a predicate can serve, so PostgreSQL reads the whole table.",
+                            instance.table.table_name()
+                        ),
+                        resolution: "Add an index on a column the WHERE compares with a value, or keep the scan for a small table.".to_owned(),
+                    });
+                    }
                 }
-            }
-            Ok(())
-        })?;
-        for (selection, table) in found {
-            reporter.statement(
-                statement,
-                selection.clone(),
-                format!(
-                    "The WHERE `{selection}` has no condition an index of '{table}' without a predicate can serve, so PostgreSQL reads the whole table."
-                ),
-                "Add an index on a column the WHERE compares with a value, or keep the scan for a small table.".to_owned(),
-            )?;
-        }
-        Ok(())
+                Ok(())
+            })
+        })
     }
 }
 
@@ -446,37 +437,30 @@ impl<DB: DatabaseLike> QueryRule for UnindexedCorrelatedSelect<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let mut found = Vec::new();
-        check_queries(database, statement, |full, query, _| {
-            let SetExpr::Select(select) = query.body.as_ref() else {
-                return Ok(());
-            };
-            for item in &select.projection {
-                let (SelectItem::UnnamedExpr(Expr::Subquery(subquery))
-                | SelectItem::ExprWithAlias {
-                    expr: Expr::Subquery(subquery),
-                    ..
-                }) = item
-                else {
-                    continue;
+        report(statement, reporter, |found| {
+            check_queries(database, statement, |full, query, _| {
+                let SetExpr::Select(select) = query.body.as_ref() else {
+                    return Ok(());
                 };
-                found.extend(
-                    unindexed_correlation(database, full, subquery)?
-                        .map(|column| (subquery.to_string(), column)),
-                );
-            }
-            Ok(())
-        })?;
-        for (subquery, (table, column)) in found {
-            reporter.statement(
-                statement,
-                subquery.clone(),
-                format!(
-                    "`({subquery})` runs once per outer row and finds its rows through '{table}.{column}', which leads no index, so each run reads the whole table."
-                ),
-                format!("Create an index on {table} ({column}), or rewrite the subquery as a join."),
-            )?;
-        }
-        Ok(())
+                for item in &select.projection {
+                    let (SelectItem::UnnamedExpr(Expr::Subquery(subquery))
+                    | SelectItem::ExprWithAlias {
+                        expr: Expr::Subquery(subquery),
+                        ..
+                    }) = item
+                    else {
+                        continue;
+                    };
+                    found.extend(unindexed_correlation(database, full, subquery)?.map(|(table, column)| Finding {
+                    object: subquery.to_string(),
+                    message: format!(
+                        "`({subquery})` runs once per outer row and finds its rows through '{table}.{column}', which leads no index, so each run reads the whole table."
+                    ),
+                    resolution: format!("Create an index on {table} ({column}), or rewrite the subquery as a join."),
+                }));
+                }
+                Ok(())
+            })
+        })
     }
 }
