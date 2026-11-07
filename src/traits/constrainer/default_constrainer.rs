@@ -19,9 +19,9 @@ use crate::{
         NoForbiddenColumnInExtension, NoNegationCheckRule, NoRustKeywordColumnName,
         NoRustKeywordForeignKeyName, NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension,
         NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule,
-        NonRedundantExtensionDag, NotInNullableSubquery, NullableCompositeForeignKey,
-        NullableUniqueColumn, OwnerRightsView, PastTimeColumnRule, PluralTableName,
-        PoliciesRequireRowLevelSecurity, PolicyReadCycle, PolicyToCreatingRole,
+        NonRedundantExtensionDag, NotInNullableSubquery, NotInSubquery,
+        NullableCompositeForeignKey, NullableUniqueColumn, OwnerRightsView, PastTimeColumnRule,
+        PluralTableName, PoliciesRequireRowLevelSecurity, PolicyReadCycle, PolicyToCreatingRole,
         PrefixRedundantIndex, PrimaryKeyReferenceEndsWithId, PublicSchemaCreate, QueryRewriteRule,
         ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
         ReachableTableWithoutRowLevelSecurity, ReferencesGrantedToClientRole, RegColumnType,
@@ -38,8 +38,8 @@ use crate::{
         WildcardView, ZeroPrecisionTimestamp,
     },
     traits::{
-        ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, SchemaRule,
-        TableRule,
+        ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
+        SchemaRule, TableRule,
     },
 };
 
@@ -154,13 +154,20 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in function_rules {
             constrainer.register_function_rule_with_floor(rule, Level::Allow);
         }
+        let query_rules: [Box<dyn QueryRule<Database = DB>>; 2] = [
+            Box::new(NotInNullableSubquery::default()),
+            Box::new(NotInSubquery::default()),
+        ];
+        for rule in query_rules {
+            constrainer.register_query_rule_with_floor(rule, Level::Allow);
+        }
         Self { constrainer }
     }
 }
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 41] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 42] = [
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
         Box::new(SecurityDefinerFunctionExposed::default()),
@@ -180,6 +187,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(UnloggedTable::default()),
         Box::new(WildcardView::default()),
         Box::new(NotInNullableSubquery::default()),
+        Box::new(NotInSubquery::default()),
         Box::new(TimestampWithoutTimeZone::default()),
         Box::new(TimeWithTimeZone::default()),
         Box::new(ZeroPrecisionTimestamp::default()),

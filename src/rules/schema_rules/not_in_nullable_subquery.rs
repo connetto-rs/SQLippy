@@ -1,103 +1,33 @@
 //! Submodule providing the `NotInNullableSubquery` rule.
 
-use std::ops::ControlFlow;
-
-use sql_traits::{
-    errors::LookupError,
-    structs::{ColumnDefinition, ColumnScope, IdentifierCase},
-    traits::{ColumnLike, DatabaseLike, FunctionLike, PolicyLike, TableLike, ViewLike},
-};
-use sqlparser::{
-    ast::{Expr, InTarget, Query, SelectItem, SetExpr, Visit, Visitor},
-    dialect::PostgreSqlDialect,
-    parser::Parser,
-};
+use sql_traits::traits::DatabaseLike;
+use sqlparser::ast::Statement;
 
 use crate::{
-    error::{Interruption, PolicyClause, PolicySite},
+    error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::policy_support::conjuncts,
-    traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
+    rules::not_in_support::NotInCheck,
+    traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule},
 };
 
-/// The nullable column a `NOT IN` subquery returns, unless its `WHERE`
-/// excludes `NULL`.
-fn nullable_output<DB: DatabaseLike>(
-    database: &DB,
-    query: &Query,
-) -> Result<Option<String>, LookupError> {
-    let SetExpr::Select(select) = query.body.as_ref() else {
-        return Ok(None);
-    };
-    let [SelectItem::UnnamedExpr(output) | SelectItem::ExprWithAlias { expr: output, .. }] =
-        select.projection.as_slice()
-    else {
-        return Ok(None);
-    };
-    let scope = ColumnScope::from_query(query, database, IdentifierCase::Folded)?;
-    let Some(ColumnDefinition::Base { table, column, .. }) =
-        scope.resolve_column_definition(output)?
-    else {
-        return Ok(None);
-    };
-    let excluded = select.selection.iter().flat_map(conjuncts).any(|filter| {
-        matches!(filter, Expr::IsNotNull(tested) if tested.to_string() == output.to_string())
-    });
-    Ok((!excluded && column.is_nullable(database)?)
-        .then(|| format!("{}.{}", table.table_name(), column.column_name())))
-}
-
-/// Collects the `NOT IN` subqueries over a nullable column.
-struct NotIns<'db, DB: DatabaseLike> {
-    database: &'db DB,
-    found: Vec<String>,
-}
-
-impl<DB: DatabaseLike> Visitor for NotIns<'_, DB> {
-    type Break = LookupError;
-
-    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<LookupError> {
-        let Expr::In {
-            target: InTarget::Subquery(query),
-            negated: true,
-            ..
-        } = expression
-        else {
-            return ControlFlow::Continue(());
-        };
-        nullable_output(self.database, query).map_or_else(ControlFlow::Break, |column| {
-            self.found
-                .extend(column.map(|column| format!("`{expression}` over nullable '{column}'")));
-            ControlFlow::Continue(())
-        })
-    }
-}
-
-/// The `NOT IN` subqueries over a nullable column a node holds.
-fn not_ins<DB: DatabaseLike, V: Visit + ?Sized>(
-    database: &DB,
-    node: &V,
-) -> Result<Vec<String>, LookupError> {
-    let mut found = NotIns {
-        database,
-        found: Vec::new(),
-    };
-    node.visit(&mut found).break_value().map_or(Ok(()), Err)?;
-    Ok(found.found)
-}
-
-const PROBLEM: &str = "which returns no row once the subquery yields a NULL";
-
-const RESOLUTION: &str =
-    "Use NOT EXISTS, declare the column NOT NULL, or filter it with IS NOT NULL in the subquery.";
+const CHECK: NotInCheck = NotInCheck {
+    describe: |not_in| {
+        not_in
+            .nullable
+            .as_ref()
+            .map(|column| format!("`{}` over nullable '{column}'", not_in.expression))
+    },
+    problem: "which returns no row once the subquery yields a NULL",
+    resolution: "Use NOT EXISTS, declare the column NOT NULL, or filter it with IS NOT NULL in the subquery.",
+};
 
 /// Struct defining a rule that reports `NOT IN` over a subquery whose column
 /// is nullable.
 ///
 /// `x NOT IN (SELECT c ...)` is never true once any `c` is `NULL`, so it
 /// silently returns no row. The rule reads views, materialized views,
-/// policies and SQL function bodies, and accepts a subquery whose `WHERE`
-/// requires the column `IS NOT NULL`.
+/// policies, SQL function bodies and, as a query rule, statements, and
+/// accepts a subquery whose `WHERE` requires the column `IS NOT NULL`.
 ///
 /// # Example
 ///
@@ -130,6 +60,7 @@ impl<DB: DatabaseLike + 'static> From<NotInNullableSubquery<DB>> for GenericCons
     fn from(rule: NotInNullableSubquery<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_schema_rule(Box::new(rule));
+        constrainer.register_query_rule(Box::new(NotInNullableSubquery::default()));
         constrainer
     }
 }
@@ -154,80 +85,19 @@ impl<DB: DatabaseLike> SchemaRule for NotInNullableSubquery<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        for view in database.views() {
-            for found in not_ins(database, view.definition())? {
-                reporter.view(
-                    view,
-                    format!("View '{}' uses {found}, {PROBLEM}.", view.view_name()),
-                    RESOLUTION.to_owned(),
-                )?;
-            }
-        }
-        for view in database.materialized_views() {
-            for found in not_ins(database, view.definition())? {
-                reporter.materialized_view(
-                    view,
-                    format!(
-                        "Materialized view '{}' uses {found}, {PROBLEM}.",
-                        view.view_name()
-                    ),
-                    RESOLUTION.to_owned(),
-                )?;
-            }
-        }
-        for table in database.tables() {
-            for policy in table.policies(database)? {
-                for (clause, expression) in [
-                    (PolicyClause::Using, policy.using_expression(database)),
-                    (PolicyClause::WithCheck, policy.check_expression(database)),
-                ] {
-                    for found in expression
-                        .map_or(Ok(Vec::new()), |expression| not_ins(database, expression))?
-                    {
-                        reporter.policies(
-                            vec![PolicySite {
-                                table: Box::new(table.clone()),
-                                policy: Box::new(policy.clone()),
-                                clause,
-                                expression: found.clone(),
-                            }],
-                            format!(
-                                "Policy '{}' on '{}' uses {found} in its {clause} clause, {PROBLEM}.",
-                                policy.name(),
-                                table.table_name()
-                            ),
-                            RESOLUTION.to_owned(),
-                        )?;
-                    }
-                }
-            }
-        }
-        let functions = database.functions().filter(|function| {
-            function.target_name().schema() != Some("pg_catalog")
-                && function
-                    .stored_language()
-                    .is_none_or(|language| language == "sql")
-        });
-        for function in functions {
-            let body = function
-                .body()
-                .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok())
-                .unwrap_or_default();
-            let mut found = not_ins(database, &body)?;
-            if let Ok(Some(body)) = function.body_expression(database) {
-                found.extend(not_ins(database, body.as_ref())?);
-            }
-            for found in found {
-                reporter.function(
-                    function,
-                    format!(
-                        "Function '{}' uses {found}, {PROBLEM}.",
-                        signature(function, database)
-                    ),
-                    RESOLUTION.to_owned(),
-                )?;
-            }
-        }
-        Ok(())
+        CHECK.check_schema(database, reporter)
+    }
+}
+
+impl<DB: DatabaseLike> QueryRule for NotInNullableSubquery<DB> {
+    type Database = DB;
+
+    fn check_statement(
+        &self,
+        database: &Self::Database,
+        statement: &Statement,
+        reporter: &mut Reporter<'_, Self::Database>,
+    ) -> Result<(), Interruption> {
+        CHECK.check_statement(database, statement, reporter)
     }
 }

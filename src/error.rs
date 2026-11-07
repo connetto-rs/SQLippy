@@ -7,6 +7,7 @@ use sql_traits::{
     structs::TargetName,
     traits::{DatabaseLike, PolicyLike, TableLike},
 };
+use sqlparser::ast::Statement;
 
 use crate::{
     deployment::Declaration,
@@ -40,6 +41,8 @@ pub enum Location<DB: DatabaseLike> {
     Extension(Box<DB::Extension>),
     /// A sequence.
     Sequence(Box<DB::Sequence>),
+    /// A statement an application sends.
+    Statement(StatementSite),
 }
 
 /// Clause of a policy.
@@ -109,6 +112,28 @@ impl<DB: DatabaseLike> Display for PolicySite<DB> {
     }
 }
 
+/// One statement and the offending sub-expression within it.
+#[derive(Debug)]
+pub struct StatementSite {
+    pub(crate) statement: String,
+    pub(crate) expression: String,
+}
+
+impl StatementSite {
+    /// Returns the statement as sqlparser renders it, the form statement
+    /// allowances are matched in.
+    #[must_use]
+    pub fn statement(&self) -> &str {
+        &self.statement
+    }
+
+    /// Returns the offending sub-expression rendered as SQL.
+    #[must_use]
+    pub fn expression(&self) -> &str {
+        &self.expression
+    }
+}
+
 /// A reviewed exception excusing one rule's violations that list a policy.
 #[derive(Debug, Clone)]
 pub struct PolicyAllowance {
@@ -146,6 +171,63 @@ impl Display for PolicyAllowance {
             self.policy,
             self.table.name()
         )
+    }
+}
+
+/// A reviewed exception excusing one rule's violations in one statement.
+#[derive(Debug, Clone)]
+pub struct StatementAllowance {
+    pub(crate) rule: String,
+    pub(crate) statement: String,
+    pub(crate) parsed: Option<Box<Statement>>,
+}
+
+impl StatementAllowance {
+    /// Returns the type name of the excused rule.
+    #[must_use]
+    pub fn rule(&self) -> &str {
+        &self.rule
+    }
+
+    /// Returns the excused statement as sqlparser renders it, or as written
+    /// when it does not parse as one PostgreSQL statement.
+    #[must_use]
+    pub fn statement(&self) -> &str {
+        &self.statement
+    }
+
+    /// Whether this allowance excuses `rule` on the statement rendered as
+    /// `statement`.
+    pub(crate) fn excuses(&self, rule: &RuleMetadata, statement: &str) -> bool {
+        self.parsed.is_some() && self.rule == rule.name && self.statement == statement
+    }
+}
+
+impl Display for StatementAllowance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the allowance for {} on statement '{}' excuses no violation",
+            self.rule, self.statement
+        )
+    }
+}
+
+/// A reviewed exception excusing a rule's violations.
+#[derive(Debug, Clone)]
+pub enum Allowance {
+    /// An allowance naming a policy.
+    Policy(PolicyAllowance),
+    /// An allowance naming a statement.
+    Statement(StatementAllowance),
+}
+
+impl Display for Allowance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Policy(allowance) => allowance.fmt(formatter),
+            Self::Statement(allowance) => allowance.fmt(formatter),
+        }
     }
 }
 
@@ -253,6 +335,9 @@ impl<DB: DatabaseLike> Display for Violation<DB> {
                 write!(formatter, "\n  at {site}")?;
             }
         }
+        if let Location::Statement(site) = &self.location {
+            write!(formatter, "\n  in {}", site.statement)?;
+        }
         if let Some(source) = self.rule.source {
             write!(formatter, "\n  source: {source}")?;
         }
@@ -272,7 +357,7 @@ pub enum Error<DB: DatabaseLike> {
     Lookup(#[from] LookupError),
     /// An allowance excused no violation, so it is stale or misspelled.
     #[error("Unused allowance: {0}")]
-    UnusedAllowance(PolicyAllowance),
+    UnusedAllowance(Allowance),
     /// A registered rule does not run because the deployment lacks a
     /// declaration it reads.
     #[error("Inactive rule: {0}")]

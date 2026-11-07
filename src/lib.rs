@@ -13,8 +13,8 @@ pub mod prelude {
     pub use crate::{
         deployment::{Declaration, Deployment},
         error::{
-            Error, InactiveRule, Interruption, Location, PolicyAllowance, PolicyClause, PolicySite,
-            Violation,
+            Allowance, Error, InactiveRule, Interruption, Location, PolicyAllowance, PolicyClause,
+            PolicySite, StatementAllowance, StatementSite, Violation,
         },
         lint::{Level, LintGroup, Rule, RuleMetadata},
         rules::*,

@@ -6,14 +6,16 @@ use sql_traits::{
     structs::{IdentifierCase, TargetName},
     traits::{DatabaseLike, TableLike},
 };
+use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 
 use crate::{
     deployment::Deployment,
-    error::{Error, InactiveRule, Interruption, PolicyAllowance},
+    error::{Allowance, Error, InactiveRule, Interruption, PolicyAllowance, StatementAllowance},
     lint::{Level, LintGroup, Rule, RuleMetadata},
     traits::{
-        ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, Reporter, SchemaRule, TableRule,
-        reporter::ResolvedAllowance,
+        ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, QueryRule, Reporter, SchemaRule,
+        TableRule,
+        reporter::{Allowances, ResolvedAllowance},
     },
 };
 
@@ -47,16 +49,18 @@ impl Levels {
     }
 }
 
-/// A constrainer holding rules, their levels, policy allowances and the
-/// deployment its rules read.
+/// A constrainer holding rules, their levels, allowances and the deployment
+/// its rules read.
 pub struct GenericConstrainer<DB: DatabaseLike> {
     tables: Vec<Registered<dyn TableRule<Database = DB>>>,
     columns: Vec<Registered<dyn ColumnRule<Database = DB>>>,
     foreign_keys: Vec<Registered<dyn ForeignKeyRule<Database = DB>>>,
     schemas: Vec<Registered<dyn SchemaRule<Database = DB>>>,
     functions: Vec<Registered<dyn FunctionRule<Database = DB>>>,
+    queries: Vec<Registered<dyn QueryRule<Database = DB>>>,
     levels: Levels,
     allowances: Vec<PolicyAllowance>,
+    statement_allowances: Vec<StatementAllowance>,
     deployment: Deployment,
 }
 
@@ -68,8 +72,10 @@ impl<DB: DatabaseLike> Default for GenericConstrainer<DB> {
             foreign_keys: Vec::new(),
             schemas: Vec::new(),
             functions: Vec::new(),
+            queries: Vec::new(),
             levels: Levels::default(),
             allowances: Vec::new(),
+            statement_allowances: Vec::new(),
             deployment: Deployment::default(),
         }
     }
@@ -81,9 +87,25 @@ struct Run<'run, DB: DatabaseLike> {
     deployment: &'run Deployment,
     allowances: Vec<ResolvedAllowance<'run, DB>>,
     used: Vec<bool>,
+    statements: &'run [StatementAllowance],
 }
 
-impl<DB: DatabaseLike> Run<'_, DB> {
+impl<'run, DB: DatabaseLike> Run<'run, DB> {
+    /// A run consulting only the given statement allowances.
+    fn for_statements(
+        database: &'run DB,
+        deployment: &'run Deployment,
+        statements: &'run [StatementAllowance],
+    ) -> Self {
+        Self {
+            database,
+            deployment,
+            allowances: Vec::new(),
+            used: Vec::new(),
+            statements,
+        }
+    }
+
     /// Runs one rule check through a reporter and forwards its lookup failure.
     fn check(
         &mut self,
@@ -97,8 +119,11 @@ impl<DB: DatabaseLike> Run<'_, DB> {
             self.deployment,
             rule,
             level,
-            &self.allowances,
-            &mut self.used,
+            Allowances {
+                policies: &self.allowances,
+                used: &mut self.used,
+                statements: self.statements,
+            },
             sink,
         ));
         match outcome {
@@ -144,6 +169,15 @@ fn inactive<R: Rule + ?Sized>(
                 missing,
             })
         })
+}
+
+/// The single PostgreSQL statement `sql` holds.
+fn single_statement(sql: &str) -> Option<Statement> {
+    let [statement] = Parser::parse_sql(&PostgreSqlDialect {}, sql)
+        .ok()?
+        .try_into()
+        .ok()?;
+    Some(statement)
 }
 
 impl<DB: DatabaseLike> GenericConstrainer<DB> {
@@ -197,6 +231,15 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         self.functions.push(registered);
     }
 
+    pub(crate) fn register_query_rule_with_floor(
+        &mut self,
+        rule: Box<dyn QueryRule<Database = DB>>,
+        floor: Level,
+    ) {
+        let registered = self.registered(rule, floor);
+        self.queries.push(registered);
+    }
+
     pub(crate) fn set_rule_level(&mut self, rule: &str, level: Level) {
         match self.levels.rules.iter_mut().find(|(name, _)| name == rule) {
             Some(entry) => entry.1 = level,
@@ -218,6 +261,17 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         });
     }
 
+    pub(crate) fn allow_statement(&mut self, rule: &str, statement: &str) {
+        let parsed = single_statement(statement);
+        self.statement_allowances.push(StatementAllowance {
+            rule: rule.to_owned(),
+            statement: parsed
+                .as_ref()
+                .map_or_else(|| statement.to_owned(), ToString::to_string),
+            parsed: parsed.map(Box::new),
+        });
+    }
+
     pub(crate) fn set_deployment(&mut self, deployment: Deployment) {
         self.deployment = deployment;
     }
@@ -229,6 +283,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             .chain(inactive(&self.foreign_keys, deployment))
             .chain(inactive(&self.schemas, deployment))
             .chain(inactive(&self.functions, deployment))
+            .chain(inactive(&self.queries, deployment))
             .collect()
     }
 
@@ -238,6 +293,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         self.levels.refresh(&mut self.foreign_keys);
         self.levels.refresh(&mut self.schemas);
         self.levels.refresh(&mut self.functions);
+        self.levels.refresh(&mut self.queries);
     }
 
     pub(crate) fn visit(
@@ -262,6 +318,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
                 })
                 .collect(),
             used: vec![false; self.allowances.len()],
+            statements: &[],
         };
         for table in database.tables() {
             for entry in enabled(&self.tables, deployment) {
@@ -308,10 +365,78 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
                 entry.rule.check_schema(database, reporter)
             })?;
         }
+        let mut stale = Vec::new();
+        for allowance in &self.statement_allowances {
+            if !self.allowance_holds(database, allowance, sink)? {
+                stale.push(allowance);
+            }
+        }
         for (allowance, used) in self.allowances.iter().zip(&run.used) {
             if !used {
-                sink(Error::UnusedAllowance(allowance.clone()))?;
+                sink(Error::UnusedAllowance(Allowance::Policy(allowance.clone())))?;
             }
+        }
+        for allowance in stale {
+            sink(Error::UnusedAllowance(Allowance::Statement(
+                allowance.clone(),
+            )))?;
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Whether the rule a statement allowance names, at its configured level,
+    /// still reports the allowance's own statement. A lookup failure goes to
+    /// `sink` and keeps the allowance, since the rule could not decide.
+    fn allowance_holds(
+        &self,
+        database: &DB,
+        allowance: &StatementAllowance,
+        sink: &mut dyn FnMut(Error<DB>) -> ControlFlow<()>,
+    ) -> ControlFlow<(), bool> {
+        let Some(statement) = &allowance.parsed else {
+            return ControlFlow::Continue(false);
+        };
+        let deployment = &self.deployment;
+        let mut run = Run::for_statements(database, deployment, &[]);
+        let (mut fired, mut failed) = (false, false);
+        for entry in enabled(&self.queries, deployment)
+            .filter(|entry| entry.rule.metadata().name == allowance.rule)
+        {
+            let flow = run.check(
+                entry.rule.metadata(),
+                entry.level,
+                &mut |error| match error {
+                    Error::Violation(_) => {
+                        fired = true;
+                        ControlFlow::Break(())
+                    }
+                    other => {
+                        failed = true;
+                        sink(other)
+                    }
+                },
+                |reporter| entry.rule.check_statement(database, statement, reporter),
+            );
+            if fired {
+                return ControlFlow::Continue(true);
+            }
+            flow?;
+        }
+        ControlFlow::Continue(failed)
+    }
+
+    pub(crate) fn visit_statement(
+        &self,
+        database: &DB,
+        statement: &Statement,
+        sink: &mut dyn FnMut(Error<DB>) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        let deployment = &self.deployment;
+        let mut run = Run::for_statements(database, deployment, &self.statement_allowances);
+        for entry in enabled(&self.queries, deployment) {
+            run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
+                entry.rule.check_statement(database, statement, reporter)
+            })?;
         }
         ControlFlow::Continue(())
     }

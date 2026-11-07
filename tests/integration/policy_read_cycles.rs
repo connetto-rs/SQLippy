@@ -476,7 +476,9 @@ fn an_allowance_left_after_the_policy_is_fixed_fails_validation() {
         TargetName::new("memberships", false),
         "memberships_admin",
     );
-    let Err(Error::UnusedAllowance(allowance)) = constrainer.validate_schema(&database) else {
+    let Err(Error::UnusedAllowance(Allowance::Policy(allowance))) =
+        constrainer.validate_schema(&database)
+    else {
         panic!("an allowance excusing nothing must fail validation");
     };
     assert_eq!(
@@ -675,11 +677,14 @@ fn an_unused_allowance_names_its_table() {
         TargetName::new("memberships", false),
         "admins",
     );
-    let Err(Error::UnusedAllowance(allowance)) = constrainer.validate_schema(&database) else {
+    let Err(error) = constrainer.validate_schema(&database) else {
         panic!("the allowance excuses nothing");
     };
+    let Error::UnusedAllowance(Allowance::Policy(allowance)) = &error else {
+        panic!("unexpected failure: {error}");
+    };
     assert_eq!(allowance.table().name(), "memberships");
-    assert!(allowance.to_string().contains("admins"));
+    assert!(error.to_string().contains("admins"));
 }
 
 #[test]

@@ -6,10 +6,13 @@ use sql_traits::traits::{
     ColumnLike, DatabaseLike, DomainLike, ExtensionLike, ForeignKeyLike, FunctionLike, PolicyLike,
     RoleLike, SequenceLike, TableLike, ViewLike,
 };
+use sqlparser::ast::Statement;
 
 use crate::{
     deployment::Deployment,
-    error::{Error, Interruption, Location, PolicySite, Violation},
+    error::{
+        Error, Interruption, Location, PolicySite, StatementAllowance, StatementSite, Violation,
+    },
     lint::{Level, RuleMetadata},
 };
 
@@ -28,6 +31,14 @@ impl<DB: DatabaseLike> ResolvedAllowance<'_, DB> {
     }
 }
 
+/// The allowances a reporter consults, and which policy allowances excused a
+/// violation so far.
+pub(crate) struct Allowances<'run, DB: DatabaseLike> {
+    pub(crate) policies: &'run [ResolvedAllowance<'run, DB>],
+    pub(crate) used: &'run mut [bool],
+    pub(crate) statements: &'run [StatementAllowance],
+}
+
 /// A function's name with its argument types as written, which tells overloads
 /// apart.
 pub(crate) fn signature<DB: DatabaseLike>(function: &DB::Function, database: &DB) -> String {
@@ -42,8 +53,7 @@ pub struct Reporter<'run, DB: DatabaseLike> {
     deployment: &'run Deployment,
     rule: &'static RuleMetadata,
     level: Level,
-    allowances: &'run [ResolvedAllowance<'run, DB>],
-    used: &'run mut [bool],
+    allowances: Allowances<'run, DB>,
     sink: &'run mut dyn FnMut(Error<DB>) -> ControlFlow<()>,
 }
 
@@ -53,8 +63,7 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         deployment: &'run Deployment,
         rule: &'static RuleMetadata,
         level: Level,
-        allowances: &'run [ResolvedAllowance<'run, DB>],
-        used: &'run mut [bool],
+        allowances: Allowances<'run, DB>,
         sink: &'run mut dyn FnMut(Error<DB>) -> ControlFlow<()>,
     ) -> Self {
         Self {
@@ -63,7 +72,6 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
             rule,
             level,
             allowances,
-            used,
             sink,
         }
     }
@@ -88,7 +96,8 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         resolution: String,
     ) -> Result<(), Interruption> {
         let mut excused = false;
-        for (allowance, used) in self.allowances.iter().zip(self.used.iter_mut()) {
+        let allowances = &mut self.allowances;
+        for (allowance, used) in allowances.policies.iter().zip(allowances.used.iter_mut()) {
             if sites.iter().any(|site| allowance.excuses(self.rule, site)) {
                 *used = true;
                 excused = true;
@@ -103,6 +112,41 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
             .collect::<Vec<_>>()
             .join(" -> ");
         self.emit(Location::Policies(sites), object, message, resolution)
+    }
+
+    /// Reports a violation on a sub-expression of a statement, unless a
+    /// statement allowance for this rule names the same statement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn statement(
+        &mut self,
+        statement: &Statement,
+        expression: String,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        let statement = statement.to_string();
+        if self
+            .allowances
+            .statements
+            .iter()
+            .any(|allowance| allowance.excuses(self.rule, &statement))
+        {
+            return Ok(());
+        }
+        let object = expression.clone();
+        self.emit(
+            Location::Statement(StatementSite {
+                statement,
+                expression,
+            }),
+            object,
+            message,
+            resolution,
+        )
     }
 
     /// Reports a violation on a table.
