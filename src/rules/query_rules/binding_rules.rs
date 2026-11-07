@@ -14,6 +14,7 @@ use crate::{
     lint::{LintGroup, Rule, RuleMetadata},
     rules::{
         key_support::named,
+        policy_support::unnested,
         statement_support::{Finding, OwnLevel, check_select_expressions, check_selects, report},
     },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
@@ -26,12 +27,12 @@ fn window_names(
     each: &mut impl FnMut(&'static str, &Ident) -> Result<(), LookupError>,
 ) -> Result<(), LookupError> {
     for expression in &spec.partition_by {
-        if let Expr::Identifier(name) = expression {
+        if let Expr::Identifier(name) = unnested(expression) {
             each("PARTITION BY", name)?;
         }
     }
     for key in &spec.order_by {
-        if let Expr::Identifier(name) = &key.expr {
+        if let Expr::Identifier(name) = unnested(&key.expr) {
             each("window ORDER BY", name)?;
         }
     }
@@ -48,11 +49,11 @@ fn input_first_names(
 ) -> Result<(), LookupError> {
     if let GroupByExpr::Expressions(keys, _) = &select.group_by {
         for key in keys {
-            match key {
+            match unnested(key) {
                 Expr::Identifier(name) => each("GROUP BY", name)?,
                 Expr::Rollup(sets) | Expr::Cube(sets) | Expr::GroupingSets(sets) => {
                     for member in sets.iter().flatten() {
-                        if let Expr::Identifier(name) = member {
+                        if let Expr::Identifier(name) = unnested(member) {
                             each("GROUP BY", name)?;
                         }
                     }
@@ -197,7 +198,7 @@ query_rule!(
     /// ```
     SelfComparison,
     LintGroup::Suspicious,
-    "A column compared with itself reads as always true, but the comparison is never true for NULL, so it filters rows the author did not mean to drop.",
+    "A column compared with itself reads as always true, but the comparison is never true for NULL.",
     Some("https://www.postgresql.org/docs/current/functions-comparison.html")
 );
 
@@ -220,17 +221,17 @@ impl<DB: DatabaseLike> QueryRule for SelfComparison<DB> {
                     BinaryOperator::NotEq | BinaryOperator::Lt | BinaryOperator::Gt => false,
                     _ => return Ok(()),
                 };
-                let Some((relation, column)) = named(scope, left)? else {
+                let Some((relation, column)) = named(scope, unnested(left))? else {
                     return Ok(());
                 };
-                if named(scope, right)? != Some((relation.clone(), column.clone())) {
+                if named(scope, unnested(right))? != Some((relation.clone(), column.clone())) {
                     return Ok(());
                 }
                 found.push(if reflexive {
                     Finding {
                         object: expression.to_string(),
                         message: format!(
-                            "`{expression}` compares {relation}.{column} with itself, which is true only where it is not NULL, so it keeps just those rows."
+                            "`{expression}` compares {relation}.{column} with itself, which is never true where it is NULL, so it only says whether {column} is NULL."
                         ),
                         resolution: format!(
                             "Compare with the column meant, or write {column} IS NOT NULL when that is the intent."

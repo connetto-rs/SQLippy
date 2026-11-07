@@ -325,6 +325,14 @@ impl<DB: DatabaseLike> Visitor for RowReferences<'_, DB> {
     }
 }
 
+/// Strips the parentheses around an expression.
+pub(crate) fn unnested(mut expression: &Expr) -> &Expr {
+    while let Expr::Nested(inner) = expression {
+        expression = inner;
+    }
+    expression
+}
+
 /// The operands of the `AND` chain of an expression.
 pub(crate) fn conjuncts(expression: &Expr) -> Vec<&Expr> {
     match expression {

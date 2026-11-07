@@ -40,6 +40,14 @@ fn a_grouping_or_window_name_bound_to_an_input_column_instead_of_its_alias_is_re
                 &["name"],
             ),
             (
+                "SELECT lower(name) AS name, count(*) FROM people GROUP BY (name)",
+                &["name"],
+            ),
+            (
+                "SELECT p.team AS id, row_number() OVER (PARTITION BY (id) ORDER BY (id) DESC) FROM people AS p",
+                &["id", "id"],
+            ),
+            (
                 "SELECT p.team AS id, row_number() OVER (PARTITION BY id ORDER BY p.id) FROM people AS p",
                 &["id"],
             ),
@@ -160,6 +168,11 @@ fn a_column_compared_with_itself_is_reported() {
                 "SELECT id FROM people WHERE name <> name",
                 &["name <> name"],
             ),
+            (
+                "SELECT id FROM people AS p WHERE (p.name) = name",
+                &["(p.name) = name"],
+            ),
+            ("SELECT name = (name) FROM people", &["name = (name)"]),
             (
                 "SELECT p.id FROM people AS p JOIN teams AS t ON t.id = t.id",
                 &["t.id = t.id"],
