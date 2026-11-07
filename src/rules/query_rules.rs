@@ -16,5 +16,7 @@ mod outer_column_capture;
 pub use outer_column_capture::OuterColumnCapture;
 mod paging_rules;
 pub use paging_rules::{OffsetPaging, RandomOrderLimit};
+mod type_rules;
 mod unfiltered_write;
+pub use type_rules::{SessionTimeZoneDependence, TimestampBetween, TruncatingIntegerDivision};
 pub use unfiltered_write::UnfilteredWrite;

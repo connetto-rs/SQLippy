@@ -100,3 +100,21 @@ pub fn inactive_declarations<C: Constrainer<Database = ParserDB>>(
         .map(|inactive| (inactive.rule().name, inactive.missing()))
         .collect()
 }
+
+/// Asserts the objects `rule` alone reports on each `(statement, objects)`
+/// case against `schema`.
+pub fn check_query_rule<R: QueryRule<Database = ParserDB> + 'static>(
+    schema: &str,
+    rule: R,
+    cases: &[(&str, &[&str])],
+) {
+    let constrainer = query_rule(rule);
+    let database = crate::common::parse(schema);
+    for (sql, expected) in cases {
+        assert_eq!(
+            statement_objects(&constrainer, &database, sql),
+            *expected,
+            "{sql}"
+        );
+    }
+}
