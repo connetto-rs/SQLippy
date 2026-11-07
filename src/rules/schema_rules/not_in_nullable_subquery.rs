@@ -35,7 +35,8 @@ fn nullable_output<DB: DatabaseLike>(
         return Ok(None);
     };
     let scope = ColumnScope::from_query(query, database, IdentifierCase::Folded)?;
-    let Some(ColumnDefinition::Base { table, column }) = scope.resolve_column_definition(output)?
+    let Some(ColumnDefinition::Base { table, column, .. }) =
+        scope.resolve_column_definition(output)?
     else {
         return Ok(None);
     };
@@ -213,11 +214,9 @@ impl<DB: DatabaseLike> SchemaRule for NotInNullableSubquery<DB> {
                 .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok())
                 .unwrap_or_default();
             let mut found = not_ins(database, &body)?;
-            found.extend(
-                function
-                    .body_expression()
-                    .map_or(Ok(Vec::new()), |body| not_ins(database, body))?,
-            );
+            if let Ok(Some(body)) = function.body_expression(database) {
+                found.extend(not_ins(database, body.as_ref())?);
+            }
             for found in found {
                 reporter.function(
                     function,

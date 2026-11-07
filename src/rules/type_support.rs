@@ -54,7 +54,9 @@ pub(crate) fn declared_flaws<'db, DB: DatabaseLike>(
     match name.as_str() {
         "timestamp without time zone" => flaws.push(TypeFlaw::NaiveTimestamp),
         "time with time zone" => flaws.push(TypeFlaw::TimeWithTimeZone),
-        "char" | "character" => flaws.push(TypeFlaw::BlankPaddedCharacter),
+        "char" | "character" if data_type.max_character_length(database).is_some() => {
+            flaws.push(TypeFlaw::BlankPaddedCharacter);
+        }
         "money" => flaws.push(TypeFlaw::Money),
         "json" => flaws.push(TypeFlaw::Json),
         "numeric" if data_type.numeric_scale(database).is_some() => {
@@ -299,7 +301,9 @@ fn function_flaws<DB: DatabaseLike>(
             .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok())
             .unwrap_or_default();
         found.extend(written_in(&body));
-        found.extend(function.body_expression().map_or_default(written_in));
+        if let Ok(Some(body)) = function.body_expression(database) {
+            found.extend(written_in(body.as_ref()));
+        }
     }
     found
 }

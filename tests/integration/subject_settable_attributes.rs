@@ -312,6 +312,15 @@ fn a_privilege_left_reaching_a_writer_keeps_the_finding() {
         ),
         ["Warn profiles.w"]
     );
+    assert_eq!(
+        reported_for(
+            Deployment::default()
+                .with_app_role("app")
+                .with_anonymous_role("anon"),
+            &format!("{ADMIN_READ} {OPEN_UPDATE} {WITHHELD}")
+        ),
+        ["Warn profiles.w"]
+    );
 }
 
 #[test]

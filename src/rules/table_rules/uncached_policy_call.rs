@@ -51,14 +51,16 @@ fn scalar_select(statements: &[Statement]) -> bool {
 
 /// Whether PostgreSQL inlines a call to the function into the calling query,
 /// which a `RETURN` body or a body of one `SELECT` of one expression allows.
-fn inlinable<F: FunctionLike>(function: &F) -> bool {
+fn inlinable<F: FunctionLike>(database: &F::DB, function: &F) -> bool {
     function
         .stored_language()
         .is_none_or(|language| language == "sql")
         && function.security_mode() != FunctionSecurity::Definer
         && function.configuration_parameters().is_empty()
         && !function.returns_set()
-        && (function.body_expression().is_some()
+        && (function
+            .body_expression(database)
+            .is_ok_and(|body| body.is_some())
             || function
                 .body()
                 .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok())
@@ -103,7 +105,7 @@ impl<DB: DatabaseLike> RowIndependentCalls<'_, DB> {
                 FunctionBehavior::Stable => immutable = false,
                 FunctionBehavior::Volatile => {
                     immutable = false;
-                    volatile |= !inlinable(function);
+                    volatile |= !inlinable(self.database, function);
                 }
             }
         }

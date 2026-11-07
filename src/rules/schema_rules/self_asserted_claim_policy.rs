@@ -23,7 +23,7 @@ fn is_self_asserted<DB: DatabaseLike>(
     deployment: &Deployment,
     definition: Option<&ColumnDefinition<'_, '_, '_, DB>>,
 ) -> bool {
-    let Some(ColumnDefinition::Base { table, column }) = definition else {
+    let Some(ColumnDefinition::Base { table, column, .. }) = definition else {
         return false;
     };
     let schema = schema_of(database, table.stored_table_schema());

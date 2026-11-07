@@ -326,7 +326,7 @@ pub(crate) fn credential_compared<DB: DatabaseLike>(
     for (column, other) in [(left, right), (right, left)] {
         if is_credential_value(deployment, other)
             && is_column_reference(column)
-            && let Some(ColumnDefinition::Base { table, column }) =
+            && let Some(ColumnDefinition::Base { table, column, .. }) =
                 scope.resolve_column_definition(column)?
             && let Some(id) = database.table_id(table)
         {
@@ -360,7 +360,7 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
             return Ok(None);
         }
         Ok(match scope.resolve_column_definition(expression)? {
-            Some(ColumnDefinition::Base { table, column }) => self
+            Some(ColumnDefinition::Base { table, column, .. }) => self
                 .authority
                 .database
                 .table_id(table)
