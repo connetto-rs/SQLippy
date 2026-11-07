@@ -10,7 +10,7 @@ use sqlparser::ast::{
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::statement_support::is_random,
+    rules::statement_support::{is_random, row_limit},
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
 
@@ -46,19 +46,7 @@ fn random_pick(query: &Query) -> Option<String> {
     {
         return None;
     }
-    let cap = match (&query.limit_clause, &query.fetch) {
-        (
-            Some(
-                LimitClause::LimitOffset {
-                    limit: Some(limit), ..
-                }
-                | LimitClause::OffsetCommaLimit { limit, .. },
-            ),
-            _,
-        ) => format!("LIMIT {limit}"),
-        (_, Some(fetch)) => fetch.to_string(),
-        _ => return None,
-    };
+    let cap = row_limit(query).or_else(|| query.fetch.as_ref().map(ToString::to_string))?;
     Some(format!("{order_by} {cap}"))
 }
 

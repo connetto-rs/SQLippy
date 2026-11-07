@@ -10,7 +10,7 @@ use sql_traits::{
 };
 use sqlparser::{
     ast::{
-        Delete, Expr, FromTable, Insert, Query, Select, SetExpr, Statement, Update,
+        Delete, Expr, FromTable, Insert, LimitClause, Query, Select, SetExpr, Statement, Update,
         UpdateTableFromKind, Visit, Visitor, With,
     },
     dialect::PostgreSqlDialect,
@@ -151,6 +151,17 @@ fn selects(body: &SetExpr) -> Vec<&Select> {
             found
         }
         _ => Vec::new(),
+    }
+}
+
+/// The `LIMIT` of a query, as written.
+pub(crate) fn row_limit(query: &Query) -> Option<String> {
+    match query.limit_clause.as_ref()? {
+        LimitClause::LimitOffset {
+            limit: Some(limit), ..
+        }
+        | LimitClause::OffsetCommaLimit { limit, .. } => Some(format!("LIMIT {limit}")),
+        LimitClause::LimitOffset { limit: None, .. } => None,
     }
 }
 

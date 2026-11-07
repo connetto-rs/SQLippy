@@ -18,7 +18,9 @@ use crate::{
     rules::{
         key_support::{Instance, determined, equalities, instances, named, order_of, references},
         policy_support::conjuncts,
-        statement_support::{OwnLevel, check_queries, check_selects, is_random},
+        statement_support::{
+            Finding, OwnLevel, check_queries, check_selects, is_random, report, row_limit,
+        },
     },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
@@ -26,26 +28,15 @@ use crate::{
 /// The row cap of a query: its `LIMIT`, else its `OFFSET`, else its
 /// `FETCH`.
 fn cap_of(query: &Query) -> Option<String> {
-    match (&query.limit_clause, &query.fetch) {
-        (
-            Some(
-                LimitClause::LimitOffset {
-                    limit: Some(limit), ..
-                }
-                | LimitClause::OffsetCommaLimit { limit, .. },
-            ),
-            _,
-        ) => Some(format!("LIMIT {limit}")),
-        (
+    row_limit(query)
+        .or_else(|| match &query.limit_clause {
             Some(LimitClause::LimitOffset {
                 offset: Some(offset),
                 ..
-            }),
-            _,
-        ) => Some(offset.to_string()),
-        (_, Some(fetch)) => Some(fetch.to_string()),
-        _ => None,
-    }
+            }) => Some(offset.to_string()),
+            _ => None,
+        })
+        .or_else(|| query.fetch.as_ref().map(ToString::to_string))
 }
 
 /// Stops at the first aggregate call outside a window.
@@ -142,47 +133,45 @@ impl<DB: DatabaseLike> QueryRule for UnorderedLimit<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let mut found = Vec::new();
-        check_queries(database, statement, |scope, query, existence| {
-            let Some(cap) = cap_of(query).filter(|_| !existence) else {
-                return Ok(());
-            };
-            let order = order_of(query);
-            if order.iter().any(|key| is_random(key)) {
-                return Ok(());
-            }
-            let verdict = match query.body.as_ref() {
-                SetExpr::Select(select) if single_answer(select) => Some(true),
-                SetExpr::Select(select) => scope
-                    .scope_for_select(select)
-                    .map(|local| determined(database, &local, select, &order))
-                    .transpose()?
-                    .flatten(),
-                _ => None,
-            };
-            if verdict == Some(false) || (verdict.is_none() && order.is_empty()) {
-                found.push((cap, order.is_empty()));
-            }
-            Ok(())
-        })?;
-        for (cap, unordered) in found {
-            let message = if unordered {
-                format!(
-                    "`{cap}` caps rows the query does not order, so PostgreSQL returns whichever rows it meets first."
-                )
-            } else {
-                format!(
-                    "`{cap}` caps rows whose ORDER BY leaves ties, so rows with equal sort keys come back in any order."
-                )
-            };
-            reporter.statement(
-                statement,
-                cap,
-                message,
-                "Order by a unique key, adding the primary key as the last sort column.".to_owned(),
-            )?;
-        }
-        Ok(())
+        report(statement, reporter, |found| {
+            check_queries(database, statement, |scope, query, existence| {
+                let Some(cap) = cap_of(query).filter(|_| !existence) else {
+                    return Ok(());
+                };
+                let order = order_of(query);
+                if order.iter().any(|key| is_random(key)) {
+                    return Ok(());
+                }
+                let verdict = match query.body.as_ref() {
+                    SetExpr::Select(select) if single_answer(select) => Some(true),
+                    SetExpr::Select(select) => scope
+                        .scope_for_select(select)
+                        .map(|local| determined(database, &local, select, &order))
+                        .transpose()?
+                        .flatten(),
+                    _ => None,
+                };
+                if verdict == Some(false) || (verdict.is_none() && order.is_empty()) {
+                    let message = if order.is_empty() {
+                        format!(
+                            "`{cap}` caps rows the query does not order, so PostgreSQL returns whichever rows it meets first."
+                        )
+                    } else {
+                        format!(
+                            "`{cap}` caps rows whose ORDER BY leaves ties, so rows with equal sort keys come back in any order."
+                        )
+                    };
+                    found.push(Finding {
+                        object: cap,
+                        message,
+                        resolution:
+                            "Order by a unique key, adding the primary key as the last sort column."
+                                .to_owned(),
+                    });
+                }
+                Ok(())
+            })
+        })
     }
 }
 
@@ -229,29 +218,25 @@ impl<DB: DatabaseLike> QueryRule for UnorderedDistinctOn<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let mut found = Vec::new();
-        check_selects(database, statement, |scope, query, select| {
-            let Some(distinct @ Distinct::On(_)) = &select.distinct else {
-                return Ok(());
-            };
-            let order = order_of(query);
-            let verdict = determined(database, scope, select, &order)?;
-            if verdict == Some(false) || (verdict.is_none() && order.is_empty()) {
-                found.push(distinct.to_string());
-            }
-            Ok(())
-        })?;
-        for distinct in found {
-            reporter.statement(
-                statement,
-                distinct.clone(),
-                format!(
-                    "`{distinct}` keeps the first row of each group, and the ORDER BY does not decide which row is first."
-                ),
-                "Continue the ORDER BY after the DISTINCT ON columns with columns that make each row unique, such as the primary key.".to_owned(),
-            )?;
-        }
-        Ok(())
+        report(statement, reporter, |found| {
+            check_selects(database, statement, |scope, query, select| {
+                let Some(distinct @ Distinct::On(_)) = &select.distinct else {
+                    return Ok(());
+                };
+                let order = order_of(query);
+                let verdict = determined(database, scope, select, &order)?;
+                if verdict == Some(false) || (verdict.is_none() && order.is_empty()) {
+                    found.push(Finding {
+                    object: distinct.to_string(),
+                    message: format!(
+                        "`{distinct}` keeps the first row of each group, and the ORDER BY does not decide which row is first."
+                    ),
+                    resolution: "Continue the ORDER BY after the DISTINCT ON columns with columns that make each row unique, such as the primary key.".to_owned(),
+                });
+                }
+                Ok(())
+            })
+        })
     }
 }
 
@@ -342,60 +327,57 @@ impl<DB: DatabaseLike> QueryRule for UnlinkedFromItem<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let mut found = Vec::new();
-        check_selects(database, statement, |scope, _, select| {
-            if select.from.len() < 2 {
-                return Ok(());
-            }
-            let Some(instances) = instances(database, select) else {
-                return Ok(());
-            };
-            let mut parents: Vec<usize> = (0..select.from.len()).collect();
-            for conjunct in select.selection.iter().flat_map(conjuncts) {
-                let mut items = Vec::new();
-                OwnLevel::new(|expression: &Expr| {
-                    if let Some((relation, _)) = named(scope, expression)? {
-                        items.extend(
-                            instances
-                                .iter()
-                                .filter(|instance| instance.name == relation)
-                                .map(|instance| instance.item),
-                        );
+        report(statement, reporter, |found| {
+            check_selects(database, statement, |scope, _, select| {
+                if select.from.len() < 2 {
+                    return Ok(());
+                }
+                let Some(instances) = instances(database, select) else {
+                    return Ok(());
+                };
+                let mut parents: Vec<usize> = (0..select.from.len()).collect();
+                for conjunct in select.selection.iter().flat_map(conjuncts) {
+                    let mut items = Vec::new();
+                    OwnLevel::new(|expression: &Expr| {
+                        if let Some((relation, _)) = named(scope, expression)? {
+                            items.extend(
+                                instances
+                                    .iter()
+                                    .filter(|instance| instance.name == relation)
+                                    .map(|instance| instance.item),
+                            );
+                        }
+                        Ok(())
+                    })
+                    .over(conjunct)?;
+                    for pair in items.windows(2) {
+                        let (left, right) =
+                            (root(&mut parents, pair[0]), root(&mut parents, pair[1]));
+                        parents[left] = right;
                     }
-                    Ok(())
-                })
-                .over(conjunct)?;
-                for pair in items.windows(2) {
-                    let (left, right) = (root(&mut parents, pair[0]), root(&mut parents, pair[1]));
-                    parents[left] = right;
                 }
-            }
-            let first = root(&mut parents, 0);
-            let linked: Vec<bool> = (0..select.from.len())
-                .map(|item| root(&mut parents, item) == first)
-                .collect();
-            for (item, from) in select.from.iter().enumerate() {
-                if !linked[item] {
-                    found.push((from.to_string(), link(database, &instances, item, &linked)?));
+                let first = root(&mut parents, 0);
+                let linked: Vec<bool> = (0..select.from.len())
+                    .map(|item| root(&mut parents, item) == first)
+                    .collect();
+                for (item, from) in select.from.iter().enumerate() {
+                    if !linked[item] {
+                        let resolution = link(database, &instances, item, &linked)?.map_or_else(
+                        || "Add the WHERE condition that links it, or write CROSS JOIN when every combination is meant.".to_owned(),
+                        |condition| format!("Add {condition} to the WHERE, or write CROSS JOIN when every combination is meant."),
+                    );
+                        found.push(Finding {
+                        object: from.to_string(),
+                        message: format!(
+                            "`{from}` is not linked to the first FROM item by any WHERE condition, so each of its rows pairs with every row of the rest."
+                        ),
+                        resolution,
+                    });
+                    }
                 }
-            }
-            Ok(())
-        })?;
-        for (item, condition) in found {
-            let resolution = condition.map_or_else(
-                || "Add the WHERE condition that links it, or write CROSS JOIN when every combination is meant.".to_owned(),
-                |condition| format!("Add {condition} to the WHERE, or write CROSS JOIN when every combination is meant."),
-            );
-            reporter.statement(
-                statement,
-                item.clone(),
-                format!(
-                    "`{item}` is not linked to the first FROM item by any WHERE condition, so each of its rows pairs with every row of the rest."
-                ),
-                resolution,
-            )?;
-        }
-        Ok(())
+                Ok(())
+            })
+        })
     }
 }
 
@@ -506,24 +488,17 @@ impl<DB: DatabaseLike> QueryRule for DistinctOverReferencedSide<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let mut found = Vec::new();
-        check_selects(database, statement, |scope, _, select| {
-            found.extend(
-                filtering_join(database, scope, select)?
-                    .map(|(parent, child)| (select.to_string(), parent, child)),
-            );
-            Ok(())
-        })?;
-        for (select, parent, child) in found {
-            reporter.statement(
-                statement,
-                select.clone(),
-                format!(
-                    "`{select}` selects only columns of {parent} and joins {child} through its foreign key only to filter, so it builds every matching row before DISTINCT collapses them."
-                ),
-                format!("Select from {parent} WHERE EXISTS (SELECT 1 FROM {child} WHERE …) and drop DISTINCT."),
-            )?;
-        }
-        Ok(())
+        report(statement, reporter, |found| {
+            check_selects(database, statement, |scope, _, select| {
+                found.extend(filtering_join(database, scope, select)?.map(|(parent, child)| Finding {
+                    object: select.to_string(),
+                    message: format!(
+                        "`{select}` selects only columns of {parent} and joins {child} through its foreign key only to filter, so it builds every matching row before DISTINCT collapses them."
+                    ),
+                    resolution: format!("Select from {parent} WHERE EXISTS (SELECT 1 FROM {child} WHERE …) and drop DISTINCT."),
+                }));
+                Ok(())
+            })
+        })
     }
 }

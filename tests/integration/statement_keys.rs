@@ -4,7 +4,7 @@
 
 use crate::{
     common::parse,
-    rule_findings::{statement, statement_findings},
+    rule_findings::{check_query_rule, statement, statement_levels},
 };
 use sql_rules::prelude::*;
 
@@ -20,20 +20,6 @@ const SHOP: &str = "
     CREATE UNIQUE INDEX orders_lower_code ON orders (lower(code));
     CREATE TABLE tags (order_id INT NOT NULL, tag TEXT NOT NULL, UNIQUE NULLS NOT DISTINCT (order_id, tag));
     CREATE TABLE notes (body TEXT);";
-
-/// Checks the objects `rule` reports on each `(statement, objects)` case.
-fn check<R: QueryRule<Database = ParserDB> + 'static>(rule: R, cases: &[(&str, &[&str])]) {
-    let mut constrainer = GenericConstrainer::default();
-    constrainer.register_query_rule(Box::new(rule));
-    let database = parse(SHOP);
-    for (sql, expected) in cases {
-        let found: Vec<String> = statement_findings(&constrainer, &database, sql)
-            .into_iter()
-            .map(|(_, _, object)| object)
-            .collect();
-        assert_eq!(found, *expected, "{sql}");
-    }
-}
 
 #[test]
 fn an_ambiguous_order_is_a_lookup_failure() {
@@ -51,7 +37,8 @@ fn an_ambiguous_order_is_a_lookup_failure() {
 
 #[test]
 fn order_keys_and_unread_tables_are_read_as_postgresql_does() {
-    check(
+    check_query_rule(
+        SHOP,
         UnorderedLimit::default(),
         &[
             (
@@ -95,7 +82,8 @@ fn order_keys_and_unread_tables_are_read_as_postgresql_does() {
 
 #[test]
 fn a_row_cap_over_rows_the_order_leaves_tied_is_reported() {
-    check(
+    check_query_rule(
+        SHOP,
         UnorderedLimit::default(),
         &[
             ("SELECT id FROM orders LIMIT 1", &["LIMIT 1"]),
@@ -187,7 +175,8 @@ fn a_row_cap_over_rows_the_order_leaves_tied_is_reported() {
 
 #[test]
 fn distinct_on_without_an_order_that_breaks_ties_is_reported() {
-    check(
+    check_query_rule(
+        SHOP,
         UnorderedDistinctOn::default(),
         &[
             (
@@ -217,7 +206,8 @@ fn distinct_on_without_an_order_that_breaks_ties_is_reported() {
 
 #[test]
 fn a_from_item_no_condition_links_is_reported() {
-    check(
+    check_query_rule(
+        SHOP,
         UnlinkedFromItem::default(),
         &[
             ("SELECT * FROM customers, orders", &["orders"]),
@@ -272,7 +262,8 @@ fn an_unlinked_from_item_names_the_foreign_key_that_would_link_it() {
 
 #[test]
 fn distinct_over_the_referenced_side_of_a_join_is_reported() {
-    check(
+    check_query_rule(
+        SHOP,
         DistinctOverReferencedSide::default(),
         &[
             (
@@ -325,12 +316,8 @@ fn the_default_constrainer_runs_key_rules_at_their_group_levels() {
     let mut constrainer = DefaultConstrainer::<ParserDB>::default();
     let database = parse(SHOP);
     let sql = "SELECT DISTINCT c.id FROM customers AS c, orders AS o, notes WHERE o.customer_id = c.id LIMIT 1";
-    let rules = |constrainer: &DefaultConstrainer<ParserDB>| {
-        statement_findings(constrainer, &database, sql)
-            .into_iter()
-            .map(|(rule, level, _)| (rule, level))
-            .collect::<Vec<_>>()
-    };
+    let rules =
+        |constrainer: &DefaultConstrainer<ParserDB>| statement_levels(constrainer, &database, sql);
     assert_eq!(
         rules(&constrainer),
         [
