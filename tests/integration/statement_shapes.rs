@@ -4,18 +4,14 @@
 
 use crate::{
     common::parse,
-    rule_findings::{statement, statement_findings},
+    rule_findings::{
+        query_rule, statement, statement_findings, statement_levels, statement_objects,
+    },
 };
 use sql_rules::prelude::*;
 
 const NOTES: &str = "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT, body TEXT);
     CREATE TABLE users (id INT PRIMARY KEY, name TEXT);";
-
-fn only<R: QueryRule<Database = ParserDB> + 'static>(rule: R) -> GenericConstrainer<ParserDB> {
-    let mut constrainer = GenericConstrainer::default();
-    constrainer.register_query_rule(Box::new(rule));
-    constrainer
-}
 
 /// Objects `rule` reports on each statement, in order.
 fn reported(
@@ -25,18 +21,13 @@ fn reported(
 ) -> Vec<Vec<String>> {
     statements
         .iter()
-        .map(|sql| {
-            statement_findings(constrainer, database, sql)
-                .into_iter()
-                .map(|(_, _, object)| object)
-                .collect()
-        })
+        .map(|sql| statement_objects(constrainer, database, sql))
         .collect()
 }
 
 #[test]
 fn random_order_with_a_limit_is_reported() {
-    let constrainer = only(RandomOrderLimit::default());
+    let constrainer = query_rule(RandomOrderLimit::default());
     let database = parse(NOTES);
     assert_eq!(
         reported(
@@ -62,7 +53,7 @@ fn random_order_with_a_limit_is_reported() {
 
 #[test]
 fn offset_paging_is_reported_except_the_zero_offset_fence() {
-    let constrainer = only(OffsetPaging::default());
+    let constrainer = query_rule(OffsetPaging::default());
     let database = parse(NOTES);
     assert_eq!(
         reported(
@@ -86,7 +77,7 @@ fn offset_paging_is_reported_except_the_zero_offset_fence() {
 
 #[test]
 fn writes_without_a_where_are_reported() {
-    let constrainer = only(UnfilteredWrite::default());
+    let constrainer = query_rule(UnfilteredWrite::default());
     let database = parse(NOTES);
     assert_eq!(
         reported(
@@ -148,7 +139,7 @@ const LOGINS: &str = "
       BEGIN PERFORM app.become_admin(); END $$;";
 
 fn credential_rule() -> GenericConstrainer<ParserDB> {
-    let mut constrainer = only(CredentialSettingWrite::default());
+    let mut constrainer = query_rule(CredentialSettingWrite::default());
     constrainer.set_deployment(
         Deployment::default()
             .with_credential("current_setting('app.user_id', true)")
@@ -259,7 +250,7 @@ fn credential_bodies_written_as_an_expression_a_select_or_a_block_are_read() {
 
 #[test]
 fn the_credential_rule_is_inactive_without_declared_credentials() {
-    let constrainer = only(CredentialSettingWrite::default());
+    let constrainer = query_rule(CredentialSettingWrite::default());
     let database = parse(LOGINS);
     assert_eq!(
         constrainer
@@ -349,7 +340,7 @@ const TEAMS: &str = "CREATE TABLE teams (id INT PRIMARY KEY, name TEXT);
 
 #[test]
 fn an_unqualified_name_resolving_outside_its_subquery_is_reported() {
-    let constrainer = only(OuterColumnCapture::default());
+    let constrainer = query_rule(OuterColumnCapture::default());
     let database = parse(TEAMS);
     assert_eq!(
         reported(
@@ -387,7 +378,7 @@ fn an_unqualified_name_resolving_outside_its_subquery_is_reported() {
 
 #[test]
 fn captures_under_a_with_clause_are_reported() {
-    let constrainer = only(OuterColumnCapture::default());
+    let constrainer = query_rule(OuterColumnCapture::default());
     let database = parse(TEAMS);
     assert_eq!(
         reported(
@@ -413,7 +404,7 @@ fn captures_under_a_with_clause_are_reported() {
 
 #[test]
 fn a_captured_name_is_named_with_the_outer_relation() {
-    let constrainer = only(OuterColumnCapture::default());
+    let constrainer = query_rule(OuterColumnCapture::default());
     let Err(Error::Violation(violation)) = constrainer.validate_statement(
         &parse(TEAMS),
         &statement("SELECT id FROM teams AS t WHERE id IN (SELECT id FROM banned)"),
@@ -426,7 +417,7 @@ fn a_captured_name_is_named_with_the_outer_relation() {
 
 #[test]
 fn names_the_subquery_resolves_or_that_resolve_nowhere_pass() {
-    let constrainer = only(OuterColumnCapture::default());
+    let constrainer = query_rule(OuterColumnCapture::default());
     let database = parse(TEAMS);
     for sql in [
         "SELECT id FROM teams WHERE id IN (SELECT team_id FROM banned)",
@@ -449,7 +440,7 @@ fn names_the_subquery_resolves_or_that_resolve_nowhere_pass() {
 
 #[test]
 fn a_name_the_schema_cannot_resolve_is_a_lookup_failure() {
-    let constrainer = only(OuterColumnCapture::default());
+    let constrainer = query_rule(OuterColumnCapture::default());
     let database = parse(TEAMS);
     for sql in [
         "SELECT id FROM teams WHERE id IN (SELECT team_id FROM banned, members)",
@@ -475,10 +466,7 @@ fn the_default_constrainer_runs_shape_rules_at_their_group_levels() {
     );
     let database = parse(&format!("{TEAMS} CREATE TABLE notes (id INT, body TEXT);"));
     let rules = |constrainer: &DefaultConstrainer<ParserDB>, sql: &str| {
-        statement_findings(constrainer, &database, sql)
-            .into_iter()
-            .map(|(rule, level, _)| (rule, level))
-            .collect::<Vec<_>>()
+        statement_levels(constrainer, &database, sql)
     };
     assert_eq!(
         rules(&constrainer, "DELETE FROM notes"),

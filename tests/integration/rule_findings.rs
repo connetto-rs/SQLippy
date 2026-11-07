@@ -55,3 +55,37 @@ pub fn statement_findings<C: Constrainer<Database = ParserDB>>(
         })
         .collect()
 }
+
+/// A constrainer running `rule` alone.
+pub fn query_rule<R: QueryRule<Database = ParserDB> + 'static>(
+    rule: R,
+) -> GenericConstrainer<ParserDB> {
+    let mut constrainer = GenericConstrainer::default();
+    constrainer.register_query_rule(Box::new(rule));
+    constrainer
+}
+
+/// Object of every violation `sql` raises against `database`, in order.
+pub fn statement_objects<C: Constrainer<Database = ParserDB>>(
+    constrainer: &C,
+    database: &ParserDB,
+    sql: &str,
+) -> Vec<String> {
+    statement_findings(constrainer, database, sql)
+        .into_iter()
+        .map(|(_, _, object)| object)
+        .collect()
+}
+
+/// Rule and level of every violation `sql` raises against `database`, in
+/// order.
+pub fn statement_levels<C: Constrainer<Database = ParserDB>>(
+    constrainer: &C,
+    database: &ParserDB,
+    sql: &str,
+) -> Vec<(&'static str, Level)> {
+    statement_findings(constrainer, database, sql)
+        .into_iter()
+        .map(|(rule, level, _)| (rule, level))
+        .collect()
+}
