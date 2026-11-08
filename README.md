@@ -1,9 +1,9 @@
 # SQLippy
 
-[![CI](https://github.com/connetto-rs/sql-rules/workflows/Rust%20CI/badge.svg)](https://github.com/connetto-rs/sql-rules/actions)
-[![Security Audit](https://github.com/connetto-rs/sql-rules/workflows/Security%20Audit/badge.svg)](https://github.com/connetto-rs/sql-rules/actions)
+[![CI](https://github.com/connetto-rs/SQLippy/workflows/Rust%20CI/badge.svg)](https://github.com/connetto-rs/SQLippy/actions)
+[![Security Audit](https://github.com/connetto-rs/SQLippy/workflows/Security%20Audit/badge.svg)](https://github.com/connetto-rs/SQLippy/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Codecov](https://codecov.io/gh/connetto-rs/sql-rules/branch/main/graph/badge.svg)](https://codecov.io/gh/connetto-rs/sql-rules)
+[![Codecov](https://codecov.io/gh/connetto-rs/SQLippy/branch/main/graph/badge.svg)](https://codecov.io/gh/connetto-rs/SQLippy)
 
 [SQL-traits](https://github.com/connetto-rs/sql-traits)-based lints for SQL schemas and for the statements applications send to them. Every rule belongs to a Clippy-style group whose default level is `allow`, `warn` or `deny`, and every violation explains why the shape is bad and how to fix it.
 
