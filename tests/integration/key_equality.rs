@@ -2,7 +2,7 @@
 //! constrainer API. Each refused or missed key was measured on PostgreSQL 17
 //! and 18.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 /// Level and column of every finding of the rule, failing on any error other

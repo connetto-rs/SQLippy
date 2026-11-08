@@ -94,7 +94,7 @@ impl Visitor for BodyReads<'_> {
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let mut constrainer: GenericConstrainer<ParserDB> = DefinerTakesActingUser::default().into();

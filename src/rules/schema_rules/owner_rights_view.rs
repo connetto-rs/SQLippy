@@ -101,7 +101,7 @@ fn hidden_from<DB: DatabaseLike>(
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = OwnerRightsView::default().into();

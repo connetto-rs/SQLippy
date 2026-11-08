@@ -2,7 +2,7 @@
 //! constrainer API. On PostgreSQL 17.11 and 18.6, `UNIQUE` stored two rows
 //! holding `NULL` and `UNIQUE NULLS NOT DISTINCT` refused the second.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 /// Level and message of every finding of the rule.

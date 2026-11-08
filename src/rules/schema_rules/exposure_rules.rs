@@ -50,7 +50,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let mut constrainer: GenericConstrainer<ParserDB> = SecurityDefinerFunctionExposed::default().into();
@@ -131,7 +131,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let mut constrainer: GenericConstrainer<ParserDB> = ExtensionInExposedSchema::default().into();
@@ -184,7 +184,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = ReachableSequence::default().into();
@@ -249,7 +249,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> =

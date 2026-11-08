@@ -21,7 +21,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = RowLevelSecurityWithoutPolicies::default().into();
@@ -75,7 +75,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = MultiplePermissivePolicies::default().into();
@@ -194,7 +194,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = RegColumnType::default().into();
@@ -246,7 +246,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = AutovacuumDisabledTable::default().into();

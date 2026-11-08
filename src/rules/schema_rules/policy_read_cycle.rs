@@ -622,7 +622,7 @@ impl<'db, DB: DatabaseLike> Analysis<'db, DB> {
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = PolicyReadCycle::default().into();
@@ -713,7 +713,7 @@ impl<DB: DatabaseLike> SchemaRule for PolicyReadCycle<DB> {
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = LatentPolicyReadCycle::default().into();
@@ -801,7 +801,7 @@ impl<DB: DatabaseLike> SchemaRule for LatentPolicyReadCycle<DB> {
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = FunctionMediatedPolicyCycle::default().into();

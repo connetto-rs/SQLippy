@@ -6,7 +6,7 @@
 //! `ARRAY(SELECT call)` runs once per statement as an initPlan on PostgreSQL
 //! 17.11 and 18.6.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 const SCHEMA: &str = "

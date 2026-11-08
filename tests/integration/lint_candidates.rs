@@ -7,13 +7,13 @@
 //! on a view without `security_barrier` but not on one with it.
 
 use crate::rule_findings::findings;
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 /// Objects `rule` reports at warn, registered alone under `deployment`.
 fn objects<R>(rule: R, deployment: Deployment, sql: &str) -> Vec<String>
 where
-    R: sql_rules::lint::Rule + Into<GenericConstrainer<ParserDB>>,
+    R: sqlippy::lint::Rule + Into<GenericConstrainer<ParserDB>>,
 {
     let name = rule.metadata().name;
     let mut constrainer = rule.into();

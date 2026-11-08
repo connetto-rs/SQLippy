@@ -24,7 +24,7 @@ use crate::{
 /// `NoSurrogatePrimaryKeyInExtension` constraint.
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> =
 ///     NoSurrogatePrimaryKeyInExtension::default().into();

@@ -549,17 +549,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
-name = "sql-rules"
-version = "0.1.0"
-dependencies = [
- "heck",
- "inflection-rs",
- "sql-traits",
- "sqlparser",
- "thiserror",
-]
-
-[[package]]
 name = "sql-traits"
 version = "0.1.0"
 source = "git+https://github.com/connetto-rs/sql-traits?branch=main#8a6a8c7abdaad33cc98503d5f0e9f16d0dd29f60"
@@ -581,6 +570,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa63391be723434747b0c2ffc2e7270f4a7a476d083b55cdda961c4773d1d5e4"
 dependencies = [
  "jiff",
+ "thiserror",
+]
+
+[[package]]
+name = "sqlippy"
+version = "0.1.0"
+dependencies = [
+ "heck",
+ "inflection-rs",
+ "sql-traits",
+ "sqlparser",
  "thiserror",
 ]
 

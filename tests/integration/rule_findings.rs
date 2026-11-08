@@ -1,6 +1,6 @@
 //! Findings of one rule, shared by the suites that check rules by name.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 
 /// Level, object and message of every finding of `rule`, failing on anything

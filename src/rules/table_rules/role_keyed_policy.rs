@@ -23,7 +23,7 @@ use crate::{
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = PolicyToCreatingRole::default().into();
@@ -48,7 +48,7 @@ pub struct PolicyToCreatingRole<DB>(std::marker::PhantomData<DB>);
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let mut constrainer: GenericConstrainer<ParserDB> =

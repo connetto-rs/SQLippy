@@ -3,7 +3,7 @@
 //! behaviour each rule cites was measured on PostgreSQL 17.11 and 18.6.
 
 use crate::rule_findings::findings;
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 
 fn objects<C: Constrainer<Database = ParserDB>>(
     constrainer: &C,

@@ -2,7 +2,7 @@
 //! constrainer API wherever the schema holds them. The behaviour each rule
 //! cites was measured on PostgreSQL 17.11 and 18.6.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 /// Rule, level, object and message of every type finding.

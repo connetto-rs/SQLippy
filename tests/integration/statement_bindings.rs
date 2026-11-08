@@ -6,7 +6,7 @@ use crate::{
     common::parse,
     rule_findings::{check_query_rule, query_rule},
 };
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::{dialect::GenericDialect, parser::Parser};
 
 const PEOPLE: &str = "

@@ -2,7 +2,7 @@
 //! govern, observed through the public constrainer API.
 
 use crate::common::{ROLES, finding, findings, parse, supabase};
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 
 #[test]
 fn a_table_without_row_level_security_granted_to_a_client_role_is_reachable() {

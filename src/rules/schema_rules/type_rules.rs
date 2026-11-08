@@ -163,7 +163,7 @@ type_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = TimestampWithoutTimeZone::default().into();
@@ -192,7 +192,7 @@ type_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = TimeWithTimeZone::default().into();
@@ -221,7 +221,7 @@ type_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = ZeroPrecisionTimestamp::default().into();
@@ -251,7 +251,7 @@ type_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = BlankPaddedCharacter::default().into();
@@ -281,7 +281,7 @@ type_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = MoneyType::default().into();
@@ -309,7 +309,7 @@ type_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = JsonType::default().into();
@@ -340,7 +340,7 @@ type_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = ScaledNumeric::default().into();
@@ -372,7 +372,7 @@ type_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let mut constrainer: GenericConstrainer<ParserDB> = ClientWrittenScaledNumeric::default().into();

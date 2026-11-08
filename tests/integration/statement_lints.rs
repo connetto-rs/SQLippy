@@ -5,7 +5,7 @@
 use std::ops::ControlFlow;
 
 use crate::rule_findings::{findings, statement};
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 const PAIRS: &str = "CREATE TABLE a (id INT NOT NULL, team INT);

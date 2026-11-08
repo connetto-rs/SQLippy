@@ -21,7 +21,7 @@ use crate::{
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = NullableCompositeForeignKey::default().into();
@@ -116,7 +116,7 @@ fn leads<DB: DatabaseLike, I: IndexLike<DB = DB>>(
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = UnindexedForeignKey::default().into();

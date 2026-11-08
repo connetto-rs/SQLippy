@@ -1,7 +1,7 @@
 //! Views over row-level-security tables that run with their owner's rights,
 //! observed through the public constrainer API.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 /// Each view the rule reports, with whether the finding says rows leak.

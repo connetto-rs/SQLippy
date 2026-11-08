@@ -1,7 +1,7 @@
 //! Dead permissive policies, tautological write checks and unforced row-level
 //! security observed through the public constrainer API.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 fn parse(sql: &str) -> ParserDB {

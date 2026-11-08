@@ -2,7 +2,7 @@
 //! API. The search path shapes were measured on PostgreSQL 17 and 18 with a
 //! caller holding a temporary `docs` table over a three-row `public.docs`.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 /// Rule, level and function of every finding, failing on any error other than

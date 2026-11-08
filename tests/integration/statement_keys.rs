@@ -6,7 +6,7 @@ use crate::{
     common::parse,
     rule_findings::{check_query_rule, statement, statement_levels},
 };
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 
 const SHOP: &str = "
     CREATE TABLE customers (id INT PRIMARY KEY, email TEXT UNIQUE, login TEXT NOT NULL UNIQUE, team INT);

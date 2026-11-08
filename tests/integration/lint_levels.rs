@@ -1,7 +1,7 @@
 //! Lint levels, groups and complete collection observed through the public constrainer API.
 
-use sql_rules::prelude::*;
 use sql_traits::errors::LookupError;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 fn parse(sql: &str) -> ParserDB {

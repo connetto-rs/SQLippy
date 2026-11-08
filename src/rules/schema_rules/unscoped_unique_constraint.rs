@@ -37,7 +37,7 @@ fn scoped<DB: DatabaseLike, I: IndexLike<DB = DB>>(
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let mut constrainer: GenericConstrainer<ParserDB> =

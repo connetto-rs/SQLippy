@@ -1,4 +1,4 @@
-# SQL Rules
+# SQLippy
 
 [![CI](https://github.com/connetto-rs/sql-rules/workflows/Rust%20CI/badge.svg)](https://github.com/connetto-rs/sql-rules/actions)
 [![Security Audit](https://github.com/connetto-rs/sql-rules/workflows/Security%20Audit/badge.svg)](https://github.com/connetto-rs/sql-rules/actions)
@@ -10,7 +10,7 @@
 ## Usage
 
 ```rust
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::GenericDialect;
 
 let database = ParserDB::parse::<GenericDialect>(

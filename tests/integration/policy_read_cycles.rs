@@ -1,6 +1,6 @@
 //! Policy read cycles and policy allowances observed through the public constrainer API.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 fn parse(sql: &str) -> ParserDB {

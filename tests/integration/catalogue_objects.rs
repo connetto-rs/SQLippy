@@ -4,12 +4,12 @@
 //! 17.11 and 18.6.
 
 use crate::rule_findings::findings;
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 
 /// Objects `rule` reports, registered alone.
 fn objects<R>(rule: R, sql: &str) -> Vec<String>
 where
-    R: sql_rules::lint::Rule + Into<GenericConstrainer<ParserDB>>,
+    R: sqlippy::lint::Rule + Into<GenericConstrainer<ParserDB>>,
 {
     let name = rule.metadata().name;
     findings(&rule.into(), name, sql)

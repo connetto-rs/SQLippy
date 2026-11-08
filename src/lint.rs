@@ -40,7 +40,7 @@ impl LintGroup {
     /// # Example
     ///
     /// ```
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     ///
     /// assert_eq!(LintGroup::Correctness.default_level(), Level::Deny);
     /// assert_eq!(LintGroup::Style.default_level(), Level::Warn);

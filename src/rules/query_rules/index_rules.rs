@@ -93,7 +93,7 @@ query_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = ExpressionDefeatsIndex::default().into();
@@ -264,7 +264,7 @@ query_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = UnindexedFilter::default().into();
@@ -372,7 +372,7 @@ query_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = UnindexedCorrelatedSelect::default().into();

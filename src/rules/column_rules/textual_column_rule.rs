@@ -13,7 +13,7 @@ use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, Database
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = TextualColumnRule::default().into();

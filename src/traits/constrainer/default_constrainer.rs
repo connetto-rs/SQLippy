@@ -57,7 +57,7 @@ use crate::{
 /// # Example
 ///
 /// ```
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
 /// let database = ParserDB::parse::<GenericDialect>("CREATE TABLE t (type INT);").unwrap();

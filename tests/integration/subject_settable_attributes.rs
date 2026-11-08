@@ -3,7 +3,7 @@
 //! constrainer API. Every flagged and passing shape below was measured on
 //! PostgreSQL 17.11 and 18.6.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 const CREDENTIAL: &str = "current_setting('app.user_id', true)";

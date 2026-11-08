@@ -25,7 +25,7 @@ use crate::{
 /// `CompatibleForeignKey` constraint.
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = CompatibleForeignKey::default().into();

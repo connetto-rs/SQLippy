@@ -1,7 +1,7 @@
 //! Array-membership grants, deny-list-only grants and unindexed policy
 //! filters, observed through the public constrainer API.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 /// Level and site of every finding of `rule`.

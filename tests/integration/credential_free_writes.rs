@@ -2,7 +2,7 @@
 //! public constrainer API. Every flagged and passing shape below was measured
 //! on PostgreSQL 17.11 and 18.6 as an anonymous caller.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 fn parse(sql: &str) -> ParserDB {

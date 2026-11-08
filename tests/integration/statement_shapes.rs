@@ -9,7 +9,7 @@ use crate::{
         statement_objects,
     },
 };
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 
 const NOTES: &str = "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT, body TEXT);
     CREATE TABLE users (id INT PRIMARY KEY, name TEXT);";

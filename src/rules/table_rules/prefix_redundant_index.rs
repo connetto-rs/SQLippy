@@ -82,7 +82,7 @@ impl<'db, DB: DatabaseLike> Shape<'db, DB> {
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = PrefixRedundantIndex::default().into();

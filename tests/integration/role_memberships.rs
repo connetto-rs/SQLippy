@@ -1,7 +1,7 @@
 //! Role memberships granted with `GRANT role TO role`, and their `INHERIT`
 //! and `SET` options, observed through the public constrainer API.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 /// Rule name and object of every violation, failing on anything else.

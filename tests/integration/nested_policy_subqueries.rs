@@ -1,7 +1,7 @@
 //! Policy subqueries reading tables whose own policies hold subqueries,
 //! observed through the public constrainer API.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 const SCHEMA: &str = "

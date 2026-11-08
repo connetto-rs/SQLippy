@@ -26,7 +26,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = QueryRewriteRule::default().into();
@@ -87,7 +87,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = TableInheritance::default().into();
@@ -257,7 +257,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = TruncatedIdentifier::default().into();
@@ -412,7 +412,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = ReservedKeywordIdentifier::default().into();
@@ -461,7 +461,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = UnvalidatedConstraint::default().into();
@@ -526,7 +526,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = PublicSchemaCreate::default().into();
@@ -581,7 +581,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = UnloggedTable::default().into();
@@ -623,7 +623,7 @@ schema_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = WildcardView::default().into();
