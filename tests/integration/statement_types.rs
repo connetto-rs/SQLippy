@@ -6,7 +6,7 @@ use crate::{
     common::parse,
     rule_findings::{check_query_rule, statement_findings},
 };
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 
 const EVENTS: &str = "CREATE TABLE events (
     id INT PRIMARY KEY,

@@ -159,7 +159,7 @@ impl<DB: DatabaseLike> Visitor for SelfAssertedRead<'_, '_, DB> {
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let mut constrainer: GenericConstrainer<ParserDB> = SelfAssertedClaimPolicy::default().into();

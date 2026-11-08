@@ -78,7 +78,7 @@ rule_definition!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = SerialColumn::default().into();
@@ -128,7 +128,7 @@ rule_definition!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = NarrowIntegerKey::default().into();
@@ -183,7 +183,7 @@ rule_definition!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let mut constrainer: GenericConstrainer<ParserDB> = ClientWrittenCounterKey::default().into();

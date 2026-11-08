@@ -119,7 +119,7 @@ pub trait Constrainer: Default {
     /// # Example
     ///
     /// ```
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     ///
     /// let mut constrainer: GenericConstrainer<ParserDB> =
     ///     TruncateGrantedToAppRole::default().into();
@@ -152,7 +152,7 @@ pub trait Constrainer: Default {
     /// # Example
     ///
     /// ```
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::dialect::GenericDialect;
     ///
     /// let database = ParserDB::parse::<GenericDialect>(
@@ -212,7 +212,7 @@ pub trait Constrainer: Default {
     /// # Example
     ///
     /// ```
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
     ///
     /// let database =

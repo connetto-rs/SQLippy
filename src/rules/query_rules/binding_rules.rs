@@ -97,7 +97,7 @@ query_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = AliasShadowedByColumn::default().into();
@@ -181,7 +181,7 @@ query_rule!(
     /// # Example
     ///
     /// ```rust
-    /// use sql_rules::prelude::*;
+    /// use sqlippy::prelude::*;
     /// use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
     ///
     /// let constrainer: GenericConstrainer<ParserDB> = SelfComparison::default().into();

@@ -21,7 +21,7 @@ const SOURCE: Option<&str> = Some("https://www.postgresql.org/docs/current/ddl-r
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let mut constrainer: GenericConstrainer<ParserDB> =
@@ -45,7 +45,7 @@ pub struct ClientRoleBypassesRowLevelSecurity<DB>(std::marker::PhantomData<DB>);
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let mut constrainer: GenericConstrainer<ParserDB> =

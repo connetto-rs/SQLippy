@@ -381,7 +381,7 @@ impl<DB: DatabaseLike> Visitor for Writes<'_, '_, DB> {
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 ///
 /// let mut constrainer: GenericConstrainer<ParserDB> = CredentialSettingWrite::default().into();

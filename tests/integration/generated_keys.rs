@@ -1,7 +1,7 @@
 //! Keys the database generates, serial and identity alike, observed through
 //! the public constrainer API.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 /// Rule name and message of every violation, failing on anything else.

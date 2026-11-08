@@ -18,7 +18,7 @@ use sqlparser::{
 /// # Example
 ///
 /// ```
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 ///
 /// let supabase = Deployment::default()
 ///     .with_anonymous_role("anon")

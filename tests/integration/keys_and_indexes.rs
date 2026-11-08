@@ -1,7 +1,7 @@
 //! Keys and indexes, observed through the public constrainer API. The
 //! behaviour each rule cites was measured on PostgreSQL 17.11 and 18.6.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 const RULES: [&str; 7] = [

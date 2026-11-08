@@ -17,7 +17,7 @@ use crate::{
 /// `HasPrimaryKey` constraint.
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = HasPrimaryKey::default().into();

@@ -4,7 +4,7 @@
 //! deleted it through a writing definer, and got nothing from a definer that
 //! also compared the parameter with the credential.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 const SCHEMA: &str = "

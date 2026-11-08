@@ -241,7 +241,7 @@ fn withheld<DB: DatabaseLike>(
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let mut constrainer: GenericConstrainer<ParserDB> = SubjectSettableAttribute::default().into();

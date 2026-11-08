@@ -89,7 +89,7 @@ fn granted_to_everyone<DB: DatabaseLike>(
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = DenyListPolicy::default().into();

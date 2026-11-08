@@ -4,7 +4,7 @@
 //! duplicate-key error inserting that tenant's email under a global unique
 //! index, and stored it under one scoped to the tenant.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 const SCHEMA: &str = "

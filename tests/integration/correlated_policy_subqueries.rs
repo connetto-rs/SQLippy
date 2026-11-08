@@ -1,7 +1,7 @@
 //! Policy subqueries correlated to the checked row, observed through the public
 //! constrainer API.
 
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 const TABLES: &str = "

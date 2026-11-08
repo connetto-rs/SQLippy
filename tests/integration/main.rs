@@ -1,5 +1,5 @@
 //! Integration tests of the public constrainer API, built as one test binary
-//! so the suite links `sql-rules` and its dependencies once.
+//! so the suite links `sqlippy` and its dependencies once.
 
 mod common;
 mod rule_findings;

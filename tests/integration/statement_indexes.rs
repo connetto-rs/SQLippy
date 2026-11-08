@@ -6,7 +6,7 @@ use crate::{
     common::parse,
     rule_findings::{check_query_rule, statement_levels},
 };
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 
 const USERS: &str = "
     CREATE TABLE teams (id INT PRIMARY KEY, name TEXT);

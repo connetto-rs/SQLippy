@@ -6,7 +6,7 @@ use crate::{
     common::{finding, findings, parse, supabase},
     rule_findings::inactive_declarations,
 };
-use sql_rules::prelude::*;
+use sqlippy::prelude::*;
 
 const DOCS: &str = "
     CREATE TABLE docs (id INT PRIMARY KEY, owner TEXT);

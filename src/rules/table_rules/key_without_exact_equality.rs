@@ -46,7 +46,7 @@ fn inexact_equality<T: DataTypeLike>(data_type: &T, database: &T::DB) -> Option<
 /// # Example
 ///
 /// ```rust
-/// use sql_rules::prelude::*;
+/// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = KeyWithoutExactEquality::default().into();
