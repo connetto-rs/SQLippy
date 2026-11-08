@@ -1,6 +1,7 @@
 //! Dead permissive policies, tautological write checks and unforced row-level
 //! security observed through the public constrainer API.
 
+use sql_traits::errors::LookupError;
 use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
@@ -313,4 +314,20 @@ fn an_unresolvable_filter_is_a_lookup_failure() {
             "{using}"
         );
     }
+}
+
+#[test]
+fn a_policy_literal_that_needs_session_state_is_a_lookup_failure() {
+    let constrainer: GenericConstrainer<ParserDB> = TautologicalWithCheck::default().into();
+    let database = parse(
+        "CREATE TABLE docs (owner TEXT, expires TIMESTAMPTZ);
+         CREATE POLICY own ON docs FOR UPDATE USING (owner = current_user AND expires > '2026-01-01 09:00') WITH CHECK (true);",
+    );
+    assert!(
+        matches!(
+            constrainer.validate_schema(&database),
+            Err(Error::Lookup(LookupError::PolicyLiteralUnreadable { .. }))
+        ),
+        "a timestamptz literal before any SET TIME ZONE has no known stored value"
+    );
 }

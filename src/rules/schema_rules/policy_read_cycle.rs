@@ -18,7 +18,7 @@ use crate::{
     lint::{LintGroup, Rule, RuleMetadata},
     rules::{
         function_rules::unreadable_body,
-        policy_support::{Command, held_by_name, held_roles, policy_roles},
+        policy_support::{Command, held_by_name, held_roles, policy_roles, walked_clauses},
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
@@ -349,8 +349,7 @@ impl<'db, DB: DatabaseLike> Analysis<'db, DB> {
     fn new(database: &'db DB) -> Result<Self, LookupError> {
         let mut facts = Vec::new();
         for policy in database.policies() {
-            let using = policy.using_expression(database);
-            let check = policy.check_expression(database);
+            let [(_, using), (_, check)] = walked_clauses(database, policy)?;
             let (using_sublink, using_reads) = sublink_reads(database, policy, using)?;
             let (check_sublink, check_reads) = sublink_reads(database, policy, check)?;
             facts.push(PolicyFacts {

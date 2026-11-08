@@ -145,7 +145,7 @@ impl<DB: DatabaseLike> TableRule for CredentialFreeWrite<DB> {
                     continue;
                 }
                 let judge = CredentialJudge::new(database, policy, deployment);
-                for clause in applied(database, policy, command) {
+                for clause in applied(database, policy, command)? {
                     if clause.stage == stage && judge.requires(clause.expression)? {
                         requires = true;
                     }
@@ -166,7 +166,7 @@ impl<DB: DatabaseLike> TableRule for CredentialFreeWrite<DB> {
                 if guarded.contains(&command) || !command.covered_by(policy.command()) {
                     continue;
                 }
-                for clause in applied(database, policy, command) {
+                for clause in applied(database, policy, command)? {
                     if clause.stage != stage || judge.requires(clause.expression)? {
                         continue;
                     }

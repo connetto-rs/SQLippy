@@ -138,6 +138,18 @@ fn casts_calls_and_declared_types_elsewhere_are_reported() {
 }
 
 #[test]
+fn a_policy_comparing_a_timestamp_column_to_an_uncast_literal_is_not_reported() {
+    assert_eq!(
+        reported(
+            "CREATE TABLE t (at TIMESTAMP);
+             ALTER TABLE t ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY p ON t USING (at > '2020-01-01');"
+        ),
+        pairs(&[("TimestampWithoutTimeZone", "t.at")])
+    );
+}
+
+#[test]
 fn client_written_tables_get_the_echo_and_the_suspicious_numeric_rule() {
     let found = findings(
         &every_rule(),

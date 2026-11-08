@@ -6,7 +6,7 @@ use std::ops::ControlFlow;
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinition, ColumnDefinitionScope, ColumnScope, IdentifierCase},
-    traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, TableLike},
 };
 use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArguments, InTarget, JoinConstraint, JoinOperator,
@@ -15,7 +15,7 @@ use sqlparser::ast::{
 
 use crate::{
     deployment::Deployment,
-    rules::policy_support::{conjuncts, is_column_reference, sql_set_body},
+    rules::policy_support::{conjuncts, is_column_reference, sql_set_body, walked_clauses},
 };
 
 /// A column, as its table's position and its stored name.
@@ -498,14 +498,10 @@ pub(crate) fn authority_columns<DB: DatabaseLike>(
     };
     for table in database.tables() {
         for policy in table.policies(database)? {
-            for expression in [
-                policy.using_expression(database),
-                policy.check_expression(database),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                authority.expression(table, expression)?;
+            for (_, expression) in walked_clauses(database, policy)? {
+                if let Some(expression) = expression {
+                    authority.expression(table, expression)?;
+                }
             }
         }
     }

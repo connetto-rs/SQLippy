@@ -16,8 +16,9 @@ use sqlparser::{
 };
 
 use crate::{
-    error::{Interruption, PolicyClause, PolicySite},
+    error::{Interruption, PolicySite},
     lint::{LintGroup, Rule, RuleMetadata},
+    rules::policy_support::walked_clauses,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -223,10 +224,7 @@ impl<DB: DatabaseLike> TableRule for UncachedPolicyCall<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         for policy in table.policies(database)? {
-            let clauses = [
-                (PolicyClause::Using, policy.using_expression(database)),
-                (PolicyClause::WithCheck, policy.check_expression(database)),
-            ];
+            let clauses = walked_clauses(database, policy)?;
             for (clause, expression) in clauses {
                 let Some(expression) = expression else {
                     continue;
