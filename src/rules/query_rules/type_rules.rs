@@ -14,7 +14,10 @@ use sqlparser::ast::{
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::statement_support::{Finding, check_select_expressions, report},
+    rules::{
+        policy_support::unnested,
+        statement_support::{Finding, check_select_expressions, report},
+    },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
 
@@ -383,15 +386,11 @@ impl<DB: DatabaseLike> QueryRule for TruncatingIntegerDivision<DB> {
                 else {
                     return Ok(None);
                 };
-                let mut quotient = left.as_ref();
-                while let Expr::Nested(inner) = quotient {
-                    quotient = inner;
-                }
                 let Expr::BinaryOp {
                     left: dividend,
                     op: BinaryOperator::Divide,
                     right: divisor,
-                } = quotient
+                } = unnested(left)
                 else {
                     return Ok(None);
                 };
