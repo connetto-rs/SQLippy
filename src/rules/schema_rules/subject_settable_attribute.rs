@@ -164,7 +164,7 @@ fn guarded<DB: DatabaseLike>(
         {
             continue;
         }
-        for check in applied(database, guard, command) {
+        for check in applied(database, guard, command)? {
             if check.stage == Stage::Check && fixes(database, scope, attribute, check.expression)? {
                 return Ok(true);
             }
@@ -342,7 +342,7 @@ impl<DB: DatabaseLike> SchemaRule for SubjectSettableAttribute<DB> {
                     if !command.covered_by(policy.command()) {
                         continue;
                     }
-                    for position in applied(database, policy, command) {
+                    for position in applied(database, policy, command)? {
                         if position.stage != Stage::Check
                             || !admits_subject(database, deployment, &scope, position.expression)?
                         {

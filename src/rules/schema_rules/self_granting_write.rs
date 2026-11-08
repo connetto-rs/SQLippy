@@ -194,7 +194,7 @@ impl<DB: DatabaseLike> SchemaRule for SelfGrantingWrite<DB> {
                     if !command.covered_by(policy.command()) {
                         continue;
                     }
-                    for position in applied(database, policy, command) {
+                    for position in applied(database, policy, command)? {
                         if position.stage != Stage::Check {
                             continue;
                         }
@@ -214,7 +214,7 @@ impl<DB: DatabaseLike> SchemaRule for SelfGrantingWrite<DB> {
                                     continue;
                                 }
                                 let guard_judge = CredentialJudge::new(database, guard, deployment);
-                                for check in applied(database, guard, command) {
+                                for check in applied(database, guard, command)? {
                                     guarded |= check.stage == Stage::Check
                                         && constrains(
                                             &guard_judge,

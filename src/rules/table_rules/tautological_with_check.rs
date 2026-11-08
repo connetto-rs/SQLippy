@@ -84,8 +84,8 @@ impl<DB: DatabaseLike> TableRule for TautologicalWithCheck<DB> {
                 continue;
             }
             let (Some(using), Some(check)) = (
-                policy.using_expression(database),
-                policy.check_expression(database),
+                policy.using_expression(database)?,
+                policy.check_expression(database)?,
             ) else {
                 continue;
             };

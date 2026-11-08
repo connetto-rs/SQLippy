@@ -9,9 +9,9 @@ use sql_traits::{
 use sqlparser::ast::{Expr, Query, Visit, Visitor};
 
 use crate::{
-    error::{Interruption, PolicyClause, PolicySite},
+    error::{Interruption, PolicySite},
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::policy_support::{Command, held_by_name, policy_roles},
+    rules::policy_support::{Command, held_by_name, policy_roles, walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -85,13 +85,18 @@ fn nested_policy<'db, DB: DatabaseLike>(
     if !table.has_row_level_security(database)? {
         return Ok(None);
     }
-    Ok(table.policies(database)?.find(|policy| {
-        Command::Select.covered_by(policy.command())
+    for policy in table.policies(database)? {
+        if Command::Select.covered_by(policy.command())
             && share_a_role(database, outer, policy)
             && policy
-                .using_expression(database)
-                .is_some_and(holds_subquery)
-    }))
+                .using_clause(database)?
+                .as_ref()
+                .is_some_and(|clause| holds_subquery(clause.expression()))
+        {
+            return Ok(Some(policy));
+        }
+    }
+    Ok(None)
 }
 
 /// Struct defining a rule that reports a policy subquery reading a table with
@@ -167,10 +172,7 @@ impl<DB: DatabaseLike> TableRule for NestedPolicySubquery<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         for policy in table.policies(database)? {
-            let clauses = [
-                (PolicyClause::Using, policy.using_expression(database)),
-                (PolicyClause::WithCheck, policy.check_expression(database)),
-            ];
+            let clauses = walked_clauses(database, policy)?;
             for (clause, expression) in clauses {
                 let Some(expression) = expression else {
                     continue;

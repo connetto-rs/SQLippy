@@ -111,6 +111,18 @@ fn wrapped_row_dependent_constant_and_sublink_calls_pass() {
 }
 
 #[test]
+fn a_call_beside_a_literal_without_a_known_stored_value_is_still_reported() {
+    assert_eq!(
+        calls(
+            "CREATE TABLE exp (owner TEXT, expires TIMESTAMPTZ);
+             ALTER TABLE exp ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY p ON exp USING (owner = current_setting('app.user_id', true) AND expires > '2026-01-01 09:00');"
+        ),
+        [("current_setting('app.user_id', true)".to_owned(), false)]
+    );
+}
+
+#[test]
 fn the_default_constrainer_warns() {
     let found = findings(
         &DefaultConstrainer::<ParserDB>::default(),

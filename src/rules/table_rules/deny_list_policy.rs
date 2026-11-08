@@ -67,7 +67,7 @@ fn granted_to_everyone<DB: DatabaseLike>(
             continue;
         }
         reached = true;
-        for position in applied(database, *policy, command) {
+        for position in applied(database, *policy, command)? {
             if !is_tautology(database, table, position.expression)? {
                 return Ok(false);
             }
@@ -164,7 +164,7 @@ impl<DB: DatabaseLike> TableRule for DenyListPolicy<DB> {
                 if !command.covered_by(deny.command()) {
                     continue;
                 }
-                let Some(position) = applied(database, deny, command)
+                let Some(position) = applied(database, deny, command)?
                     .into_iter()
                     .find(|position| is_deny_list(position.expression))
                 else {

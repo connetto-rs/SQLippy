@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ColumnDefinition, ColumnScope, FunctionKind, IdentifierCase},
+    structs::{ColumnDefinition, ColumnScope, FunctionKind, IdentifierCase, PolicyExpression},
     traits::{DatabaseLike, FunctionLike, PolicyLike, RoleLike, RoleMembershipLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
@@ -66,9 +66,9 @@ pub(crate) fn applied<'db, DB: DatabaseLike>(
     database: &'db DB,
     policy: &'db DB::Policy,
     command: Command,
-) -> Vec<Applied<'db>> {
-    let using = policy.using_expression(database);
-    let check = policy.check_expression(database);
+) -> Result<Vec<Applied<'db>>, LookupError> {
+    let using = policy.using_expression(database)?;
+    let check = policy.check_expression(database)?;
     let filter = using.map(|expression| Applied {
         stage: Stage::Filter,
         clause: PolicyClause::Using,
@@ -87,10 +87,35 @@ pub(crate) fn applied<'db, DB: DatabaseLike>(
         }),
     };
     match command {
-        Command::Select | Command::Delete => filter.into_iter().collect(),
-        Command::Insert => new_rows.into_iter().collect(),
-        Command::Update => filter.into_iter().chain(new_rows).collect(),
+        Command::Select | Command::Delete => Ok(filter.into_iter().collect()),
+        Command::Insert => Ok(new_rows.into_iter().collect()),
+        Command::Update => Ok(filter.into_iter().chain(new_rows).collect()),
     }
+}
+
+/// The `USING` and `WITH CHECK` clauses of `policy`, each for a walk of the
+/// relations, subqueries and calls it holds, stored when every literal of it
+/// could be read and written when one could not.
+pub(crate) fn walked_clauses<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    policy: &'db DB::Policy,
+) -> Result<[(PolicyClause, Option<&'db Expr>); 2], LookupError> {
+    Ok([
+        (
+            PolicyClause::Using,
+            policy
+                .using_clause(database)?
+                .as_ref()
+                .map(PolicyExpression::expression),
+        ),
+        (
+            PolicyClause::WithCheck,
+            policy
+                .check_clause(database)?
+                .as_ref()
+                .map(PolicyExpression::expression),
+        ),
+    ])
 }
 
 /// Normalized name of a policy role.

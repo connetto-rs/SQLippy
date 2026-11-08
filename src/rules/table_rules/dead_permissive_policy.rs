@@ -111,7 +111,7 @@ impl<DB: DatabaseLike> TableRule for DeadPermissivePolicy<DB> {
                 if !command.covered_by(policy.command()) {
                     continue;
                 }
-                for position in applied(database, *policy, command) {
+                for position in applied(database, *policy, command)? {
                     narrower |= !is_tautology(database, table, position.expression)?;
                     let mut decided = false;
                     for (other, other_policy) in permissive.iter().enumerate() {
@@ -121,7 +121,7 @@ impl<DB: DatabaseLike> TableRule for DeadPermissivePolicy<DB> {
                         {
                             continue;
                         }
-                        for deciding in applied(database, *other_policy, command) {
+                        for deciding in applied(database, *other_policy, command)? {
                             if deciding.stage == position.stage
                                 && is_tautology(database, table, deciding.expression)?
                             {
