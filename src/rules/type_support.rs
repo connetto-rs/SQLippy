@@ -236,8 +236,8 @@ pub(crate) fn type_uses<'db, DB: DatabaseLike>(
         }
         for policy in table.policies(database)? {
             for (clause, expression) in [
-                (PolicyClause::Using, policy.using_expression(database)),
-                (PolicyClause::WithCheck, policy.check_expression(database)),
+                (PolicyClause::Using, policy.written_using(database)?),
+                (PolicyClause::WithCheck, policy.written_check(database)?),
             ] {
                 add(
                     TypeSite::Policy(table, policy, clause),

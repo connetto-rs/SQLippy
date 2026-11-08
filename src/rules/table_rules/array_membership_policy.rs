@@ -11,9 +11,9 @@ use sqlparser::ast::{BinaryOperator, Expr, Query, Visit, Visitor};
 
 use crate::{
     deployment::Deployment,
-    error::{Interruption, PolicyClause, PolicySite},
+    error::{Interruption, PolicySite},
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::policy_support::derives_from_caller,
+    rules::policy_support::{derives_from_caller, walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -160,10 +160,7 @@ impl<DB: DatabaseLike> TableRule for ArrayMembershipPolicy<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         for policy in table.policies(database)? {
-            let clauses = [
-                (PolicyClause::Using, policy.using_expression(database)),
-                (PolicyClause::WithCheck, policy.check_expression(database)),
-            ];
+            let clauses = walked_clauses(database, policy)?;
             for (clause, expression) in clauses {
                 let Some(expression) = expression else {
                     continue;

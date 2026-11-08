@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ColumnDefinition, ColumnScope, IdentifierCase},
+    structs::{ColumnDefinition, ColumnScope, IdentifierCase, PolicyExpression},
     traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike},
 };
 use sqlparser::ast::{Expr, Query, Visit, Visitor};
@@ -248,7 +248,11 @@ impl<DB: DatabaseLike> TableRule for UnindexedPolicyFilter<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         for policy in table.policies(database)? {
-            let Some(expression) = policy.using_expression(database) else {
+            let Some(expression) = policy
+                .using_clause(database)?
+                .as_ref()
+                .map(PolicyExpression::expression)
+            else {
                 continue;
             };
             let mut filters = Filters {

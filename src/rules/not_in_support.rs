@@ -15,8 +15,8 @@ use sqlparser::{
 };
 
 use crate::{
-    error::{Interruption, PolicyClause, PolicySite},
-    rules::policy_support::conjuncts,
+    error::{Interruption, PolicySite},
+    rules::policy_support::{conjuncts, walked_clauses},
     traits::{Reporter, reporter::signature},
 };
 
@@ -162,10 +162,7 @@ impl NotInCheck {
         }
         for table in database.tables() {
             for policy in table.policies(database)? {
-                for (clause, expression) in [
-                    (PolicyClause::Using, policy.using_expression(database)),
-                    (PolicyClause::WithCheck, policy.check_expression(database)),
-                ] {
+                for (clause, expression) in walked_clauses(database, policy)? {
                     for (found, _) in expression.map_or(Ok(Vec::new()), |expression| {
                         self.found(database, expression)
                     })? {

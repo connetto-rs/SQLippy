@@ -11,9 +11,12 @@ use sqlparser::ast::{Expr, Query, SetExpr, Visit, Visitor};
 
 use crate::{
     deployment::{Declaration, Deployment},
-    error::{Interruption, PolicyClause, PolicySite},
+    error::{Interruption, PolicySite},
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::{grant_support::schema_of, policy_support::is_column_reference},
+    rules::{
+        grant_support::schema_of,
+        policy_support::{is_column_reference, walked_clauses},
+    },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
 
@@ -234,10 +237,7 @@ impl<DB: DatabaseLike> SchemaRule for SelfAssertedClaimPolicy<DB> {
         }
         for table in database.tables() {
             for policy in table.policies(database)? {
-                let clauses = [
-                    (PolicyClause::Using, policy.using_expression(database)),
-                    (PolicyClause::WithCheck, policy.check_expression(database)),
-                ];
+                let clauses = walked_clauses(database, policy)?;
                 let mut sites = Vec::new();
                 for (clause, expression) in clauses {
                     let Some(expression) = expression else {
