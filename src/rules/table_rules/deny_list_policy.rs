@@ -9,17 +9,9 @@ use sqlparser::ast::{CreatePolicyType, Expr, InTarget, UnaryOperator};
 use crate::{
     error::{Interruption, PolicySite},
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::policy_support::{Command, applied, held_by_name, is_tautology, policy_roles},
+    rules::policy_support::{Command, applied, held_by_name, is_tautology, policy_roles, unnested},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
-
-/// Strips the parentheses around an expression.
-fn unnested(mut expression: &Expr) -> &Expr {
-    while let Expr::Nested(inner) = expression {
-        expression = inner;
-    }
-    expression
-}
 
 /// Whether the expression is a negated existence test: `NOT EXISTS` or
 /// `NOT IN` over a subquery.

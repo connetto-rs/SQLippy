@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ColumnDefinition, ColumnScope, IdentifierCase},
+    structs::{ColumnDefinition, ColumnScope, FunctionKind, IdentifierCase},
     traits::{DatabaseLike, FunctionLike, PolicyLike, RoleLike, RoleMembershipLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
@@ -323,6 +323,37 @@ impl<DB: DatabaseLike> Visitor for RowReferences<'_, DB> {
         let reads = self.reads_table(expression);
         self.record(reads, |references| references.outside = true)
     }
+}
+
+/// Whether a call that reaches the functions `reached` may run an aggregate:
+/// one of them is an aggregate, or it reaches no known function.
+///
+/// # Errors
+///
+/// Returns the first lookup failure of a function's kind.
+pub(crate) fn may_aggregate<'db, DB: DatabaseLike>(
+    database: &DB,
+    reached: impl IntoIterator<Item = &'db DB::Function>,
+) -> Result<bool, LookupError>
+where
+    DB::Function: 'db,
+{
+    let mut known = false;
+    for function in reached {
+        known = true;
+        if function.kind(database)? == FunctionKind::Aggregate {
+            return Ok(true);
+        }
+    }
+    Ok(!known)
+}
+
+/// Strips the parentheses around an expression.
+pub(crate) fn unnested(mut expression: &Expr) -> &Expr {
+    while let Expr::Nested(inner) = expression {
+        expression = inner;
+    }
+    expression
 }
 
 /// The operands of the `AND` chain of an expression.

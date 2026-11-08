@@ -6,8 +6,8 @@ use sql_traits::traits::DatabaseLike;
 use crate::{
     lint::Level,
     rules::{
-        ArrayMembershipPolicy, AutovacuumDisabledTable, BlankPaddedCharacter,
-        CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
+        AliasShadowedByColumn, ArrayMembershipPolicy, AutovacuumDisabledTable,
+        BlankPaddedCharacter, CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
         ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
         CompatibleForeignKey, CorrelatedPolicySubquery, CredentialFreeWrite,
         CredentialSettingWrite, DeadPermissivePolicy, DefinerTakesActingUser,
@@ -29,17 +29,18 @@ use crate::{
         ReferencesGrantedToClientRole, RegColumnType, ReservedKeywordIdentifier,
         RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, ScaledNumeric,
         SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
-        SelfAssertedClaimPolicy, SelfGrantingWrite, SerialColumn, SessionTimeZoneDependence,
-        SettableMembershipInBypassingRole, SingularColumnName, SnakeCaseColumnName,
-        SnakeCaseTableName, SubjectSettableAttribute, TableInheritance, TautologicalWithCheck,
-        TextualColumnRule, TimeDependentCheck, TimeWithTimeZone, TimestampBetween,
-        TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
-        TruncatedIdentifier, TruncatingIntegerDivision, UncachedPolicyCall, UnfilteredWrite,
-        UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter, UnindexedForeignKey,
-        UnindexedPolicyFilter, UniqueCheckRule, UniqueColumnNamesInExtensionGraph,
-        UniqueForeignKey, UniqueUniqueIndex, UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn,
-        UnorderedLimit, UnscopedUniqueConstraintOnRowLevelSecurityTable, UnvalidatedConstraint,
-        WildcardView, ZeroPrecisionTimestamp,
+        SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SerialColumn,
+        SessionTimeZoneDependence, SettableMembershipInBypassingRole, SingularColumnName,
+        SnakeCaseColumnName, SnakeCaseTableName, SubjectSettableAttribute, TableInheritance,
+        TautologicalWithCheck, TextualColumnRule, TimeDependentCheck, TimeWithTimeZone,
+        TimestampBetween, TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole,
+        TruncateGrantedToAppRole, TruncatedIdentifier, TruncatingIntegerDivision,
+        UncachedPolicyCall, UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect,
+        UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter, UniqueCheckRule,
+        UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex, UnlinkedFromItem,
+        UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin,
+        UnscopedUniqueConstraintOnRowLevelSecurityTable, UnvalidatedConstraint, WildcardView,
+        ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -165,7 +166,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 17] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 20] = [
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
         Box::new(RandomOrderLimit::default()),
@@ -183,6 +184,9 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(ExpressionDefeatsIndex::default()),
         Box::new(UnindexedFilter::default()),
         Box::new(UnindexedCorrelatedSelect::default()),
+        Box::new(AliasShadowedByColumn::default()),
+        Box::new(SelfComparison::default()),
+        Box::new(UnreadOuterJoin::default()),
     ];
     for rule in query_rules {
         constrainer.register_query_rule_with_floor(rule, Level::Allow);

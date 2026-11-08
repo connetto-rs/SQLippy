@@ -279,6 +279,31 @@ pub(crate) fn check_queries<DB: DatabaseLike>(
     .map_or(Ok(()), Err)
 }
 
+/// Calls `check` with every `SELECT` of a statement, the query it belongs to,
+/// the scope its names resolve in, and the statement's scope, which also
+/// resolves the names inside the subqueries it holds.
+///
+/// # Errors
+///
+/// Returns the first lookup failure of the scope or of `check`.
+pub(crate) fn check_scoped_selects<DB: DatabaseLike>(
+    database: &DB,
+    statement: &Statement,
+    mut check: impl FnMut(
+        &ColumnScope<'_, '_, DB>,
+        &ColumnDefinitionScope<'_, '_, '_, DB>,
+        &Query,
+        &Select,
+    ) -> Result<(), LookupError>,
+) -> Result<(), LookupError> {
+    check_queries(database, statement, |full, query, _| {
+        selects(&query.body).into_iter().try_for_each(|select| {
+            full.scope_for_select(select)
+                .map_or(Ok(()), |local| check(full, &local, query, select))
+        })
+    })
+}
+
 /// Calls `check` with every `SELECT` of a statement, the query it belongs to
 /// and the scope its names resolve in.
 ///
@@ -294,12 +319,8 @@ pub(crate) fn check_selects<DB: DatabaseLike>(
         &Select,
     ) -> Result<(), LookupError>,
 ) -> Result<(), LookupError> {
-    check_queries(database, statement, |scope, query, _| {
-        selects(&query.body).into_iter().try_for_each(|select| {
-            scope
-                .scope_for_select(select)
-                .map_or(Ok(()), |local| check(&local, query, select))
-        })
+    check_scoped_selects(database, statement, |_, local, query, select| {
+        check(local, query, select)
     })
 }
 

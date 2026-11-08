@@ -10,6 +10,8 @@ macro_rules! query_rule {
     };
 }
 
+mod binding_rules;
+pub use binding_rules::{AliasShadowedByColumn, SelfComparison};
 mod credential_setting_write;
 pub use credential_setting_write::CredentialSettingWrite;
 mod index_rules;
@@ -17,6 +19,7 @@ pub use index_rules::{ExpressionDefeatsIndex, UnindexedCorrelatedSelect, Unindex
 mod key_rules;
 pub use key_rules::{
     DistinctOverReferencedSide, UnlinkedFromItem, UnorderedDistinctOn, UnorderedLimit,
+    UnreadOuterJoin,
 };
 mod outer_column_capture;
 pub use outer_column_capture::OuterColumnCapture;

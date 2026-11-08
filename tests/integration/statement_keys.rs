@@ -312,6 +312,165 @@ fn distinct_over_the_referenced_side_of_a_join_is_reported() {
 }
 
 #[test]
+fn an_outer_join_read_nowhere_that_can_repeat_rows_is_reported() {
+    check_query_rule(
+        SHOP,
+        UnreadOuterJoin::default(),
+        &[
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id",
+                &["orders AS o"],
+            ),
+            (
+                "SELECT c.* FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id",
+                &["orders AS o"],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.code = c.email",
+                &["orders AS o"],
+            ),
+            (
+                "SELECT c.id FROM orders AS o RIGHT JOIN customers AS c ON o.customer_id = c.id",
+                &["orders AS o"],
+            ),
+            (
+                "SELECT c.id FROM customers AS c FULL JOIN orders AS o ON o.customer_id = c.id",
+                &["orders AS o"],
+            ),
+            (
+                "SELECT o.id FROM orders AS o LEFT JOIN tags AS t ON t.order_id = o.id",
+                &["tags AS t"],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id \
+                 LEFT JOIN tags AS t ON t.order_id = o.id",
+                &["tags AS t"],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id \
+                 UNION SELECT id FROM customers ORDER BY id",
+                &["orders AS o"],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o \
+                 ON o.customer_id = c.id AND o.prio > 1",
+                &["orders AS o"],
+            ),
+            (
+                "SELECT c.id, max(c.id) FROM customers AS c LEFT JOIN orders AS o \
+                 ON o.customer_id = c.id GROUP BY c.id",
+                &["orders AS o"],
+            ),
+            (
+                "SELECT count(DISTINCT c.id) FROM customers AS c LEFT JOIN orders AS o \
+                 ON o.customer_id = c.id",
+                &["orders AS o"],
+            ),
+            (
+                "SELECT lower(c.email) FROM customers AS c LEFT JOIN orders AS o \
+                 ON o.customer_id = c.id",
+                &["orders AS o"],
+            ),
+        ],
+    );
+}
+
+#[test]
+fn an_outer_join_read_elsewhere_or_matching_one_row_passes() {
+    check_query_rule(
+        SHOP,
+        UnreadOuterJoin::default(),
+        &[
+            (
+                "SELECT c.id, count(*) FROM customers AS c LEFT JOIN orders AS o \
+                 ON o.customer_id = c.id GROUP BY c.id",
+                &[],
+            ),
+            (
+                "SELECT sum(c.id) FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id",
+                &[],
+            ),
+            (
+                "SELECT c.id, count(*) OVER () FROM customers AS c LEFT JOIN orders AS o \
+                 ON o.customer_id = c.id",
+                &[],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id \
+                 GROUP BY c.id HAVING count(*) > 1",
+                &[],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id \
+                 GROUP BY c.id ORDER BY count(*)",
+                &[],
+            ),
+            (
+                "SELECT o.id FROM orders AS o LEFT JOIN customers AS c ON c.id = o.customer_id",
+                &[],
+            ),
+            (
+                "SELECT o.id FROM orders AS o LEFT JOIN customers AS c ON c.email = o.code",
+                &[],
+            ),
+            (
+                "SELECT o.id FROM orders AS o LEFT JOIN customers AS c ON c.login = $1",
+                &[],
+            ),
+            (
+                "SELECT o.id FROM orders AS o LEFT JOIN customers AS c \
+                 ON c.id = o.customer_id AND c.team > 1",
+                &[],
+            ),
+            (
+                "SELECT o.id FROM orders AS o LEFT JOIN tags AS t ON t.order_id = o.id AND t.tag = 'x'",
+                &[],
+            ),
+            (
+                "SELECT c.id, o.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id",
+                &[],
+            ),
+            (
+                "SELECT * FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id",
+                &[],
+            ),
+            (
+                "SELECT o.* FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id",
+                &[],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id \
+                 WHERE o.id IS NULL",
+                &[],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id \
+                 ORDER BY o.prio",
+                &[],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id \
+                 WHERE EXISTS (SELECT 1 FROM notes WHERE notes.body = o.code)",
+                &[],
+            ),
+            (
+                "SELECT c.id FROM customers AS c JOIN orders AS o ON o.customer_id = c.id",
+                &[],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN orders AS o USING (id)",
+                &[],
+            ),
+            (
+                "SELECT c.id FROM customers AS c LEFT JOIN (SELECT customer_id FROM orders) AS o \
+                 ON o.customer_id = c.id",
+                &[],
+            ),
+        ],
+    );
+}
+
+#[test]
 fn the_default_constrainer_runs_key_rules_at_their_group_levels() {
     let mut constrainer = DefaultConstrainer::<ParserDB>::default();
     let database = parse(SHOP);

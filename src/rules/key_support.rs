@@ -5,16 +5,19 @@ use std::{iter, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ColumnDefinitionScope, IdentifierCase, TargetName},
+    structs::{ColumnDefinitionScope, ColumnScope, IdentifierCase, TargetName},
     traits::{ColumnLike, DatabaseLike, ForeignKeyLike, IndexLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{
-    BinaryOperator, Distinct, Expr, GroupByExpr, OrderBy, OrderByKind, Query, Select, SelectItem,
-    SelectItemQualifiedWildcardKind, TableFactor, Value, ValueWithSpan, Visit, Visitor,
+    BinaryOperator, Distinct, Expr, GroupByExpr, InTarget, OrderBy, OrderByKind, Query, Select,
+    SelectItem, SelectItemQualifiedWildcardKind, TableFactor, Value, ValueWithSpan, Visit, Visitor,
 };
 
-use crate::rules::{policy_support::conjuncts, statement_support::OwnLevel};
+use crate::rules::{
+    policy_support::conjuncts,
+    statement_support::{OwnLevel, reads_outer},
+};
 
 /// A column a `SELECT` names: the folded name its relation goes by in the
 /// query, and the column's stored name.
@@ -39,6 +42,36 @@ impl<DB: DatabaseLike> Instance<'_, DB> {
         expression: &Expr,
     ) -> Result<bool, LookupError> {
         Ok(named(scope, expression)?.is_some_and(|(relation, _)| relation == self.name))
+    }
+
+    /// Whether `part` reads a column of this relation, itself or through a
+    /// subquery it holds, resolved in `scope` and, inside the subquery, in
+    /// the statement's scope `full`.
+    pub(crate) fn read_in<V: Visit + ?Sized>(
+        &self,
+        database: &DB,
+        full: &ColumnScope<'_, '_, DB>,
+        scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+        part: &V,
+    ) -> Result<bool, LookupError> {
+        let mut read = false;
+        OwnLevel::new(|node: &Expr| {
+            read |= self.names(scope, node)?;
+            if let Expr::Subquery(query)
+            | Expr::Exists {
+                subquery: query, ..
+            }
+            | Expr::In {
+                target: InTarget::Subquery(query),
+                ..
+            } = node
+            {
+                read |= reads_outer(database, full, query, &self.name)?;
+            }
+            Ok(())
+        })
+        .over(part)?;
+        Ok(read)
     }
 }
 
@@ -112,16 +145,19 @@ pub(crate) fn named<DB: DatabaseLike>(
         }))
 }
 
-/// The unique keys of a table that tell its rows apart: unconditional,
-/// over plain columns, and over columns that cannot hold distinct `NULL`s.
-pub(crate) fn unique_keys<'db, DB: DatabaseLike>(
+/// The columns of one unique key.
+pub(crate) type Key<'db, DB> = Vec<&'db <DB as DatabaseLike>::Column>;
+
+/// The unconditional unique keys of a table over plain columns, each with
+/// whether several of its rows can hold a `NULL` in the key.
+fn plain_unique_keys<'db, DB: DatabaseLike>(
     database: &'db DB,
     table: &'db DB::Table,
-) -> Result<Vec<Vec<&'db DB::Column>>, LookupError> {
+) -> Result<Vec<(Key<'db, DB>, bool)>, LookupError> {
     fn usable<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
         database: &'db DB,
         index: &'db I,
-    ) -> Result<Option<Vec<&'db DB::Column>>, LookupError> {
+    ) -> Result<Option<(Key<'db, DB>, bool)>, LookupError> {
         if index.predicate().is_some() || !index.is_simple(database)? {
             return Ok(None);
         }
@@ -130,7 +166,7 @@ pub(crate) fn unique_keys<'db, DB: DatabaseLike>(
         for column in &columns {
             nullable |= column.is_nullable(database)?;
         }
-        Ok((!nullable || !index.nulls_distinct()).then_some(columns))
+        Ok(Some((columns, nullable && index.nulls_distinct())))
     }
     let mut keys = Vec::new();
     for index in table.unique_indices(database)? {
@@ -140,6 +176,31 @@ pub(crate) fn unique_keys<'db, DB: DatabaseLike>(
         keys.extend(usable(database, index)?);
     }
     Ok(keys)
+}
+
+/// The unique keys of a table that tell its rows apart: unconditional,
+/// over plain columns, and over columns that cannot hold distinct `NULL`s.
+pub(crate) fn unique_keys<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    table: &'db DB::Table,
+) -> Result<Vec<Key<'db, DB>>, LookupError> {
+    Ok(plain_unique_keys(database, table)?
+        .into_iter()
+        .filter_map(|(key, nulls)| (!nulls).then_some(key))
+        .collect())
+}
+
+/// The unique keys of a table through which an equality on every key column
+/// matches at most one row: unconditional and over plain columns, nullable
+/// ones included, since an equality never matches a `NULL`.
+pub(crate) fn equality_keys<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    table: &'db DB::Table,
+) -> Result<Vec<Key<'db, DB>>, LookupError> {
+    Ok(plain_unique_keys(database, table)?
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect())
 }
 
 /// Collects the expressions a node holds at its top, outside the
