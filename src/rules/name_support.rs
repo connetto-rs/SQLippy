@@ -7,8 +7,10 @@ use sql_traits::{
 };
 
 use crate::{
-    error::Interruption, rules::type_support::underlying_type, traits::Reporter,
-    vocabulary::Vocabulary,
+    error::Interruption,
+    rules::type_support::underlying_type,
+    traits::Reporter,
+    vocabulary::{Ending, Vocabulary},
 };
 
 /// The non-empty snake_case words of a name.
@@ -49,20 +51,36 @@ pub(crate) fn names_flag(vocabularies: &[Vocabulary], name: &str) -> bool {
         .is_some_and(|word| in_vocabularies(vocabularies, Vocabulary::is_flag_prefix, word))
 }
 
-/// Whether the last word of the name closes the name of a uuid in one of the
-/// vocabularies, as `uuid` closes `owner_uuid`.
-pub(crate) fn names_uuid(vocabularies: &[Vocabulary], name: &str) -> bool {
-    words(name)
-        .last()
-        .is_some_and(|word| in_vocabularies(vocabularies, Vocabulary::is_uuid_term, word))
+/// Whether the last words of the name are a term of `ending` in one of the
+/// vocabularies.
+fn names_ending(vocabularies: &[Vocabulary], ending: Ending, name: &str) -> bool {
+    vocabularies
+        .iter()
+        .any(|vocabulary| vocabulary.ends(ending, name))
 }
 
-/// Whether the last word of the name closes the name of a moment or a day in
-/// one of the vocabularies, as `at` closes `created_at`.
+/// Whether the name closes with a uuid term in one of the vocabularies, as
+/// `uuid` closes `owner_uuid`.
+pub(crate) fn names_uuid(vocabularies: &[Vocabulary], name: &str) -> bool {
+    names_ending(vocabularies, Ending::Uuid, name)
+}
+
+/// Whether the name closes with a moment term in one of the vocabularies, as
+/// `at` closes `created_at`.
 pub(crate) fn names_moment(vocabularies: &[Vocabulary], name: &str) -> bool {
-    words(name)
-        .last()
-        .is_some_and(|word| in_vocabularies(vocabularies, Vocabulary::is_moment_term, word))
+    names_ending(vocabularies, Ending::Moment, name)
+}
+
+/// Whether the name closes with an address term in one of the vocabularies,
+/// as `ip` closes `client_ip` and `ip_address` closes `server_ip_address`.
+pub(crate) fn names_address(vocabularies: &[Vocabulary], name: &str) -> bool {
+    names_ending(vocabularies, Ending::Address, name)
+}
+
+/// Whether the name closes with a JSON term in one of the vocabularies, as
+/// `json` closes `payload_json`.
+pub(crate) fn names_json(vocabularies: &[Vocabulary], name: &str) -> bool {
+    names_ending(vocabularies, Ending::Json, name)
 }
 
 /// A column whose name says what it holds while its stored type cannot hold

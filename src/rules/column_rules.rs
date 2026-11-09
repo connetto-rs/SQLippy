@@ -28,3 +28,7 @@ mod uuid_stored_as_text;
 pub use uuid_stored_as_text::UuidStoredAsText;
 mod moment_stored_as_text;
 pub use moment_stored_as_text::MomentStoredAsText;
+mod address_stored_as_text;
+pub use address_stored_as_text::AddressStoredAsText;
+mod json_stored_as_text;
+pub use json_stored_as_text::JsonStoredAsText;
