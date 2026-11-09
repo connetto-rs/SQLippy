@@ -32,3 +32,5 @@ mod address_stored_as_text;
 pub use address_stored_as_text::AddressStoredAsText;
 mod json_stored_as_text;
 pub use json_stored_as_text::JsonStoredAsText;
+mod fractional_count;
+pub use fractional_count::FractionalCount;

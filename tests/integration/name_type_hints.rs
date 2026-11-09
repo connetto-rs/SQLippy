@@ -222,7 +222,7 @@ fn a_selected_vocabulary_supplies_flag_and_uuid_words() {
 }
 
 #[test]
-fn the_default_constrainer_runs_the_text_hints_as_pedantic() {
+fn the_default_constrainer_runs_the_name_hints_after_money_as_pedantic() {
     let database = parse(
         "CREATE TABLE t (
              id INT PRIMARY KEY,
@@ -230,7 +230,8 @@ fn the_default_constrainer_runs_the_text_hints_as_pedantic() {
              item_uuid TEXT,
              created_at TEXT,
              client_ip TEXT,
-             payload_json TEXT
+             payload_json TEXT,
+             item_count REAL
          );",
     );
     let hints = [
@@ -239,6 +240,7 @@ fn the_default_constrainer_runs_the_text_hints_as_pedantic() {
         "MomentStoredAsText",
         "AddressStoredAsText",
         "JsonStoredAsText",
+        "FractionalCount",
     ];
     let raised = |constrainer: &DefaultConstrainer<ParserDB>| {
         constrainer
@@ -264,7 +266,8 @@ fn the_default_constrainer_runs_the_text_hints_as_pedantic() {
             finding("UuidStoredAsText", Level::Warn, "t.item_uuid"),
             finding("MomentStoredAsText", Level::Warn, "t.created_at"),
             finding("AddressStoredAsText", Level::Warn, "t.client_ip"),
-            finding("JsonStoredAsText", Level::Warn, "t.payload_json")
+            finding("JsonStoredAsText", Level::Warn, "t.payload_json"),
+            finding("FractionalCount", Level::Warn, "t.item_count")
         ]
     );
 }
@@ -429,5 +432,65 @@ fn the_past_time_rule_leaves_a_text_moment_to_the_moment_hint() {
             "CREATE TABLE events (geburts_datum TEXT, created_at TEXT);"
         ),
         ["events.geburts_datum"]
+    );
+}
+
+#[test]
+fn a_count_stored_as_a_float_or_numeric_is_reported() {
+    assert_eq!(
+        objects(
+            FractionalCount::default(),
+            Deployment::default(),
+            "CREATE DOMAIN count_t AS NUMERIC;
+             CREATE TABLE stock (
+                 item_count DOUBLE PRECISION,
+                 quantity REAL,
+                 qty NUMERIC,
+                 count FLOAT8,
+                 visit_count count_t
+             );"
+        ),
+        [
+            "stock.item_count",
+            "stock.quantity",
+            "stock.qty",
+            "stock.count",
+            "stock.visit_count"
+        ]
+    );
+}
+
+#[test]
+fn integer_counts_averages_and_other_names_are_not_reported() {
+    assert_eq!(
+        objects(
+            FractionalCount::default(),
+            Deployment::default(),
+            "CREATE TABLE stock (
+                 item_count INTEGER,
+                 quantity BIGINT,
+                 avg_count DOUBLE PRECISION,
+                 mean_quantity REAL,
+                 count_ratio REAL,
+                 country REAL,
+                 discount REAL
+             );"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_selected_vocabulary_supplies_count_terms() {
+    let italian = Vocabulary::default()
+        .with_count_term("quantita")
+        .with_average_term("media");
+    assert_eq!(
+        objects(
+            FractionalCount::default(),
+            Deployment::default().with_vocabulary(italian),
+            "CREATE TABLE t (pezzi_quantita REAL, media_quantita REAL, item_count REAL);"
+        ),
+        ["t.pezzi_quantita"]
     );
 }
