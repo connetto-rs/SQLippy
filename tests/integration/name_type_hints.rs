@@ -222,25 +222,34 @@ fn a_selected_vocabulary_supplies_flag_and_uuid_words() {
 }
 
 #[test]
-fn the_default_constrainer_runs_the_flag_uuid_and_moment_hints_as_pedantic() {
+fn the_default_constrainer_runs_the_text_hints_as_pedantic() {
     let database = parse(
-        "CREATE TABLE t (id INT PRIMARY KEY, is_active INTEGER, item_uuid TEXT, created_at TEXT);",
+        "CREATE TABLE t (
+             id INT PRIMARY KEY,
+             is_active INTEGER,
+             item_uuid TEXT,
+             created_at TEXT,
+             client_ip TEXT,
+             payload_json TEXT
+         );",
     );
+    let hints = [
+        "FlagNotBoolean",
+        "UuidStoredAsText",
+        "MomentStoredAsText",
+        "AddressStoredAsText",
+        "JsonStoredAsText",
+    ];
     let raised = |constrainer: &DefaultConstrainer<ParserDB>| {
         constrainer
             .diagnostics(&database)
             .into_iter()
             .filter_map(|error| match error {
-                Error::Violation(violation)
-                    if ["FlagNotBoolean", "UuidStoredAsText", "MomentStoredAsText"]
-                        .contains(&violation.rule().name) =>
-                {
-                    Some((
-                        violation.rule().name.to_owned(),
-                        violation.level(),
-                        violation.object().to_owned(),
-                    ))
-                }
+                Error::Violation(violation) if hints.contains(&violation.rule().name) => Some((
+                    violation.rule().name.to_owned(),
+                    violation.level(),
+                    violation.object().to_owned(),
+                )),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -253,8 +262,99 @@ fn the_default_constrainer_runs_the_flag_uuid_and_moment_hints_as_pedantic() {
         [
             finding("FlagNotBoolean", Level::Warn, "t.is_active"),
             finding("UuidStoredAsText", Level::Warn, "t.item_uuid"),
-            finding("MomentStoredAsText", Level::Warn, "t.created_at")
+            finding("MomentStoredAsText", Level::Warn, "t.created_at"),
+            finding("AddressStoredAsText", Level::Warn, "t.client_ip"),
+            finding("JsonStoredAsText", Level::Warn, "t.payload_json")
         ]
+    );
+}
+
+#[test]
+fn an_ip_address_or_network_stored_as_text_is_reported() {
+    assert_eq!(
+        objects(
+            AddressStoredAsText::default(),
+            Deployment::default(),
+            "CREATE DOMAIN ip_t AS TEXT;
+             CREATE TABLE hits (
+                 client_ip TEXT,
+                 ip TEXT,
+                 allowed_cidr VARCHAR(43),
+                 ip_address TEXT,
+                 server_ip_address TEXT,
+                 peer_ip ip_t
+             );"
+        ),
+        [
+            "hits.client_ip",
+            "hits.ip",
+            "hits.allowed_cidr",
+            "hits.ip_address",
+            "hits.server_ip_address",
+            "hits.peer_ip"
+        ]
+    );
+}
+
+#[test]
+fn typed_addresses_and_other_addresses_are_not_reported() {
+    assert_eq!(
+        objects(
+            AddressStoredAsText::default(),
+            Deployment::default(),
+            "CREATE TABLE hits (
+                 client_ip INET,
+                 allowed_cidr CIDR,
+                 ip_country TEXT,
+                 email_address TEXT,
+                 shipping_address TEXT,
+                 tip TEXT
+             );"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_json_document_stored_as_text_is_reported() {
+    assert_eq!(
+        objects(
+            JsonStoredAsText::default(),
+            Deployment::default(),
+            "CREATE TABLE docs (
+                 payload_json TEXT,
+                 json TEXT,
+                 settings_json VARCHAR(200),
+                 meta_json JSONB,
+                 json_path TEXT,
+                 jsonish TEXT
+             );"
+        ),
+        ["docs.payload_json", "docs.json", "docs.settings_json"]
+    );
+}
+
+#[test]
+fn a_selected_vocabulary_supplies_terms_of_several_words() {
+    let italian = Vocabulary::default()
+        .with_address_term("indirizzo_ip")
+        .with_json_term("dati_json");
+    let sql = "CREATE TABLE t (server_indirizzo_ip TEXT, indirizzo TEXT, client_ip TEXT, evento_dati_json TEXT, payload_json TEXT);";
+    assert_eq!(
+        objects(
+            AddressStoredAsText::default(),
+            Deployment::default().with_vocabulary(italian.clone()),
+            sql
+        ),
+        ["t.server_indirizzo_ip"]
+    );
+    assert_eq!(
+        objects(
+            JsonStoredAsText::default(),
+            Deployment::default().with_vocabulary(italian),
+            sql
+        ),
+        ["t.evento_dati_json"]
     );
 }
 

@@ -6,7 +6,7 @@ use sql_traits::traits::DatabaseLike;
 use crate::{
     lint::Level,
     rules::{
-        AliasShadowedByColumn, ArrayMembershipPolicy, AutovacuumDisabledTable,
+        AddressStoredAsText, AliasShadowedByColumn, ArrayMembershipPolicy, AutovacuumDisabledTable,
         BlankPaddedCharacter, CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
         ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
         CompatibleForeignKey, CorrelatedPolicySubquery, CredentialFreeWrite,
@@ -15,13 +15,13 @@ use crate::{
         DistinctOverReferencedSide, ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FlagNotBoolean,
         FloatingPointMoney, FunctionMediatedPolicyCycle, GrantOptionToClientRole, HasPrimaryKey,
-        ImpureImmutableFunction, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
-        LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName, MomentStoredAsText,
-        MoneyType, MultiplePermissivePolicies, NarrowIntegerKey, NestedPolicySubquery,
-        NoForbiddenColumnInExtension, NoNegationCheckRule, NoRustKeywordColumnName,
-        NoRustKeywordForeignKeyName, NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension,
-        NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule,
-        NonRedundantExtensionDag, NotInNullableSubquery, NotInSubquery,
+        ImpureImmutableFunction, JsonStoredAsText, JsonType, KeyWithoutExactEquality,
+        LatentPolicyReadCycle, LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName,
+        MomentStoredAsText, MoneyType, MultiplePermissivePolicies, NarrowIntegerKey,
+        NestedPolicySubquery, NoForbiddenColumnInExtension, NoNegationCheckRule,
+        NoRustKeywordColumnName, NoRustKeywordForeignKeyName, NoRustKeywordTableName,
+        NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId,
+        NonEmptyTextualColumnRule, NonRedundantExtensionDag, NotInNullableSubquery, NotInSubquery,
         NullableCompositeForeignKey, NullableUniqueColumn, OffsetPaging, OuterColumnCapture,
         OwnerRightsView, PastTimeColumnRule, PluralTableName, PoliciesRequireRowLevelSecurity,
         PolicyReadCycle, PolicyToCreatingRole, PrefixRedundantIndex, PrimaryKeyReferenceEndsWithId,
@@ -119,7 +119,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in table_rules {
             constrainer.register_table_rule_with_floor(rule, Level::Allow);
         }
-        let column_rules: [Box<dyn ColumnRule<Database = DB>>; 16] = [
+        let column_rules: [Box<dyn ColumnRule<Database = DB>>; 18] = [
             Box::new(SerialColumn::default()),
             Box::new(NarrowIntegerKey::default()),
             Box::new(ClientWrittenCounterKey::default()),
@@ -136,6 +136,8 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(FlagNotBoolean::default()),
             Box::new(UuidStoredAsText::default()),
             Box::new(MomentStoredAsText::default()),
+            Box::new(AddressStoredAsText::default()),
+            Box::new(JsonStoredAsText::default()),
         ];
         for rule in column_rules {
             constrainer.register_column_rule_with_floor(rule, Level::Allow);
