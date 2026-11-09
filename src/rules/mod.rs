@@ -56,6 +56,7 @@ mod credential_support;
 mod grant_support;
 mod index_support;
 mod key_support;
+mod name_support;
 mod not_in_support;
 mod policy_support;
 pub mod rust_keywords;

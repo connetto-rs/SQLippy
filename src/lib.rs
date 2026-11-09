@@ -5,6 +5,7 @@ pub mod error;
 pub mod lint;
 pub mod rules;
 pub mod traits;
+pub mod vocabulary;
 
 /// Prelude module re-exporting commonly used items from the crate.
 pub mod prelude {
@@ -19,5 +20,6 @@ pub mod prelude {
         lint::{Level, LintGroup, Rule, RuleMetadata},
         rules::*,
         traits::*,
+        vocabulary::Vocabulary,
     };
 }

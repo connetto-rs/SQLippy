@@ -13,14 +13,15 @@ use crate::{
         CredentialSettingWrite, DeadPermissivePolicy, DefinerTakesActingUser,
         DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
         DistinctOverReferencedSide, ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
-        ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FunctionMediatedPolicyCycle,
-        GrantOptionToClientRole, HasPrimaryKey, ImpureImmutableFunction, JsonType,
-        KeyWithoutExactEquality, LatentPolicyReadCycle, LowercaseColumnName,
-        LowercaseForeignKeyName, LowercaseTableName, MoneyType, MultiplePermissivePolicies,
-        NarrowIntegerKey, NestedPolicySubquery, NoForbiddenColumnInExtension, NoNegationCheckRule,
-        NoRustKeywordColumnName, NoRustKeywordForeignKeyName, NoRustKeywordTableName,
-        NoSurrogatePrimaryKeyInExtension, NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId,
-        NonEmptyTextualColumnRule, NonRedundantExtensionDag, NotInNullableSubquery, NotInSubquery,
+        ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FloatingPointMoney,
+        FunctionMediatedPolicyCycle, GrantOptionToClientRole, HasPrimaryKey,
+        ImpureImmutableFunction, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
+        LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName, MoneyType,
+        MultiplePermissivePolicies, NarrowIntegerKey, NestedPolicySubquery,
+        NoForbiddenColumnInExtension, NoNegationCheckRule, NoRustKeywordColumnName,
+        NoRustKeywordForeignKeyName, NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension,
+        NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule,
+        NonRedundantExtensionDag, NotInNullableSubquery, NotInSubquery,
         NullableCompositeForeignKey, NullableUniqueColumn, OffsetPaging, OuterColumnCapture,
         OwnerRightsView, PastTimeColumnRule, PluralTableName, PoliciesRequireRowLevelSecurity,
         PolicyReadCycle, PolicyToCreatingRole, PrefixRedundantIndex, PrimaryKeyReferenceEndsWithId,
@@ -118,7 +119,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in table_rules {
             constrainer.register_table_rule_with_floor(rule, Level::Allow);
         }
-        let column_rules: [Box<dyn ColumnRule<Database = DB>>; 12] = [
+        let column_rules: [Box<dyn ColumnRule<Database = DB>>; 13] = [
             Box::new(SerialColumn::default()),
             Box::new(NarrowIntegerKey::default()),
             Box::new(ClientWrittenCounterKey::default()),
@@ -131,6 +132,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(TextualColumnRule::default()),
             Box::new(NonEmptyTextualColumnRule::default()),
             Box::new(PastTimeColumnRule::default()),
+            Box::new(FloatingPointMoney::default()),
         ];
         for rule in column_rules {
             constrainer.register_column_rule_with_floor(rule, Level::Allow);

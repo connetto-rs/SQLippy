@@ -12,6 +12,8 @@ use sqlparser::{
     parser::{Parser, ParserError},
 };
 
+use crate::vocabulary::Vocabulary;
+
 /// Roles and schemas of the deployment a schema serves.
 ///
 /// Role and schema names are compared with the names PostgreSQL stores, so an
@@ -41,6 +43,7 @@ pub struct Deployment {
     self_asserted_columns: Vec<SelfAssertedColumn>,
     pooled: Option<bool>,
     clock_tolerance: Option<Duration>,
+    vocabularies: Vec<Vocabulary>,
 }
 
 /// A column whose value its row's subject sets, by stored names.
@@ -108,6 +111,25 @@ impl Deployment {
     #[must_use]
     pub fn clock_tolerance(&self) -> Option<Duration> {
         self.clock_tolerance
+    }
+
+    /// Selects a vocabulary the rules reading column names match against,
+    /// beside any selected before. English applies only while none is
+    /// selected.
+    #[must_use]
+    pub fn with_vocabulary(mut self, vocabulary: Vocabulary) -> Self {
+        self.vocabularies.push(vocabulary);
+        self
+    }
+
+    /// Returns the selected vocabularies, or English when none is selected.
+    #[must_use]
+    pub fn vocabularies(&self) -> &[Vocabulary] {
+        if self.vocabularies.is_empty() {
+            std::slice::from_ref(Vocabulary::english_default())
+        } else {
+            &self.vocabularies
+        }
     }
 
     /// Returns the declared anonymous roles, `PUBLIC` excluded.
