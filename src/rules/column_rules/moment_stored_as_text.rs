@@ -15,7 +15,7 @@ pub(super) const HINT: NameHint = NameHint {
     names: names_moment,
     holds: "a moment or a day",
     flaw: "which accepts impossible dates such as `2026-02-30` and orders `2026-1-9` after `2026-01-10`",
-    resolution: "Declare it `timestamptz` for a moment or `date` for a day, which refuse impossible values and order by time.",
+    resolution: "Declare it `timestamptz` for a moment, `date` for a day or `time` for a time of day, which refuse impossible values and order by time.",
 };
 
 rule_definition!(

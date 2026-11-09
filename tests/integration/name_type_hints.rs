@@ -370,7 +370,6 @@ fn a_moment_or_a_day_stored_as_text_is_reported() {
             "CREATE DOMAIN stamp_t AS TEXT;
              CREATE TABLE events (
                  created_at TEXT,
-                 published_on VARCHAR(10),
                  start_date CHAR(10),
                  event_time TEXT,
                  timestamp TEXT,
@@ -380,7 +379,6 @@ fn a_moment_or_a_day_stored_as_text_is_reported() {
         ),
         [
             "events.created_at",
-            "events.published_on",
             "events.start_date",
             "events.event_time",
             "events.timestamp",
@@ -492,5 +490,120 @@ fn a_selected_vocabulary_supplies_count_terms() {
             "CREATE TABLE t (pezzi_quantita REAL, media_quantita REAL, item_count REAL);"
         ),
         ["t.pezzi_quantita"]
+    );
+}
+
+#[test]
+fn a_count_in_numeric_without_a_scale_holds_whole_numbers() {
+    assert_eq!(
+        objects(
+            FractionalCount::default(),
+            Deployment::default(),
+            "CREATE TABLE stock (
+                 item_count NUMERIC(10, 0),
+                 qty NUMERIC(10),
+                 visit_count NUMERIC(10, 2),
+                 total_qty NUMERIC
+             );"
+        ),
+        ["stock.visit_count", "stock.total_qty"]
+    );
+}
+
+#[test]
+fn the_moment_hint_suggests_time_for_a_time_of_day() {
+    let mut constrainer: GenericConstrainer<ParserDB> = MomentStoredAsText::default().into();
+    constrainer.set_deployment(Deployment::default());
+    let resolutions: Vec<String> = constrainer
+        .diagnostics(&parse("CREATE TABLE shop (opening_time TEXT);"))
+        .into_iter()
+        .filter_map(|error| match error {
+            Error::Violation(violation) => Some(violation.resolution().to_owned()),
+            _ => None,
+        })
+        .collect();
+    let [resolution] = resolutions.as_slice() else {
+        panic!("one finding expected, got {resolutions:?}");
+    };
+    assert!(
+        resolution.contains("`time` for a time of day"),
+        "{resolution}"
+    );
+}
+
+#[test]
+fn counts_and_identifiers_named_with_a_money_word_are_not_money() {
+    let sql = "CREATE TABLE ledger (
+                   payment_count REAL,
+                   refund_count DOUBLE PRECISION,
+                   tax_id REAL,
+                   price REAL
+               );";
+    assert_eq!(money(Deployment::default(), sql), ["ledger.price"]);
+    assert_eq!(
+        objects(FractionalCount::default(), Deployment::default(), sql),
+        ["ledger.payment_count", "ledger.refund_count"]
+    );
+    let italian = Vocabulary::default()
+        .with_money_term("importo")
+        .with_identifier_term("codice");
+    assert_eq!(
+        money(
+            Deployment::default().with_vocabulary(italian),
+            "CREATE TABLE t (importo REAL, importo_codice REAL);"
+        ),
+        ["t.importo"]
+    );
+}
+
+#[test]
+fn a_flag_prefix_leaves_the_name_to_the_flag_hint() {
+    let sql = "CREATE TABLE t (
+                   is_turned_on TEXT,
+                   has_ip TEXT,
+                   is_uuid TEXT,
+                   has_payload_json TEXT,
+                   was_updated_at TEXT,
+                   is_item_count REAL
+               );";
+    for rule in [
+        GenericConstrainer::<ParserDB>::from(MomentStoredAsText::default()),
+        AddressStoredAsText::default().into(),
+        UuidStoredAsText::default().into(),
+        JsonStoredAsText::default().into(),
+        FractionalCount::default().into(),
+        PastTimeColumnRule::default().into(),
+    ] {
+        assert_eq!(
+            objects(rule, Deployment::default(), sql),
+            Vec::<String>::new()
+        );
+    }
+    assert_eq!(
+        objects(FlagNotBoolean::default(), Deployment::default(), sql),
+        [
+            "t.is_turned_on",
+            "t.has_ip",
+            "t.is_uuid",
+            "t.has_payload_json",
+            "t.was_updated_at"
+        ]
+    );
+}
+
+#[test]
+fn names_closing_with_on_are_moments_only_when_a_vocabulary_says_so() {
+    let sql = "CREATE TABLE t (depends_on TEXT, based_on TEXT, add_on TEXT, published_on TEXT);";
+    assert_eq!(
+        objects(MomentStoredAsText::default(), Deployment::default(), sql),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        objects(
+            MomentStoredAsText::default(),
+            Deployment::default().with_vocabulary(Vocabulary::english().with_moment_term("on")),
+            sql
+        ),
+        ["t.depends_on", "t.based_on", "t.add_on", "t.published_on"]
     );
 }

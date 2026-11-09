@@ -8,7 +8,7 @@ use sql_traits::{
 };
 use sqlparser::ast::{BinaryOperator, Expr, Ident};
 
-use super::moment_stored_as_text;
+use super::{flag_not_boolean, moment_stored_as_text};
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
@@ -25,8 +25,9 @@ use crate::{
 /// current time, optionally plus a constant tolerance. The resolution adds
 /// the tolerance the deployment declares with
 /// [`Deployment::with_clock_tolerance`](crate::deployment::Deployment::with_clock_tolerance).
-/// A column [`MomentStoredAsText`](crate::rules::MomentStoredAsText) reports
-/// is left to it, since its type comes first.
+/// A column [`MomentStoredAsText`](crate::rules::MomentStoredAsText) or
+/// [`FlagNotBoolean`](crate::rules::FlagNotBoolean) reports is left to that
+/// rule, since its type comes first.
 ///
 /// # Example
 ///
@@ -140,12 +141,10 @@ impl<DB: DatabaseLike> ColumnRule for PastTimeColumnRule<DB> {
             "ends_at",
             "scheduled_at",
         ];
+        let vocabularies = reporter.deployment().vocabularies();
         if future_or_ambiguous.contains(&column_name)
-            || moment_stored_as_text::HINT.matches(
-                database,
-                column,
-                reporter.deployment().vocabularies(),
-            )
+            || moment_stored_as_text::HINT.matches(database, column, vocabularies)
+            || flag_not_boolean::HINT.matches(database, column, vocabularies)
         {
             return Ok(());
         }
