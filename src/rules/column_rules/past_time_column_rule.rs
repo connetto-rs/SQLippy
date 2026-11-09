@@ -1,19 +1,29 @@
 //! Submodule providing the `PastTimeColumnRule` rule.
 
+use std::time::Duration;
+
+use sql_traits::{
+    traits::{CheckConstraintLike, ColumnLike, DatabaseLike, TableLike},
+    utils::identifier_resolution::normalize_identifier,
+};
+use sqlparser::ast::{BinaryOperator, Expr, Ident};
+
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
+    rules::clock_support::{bound_clock, upper_bound},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
-use sql_traits::traits::{CheckConstraintLike, ColumnLike, DatabaseLike, TableLike};
 
-/// Struct defining a rule that enforces that time-related columns must have a
-/// check constraint ensuring they are in the past.
+/// Struct defining a rule that reports a time-related column with no check
+/// keeping it in the past.
 ///
-/// This rule checks if a column name ends with `_at` (e.g., `created_at`,
-/// `updated_at`).
-/// If so, it requires a check constraint involving `NOW()` or
-/// `CURRENT_TIMESTAMP` and a less-than operator.
+/// A column whose name ends with `_at` is time-related, apart from names of
+/// future instants such as `expires_at`. A check keeps it in the past when a
+/// top-level `AND` conjunct bounds the plain column from above by the
+/// current time, optionally plus a constant tolerance. The resolution adds
+/// the tolerance the deployment declares with
+/// [`Deployment::with_clock_tolerance`](crate::deployment::Deployment::with_clock_tolerance).
 ///
 /// # Example
 ///
@@ -59,6 +69,50 @@ impl<DB> Rule for PastTimeColumnRule<DB> {
     }
 }
 
+/// The PostgreSQL interval text measuring `tolerance` whole, in minutes,
+/// seconds, milliseconds or microseconds, or `None` for no tolerance.
+fn interval_text(tolerance: Duration) -> Option<String> {
+    let micros = tolerance.as_micros();
+    let (count, unit) = match micros {
+        0 => return None,
+        _ if micros % 60_000_000 == 0 => (micros / 60_000_000, "minute"),
+        _ if micros % 1_000_000 == 0 => (micros / 1_000_000, "second"),
+        _ if micros % 1_000 == 0 => (micros / 1_000, "millisecond"),
+        _ => (micros, "microsecond"),
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    Some(format!("{count} {unit}{plural}"))
+}
+
+/// Whether the expression is a reference to the column with this stored
+/// name.
+fn names_column(expression: &Expr, column: &str) -> bool {
+    let is_column =
+        |ident: &Ident| normalize_identifier(&ident.value, ident.quote_style.is_some()) == column;
+    match expression {
+        Expr::Nested(inner) => names_column(inner, column),
+        Expr::Identifier(ident) => is_column(ident),
+        Expr::CompoundIdentifier(parts) => parts.last().is_some_and(is_column),
+        _ => false,
+    }
+}
+
+/// Whether a top-level `AND` conjunct of the check bounds the column from
+/// above by the current time.
+fn keeps_in_past(expression: &Expr, column: &str) -> bool {
+    match expression {
+        Expr::Nested(inner) => keeps_in_past(inner, column),
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => keeps_in_past(left, column) || keeps_in_past(right, column),
+        _ => upper_bound(expression).is_some_and(|(value, bound)| {
+            names_column(value, column) && bound_clock(bound).is_some()
+        }),
+    }
+}
+
 impl<DB: DatabaseLike> ColumnRule for PastTimeColumnRule<DB> {
     type Database = DB;
 
@@ -87,30 +141,32 @@ impl<DB: DatabaseLike> ColumnRule for PastTimeColumnRule<DB> {
             return Ok(());
         }
 
-        let has_past_check = column.check_constraints(database)?.any(|cc| {
-            let expr = cc.expression(database).to_string().to_lowercase();
-
-            // Check for "now()" or "current_timestamp".
-            let mentions_now = expr.contains("now()") || expr.contains("current_timestamp");
-
-            // Check for less than operator.
-            let has_lt = expr.contains('<');
-
-            mentions_now && has_lt
-        });
-        if has_past_check {
+        if column
+            .check_constraints(database)?
+            .any(|check| keeps_in_past(check.expression(database), column_name))
+        {
             return Ok(());
         }
 
         let table_name = column.table(database).table_name();
+        let resolution = match reporter
+            .deployment()
+            .clock_tolerance()
+            .and_then(interval_text)
+        {
+            Some(tolerance) => format!(
+                "Add `CHECK ({column_name} <= now() + interval '{tolerance}')`, the deployment's clock tolerance. A row stamped by a clock running more than {tolerance} ahead of the database's is refused until the database's clock catches up."
+            ),
+            None => format!(
+                "Add `CHECK ({column_name} <= now())`, adding the tolerance declared with `Deployment::with_clock_tolerance` when the clocks stamping rows can run ahead. A row stamped by a clock running ahead of the database's is refused until the database's clock catches up."
+            ),
+        };
         reporter.column(
             column,
             format!(
                 "Time-related column '{table_name}.{column_name}' has no check keeping it in the past."
             ),
-            format!(
-                "Add `CHECK ({column_name} <= NOW())`. PostgreSQL assumes check conditions are immutable, so a row can fail this check on restore when the restoring server's clock is behind."
-            ),
+            resolution,
         )?;
         Ok(())
     }

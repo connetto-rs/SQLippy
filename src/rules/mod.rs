@@ -51,6 +51,7 @@ pub use function_rules::*;
 mod query_rules;
 pub use query_rules::*;
 mod authority_support;
+mod clock_support;
 mod credential_support;
 mod grant_support;
 mod index_support;
