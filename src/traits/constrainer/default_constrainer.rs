@@ -13,8 +13,8 @@ use crate::{
         CredentialSettingWrite, DeadPermissivePolicy, DefinerTakesActingUser,
         DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
         DistinctOverReferencedSide, ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
-        ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FloatingPointMoney,
-        FunctionMediatedPolicyCycle, GrantOptionToClientRole, HasPrimaryKey,
+        ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FlagNotBoolean,
+        FloatingPointMoney, FunctionMediatedPolicyCycle, GrantOptionToClientRole, HasPrimaryKey,
         ImpureImmutableFunction, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
         LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName, MoneyType,
         MultiplePermissivePolicies, NarrowIntegerKey, NestedPolicySubquery,
@@ -40,8 +40,8 @@ use crate::{
         UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter, UniqueCheckRule,
         UniqueColumnNamesInExtensionGraph, UniqueForeignKey, UniqueUniqueIndex, UnlinkedFromItem,
         UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin,
-        UnscopedUniqueConstraintOnRowLevelSecurityTable, UnvalidatedConstraint, WildcardView,
-        ZeroPrecisionTimestamp,
+        UnscopedUniqueConstraintOnRowLevelSecurityTable, UnvalidatedConstraint, UuidStoredAsText,
+        WildcardView, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -119,7 +119,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in table_rules {
             constrainer.register_table_rule_with_floor(rule, Level::Allow);
         }
-        let column_rules: [Box<dyn ColumnRule<Database = DB>>; 13] = [
+        let column_rules: [Box<dyn ColumnRule<Database = DB>>; 15] = [
             Box::new(SerialColumn::default()),
             Box::new(NarrowIntegerKey::default()),
             Box::new(ClientWrittenCounterKey::default()),
@@ -133,6 +133,8 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(NonEmptyTextualColumnRule::default()),
             Box::new(PastTimeColumnRule::default()),
             Box::new(FloatingPointMoney::default()),
+            Box::new(FlagNotBoolean::default()),
+            Box::new(UuidStoredAsText::default()),
         ];
         for rule in column_rules {
             constrainer.register_column_rule_with_floor(rule, Level::Allow);

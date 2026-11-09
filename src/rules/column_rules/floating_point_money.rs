@@ -1,15 +1,21 @@
 //! Submodule providing the `FloatingPointMoney` rule.
 
-use sql_traits::{
-    traits::{ColumnLike, DataTypeLike, DatabaseLike, TableLike},
-    utils::scalar_family::ScalarFamily,
-};
+use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::{name_support::names_money, type_support::underlying_type},
+    rules::name_support::{NameHint, names_money},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
+};
+
+/// A money-named column stored as floating point.
+const HINT: NameHint = NameHint {
+    families: &[ScalarFamily::Float],
+    names: names_money,
+    holds: "an amount of money",
+    flaw: "which stores most decimal amounts inexactly",
+    resolution: "Declare it `numeric`, which stores decimal amounts exactly, with the currency in an adjacent column when amounts in more than one currency share it.",
 };
 
 rule_definition!(
@@ -48,22 +54,6 @@ impl<DB: DatabaseLike> ColumnRule for FloatingPointMoney<DB> {
         column: &<Self::Database as DatabaseLike>::Column,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let data_type = column.data_type(database);
-        let column_name = column.column_name();
-        if underlying_type(database, data_type).scalar_family(database) != Some(ScalarFamily::Float)
-            || !names_money(reporter.deployment().vocabularies(), column_name)
-        {
-            return Ok(());
-        }
-        let table_name = column.table(database).table_name();
-        reporter.column(
-            column,
-            format!(
-                "Column '{table_name}.{column_name}' names an amount of money but is typed `{}`, which stores most decimal amounts inexactly.",
-                data_type.name(database)
-            ),
-            "Declare it `numeric`, which stores decimal amounts exactly, with the currency in an adjacent column when amounts in more than one currency share it.".to_owned(),
-        )?;
-        Ok(())
+        HINT.check(database, column, reporter)
     }
 }

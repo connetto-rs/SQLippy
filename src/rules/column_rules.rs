@@ -22,3 +22,7 @@ mod past_time_column_rule;
 pub use past_time_column_rule::PastTimeColumnRule;
 mod floating_point_money;
 pub use floating_point_money::FloatingPointMoney;
+mod flag_not_boolean;
+pub use flag_not_boolean::FlagNotBoolean;
+mod uuid_stored_as_text;
+pub use uuid_stored_as_text::UuidStoredAsText;
