@@ -288,6 +288,62 @@ fn a_client_role_that_can_set_a_bypassing_role_is_reported() {
 }
 
 #[test]
+fn bypass_attributes_changed_by_alter_role_decide_the_finding() {
+    for (sql, denied) in [
+        ("CREATE ROLE app_user; ALTER ROLE app_user BYPASSRLS;", true),
+        (
+            "CREATE ROLE app_user; ALTER ROLE app_user WITH SUPERUSER;",
+            true,
+        ),
+        (
+            "CREATE ROLE app_user BYPASSRLS; ALTER ROLE app_user NOBYPASSRLS;",
+            false,
+        ),
+        (
+            "CREATE ROLE app_user SUPERUSER; ALTER ROLE app_user NOSUPERUSER;",
+            false,
+        ),
+    ] {
+        let expected: &[(String, Level, String)] = if denied {
+            &[finding(
+                "ClientRoleBypassesRowLevelSecurity",
+                Level::Deny,
+                "app_user",
+            )]
+        } else {
+            &[]
+        };
+        assert_eq!(
+            findings(
+                ClientRoleBypassesRowLevelSecurity::default(),
+                Deployment::default().with_app_role("app_user"),
+                sql,
+            ),
+            expected,
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn a_role_made_bypassing_by_alter_role_is_reported_through_settable_membership() {
+    assert_eq!(
+        findings(
+            SettableMembershipInBypassingRole::default(),
+            Deployment::default().with_app_role("app_user"),
+            "CREATE ROLE staff;
+             CREATE ROLE app_user IN ROLE staff;
+             ALTER ROLE staff BYPASSRLS;",
+        ),
+        [finding(
+            "SettableMembershipInBypassingRole",
+            Level::Warn,
+            "app_user"
+        )]
+    );
+}
+
+#[test]
 fn bypass_rules_wait_for_a_declared_client_role() {
     let mut constrainer: GenericConstrainer<ParserDB> =
         ClientRoleBypassesRowLevelSecurity::default().into();
