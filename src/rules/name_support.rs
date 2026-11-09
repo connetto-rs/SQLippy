@@ -19,9 +19,15 @@ fn words(name: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Whether the name names an amount of money in one of the vocabularies,
-/// holding a money term and no ratio term, so `total_price` does and
-/// `tax_rate` does not.
+/// holding a money term and no ratio term and closing with neither a count
+/// nor an identifier term, so `total_price` does while `tax_rate`,
+/// `payment_count` and `tax_id` do not.
 pub(crate) fn names_money(vocabularies: &[Vocabulary], name: &str) -> bool {
+    if closes_with(vocabularies, Ending::Count, name)
+        || closes_with(vocabularies, Ending::Identifier, name)
+    {
+        return false;
+    }
     let mut money = false;
     for word in words(name) {
         if in_vocabularies(vocabularies, Vocabulary::is_ratio_term, word) {
@@ -53,10 +59,17 @@ pub(crate) fn names_flag(vocabularies: &[Vocabulary], name: &str) -> bool {
 
 /// Whether the last words of the name are a term of `ending` in one of the
 /// vocabularies.
-fn names_ending(vocabularies: &[Vocabulary], ending: Ending, name: &str) -> bool {
+fn closes_with(vocabularies: &[Vocabulary], ending: Ending, name: &str) -> bool {
     vocabularies
         .iter()
         .any(|vocabulary| vocabulary.ends(ending, name))
+}
+
+/// Whether the name closes with a term of `ending` and does not open with a
+/// flag prefix, since a flag-prefixed name such as `is_turned_on` holds a yes
+/// or no state whatever its last word says.
+fn names_ending(vocabularies: &[Vocabulary], ending: Ending, name: &str) -> bool {
+    !names_flag(vocabularies, name) && closes_with(vocabularies, ending, name)
 }
 
 /// Whether the name closes with a uuid term in one of the vocabularies, as

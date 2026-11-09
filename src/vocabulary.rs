@@ -49,7 +49,7 @@ const ENGLISH_FLAG_PREFIXES: [&str; 5] = ["is", "has", "can", "should", "was"];
 const ENGLISH_UUID_TERMS: [&str; 1] = ["uuid"];
 
 /// English words closing the name of a moment or a day.
-const ENGLISH_MOMENT_TERMS: [&str; 6] = ["at", "on", "date", "time", "timestamp", "birthday"];
+const ENGLISH_MOMENT_TERMS: [&str; 5] = ["at", "date", "time", "timestamp", "birthday"];
 
 /// English terms closing the name of an IP address or network.
 const ENGLISH_ADDRESS_TERMS: [&str; 3] = ["ip", "cidr", "ip_address"];
@@ -62,6 +62,9 @@ const ENGLISH_COUNT_TERMS: [&str; 3] = ["count", "quantity", "qty"];
 
 /// English words turning a count into an average of counts.
 const ENGLISH_AVERAGE_TERMS: [&str; 4] = ["avg", "average", "mean", "median"];
+
+/// English terms closing the name of an identifier.
+const ENGLISH_IDENTIFIER_TERMS: [&str; 1] = ["id"];
 
 /// The vocabulary a deployment that selects none is matched against.
 static ENGLISH: LazyLock<Vocabulary> = LazyLock::new(Vocabulary::english);
@@ -97,6 +100,8 @@ pub(crate) enum Ending {
     Json,
     /// A count of things.
     Count,
+    /// An identifier.
+    Identifier,
 }
 
 /// Words of one language that tell what a column holds.
@@ -138,6 +143,7 @@ pub struct Vocabulary {
     json_terms: Vec<Cow<'static, str>>,
     count_terms: Vec<Cow<'static, str>>,
     average_terms: Vec<Cow<'static, str>>,
+    identifier_terms: Vec<Cow<'static, str>>,
 }
 
 impl Vocabulary {
@@ -155,6 +161,7 @@ impl Vocabulary {
             json_terms: words(&ENGLISH_JSON_TERMS),
             count_terms: words(&ENGLISH_COUNT_TERMS),
             average_terms: words(&ENGLISH_AVERAGE_TERMS),
+            identifier_terms: words(&ENGLISH_IDENTIFIER_TERMS),
         }
     }
 
@@ -229,6 +236,14 @@ impl Vocabulary {
         self
     }
 
+    /// Adds a term closing the name of an identifier, such as `id`, so
+    /// `tax_id` names an identifier rather than an amount of money.
+    #[must_use]
+    pub fn with_identifier_term(mut self, term: impl Into<Cow<'static, str>>) -> Self {
+        self.identifier_terms.push(term.into());
+        self
+    }
+
     /// Returns whether `word` names an amount of money.
     pub(crate) fn is_money_term(&self, word: &str) -> bool {
         holds(&self.money_terms, word)
@@ -259,6 +274,7 @@ impl Vocabulary {
             Ending::Address => &self.address_terms,
             Ending::Json => &self.json_terms,
             Ending::Count => &self.count_terms,
+            Ending::Identifier => &self.identifier_terms,
         };
         terms.iter().any(|term| ends_with_words(name, term))
     }

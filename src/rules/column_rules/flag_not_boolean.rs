@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// A flag-named column stored as a number or text.
-const HINT: NameHint = NameHint {
+pub(super) const HINT: NameHint = NameHint {
     families: &[ScalarFamily::Int, ScalarFamily::String],
     names: names_flag,
     holds: "a yes or no state",

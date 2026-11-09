@@ -1,11 +1,17 @@
 //! Submodule providing the `FractionalCount` rule.
 
-use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
+use sql_traits::{
+    traits::{ColumnLike, DataTypeLike, DatabaseLike},
+    utils::scalar_family::ScalarFamily,
+};
 
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::name_support::{NameHint, names_count},
+    rules::{
+        name_support::{NameHint, names_count},
+        type_support::underlying_type,
+    },
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
 
@@ -26,7 +32,8 @@ rule_definition!(
     /// The name's last words are matched against the deployment's
     /// vocabularies, English unless it selects others, and a name holding an
     /// average word such as `avg_count` is skipped. The type is read through
-    /// arrays and domains.
+    /// arrays and domains, and `numeric` with scale 0, such as `numeric(10)`,
+    /// is skipped since it rounds every value to a whole number.
     ///
     /// # Example
     ///
@@ -56,6 +63,10 @@ impl<DB: DatabaseLike> ColumnRule for FractionalCount<DB> {
         column: &<Self::Database as DatabaseLike>::Column,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
+        let stored = underlying_type(database, column.data_type(database));
+        if stored.numeric_scale(database) == Some(0) {
+            return Ok(());
+        }
         HINT.check(database, column, reporter)
     }
 }
