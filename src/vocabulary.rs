@@ -48,6 +48,9 @@ const ENGLISH_FLAG_PREFIXES: [&str; 5] = ["is", "has", "can", "should", "was"];
 /// English words closing the name of a uuid.
 const ENGLISH_UUID_TERMS: [&str; 1] = ["uuid"];
 
+/// English words closing the name of a moment or a day.
+const ENGLISH_MOMENT_TERMS: [&str; 6] = ["at", "on", "date", "time", "timestamp", "birthday"];
+
 /// The vocabulary a deployment that selects none is matched against.
 static ENGLISH: LazyLock<Vocabulary> = LazyLock::new(Vocabulary::english);
 
@@ -60,8 +63,8 @@ fn holds(terms: &[Cow<'static, str>], word: &str) -> bool {
 ///
 /// A rule matches each term against the whole snake_case words of a column
 /// name, ignoring ASCII case, so `price` matches `total_price` and not
-/// `priceless`. A flag prefix must be the first word and a uuid term the
-/// last. A deployment selects the vocabularies its schema uses with
+/// `priceless`. A flag prefix must be the first word, and a uuid or moment
+/// term the last. A deployment selects the vocabularies its schema uses with
 /// [`Deployment::with_vocabulary`](crate::deployment::Deployment::with_vocabulary),
 /// and English applies when it selects none.
 ///
@@ -88,6 +91,7 @@ pub struct Vocabulary {
     ratio_terms: Vec<Cow<'static, str>>,
     flag_prefixes: Vec<Cow<'static, str>>,
     uuid_terms: Vec<Cow<'static, str>>,
+    moment_terms: Vec<Cow<'static, str>>,
 }
 
 impl Vocabulary {
@@ -100,6 +104,7 @@ impl Vocabulary {
             ratio_terms: words(&ENGLISH_RATIO_TERMS),
             flag_prefixes: words(&ENGLISH_FLAG_PREFIXES),
             uuid_terms: words(&ENGLISH_UUID_TERMS),
+            moment_terms: words(&ENGLISH_MOMENT_TERMS),
         }
     }
 
@@ -134,6 +139,14 @@ impl Vocabulary {
         self
     }
 
+    /// Adds a word closing the name of a moment or a day, such as `at`, so
+    /// `created_at` names one.
+    #[must_use]
+    pub fn with_moment_term(mut self, term: impl Into<Cow<'static, str>>) -> Self {
+        self.moment_terms.push(term.into());
+        self
+    }
+
     /// Returns whether `word` names an amount of money.
     pub(crate) fn is_money_term(&self, word: &str) -> bool {
         holds(&self.money_terms, word)
@@ -152,6 +165,11 @@ impl Vocabulary {
     /// Returns whether `word` closes the name of a uuid.
     pub(crate) fn is_uuid_term(&self, word: &str) -> bool {
         holds(&self.uuid_terms, word)
+    }
+
+    /// Returns whether `word` closes the name of a moment or a day.
+    pub(crate) fn is_moment_term(&self, word: &str) -> bool {
+        holds(&self.moment_terms, word)
     }
 
     /// Returns the English vocabulary, built once.

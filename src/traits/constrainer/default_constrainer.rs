@@ -16,8 +16,8 @@ use crate::{
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FlagNotBoolean,
         FloatingPointMoney, FunctionMediatedPolicyCycle, GrantOptionToClientRole, HasPrimaryKey,
         ImpureImmutableFunction, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
-        LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName, MoneyType,
-        MultiplePermissivePolicies, NarrowIntegerKey, NestedPolicySubquery,
+        LowercaseColumnName, LowercaseForeignKeyName, LowercaseTableName, MomentStoredAsText,
+        MoneyType, MultiplePermissivePolicies, NarrowIntegerKey, NestedPolicySubquery,
         NoForbiddenColumnInExtension, NoNegationCheckRule, NoRustKeywordColumnName,
         NoRustKeywordForeignKeyName, NoRustKeywordTableName, NoSurrogatePrimaryKeyInExtension,
         NoTautologicalCheckRule, NonCompositePrimaryKeyNamedId, NonEmptyTextualColumnRule,
@@ -119,7 +119,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in table_rules {
             constrainer.register_table_rule_with_floor(rule, Level::Allow);
         }
-        let column_rules: [Box<dyn ColumnRule<Database = DB>>; 15] = [
+        let column_rules: [Box<dyn ColumnRule<Database = DB>>; 16] = [
             Box::new(SerialColumn::default()),
             Box::new(NarrowIntegerKey::default()),
             Box::new(ClientWrittenCounterKey::default()),
@@ -135,6 +135,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(FloatingPointMoney::default()),
             Box::new(FlagNotBoolean::default()),
             Box::new(UuidStoredAsText::default()),
+            Box::new(MomentStoredAsText::default()),
         ];
         for rule in column_rules {
             constrainer.register_column_rule_with_floor(rule, Level::Allow);

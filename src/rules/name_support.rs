@@ -22,37 +22,47 @@ fn words(name: &str) -> impl Iterator<Item = &str> {
 pub(crate) fn names_money(vocabularies: &[Vocabulary], name: &str) -> bool {
     let mut money = false;
     for word in words(name) {
-        if vocabularies
-            .iter()
-            .any(|vocabulary| vocabulary.is_ratio_term(word))
-        {
+        if in_vocabularies(vocabularies, Vocabulary::is_ratio_term, word) {
             return false;
         }
-        money |= vocabularies
-            .iter()
-            .any(|vocabulary| vocabulary.is_money_term(word));
+        money |= in_vocabularies(vocabularies, Vocabulary::is_money_term, word);
     }
     money
+}
+
+/// Whether one of the vocabularies holds `word` as the term `is_term` tests.
+fn in_vocabularies(
+    vocabularies: &[Vocabulary],
+    is_term: fn(&Vocabulary, &str) -> bool,
+    word: &str,
+) -> bool {
+    vocabularies
+        .iter()
+        .any(|vocabulary| is_term(vocabulary, word))
 }
 
 /// Whether the first word of the name opens a yes or no state in one of the
 /// vocabularies, as `is` opens `is_active`.
 pub(crate) fn names_flag(vocabularies: &[Vocabulary], name: &str) -> bool {
-    words(name).next().is_some_and(|word| {
-        vocabularies
-            .iter()
-            .any(|vocabulary| vocabulary.is_flag_prefix(word))
-    })
+    words(name)
+        .next()
+        .is_some_and(|word| in_vocabularies(vocabularies, Vocabulary::is_flag_prefix, word))
 }
 
 /// Whether the last word of the name closes the name of a uuid in one of the
 /// vocabularies, as `uuid` closes `owner_uuid`.
 pub(crate) fn names_uuid(vocabularies: &[Vocabulary], name: &str) -> bool {
-    words(name).last().is_some_and(|word| {
-        vocabularies
-            .iter()
-            .any(|vocabulary| vocabulary.is_uuid_term(word))
-    })
+    words(name)
+        .last()
+        .is_some_and(|word| in_vocabularies(vocabularies, Vocabulary::is_uuid_term, word))
+}
+
+/// Whether the last word of the name closes the name of a moment or a day in
+/// one of the vocabularies, as `at` closes `created_at`.
+pub(crate) fn names_moment(vocabularies: &[Vocabulary], name: &str) -> bool {
+    words(name)
+        .last()
+        .is_some_and(|word| in_vocabularies(vocabularies, Vocabulary::is_moment_term, word))
 }
 
 /// A column whose name says what it holds while its stored type cannot hold
@@ -71,30 +81,38 @@ pub(crate) struct NameHint {
 }
 
 impl NameHint {
-    /// Reports `column` when its name says what the hint is about and its
-    /// type, through arrays and domains, is stored in one of the families.
+    /// Whether the column's name says what the hint is about and its type,
+    /// through arrays and domains, is stored in one of the families.
+    pub(crate) fn matches<DB: DatabaseLike>(
+        &self,
+        database: &DB,
+        column: &DB::Column,
+        vocabularies: &[Vocabulary],
+    ) -> bool {
+        underlying_type(database, column.data_type(database))
+            .scalar_family(database)
+            .is_some_and(|family| self.families.contains(&family))
+            && (self.names)(vocabularies, column.column_name())
+    }
+
+    /// Reports `column` when the hint [`matches`](Self::matches) it.
     pub(crate) fn check<DB: DatabaseLike>(
         &self,
         database: &DB,
         column: &DB::Column,
         reporter: &mut Reporter<'_, DB>,
     ) -> Result<(), Interruption> {
-        let data_type = column.data_type(database);
-        let column_name = column.column_name();
-        if !underlying_type(database, data_type)
-            .scalar_family(database)
-            .is_some_and(|family| self.families.contains(&family))
-            || !(self.names)(reporter.deployment().vocabularies(), column_name)
-        {
+        if !self.matches(database, column, reporter.deployment().vocabularies()) {
             return Ok(());
         }
         let table_name = column.table(database).table_name();
         reporter.column(
             column,
             format!(
-                "Column '{table_name}.{column_name}' names {} but is typed `{}`, {}.",
+                "Column '{table_name}.{}' names {} but is typed `{}`, {}.",
+                column.column_name(),
                 self.holds,
-                data_type.name(database),
+                column.data_type(database).name(database),
                 self.flaw
             ),
             self.resolution.to_owned(),
