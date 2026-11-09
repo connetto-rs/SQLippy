@@ -592,6 +592,17 @@ fn a_flag_prefix_leaves_the_name_to_the_flag_hint() {
 }
 
 #[test]
+fn a_flag_prefix_leaves_a_money_word_to_the_flag_hint() {
+    assert_eq!(
+        money(
+            Deployment::default(),
+            "CREATE TABLE t (has_discount REAL, is_refund DOUBLE PRECISION, discount REAL);"
+        ),
+        ["t.discount"]
+    );
+}
+
+#[test]
 fn names_closing_with_on_are_moments_only_when_a_vocabulary_says_so() {
     let sql = "CREATE TABLE t (depends_on TEXT, based_on TEXT, add_on TEXT, published_on TEXT);";
     assert_eq!(
