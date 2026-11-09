@@ -236,6 +236,51 @@ fn forced_or_policy_free_tables_are_not_reported() {
     }
 }
 
+fn unenabled(sql: &str) -> Vec<(String, Level, String)> {
+    findings(&PoliciesRequireRowLevelSecurity::default().into(), sql)
+}
+
+#[test]
+fn policies_on_a_table_without_row_level_security_enabled_are_denied() {
+    for sql in [
+        "CREATE TABLE docs (id INT);
+         CREATE POLICY p ON docs USING (id > 0);
+         CREATE POLICY q ON docs FOR INSERT WITH CHECK (id > 0);",
+        "CREATE TABLE docs (id INT);
+         ALTER TABLE docs FORCE ROW LEVEL SECURITY;
+         CREATE POLICY p ON docs USING (id > 0);",
+        "CREATE TABLE docs (id INT);
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY p ON docs USING (id > 0);
+         ALTER TABLE docs DISABLE ROW LEVEL SECURITY;",
+    ] {
+        assert_eq!(
+            unenabled(sql),
+            [(
+                "PoliciesRequireRowLevelSecurity".to_owned(),
+                Level::Deny,
+                "docs".to_owned()
+            )],
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn enabled_or_policy_free_tables_pass_the_row_level_security_requirement() {
+    for sql in [
+        "CREATE TABLE docs (id INT);
+         CREATE POLICY p ON docs USING (id > 0);
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;",
+        "CREATE TABLE docs (id INT);
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE docs DISABLE ROW LEVEL SECURITY;",
+        "CREATE TABLE docs (id INT); ALTER TABLE docs FORCE ROW LEVEL SECURITY;",
+    ] {
+        assert_eq!(unenabled(sql), [], "{sql}");
+    }
+}
+
 #[test]
 fn the_default_constrainer_registers_the_policy_checks_at_their_group_defaults() {
     let database = parse(&format!(
