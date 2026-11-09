@@ -18,6 +18,7 @@ mod key_equality;
 mod keys_and_indexes;
 mod lint_candidates;
 mod lint_levels;
+mod name_type_hints;
 mod nested_policy_subqueries;
 mod nullable_unique;
 mod owner_rights_views;

@@ -20,3 +20,5 @@ mod counter_keys;
 pub use counter_keys::{ClientWrittenCounterKey, NarrowIntegerKey, SerialColumn};
 mod past_time_column_rule;
 pub use past_time_column_rule::PastTimeColumnRule;
+mod floating_point_money;
+pub use floating_point_money::FloatingPointMoney;

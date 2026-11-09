@@ -41,6 +41,21 @@ pub(crate) enum TypeFlaw {
     ScaledNumeric,
 }
 
+/// The type a value of `data_type` is stored as, through array elements and
+/// domains, so `prices amount_t[]` over `amount_t AS real` answers `real`.
+pub(crate) fn underlying_type<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    mut data_type: &'db DB::DataType,
+) -> &'db DB::DataType {
+    while let Some(inner) = data_type
+        .array_element(database)
+        .or_else(|| data_type.base_type(database))
+    {
+        data_type = inner;
+    }
+    data_type
+}
+
 /// The flaws of a declared type, its array elements included.
 pub(crate) fn declared_flaws<'db, DB: DatabaseLike>(
     database: &'db DB,
