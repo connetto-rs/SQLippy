@@ -2,8 +2,11 @@
 //! immutable functions, observed through the public constrainer API. The
 //! behaviour each rule cites was measured on PostgreSQL 17.11 and 18.6.
 
+use std::time::Duration;
+
 use crate::rule_findings::findings;
 use sqlippy::prelude::*;
+use sqlparser::dialect::PostgreSqlDialect;
 
 fn objects<C: Constrainer<Database = ParserDB>>(
     constrainer: &C,
@@ -151,6 +154,95 @@ fn immutable_functions_reading_what_can_change_are_reported() {
             ("stamped(INT)".to_owned(), false)
         ]
     );
+}
+
+/// Resolution of every `PastTimeColumnRule` finding on `sql` under `deployment`.
+fn past_time_resolutions(deployment: Deployment, sql: &str) -> Vec<String> {
+    let mut constrainer: GenericConstrainer<ParserDB> = PastTimeColumnRule::default().into();
+    constrainer.set_deployment(deployment);
+    let database = ParserDB::parse::<PostgreSqlDialect>(sql).expect("schema parses");
+    constrainer
+        .diagnostics(&database)
+        .into_iter()
+        .filter_map(|error| match error {
+            Error::Violation(violation) if violation.rule().name == "PastTimeColumnRule" => {
+                Some(violation.resolution().to_owned())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn checks_bounding_the_column_by_the_current_time_from_above_keep_it_in_the_past() {
+    for check in [
+        "created_at <= now()",
+        "created_at <= now() + interval '5 minutes'",
+        "created_at < current_timestamp",
+        "now() >= created_at",
+        "(created_at <= now() AND x > 0)",
+        "t.created_at <= now()",
+        "(created_at) <= now()",
+    ] {
+        assert_eq!(
+            past_time_resolutions(
+                Deployment::default(),
+                &format!("CREATE TABLE t (created_at TIMESTAMPTZ, x INT, CHECK ({check}));")
+            ),
+            Vec::<String>::new(),
+            "{check}"
+        );
+    }
+}
+
+#[test]
+fn checks_that_do_not_bound_the_column_from_above_leave_it_unchecked() {
+    for check in [
+        "now() < created_at",
+        "created_at > now() - interval '1 day'",
+        "created_at < now() OR x > 0",
+        "created_at <= now() + x * interval '1 minute'",
+        "created_at::date <= now()::date",
+    ] {
+        assert_eq!(
+            past_time_resolutions(
+                Deployment::default(),
+                &format!("CREATE TABLE t (created_at TIMESTAMPTZ, x INT, CHECK ({check}));")
+            )
+            .len(),
+            1,
+            "{check}"
+        );
+    }
+}
+
+#[test]
+fn the_suggested_check_adds_the_declared_device_clock_tolerance() {
+    let sql = "CREATE TABLE t (created_at TIMESTAMPTZ);";
+    let suggests = |deployment: Deployment, clause: &str| {
+        let [resolution] = past_time_resolutions(deployment, sql)
+            .try_into()
+            .expect("one finding");
+        assert!(resolution.contains(clause), "{resolution}");
+        assert!(!resolution.contains("restore"), "{resolution}");
+    };
+    suggests(Deployment::default(), "`CHECK (created_at <= now())`");
+    suggests(
+        Deployment::default().with_clock_tolerance(Duration::ZERO),
+        "`CHECK (created_at <= now())`",
+    );
+    for (tolerance, interval) in [
+        (Duration::from_secs(300), "5 minutes"),
+        (Duration::from_secs(60), "1 minute"),
+        (Duration::from_secs(90), "90 seconds"),
+        (Duration::from_millis(1500), "1500 milliseconds"),
+        (Duration::from_micros(1500), "1500 microseconds"),
+    ] {
+        suggests(
+            Deployment::default().with_clock_tolerance(tolerance),
+            &format!("`CHECK (created_at <= now() + interval '{interval}')`"),
+        );
+    }
 }
 
 #[test]

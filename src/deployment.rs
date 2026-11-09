@@ -1,7 +1,10 @@
 //! Declarations describing how a deployment connects to its database, which
 //! the row-level security rules read and never guess.
 
-use std::fmt::{self, Display};
+use std::{
+    fmt::{self, Display},
+    time::Duration,
+};
 
 use sqlparser::{
     ast::Expr,
@@ -37,6 +40,7 @@ pub struct Deployment {
     self_asserted_claims: Vec<Expr>,
     self_asserted_columns: Vec<SelfAssertedColumn>,
     pooled: Option<bool>,
+    clock_tolerance: Option<Duration>,
 }
 
 /// A column whose value its row's subject sets, by stored names.
@@ -89,6 +93,21 @@ impl Deployment {
     #[must_use]
     pub fn is_pooled(&self) -> bool {
         self.pooled == Some(true)
+    }
+
+    /// Declares how far ahead of the database's clock the clocks stamping
+    /// rows may run, such as the devices of a client that authors rows
+    /// offline.
+    #[must_use]
+    pub fn with_clock_tolerance(mut self, tolerance: Duration) -> Self {
+        self.clock_tolerance = Some(tolerance);
+        self
+    }
+
+    /// Returns the declared clock tolerance.
+    #[must_use]
+    pub fn clock_tolerance(&self) -> Option<Duration> {
+        self.clock_tolerance
     }
 
     /// Returns the declared anonymous roles, `PUBLIC` excluded.

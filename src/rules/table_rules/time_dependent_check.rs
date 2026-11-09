@@ -6,66 +6,14 @@ use sql_traits::{
     errors::LookupError,
     traits::{CheckConstraintLike, DatabaseLike, FunctionLike, TableLike},
 };
-use sqlparser::ast::{BinaryOperator, Expr, FunctionArguments, FunctionBehavior, Visit, Visitor};
+use sqlparser::ast::{Expr, FunctionArguments, FunctionBehavior, Visit, Visitor};
 
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleMetadata},
-    rules::policy_support::is_column_reference,
+    rules::clock_support::{bound_clock, is_clock, upper_bound},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
-
-/// Functions reading the current time.
-const CLOCKS: [&str; 9] = [
-    "now",
-    "current_timestamp",
-    "current_date",
-    "current_time",
-    "localtimestamp",
-    "localtime",
-    "transaction_timestamp",
-    "statement_timestamp",
-    "clock_timestamp",
-];
-
-/// Whether the expression calls a function reading the current time.
-fn is_clock(expression: &Expr) -> bool {
-    matches!(expression, Expr::Function(call) if call
-        .name
-        .0
-        .last()
-        .and_then(|part| part.as_ident())
-        .is_some_and(|ident| CLOCKS.iter().any(|clock| ident.value.eq_ignore_ascii_case(clock))))
-}
-
-/// Whether the expression reads no column and calls nothing.
-fn is_constant(expression: &Expr) -> bool {
-    struct Found;
-    impl Visitor for Found {
-        type Break = ();
-        fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
-            if is_column_reference(expression) || matches!(expression, Expr::Function(_)) {
-                return ControlFlow::Break(());
-            }
-            ControlFlow::Continue(())
-        }
-    }
-    expression.visit(&mut Found).is_continue()
-}
-
-/// The clock call an upper bound by the current time reads, with an
-/// optional constant tolerance added or subtracted and casts around it.
-fn bound_clock(expression: &Expr) -> Option<&Expr> {
-    match expression {
-        Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => bound_clock(inner),
-        Expr::BinaryOp {
-            left,
-            op: BinaryOperator::Plus | BinaryOperator::Minus,
-            right,
-        } if is_constant(right) => bound_clock(left),
-        _ => is_clock(expression).then_some(expression),
-    }
-}
 
 /// Finds the calls of a check whose result can change over time, apart from
 /// clocks bounding a value from above.
@@ -100,17 +48,9 @@ impl<DB: DatabaseLike> Visitor for Changing<'_, '_, DB> {
     type Break = LookupError;
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<LookupError> {
-        if let Expr::BinaryOp { left, op, right } = expression {
-            let upper = match op {
-                BinaryOperator::Lt | BinaryOperator::LtEq => Some(right),
-                BinaryOperator::Gt | BinaryOperator::GtEq => Some(left),
-                _ => None,
-            };
-            self.exempt.extend(
-                upper
-                    .and_then(|upper| bound_clock(upper))
-                    .map(std::ptr::from_ref),
-            );
+        if let Some((_, upper)) = upper_bound(expression) {
+            self.exempt
+                .extend(bound_clock(upper).map(std::ptr::from_ref));
         }
         if self.exempt.contains(&std::ptr::from_ref(expression)) {
             return ControlFlow::Continue(());
