@@ -19,11 +19,12 @@ fn words(name: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Whether the name names an amount of money in one of the vocabularies,
-/// holding a money term and no ratio term and closing with neither a count
-/// nor an identifier term, so `total_price` does while `tax_rate`,
-/// `payment_count` and `tax_id` do not.
+/// holding a money term and no ratio term, opening with no flag prefix and
+/// closing with neither a count nor an identifier term, so `total_price` does
+/// while `tax_rate`, `has_discount`, `payment_count` and `tax_id` do not.
 pub(crate) fn names_money(vocabularies: &[Vocabulary], name: &str) -> bool {
-    if closes_with(vocabularies, Ending::Count, name)
+    if names_flag(vocabularies, name)
+        || closes_with(vocabularies, Ending::Count, name)
         || closes_with(vocabularies, Ending::Identifier, name)
     {
         return false;
