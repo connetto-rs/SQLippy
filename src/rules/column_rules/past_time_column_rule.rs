@@ -75,9 +75,9 @@ fn interval_text(tolerance: Duration) -> Option<String> {
     let micros = tolerance.as_micros();
     let (count, unit) = match micros {
         0 => return None,
-        _ if micros % 60_000_000 == 0 => (micros / 60_000_000, "minute"),
-        _ if micros % 1_000_000 == 0 => (micros / 1_000_000, "second"),
-        _ if micros % 1_000 == 0 => (micros / 1_000, "millisecond"),
+        _ if micros.is_multiple_of(60_000_000) => (micros / 60_000_000, "minute"),
+        _ if micros.is_multiple_of(1_000_000) => (micros / 1_000_000, "second"),
+        _ if micros.is_multiple_of(1_000) => (micros / 1_000, "millisecond"),
         _ => (micros, "microsecond"),
     };
     let plural = if count == 1 { "" } else { "s" };
