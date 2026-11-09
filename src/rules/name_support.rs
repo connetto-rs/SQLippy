@@ -83,6 +83,14 @@ pub(crate) fn names_json(vocabularies: &[Vocabulary], name: &str) -> bool {
     names_ending(vocabularies, Ending::Json, name)
 }
 
+/// Whether the name closes with a count term in one of the vocabularies and
+/// holds no average term, so `item_count` names a count and `avg_count` does
+/// not.
+pub(crate) fn names_count(vocabularies: &[Vocabulary], name: &str) -> bool {
+    names_ending(vocabularies, Ending::Count, name)
+        && !words(name).any(|word| in_vocabularies(vocabularies, Vocabulary::is_average_term, word))
+}
+
 /// A column whose name says what it holds while its stored type cannot hold
 /// that faithfully, as one rule reports it.
 pub(crate) struct NameHint {
