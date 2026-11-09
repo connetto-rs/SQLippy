@@ -26,3 +26,5 @@ mod flag_not_boolean;
 pub use flag_not_boolean::FlagNotBoolean;
 mod uuid_stored_as_text;
 pub use uuid_stored_as_text::UuidStoredAsText;
+mod moment_stored_as_text;
+pub use moment_stored_as_text::MomentStoredAsText;

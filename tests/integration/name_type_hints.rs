@@ -222,15 +222,18 @@ fn a_selected_vocabulary_supplies_flag_and_uuid_words() {
 }
 
 #[test]
-fn the_default_constrainer_runs_the_flag_and_uuid_hints_as_pedantic() {
-    let database = parse("CREATE TABLE t (id INT PRIMARY KEY, is_active INTEGER, item_uuid TEXT);");
+fn the_default_constrainer_runs_the_flag_uuid_and_moment_hints_as_pedantic() {
+    let database = parse(
+        "CREATE TABLE t (id INT PRIMARY KEY, is_active INTEGER, item_uuid TEXT, created_at TEXT);",
+    );
     let raised = |constrainer: &DefaultConstrainer<ParserDB>| {
         constrainer
             .diagnostics(&database)
             .into_iter()
             .filter_map(|error| match error {
                 Error::Violation(violation)
-                    if ["FlagNotBoolean", "UuidStoredAsText"].contains(&violation.rule().name) =>
+                    if ["FlagNotBoolean", "UuidStoredAsText", "MomentStoredAsText"]
+                        .contains(&violation.rule().name) =>
                 {
                     Some((
                         violation.rule().name.to_owned(),
@@ -249,7 +252,82 @@ fn the_default_constrainer_runs_the_flag_and_uuid_hints_as_pedantic() {
         raised(&constrainer),
         [
             finding("FlagNotBoolean", Level::Warn, "t.is_active"),
-            finding("UuidStoredAsText", Level::Warn, "t.item_uuid")
+            finding("UuidStoredAsText", Level::Warn, "t.item_uuid"),
+            finding("MomentStoredAsText", Level::Warn, "t.created_at")
         ]
+    );
+}
+
+#[test]
+fn a_moment_or_a_day_stored_as_text_is_reported() {
+    assert_eq!(
+        objects(
+            MomentStoredAsText::default(),
+            Deployment::default(),
+            "CREATE DOMAIN stamp_t AS TEXT;
+             CREATE TABLE events (
+                 created_at TEXT,
+                 published_on VARCHAR(10),
+                 start_date CHAR(10),
+                 event_time TEXT,
+                 timestamp TEXT,
+                 birthday TEXT,
+                 deleted_at stamp_t
+             );"
+        ),
+        [
+            "events.created_at",
+            "events.published_on",
+            "events.start_date",
+            "events.event_time",
+            "events.timestamp",
+            "events.birthday",
+            "events.deleted_at"
+        ]
+    );
+}
+
+#[test]
+fn typed_moments_and_names_not_ending_in_a_moment_word_are_not_reported() {
+    assert_eq!(
+        objects(
+            MomentStoredAsText::default(),
+            Deployment::default(),
+            "CREATE TABLE events (
+                 created_at TIMESTAMPTZ,
+                 start_date DATE,
+                 at_risk TEXT,
+                 date_format TEXT,
+                 attachment TEXT,
+                 run_time INTEGER
+             );"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn the_past_time_rule_leaves_a_text_moment_to_the_moment_hint() {
+    let sql = "CREATE TABLE events (created_at TEXT, updated_at TIMESTAMPTZ);";
+    assert_eq!(
+        objects(PastTimeColumnRule::default(), Deployment::default(), sql),
+        ["events.updated_at"]
+    );
+    let german = Vocabulary::default().with_moment_term("datum");
+    assert_eq!(
+        objects(
+            PastTimeColumnRule::default(),
+            Deployment::default().with_vocabulary(german.clone()),
+            sql
+        ),
+        ["events.created_at", "events.updated_at"]
+    );
+    assert_eq!(
+        objects(
+            MomentStoredAsText::default(),
+            Deployment::default().with_vocabulary(german),
+            "CREATE TABLE events (geburts_datum TEXT, created_at TEXT);"
+        ),
+        ["events.geburts_datum"]
     );
 }
