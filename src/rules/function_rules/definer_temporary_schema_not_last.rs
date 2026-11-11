@@ -7,7 +7,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
 };
 
@@ -70,6 +70,7 @@ impl<DB> Rule for DefinerTemporarySchemaNotLast<DB> {
             source: Some(
                 "https://www.postgresql.org/docs/current/sql-createfunction.html#SQL-CREATEFUNCTION-SECURITY",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

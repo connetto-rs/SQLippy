@@ -109,6 +109,17 @@ impl Display for Level {
     }
 }
 
+/// What a rule decides its findings from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Basis {
+    /// Declared structure, such as types, keys, constraints and policies,
+    /// so every finding is exact.
+    Declared,
+    /// Words in object names, such as `price` or `is_active`, so a finding
+    /// is a guess about what the object means.
+    Names,
+}
+
 /// Identity, group and explanation shared by every violation of a rule.
 #[derive(Debug)]
 pub struct RuleMetadata {
@@ -120,6 +131,8 @@ pub struct RuleMetadata {
     pub rationale: &'static str,
     /// URL of a source documenting the problem, when one exists.
     pub source: Option<&'static str>,
+    /// What the rule decides its findings from.
+    pub basis: Basis,
 }
 
 /// A rule with lint metadata.

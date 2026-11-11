@@ -10,7 +10,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -126,6 +126,7 @@ impl<DB> Rule for UniqueColumnNamesInExtensionGraph<DB> {
             group: LintGroup::Suspicious,
             rationale: "A column name repeated across an extension hierarchy makes the merged row ambiguous.",
             source: None,
+            basis: Basis::Declared,
         };
         &METADATA
     }

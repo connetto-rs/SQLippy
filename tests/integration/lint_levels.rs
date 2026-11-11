@@ -252,6 +252,7 @@ impl Rule for LookupFailsOn {
             group: LintGroup::Correctness,
             rationale: "Test rule.",
             source: None,
+            basis: Basis::Declared,
         };
         &METADATA
     }
@@ -360,4 +361,31 @@ fn the_default_constrainer_reports_every_rule_at_its_group_level() {
                 && violation.object() == "notes_.expires_at"),
         "a column naming a future instant is exempt"
     );
+}
+
+#[test]
+fn rules_that_read_names_say_they_guess() {
+    let guessing: [&'static RuleMetadata; 10] = [
+        FloatingPointMoney::<ParserDB>::default().metadata(),
+        FlagNotBoolean::<ParserDB>::default().metadata(),
+        UuidStoredAsText::<ParserDB>::default().metadata(),
+        MomentStoredAsText::<ParserDB>::default().metadata(),
+        AddressStoredAsText::<ParserDB>::default().metadata(),
+        JsonStoredAsText::<ParserDB>::default().metadata(),
+        FractionalCount::<ParserDB>::default().metadata(),
+        PluralTableName::<ParserDB>::default().metadata(),
+        SingularColumnName::<ParserDB>::default().metadata(),
+        PastTimeColumnRule::<ParserDB>::default().metadata(),
+    ];
+    for metadata in guessing {
+        assert_eq!(metadata.basis, Basis::Names, "{}", metadata.name);
+    }
+    let declared: [&'static RuleMetadata; 3] = [
+        LowercaseColumnName::<ParserDB>::default().metadata(),
+        TimestampWithoutTimeZone::<ParserDB>::default().metadata(),
+        OuterColumnCapture::<ParserDB>::default().metadata(),
+    ];
+    for metadata in declared {
+        assert_eq!(metadata.basis, Basis::Declared, "{}", metadata.name);
+    }
 }

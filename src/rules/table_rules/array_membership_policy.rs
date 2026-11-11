@@ -12,7 +12,7 @@ use sqlparser::ast::{BinaryOperator, Expr, Query, Visit, Visitor};
 use crate::{
     deployment::Deployment,
     error::{Interruption, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::policy_support::{derives_from_caller, walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -145,6 +145,7 @@ impl<DB> Rule for ArrayMembershipPolicy<DB> {
             group: LintGroup::Pedantic,
             rationale: "An array element carries no foreign key and every grant or revocation rewrites the row, while a membership table with a row per grant is easier to search and scales better.",
             source: Some("https://www.postgresql.org/docs/current/arrays.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

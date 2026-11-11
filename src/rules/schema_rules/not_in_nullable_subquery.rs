@@ -5,7 +5,7 @@ use sqlparser::ast::Statement;
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::not_in_support::NotInCheck,
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule},
 };
@@ -72,6 +72,7 @@ impl<DB> Rule for NotInNullableSubquery<DB> {
             group: LintGroup::Suspicious,
             rationale: "NOT IN is never true once the subquery yields a NULL, so a nullable column makes it silently return no row.",
             source: Some("https://wiki.postgresql.org/wiki/Don%27t_Do_This"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

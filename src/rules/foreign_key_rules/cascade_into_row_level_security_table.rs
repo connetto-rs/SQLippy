@@ -5,7 +5,7 @@ use sqlparser::ast::{CreatePolicyCommand, ReferentialAction};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -60,6 +60,7 @@ impl<DB> Rule for CascadeIntoRowLevelSecurityTable<DB> {
             group: LintGroup::Pedantic,
             rationale: "Referential actions bypass row-level security, so a cascading delete removes, and a SET NULL, SET DEFAULT or ON UPDATE CASCADE rewrites, rows of the referencing table that its policies would refuse the caller.",
             source: Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

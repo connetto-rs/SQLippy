@@ -4,7 +4,7 @@ use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::name_support::{NameHint, names_json},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -43,7 +43,8 @@ rule_definition!(
     register_column_rule,
     LintGroup::Pedantic,
     "Text stores any string, so a malformed document is accepted and every read of a key or path needs a cast to json.",
-    Some("https://www.postgresql.org/docs/current/datatype-json.html")
+    Some("https://www.postgresql.org/docs/current/datatype-json.html"),
+    Basis::Names
 );
 
 impl<DB: DatabaseLike> ColumnRule for JsonStoredAsText<DB> {

@@ -4,7 +4,7 @@ use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
 
 use crate::{
     error::{Interruption, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::policy_support::{correlated_subqueries, walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -64,6 +64,7 @@ impl<DB> Rule for CorrelatedPolicySubquery<DB> {
             source: Some(
                 "https://supabase.com/docs/guides/database/postgres/row-level-security-performance",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

@@ -9,7 +9,7 @@ use sqlparser::ast::{Expr, Owner, Visit, Visitor};
 use crate::{
     deployment::Declaration,
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::policy_support::{is_role_read, walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -100,6 +100,7 @@ impl<DB> Rule for PolicyToCreatingRole<DB> {
             group: LintGroup::Suspicious,
             rationale: "PostgreSQL resolves CURRENT_USER, CURRENT_ROLE and SESSION_USER in a policy's TO list when the policy is created, so it applies to the migration's role and never to the callers it seems to name.",
             source: Some("https://www.postgresql.org/docs/current/sql-createpolicy.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }
@@ -112,6 +113,7 @@ impl<DB> Rule for RoleKeyedPolicyWhenPooled<DB> {
             group: LintGroup::Suspicious,
             rationale: "In a pooled deployment every caller shares one database role, so a policy keyed on the role admits every caller or none.",
             source: None,
+            basis: Basis::Declared,
         };
         &METADATA
     }

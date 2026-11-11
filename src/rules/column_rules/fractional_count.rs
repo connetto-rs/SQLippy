@@ -7,7 +7,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::{
         name_support::{NameHint, names_count},
         type_support::underlying_type,
@@ -51,7 +51,8 @@ rule_definition!(
     register_column_rule,
     LintGroup::Pedantic,
     "A count of things is a whole number, while a floating-point or numeric column stores 2.5 items, and ten float counts of 0.1 sum to 1.0000001.",
-    Some("https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-INT")
+    Some("https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-INT"),
+    Basis::Names
 );
 
 impl<DB: DatabaseLike> ColumnRule for FractionalCount<DB> {

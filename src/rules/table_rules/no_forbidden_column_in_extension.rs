@@ -6,7 +6,7 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -124,6 +124,7 @@ impl<DB> Rule for NoForbiddenColumnInExtension<DB> {
             group: LintGroup::Suspicious,
             rationale: "The extension model keeps the configured column name for its own use, so a column with that name on an extending table collides with it.",
             source: None,
+            basis: Basis::Declared,
         };
         &METADATA
     }

@@ -8,7 +8,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -60,6 +60,7 @@ impl<DB> Rule for NullableCompositeForeignKey<DB> {
             group: LintGroup::Suspicious,
             rationale: "Under MATCH SIMPLE a composite foreign key with any column NULL needs no matching row, so a partly filled key references nothing.",
             source: Some("https://www.postgresql.org/docs/current/sql-createtable.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }
@@ -150,6 +151,7 @@ impl<DB> Rule for UnindexedForeignKey<DB> {
             group: LintGroup::Perf,
             rationale: "A delete of a referenced row or an update of its key checks the referencing table, which scans it when no index leads with the foreign key columns.",
             source: Some("https://www.postgresql.org/docs/current/ddl-constraints.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

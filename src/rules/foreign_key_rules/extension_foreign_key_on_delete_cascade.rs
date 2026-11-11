@@ -7,7 +7,7 @@ use sqlparser::ast::ReferentialAction;
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -115,6 +115,7 @@ impl<C> Rule for ExtensionForeignKeyOnDeleteCascade<C> {
             source: Some(
                 "https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-FK",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

@@ -5,7 +5,7 @@ use sqlparser::ast::CreatePolicyCommand;
 
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::policy_support::{is_tautology, reads_row},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -62,6 +62,7 @@ impl<DB> Rule for TautologicalWithCheck<DB> {
             group: LintGroup::Suspicious,
             rationale: "An explicit always-true WITH CHECK replaces the default check against USING, so a caller can write rows the policy would never let them read.",
             source: Some("https://www.postgresql.org/docs/current/sql-createpolicy.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

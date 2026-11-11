@@ -4,7 +4,7 @@ use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::name_support::{NameHint, names_money},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -42,7 +42,8 @@ rule_definition!(
     register_column_rule,
     LintGroup::Suspicious,
     "Floating-point types store most decimal fractions approximately, so summed amounts drift by fractions of a cent and fail to equal the exact total.",
-    Some("https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-FLOAT")
+    Some("https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-FLOAT"),
+    Basis::Names
 );
 
 impl<DB: DatabaseLike> ColumnRule for FloatingPointMoney<DB> {

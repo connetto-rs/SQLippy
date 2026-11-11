@@ -6,7 +6,7 @@ use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -83,6 +83,7 @@ impl<DB> Rule for PluralTableName<DB> {
             group: LintGroup::Style,
             rationale: "One naming convention keeps queries predictable, and this crate names a table after the collection of rows it holds.",
             source: None,
+            basis: Basis::Names,
         };
         &METADATA
     }

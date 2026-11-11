@@ -1,11 +1,20 @@
 //! Submodule providing structs to add custom rules on SQL schemas.
 
 /// Defines a rule's struct, its `Default`, the constrainer that runs it alone
-/// through `$register`, and its metadata.
+/// through `$register`, and its metadata, deciding from declared structure
+/// unless a `$basis` follows `$source`.
 macro_rules! rule_definition {
     (
         $(#[$doc:meta])*
         $name:ident, $register:ident, $group:expr, $rationale:literal, $source:expr
+    ) => {
+        rule_definition!(
+            $(#[$doc])* $name, $register, $group, $rationale, $source, $crate::lint::Basis::Declared
+        );
+    };
+    (
+        $(#[$doc:meta])*
+        $name:ident, $register:ident, $group:expr, $rationale:literal, $source:expr, $basis:expr
     ) => {
         $(#[$doc])*
         pub struct $name<DB>(std::marker::PhantomData<DB>);
@@ -31,6 +40,7 @@ macro_rules! rule_definition {
                     group: $group,
                     rationale: $rationale,
                     source: $source,
+                    basis: $basis,
                 };
                 &METADATA
             }

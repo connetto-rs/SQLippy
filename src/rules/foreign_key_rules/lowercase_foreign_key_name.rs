@@ -5,7 +5,7 @@ use sql_traits::traits::{DatabaseLike, ForeignKeyLike};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -66,6 +66,7 @@ impl<C> Rule for LowercaseForeignKeyName<C> {
             source: Some(
                 "https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

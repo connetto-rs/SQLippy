@@ -9,7 +9,7 @@ use sqlparser::ast::Action;
 use crate::{
     deployment::Declaration,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::grant_support::{ClientRoles, grantee_list, grants_privilege},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -104,6 +104,7 @@ impl<DB> Rule for TruncateGrantedToAnonymousRole<DB> {
             group: LintGroup::Correctness,
             rationale: RATIONALE,
             source: SOURCE,
+            basis: Basis::Declared,
         };
         &METADATA
     }
@@ -116,6 +117,7 @@ impl<DB> Rule for TruncateGrantedToAppRole<DB> {
             group: LintGroup::Suspicious,
             rationale: RATIONALE,
             source: SOURCE,
+            basis: Basis::Declared,
         };
         &METADATA
     }

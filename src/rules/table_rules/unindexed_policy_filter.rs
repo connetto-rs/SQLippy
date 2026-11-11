@@ -12,7 +12,7 @@ use sqlparser::ast::{Expr, Query, Visit, Visitor};
 use crate::{
     deployment::Deployment,
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::{
         index_support::{Side, comparison_sides, indexed},
         policy_support::{derives_from_caller, holds_caller, is_column_reference},
@@ -233,6 +233,7 @@ impl<DB> Rule for UnindexedPolicyFilter<DB> {
             source: Some(
                 "https://supabase.com/docs/guides/database/postgres/row-level-security#add-indexes",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }
