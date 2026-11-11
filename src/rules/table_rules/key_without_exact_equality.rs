@@ -14,7 +14,7 @@ use sqlparser::ast::Expr;
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::policy_support::unnested,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -86,6 +86,7 @@ impl<DB> Rule for KeyWithoutExactEquality<DB> {
             source: Some(
                 "https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-FLOAT",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

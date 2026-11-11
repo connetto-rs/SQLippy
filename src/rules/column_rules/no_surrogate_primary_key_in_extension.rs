@@ -6,7 +6,7 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
 
@@ -87,6 +87,7 @@ impl<DB> Rule for NoSurrogatePrimaryKeyInExtension<DB> {
             group: LintGroup::Correctness,
             rationale: "An extension row shares its parent's primary key, so a generated or defaulted key cannot hold the parent's value.",
             source: None,
+            basis: Basis::Declared,
         };
         &METADATA
     }

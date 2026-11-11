@@ -14,7 +14,7 @@ use sqlparser::ast::{
 use crate::{
     deployment::{Declaration, Deployment},
     error::{Interruption, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::{
         authority_support::{TableColumn, authority_columns, credential_compared, is_literal},
         policy_support::{
@@ -295,6 +295,7 @@ impl<DB> Rule for SubjectSettableAttribute<DB> {
             source: Some(
                 "https://supabase.com/docs/guides/database/postgres/column-level-security",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

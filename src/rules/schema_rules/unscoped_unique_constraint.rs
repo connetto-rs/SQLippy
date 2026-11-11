@@ -9,7 +9,7 @@ use sql_traits::{
 use crate::{
     deployment::Declaration,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::authority_support::{TableColumn, authority_columns},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
@@ -84,6 +84,7 @@ impl<DB> Rule for UnscopedUniqueConstraintOnRowLevelSecurityTable<DB> {
             group: LintGroup::Suspicious,
             rationale: "A unique constraint spans the whole table whatever its policies hide, so a duplicate-key error tells a caller that a value exists in rows it cannot see, such as another tenant's.",
             source: Some("https://www.bytebase.com/blog/postgres-row-level-security-footguns"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

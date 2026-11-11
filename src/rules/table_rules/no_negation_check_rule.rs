@@ -6,7 +6,7 @@ use sql_traits::traits::{CheckConstraintLike, DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -77,6 +77,7 @@ impl<DB> Rule for NoNegationCheckRule<DB> {
             group: LintGroup::Correctness,
             rationale: "A check that no row can satisfy makes every insert and update of the table fail.",
             source: Some("https://www.postgresql.org/docs/current/sql-createtable.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

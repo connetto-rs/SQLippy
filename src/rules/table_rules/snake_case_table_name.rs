@@ -6,7 +6,7 @@ use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -71,6 +71,7 @@ impl<DB> Rule for SnakeCaseTableName<DB> {
             source: Some(
                 "https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

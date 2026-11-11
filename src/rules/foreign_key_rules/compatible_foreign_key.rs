@@ -11,7 +11,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -142,6 +142,7 @@ impl<C> Rule for CompatibleForeignKey<C> {
             group: LintGroup::Suspicious,
             rationale: "A foreign key whose columns differ in type from the referenced columns, or that links tables outside one extension hierarchy, usually points at the wrong column.",
             source: None,
+            basis: Basis::Declared,
         };
         &METADATA
     }

@@ -6,7 +6,7 @@ use sql_traits::traits::{CheckConstraintLike, DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -56,6 +56,7 @@ impl<DB> Rule for UniqueCheckRule<DB> {
             group: LintGroup::Complexity,
             rationale: "A duplicated check constraint enforces nothing more and is evaluated again on every write.",
             source: None,
+            basis: Basis::Declared,
         };
         &METADATA
     }

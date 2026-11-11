@@ -9,7 +9,7 @@ use sqlparser::ast::{BinaryOperator, CreatePolicyType, Expr};
 use crate::{
     deployment::Declaration,
     error::{Interruption, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::{
         authority_support::authority_columns,
         credential_support::CredentialJudge,
@@ -149,6 +149,7 @@ impl<DB> Rule for SelfGrantingWrite<DB> {
             group: LintGroup::Suspicious,
             rationale: "Policies read an authority table to decide what the caller may reach, so a write that lets the caller choose a row's scope freely lets them grant themselves that scope.",
             source: None,
+            basis: Basis::Declared,
         };
         &METADATA
     }

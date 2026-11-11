@@ -6,7 +6,7 @@ use sql_traits::traits::{DatabaseLike, FunctionLike, GrantLike, RoleMembershipLi
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::{
         grant_support::{ClientRoles, column_grants_on, grantee_list},
         policy_support::held_by_name,
@@ -67,6 +67,7 @@ impl<DB> Rule for GrantOptionToClientRole<DB> {
             group: LintGroup::Suspicious,
             rationale: "A client role holding a grant option passes the privilege on to any role it reaches, outside the schema's review.",
             source: Some("https://www.postgresql.org/docs/current/sql-grant.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

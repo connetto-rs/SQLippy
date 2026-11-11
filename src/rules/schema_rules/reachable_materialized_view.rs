@@ -8,7 +8,7 @@ use sql_traits::traits::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::grant_support::{ClientRoles, grantee_list, schema_of},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
@@ -62,6 +62,7 @@ impl<DB> Rule for ReachableMaterializedView<DB> {
             source: Some(
                 "https://github.com/supabase/splinter/blob/main/lints/0016_materialized_view_in_api.sql",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

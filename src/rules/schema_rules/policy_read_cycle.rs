@@ -15,7 +15,7 @@ use sqlparser::ast::{CreatePolicyCommand, Expr, FunctionSecurity, Query, Visit, 
 
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::{
         function_rules::unreadable_body,
         policy_support::{Command, held_by_name, held_roles, policy_roles, walked_clauses},
@@ -666,6 +666,7 @@ impl<DB> Rule for PolicyReadCycle<DB> {
             group: LintGroup::Correctness,
             rationale: "PostgreSQL fails a statement with `infinite recursion detected in policy` when expanding a relation's policies reaches a sublink on a relation it is already expanding.",
             source: SOURCE,
+            basis: Basis::Declared,
         };
         &METADATA
     }
@@ -752,6 +753,7 @@ impl<DB> Rule for LatentPolicyReadCycle<DB> {
             group: LintGroup::Suspicious,
             rationale: "A role granted every role these policies name, through a membership the schema cannot show, fails each statement with `infinite recursion detected in policy`.",
             source: SOURCE,
+            basis: Basis::Declared,
         };
         &METADATA
     }
@@ -851,6 +853,7 @@ impl<DB> Rule for FunctionMediatedPolicyCycle<DB> {
             source: Some(
                 "https://supabase.com/docs/guides/database/postgres/row-level-security#use-security-definer-functions",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

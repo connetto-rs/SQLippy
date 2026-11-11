@@ -11,7 +11,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -71,6 +71,7 @@ impl<DB> Rule for UniqueForeignKey<DB> {
             group: LintGroup::Complexity,
             rationale: "A duplicated foreign key enforces nothing more and is checked again on every write.",
             source: None,
+            basis: Basis::Declared,
         };
         &METADATA
     }

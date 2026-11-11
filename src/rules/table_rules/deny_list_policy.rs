@@ -8,7 +8,7 @@ use sqlparser::ast::{CreatePolicyType, Expr, InTarget, UnaryOperator};
 
 use crate::{
     error::{Interruption, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::policy_support::{Command, applied, held_by_name, is_tautology, policy_roles, unnested},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -133,6 +133,7 @@ impl<DB> Rule for DenyListPolicy<DB> {
             group: LintGroup::Suspicious,
             rationale: "A grant to everyone narrowed only by a deny list fails open, so a caller missing from the list keeps access, while a schema that starts from no access and grants up fails closed.",
             source: Some("https://authzed.com/docs/spicedb/best-practices"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

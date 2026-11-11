@@ -10,7 +10,7 @@ use sqlparser::ast::{Expr, Query, Visit, Visitor};
 
 use crate::{
     error::{Interruption, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::policy_support::{Command, held_by_name, policy_roles, walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -157,6 +157,7 @@ impl<DB> Rule for NestedPolicySubquery<DB> {
             source: Some(
                 "https://supabase.com/docs/guides/database/postgres/row-level-security#use-security-definer-functions",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

@@ -17,7 +17,7 @@ use sqlparser::{
 
 use crate::{
     error::{Interruption, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::policy_support::walked_clauses,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -209,6 +209,7 @@ impl<DB> Rule for UncachedPolicyCall<DB> {
             source: Some(
                 "https://supabase.com/docs/guides/database/postgres/row-level-security#call-functions-with-select",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

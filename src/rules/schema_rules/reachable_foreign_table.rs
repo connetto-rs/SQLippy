@@ -4,7 +4,7 @@ use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::grant_support::client_reach,
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
@@ -61,6 +61,7 @@ impl<DB> Rule for ReachableForeignTable<DB> {
             source: Some(
                 "https://github.com/supabase/splinter/blob/main/lints/0017_foreign_table_in_api.sql",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

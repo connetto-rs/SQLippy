@@ -7,7 +7,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, TableRule},
 };
 
@@ -58,6 +58,7 @@ impl<DB> Rule for ChildWithoutRowLevelSecurity<DB> {
             group: LintGroup::Suspicious,
             rationale: "A child table's own policies apply when a query names it directly and its parents' policies are ignored, so a child without row-level security shows every row to a role granted on it.",
             source: Some("https://www.postgresql.org/docs/current/ddl-inherit.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

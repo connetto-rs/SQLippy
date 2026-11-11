@@ -2,7 +2,7 @@
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
 use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, TableLike};
@@ -61,6 +61,7 @@ impl<DB> Rule for TextualColumnRule<DB> {
             group: LintGroup::Suspicious,
             rationale: "Without an upper bound one value of a client-writable text column can reach about 1 GB, and a bound in the database is a limit no client can skip.",
             source: Some("https://www.postgresql.org/docs/current/datatype-character.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

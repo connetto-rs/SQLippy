@@ -4,7 +4,7 @@ use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::name_support::{NameHint, names_moment},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -44,7 +44,8 @@ rule_definition!(
     register_column_rule,
     LintGroup::Pedantic,
     "Text compares a date by its characters, so impossible dates are stored, `2026-1-9` sorts after `2026-01-10`, and range filters and time arithmetic need a cast on every read.",
-    Some("https://www.postgresql.org/docs/current/datatype-datetime.html")
+    Some("https://www.postgresql.org/docs/current/datatype-datetime.html"),
+    Basis::Names
 );
 
 impl<DB: DatabaseLike> ColumnRule for MomentStoredAsText<DB> {

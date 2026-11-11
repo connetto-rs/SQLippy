@@ -5,7 +5,7 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
 
@@ -53,6 +53,7 @@ impl<DB> Rule for LowercaseColumnName<DB> {
             source: Some(
                 "https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

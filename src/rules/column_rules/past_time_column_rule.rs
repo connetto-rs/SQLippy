@@ -11,7 +11,7 @@ use sqlparser::ast::{BinaryOperator, Expr, Ident};
 use super::{flag_not_boolean, moment_stored_as_text};
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::clock_support::{bound_clock, upper_bound},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -68,6 +68,7 @@ impl<DB> Rule for PastTimeColumnRule<DB> {
             group: LintGroup::Pedantic,
             rationale: "A timestamp recording when something happened cannot lie in the future.",
             source: None,
+            basis: Basis::Names,
         };
         &METADATA
     }

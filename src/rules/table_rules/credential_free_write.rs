@@ -8,7 +8,7 @@ use sqlparser::ast::CreatePolicyType;
 use crate::{
     deployment::{Declaration, Deployment},
     error::{Interruption, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::{
         credential_support::CredentialJudge,
         policy_support::{Command, Stage, applied, held_by_name, policy_roles},
@@ -83,6 +83,7 @@ impl<DB> Rule for CredentialFreeWrite<DB> {
             source: Some(
                 "https://github.com/supabase/splinter/blob/main/lints/0024_rls_policy_always_true.sql",
             ),
+            basis: Basis::Declared,
         };
         &METADATA
     }

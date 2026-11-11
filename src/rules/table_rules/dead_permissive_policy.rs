@@ -5,7 +5,7 @@ use sqlparser::ast::CreatePolicyType;
 
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::policy_support::{Command, applied, covers, is_tautology, policy_roles},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -66,6 +66,7 @@ impl<DB> Rule for DeadPermissivePolicy<DB> {
             group: LintGroup::Correctness,
             rationale: "PostgreSQL combines permissive policies with OR, so an always-true permissive policy decides every command and role it covers and the narrower policy never changes the outcome.",
             source: Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

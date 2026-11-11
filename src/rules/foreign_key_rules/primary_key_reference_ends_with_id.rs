@@ -9,7 +9,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -101,6 +101,7 @@ impl<C> Rule for PrimaryKeyReferenceEndsWithId<C> {
             group: LintGroup::Style,
             rationale: "Ending every column that references a primary key in `_id` shows at a glance which columns are references.",
             source: None,
+            basis: Basis::Declared,
         };
         &METADATA
     }

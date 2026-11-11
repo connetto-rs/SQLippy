@@ -4,7 +4,7 @@ use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -59,6 +59,7 @@ impl<DB> Rule for UnforcedRowLevelSecurity<DB> {
             group: LintGroup::Suspicious,
             rationale: "The table owner bypasses every policy unless row-level security is forced, and applications often connect as the role that owns the tables.",
             source: Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }

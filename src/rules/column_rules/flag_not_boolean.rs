@@ -4,7 +4,7 @@ use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     rules::name_support::{NameHint, names_flag},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -43,7 +43,8 @@ rule_definition!(
     register_column_rule,
     LintGroup::Pedantic,
     "An integer or text column stores any number of values, so a yes or no state kept in one can hold 2, -1 or 'maybe', which a boolean column refuses.",
-    Some("https://www.postgresql.org/docs/current/datatype-boolean.html")
+    Some("https://www.postgresql.org/docs/current/datatype-boolean.html"),
+    Basis::Names
 );
 
 impl<DB: DatabaseLike> ColumnRule for FlagNotBoolean<DB> {

@@ -5,7 +5,7 @@ use inflection_rs::inflection::singularize;
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
 use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
@@ -75,6 +75,7 @@ impl<DB> Rule for SingularColumnName<DB> {
             group: LintGroup::Style,
             rationale: "One naming convention keeps queries predictable, and this crate names a column after the single value it holds.",
             source: None,
+            basis: Basis::Names,
         };
         &METADATA
     }

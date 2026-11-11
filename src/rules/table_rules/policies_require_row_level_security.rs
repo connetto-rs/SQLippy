@@ -4,7 +4,7 @@ use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -61,6 +61,7 @@ impl<DB> Rule for PoliciesRequireRowLevelSecurity<DB> {
             group: LintGroup::Correctness,
             rationale: "PostgreSQL applies no policy until row-level security is enabled on the table, so the policies restrict nothing.",
             source: Some("https://www.postgresql.org/docs/current/sql-createpolicy.html"),
+            basis: Basis::Declared,
         };
         &METADATA
     }
