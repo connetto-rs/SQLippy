@@ -1,0 +1,37 @@
+[package]
+name = "sqlippy-web"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Browser playground for SQLippy, built with Dioxus"
+
+[dependencies]
+sqlippy = { path = ".." }
+sql-traits = { git = "https://github.com/connetto-rs/sql-traits", branch = "main" }
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main", features = ["visitor"] }
+thiserror = "2.0"
+
+dioxus = { version = "0.7", features = ["web"] }
+dioxus-code = { version = "0.1", default-features = false, features = ["lang-sql"] }
+dioxus-code-editor = "0.1"
+dioxus-free-icons = { version = "0.10", features = ["font-awesome-solid", "font-awesome-brands"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+# wasm-opt aborts on the DWARF dx 0.7 embeds.
+strip = "debuginfo"
+debug = false
+
+# arborium's wasm sysroot only links its `stderr` symbol above opt-level 0.
+[profile.dev.package.arborium-sysroot]
+opt-level = 1
+
+[profile.dev.package.arborium-tree-sitter]
+opt-level = 1
+
+# Matches the root manifest so sql-traits and SQLippy share one parser.
+[patch.crates-io]
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }

@@ -1,0 +1,807 @@
+:root {
+    --sqy-bg: #ffffff;
+    --sqy-ink: #0a0a0a;
+    --sqy-muted: rgba(10, 10, 10, 0.64);
+    --sqy-line: rgba(10, 10, 10, 0.16);
+    --sqy-panel: rgba(255, 255, 255, 0.92);
+    --sqy-glass: rgba(255, 255, 255, 0.55);
+    --sqy-hover: rgba(10, 10, 10, 0.06);
+    --sqy-accent: #2563eb;
+    --sqy-ok: #15803d;
+    --sqy-warn: #b45309;
+    --sqy-err: #b91c1c;
+    --sqy-pedantic: #7c3aed;
+    --sqy-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --sqy-bg: #0a0a0a;
+        --sqy-ink: #f4f4f4;
+        --sqy-muted: rgba(244, 244, 244, 0.6);
+        --sqy-line: rgba(244, 244, 244, 0.2);
+        --sqy-panel: rgba(18, 18, 18, 0.92);
+        --sqy-glass: rgba(22, 22, 22, 0.5);
+        --sqy-hover: rgba(244, 244, 244, 0.08);
+        --sqy-accent: #60a5fa;
+        --sqy-ok: #4ade80;
+        --sqy-warn: #fbbf24;
+        --sqy-err: #f87171;
+        --sqy-pedantic: #a78bfa;
+    }
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+    background: var(--sqy-bg);
+    color: var(--sqy-ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+main {
+    max-width: 1500px;
+    margin: 0 auto;
+    padding: 28px 20px 48px;
+}
+
+/* Header: title, tagline, and resource links. */
+header h1 {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 4px;
+    font-size: 1.7rem;
+    letter-spacing: -0.01em;
+}
+
+.subtitle-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 6px;
+}
+
+header .tagline {
+    margin: 0;
+    color: var(--sqy-muted);
+    font-size: 0.98rem;
+}
+
+header .tagline a {
+    color: var(--sqy-accent);
+    text-decoration: none;
+    border-bottom: 1px solid currentColor;
+}
+
+/* Top-right action cluster: icon-only links (repo, sponsor heart). */
+.topbar-actions {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+
+.icon-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    border: 0;
+    background: transparent;
+    color: var(--sqy-ink);
+    text-decoration: none;
+    cursor: pointer;
+    opacity: 0.75;
+    transition:
+        opacity 0.15s ease,
+        color 0.15s ease,
+        transform 0.15s ease;
+}
+
+.icon-link:hover {
+    opacity: 1;
+}
+
+/* Sponsor heart: reddens on hover and pulses briefly when a check completes. */
+.heartbtn:hover {
+    color: #e2264d;
+    opacity: 1;
+}
+
+.heart-attention {
+    animation: sqy-heart-pulse 1s ease-in-out 0.6s 3;
+    transform-origin: center;
+}
+
+@keyframes sqy-heart-pulse {
+    0%,
+    100% {
+        color: var(--sqy-ink);
+        transform: scale(1);
+    }
+    50% {
+        color: #e5102d;
+        transform: scale(1.28);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .heart-attention {
+        animation: none;
+    }
+}
+
+/* Two-pane layout, collapsing below 960px. */
+.layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+    margin-top: 22px;
+    align-items: start;
+}
+
+@media (max-width: 960px) {
+    .layout {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Frosted-glass floating panels. */
+.panel {
+    background: var(--sqy-panel);
+    border: 1px solid var(--sqy-line);
+    border-radius: 12px;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+}
+
+.panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.panel-header h2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    font-size: 1.05rem;
+}
+
+/* Descriptor next to a panel title. */
+.panel-sub {
+    font-weight: 400;
+    font-size: 0.85rem;
+    color: var(--sqy-muted);
+}
+
+.section-icon {
+    color: var(--sqy-muted);
+}
+
+.field-label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--sqy-muted);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.field-help {
+    margin: 8px 0 0;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: var(--sqy-muted);
+}
+
+/* Example pills. */
+.pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--sqy-line);
+    border-radius: 999px;
+    padding: 0.35rem 0.4rem;
+    font-size: 0.85rem;
+    background: transparent;
+    color: var(--sqy-ink);
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.pill:hover {
+    background: var(--sqy-hover);
+}
+
+/* The loaded example inverts. */
+.pill.active {
+    background: var(--sqy-ink);
+    color: var(--sqy-bg);
+    border-color: var(--sqy-ink);
+}
+
+.control-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+/* Hidden native file inputs, triggered by their sibling buttons. */
+.file-input {
+    display: none;
+}
+
+/* Ordered upload list with drag-to-reorder. */
+.file-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.file-list li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid var(--sqy-line);
+    border-radius: 6px;
+    background: var(--sqy-glass);
+    font-family: var(--sqy-mono);
+    font-size: 0.82rem;
+    cursor: grab;
+}
+
+.file-list .drag-handle {
+    color: var(--sqy-muted);
+}
+
+.file-list .file-order {
+    color: var(--sqy-muted);
+    min-width: 1.4em;
+    text-align: right;
+}
+
+.file-list .file-remove {
+    margin-left: auto;
+    border: 0;
+    background: transparent;
+    color: var(--sqy-muted);
+    cursor: pointer;
+    padding: 0 4px;
+    font-size: 1rem;
+    line-height: 1;
+}
+
+.file-list .file-remove:hover {
+    color: var(--sqy-err);
+}
+
+/* Parse error banner in the input pane, which never blanks the findings. */
+.parse-error {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--sqy-err);
+    border-radius: 8px;
+    color: var(--sqy-err);
+    background: color-mix(in srgb, var(--sqy-err) 10%, transparent);
+    font-family: var(--sqy-mono);
+    font-size: 0.83rem;
+    white-space: pre-wrap;
+}
+
+/* Findings kept from the last SQL that parsed. */
+.stale-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--sqy-warn);
+    border-radius: 8px;
+    color: var(--sqy-warn);
+    background: color-mix(in srgb, var(--sqy-warn) 10%, transparent);
+    font-size: 0.85rem;
+}
+
+/* Shown before anything has been checked. */
+.output-empty {
+    padding: 24px;
+    text-align: center;
+    color: var(--sqy-muted);
+}
+
+/* The tone classes only carry a color through --lvl, which badges and borders read. */
+.tone-deny {
+    --lvl: var(--sqy-err);
+}
+
+.tone-warn {
+    --lvl: var(--sqy-warn);
+}
+
+.tone-pedantic {
+    --lvl: var(--sqy-pedantic);
+}
+
+.tone-ok {
+    --lvl: var(--sqy-ok);
+}
+
+/* Findings: one card per violation, deny before warn. */
+.summary {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0.2rem 0.7rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #fff;
+    background: var(--lvl, var(--sqy-muted));
+}
+
+.finding-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 75vh;
+    overflow: auto;
+}
+
+.finding {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border: 1px solid var(--sqy-line);
+    border-left: 4px solid var(--lvl, var(--sqy-line));
+    border-radius: 8px;
+    background: var(--sqy-glass);
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.finding:hover,
+.finding:focus-within {
+    border-color: var(--sqy-accent);
+    border-left-color: var(--lvl, var(--sqy-accent));
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+}
+
+.finding details,
+.finding a:not(.finding-rule) {
+    position: relative;
+    z-index: 1;
+}
+
+.finding-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.finding-head .chip {
+    margin-left: auto;
+}
+
+.finding-rule {
+    font-family: var(--sqy-mono);
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
+a.finding-rule {
+    color: inherit;
+    text-decoration: none;
+    border-bottom: 1px dotted var(--sqy-muted);
+}
+
+a.finding-rule::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+}
+
+.finding:hover a.finding-rule,
+a.finding-rule:focus-visible {
+    color: var(--sqy-accent);
+    border-bottom-color: currentColor;
+}
+
+.tabs {
+    display: flex;
+    gap: 4px;
+    margin: 16px 0 14px;
+    border-bottom: 1px solid var(--sqy-line);
+}
+
+.tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-bottom: 2px solid transparent;
+    color: var(--sqy-muted);
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.tab:hover {
+    color: var(--sqy-ink);
+}
+
+.tab.active {
+    color: var(--sqy-ink);
+    border-bottom-color: var(--sqy-accent);
+}
+
+.rules-layout {
+    display: grid;
+    grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+}
+
+/* The index scrolls on its own so the opened rule stays in view. */
+.rule-index {
+    position: sticky;
+    top: 12px;
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 24px);
+}
+
+.rule-back {
+    display: none;
+    width: fit-content;
+    color: var(--sqy-accent);
+    text-decoration: none;
+    font-size: 0.9rem;
+}
+
+@media (max-width: 960px) {
+    .rules-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .rule-index {
+        position: static;
+        max-height: none;
+    }
+
+    .has-rule .rule-index {
+        display: none;
+    }
+
+    .rule-back {
+        display: inline-block;
+    }
+
+    .finding-list {
+        max-height: none;
+    }
+}
+
+.rule-search {
+    padding: 6px 10px;
+    border: 1px solid var(--sqy-line);
+    border-radius: 8px;
+    background: var(--sqy-glass);
+    color: var(--sqy-ink);
+    font: inherit;
+}
+
+.rule-links {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+.rule-group-heading {
+    display: flex;
+    flex-shrink: 0;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 12px 0 4px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--sqy-muted);
+}
+
+.rule-group-heading:first-child {
+    margin-top: 0;
+}
+
+.rule-group-level {
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.rule-link {
+    display: block;
+    flex-shrink: 0;
+    padding: 5px 8px;
+    border-left: 3px solid var(--lvl, var(--sqy-line));
+    border-radius: 4px;
+    color: var(--sqy-ink);
+    text-decoration: none;
+    font-family: var(--sqy-mono);
+    font-size: 0.8rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rule-link:hover {
+    background: var(--sqy-hover);
+}
+
+.rule-link.active {
+    background: var(--sqy-hover);
+    font-weight: 700;
+}
+
+.rule-overview p {
+    margin: 0 0 12px;
+}
+
+.rule-overview-groups {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.rule-overview-groups li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--sqy-muted);
+    font-size: 0.9rem;
+}
+
+.rule-page {
+    border-left: 4px solid var(--lvl, var(--sqy-line));
+}
+
+.rule-title {
+    margin: 0;
+    font-family: var(--sqy-mono);
+    font-size: 1.15rem;
+    overflow-wrap: anywhere;
+}
+
+.rule-rationale {
+    margin: 0;
+    font-size: 1rem;
+}
+
+.rule-meta {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--sqy-muted);
+}
+
+.rule-meta a {
+    color: var(--sqy-accent);
+    word-break: break-all;
+}
+
+.example-pair {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+}
+
+@media (max-width: 1200px) {
+    .example-pair {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.example {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.example h3 {
+    margin: 0;
+    font-size: 0.9rem;
+}
+
+.example.bad h3 {
+    color: var(--sqy-err);
+}
+
+.example.good h3 {
+    color: var(--sqy-ok);
+}
+
+.example-verdict {
+    margin: 0;
+    color: var(--sqy-ok);
+    font-size: 0.85rem;
+}
+
+.example-findings {
+    margin: 0;
+    padding-left: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 0.85rem;
+}
+
+.example-findings p {
+    margin: 0;
+}
+
+.finding-object {
+    font-family: var(--sqy-mono);
+    font-size: 0.82rem;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--sqy-hover);
+}
+
+/* Marks a finding guessed from words in a name. */
+.heuristic {
+    padding: 0 7px;
+    border: 1px dashed var(--sqy-muted);
+    border-radius: 999px;
+    font-size: 0.72rem;
+    color: var(--sqy-muted);
+    cursor: help;
+}
+
+.finding-message {
+    margin: 0;
+}
+
+.finding-fix {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 0;
+    color: var(--sqy-ok);
+}
+
+.finding-fix svg {
+    flex: 0 0 auto;
+    margin-top: 4px;
+}
+
+.finding-sites {
+    margin: 0;
+    padding-left: 18px;
+    font-family: var(--sqy-mono);
+    font-size: 0.78rem;
+    color: var(--sqy-muted);
+}
+
+.finding details {
+    font-size: 0.85rem;
+    color: var(--sqy-muted);
+}
+
+.finding summary {
+    cursor: pointer;
+    width: fit-content;
+}
+
+.finding details p {
+    margin: 6px 0 0;
+}
+
+.finding details a {
+    color: var(--sqy-accent);
+}
+
+.lookup-list {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--sqy-warn);
+    font-size: 0.85rem;
+}
+
+.toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    user-select: none;
+}
+
+/* dioxus-code hides its input caret and paints its own background, so restore and drop them. */
+.dxc-editor-input {
+    caret-color: var(--sqy-ink) !important;
+}
+
+.dxc-editor.editor {
+    border: 1px solid var(--sqy-line);
+    border-radius: 8px;
+    --dxc-light-background: var(--sqy-panel);
+    --dxc-dark-background: var(--sqy-panel);
+    --dxc-editor-focus-ring: none;
+    --dxc-editor-font-size: 13px;
+    --dxc-editor-line-height: 20px;
+    max-height: 60vh;
+    overflow: auto;
+}
+
+/* Fade panels in on mount. */
+@keyframes fade-in-up {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+.layout > .panel {
+    animation: fade-in-up 0.4s ease-out backwards;
+}
+
+.layout > .panel:nth-child(2) {
+    animation-delay: 80ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .layout > .panel {
+        animation: none;
+    }
+}

@@ -1,0 +1,4 @@
+# arborium's C runtime links on stable and fails on nightly with `undefined symbol: stderr`.
+[toolchain]
+channel = "stable"
+targets = ["wasm32-unknown-unknown"]
