@@ -61,10 +61,6 @@ jobs:
         components: clippy
     - name: Rust Cache
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libfontconfig1-dev
     - name: Run clippy
       run: cargo clippy --all-targets -- -D warnings
 
@@ -77,10 +73,6 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
     - name: Rust Cache
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libfontconfig1-dev
     - name: Check documentation
       run: cargo doc --no-deps --document-private-items
       env:
@@ -101,10 +93,6 @@ jobs:
       uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
       with:
         tool: cargo-llvm-cov
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libfontconfig1-dev
     - name: Generate coverage
       run: |
         mkdir -p target/coverage
