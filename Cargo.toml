@@ -43,11 +43,5 @@ redundant_explicit_links = "forbid"
 invalid_rust_codeblocks = "forbid"
 
 [lints.clippy]
-unreadable_literal = "allow"
-missing_panics_doc = "allow"
-new_ret_no_self = "allow"
-struct_excessive_bools = "allow"
-should_panic_without_expect = "allow"
-doc_markdown = "allow"
 clone_on_copy = "forbid"
 pedantic = { level = "deny", priority = -1 }
