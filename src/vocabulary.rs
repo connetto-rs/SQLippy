@@ -74,7 +74,7 @@ fn holds(terms: &[Cow<'static, str>], word: &str) -> bool {
     terms.iter().any(|term| term.eq_ignore_ascii_case(word))
 }
 
-/// Whether the last snake_case words of `name` are the words of `term`,
+/// Whether the last `snake_case` words of `name` are the words of `term`,
 /// ignoring ASCII case. A term without words matches nothing.
 fn ends_with_words(name: &str, term: &str) -> bool {
     let mut name_words = name.rsplit('_').filter(|word| !word.is_empty());
@@ -106,7 +106,7 @@ pub(crate) enum Ending {
 
 /// Words of one language that tell what a column holds.
 ///
-/// A rule matches each term against the whole snake_case words of a column
+/// A rule matches each term against the whole `snake_case` words of a column
 /// name, ignoring ASCII case, so `price` matches `total_price` and not
 /// `priceless`. A flag prefix must be the first word. A uuid, moment,
 /// address, JSON or count term must close the name, and a term of several

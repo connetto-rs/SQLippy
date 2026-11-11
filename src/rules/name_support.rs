@@ -1,4 +1,4 @@
-//! What the whole snake_case words of a column name say the column holds,
+//! What the whole `snake_case` words of a column name say the column holds,
 //! and the check of the rules reporting a column whose stored type disagrees.
 
 use sql_traits::{
@@ -13,7 +13,7 @@ use crate::{
     vocabulary::{Ending, Vocabulary},
 };
 
-/// The non-empty snake_case words of a name.
+/// The non-empty `snake_case` words of a name.
 fn words(name: &str) -> impl Iterator<Item = &str> {
     name.split('_').filter(|word| !word.is_empty())
 }
