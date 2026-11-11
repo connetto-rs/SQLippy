@@ -25,7 +25,7 @@ jobs:
 
       # One scan of the root workspace, since every refquiem review replaces the
       # previous one on the pull request.
-      - uses: LucaCappelletti94/cargo-refquiem@827ed01a754ff72a074feef68b956bcbaeabac32 # v0.3.7
+      - uses: LucaCappelletti94/cargo-refquiem@b240098da0afe38765d18ec9a599885bcb06fd13 # v0.3.8
         id: refquiem
         with:
           version: 0.3.3
