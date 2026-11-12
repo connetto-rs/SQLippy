@@ -5,6 +5,7 @@ mod analysis;
 mod catalog;
 mod examples;
 mod route;
+mod rule_icons;
 mod rules_tab;
 mod settings;
 
@@ -24,6 +25,7 @@ use sqlippy::prelude::{Basis, Level, LintGroup};
 use crate::analysis::{Finding, Report, analyze};
 use crate::examples::{EXAMPLES, ExampleIcon};
 use crate::route::{Route, use_route};
+use crate::rule_icons::RuleIcon;
 use crate::rules_tab::RulesTab;
 
 const REPO_URL: &str = "https://github.com/connetto-rs/SQLippy";
@@ -491,6 +493,7 @@ fn FindingCard(finding: Finding) -> Element {
                     class: "finding-rule",
                     href: "{href}",
                     title: "Read about {finding.rule} in the Rules tab",
+                    RuleIcon { rule: finding.rule, size: 12 }
                     "{finding.rule}"
                 }
                 if finding.basis == Basis::Names {

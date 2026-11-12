@@ -15,6 +15,7 @@ use sqlippy::prelude::{Basis, DefaultConstrainer, LintGroup, ParserDB};
 use crate::analysis::analyze;
 use crate::catalog::{CatalogEntry, catalog, kind_phrase};
 use crate::route::Route;
+use crate::rule_icons::RuleIcon;
 use crate::{Tone, code_theme, settings};
 
 /// The rule list beside the opened rule, or a prompt to open one.
@@ -91,6 +92,7 @@ pub fn RulesTab(selected: Option<String>) -> Element {
                                     class: if opened.is_some_and(|open| open.name == rule.name) { "rule-link active {Tone::of(rule.level, rule.group).class()}" } else { "rule-link {Tone::of(rule.level, rule.group).class()}" },
                                     href: Route::Rules(Some(rule.name.to_owned())).href(),
                                     title: "{rule.name}",
+                                    RuleIcon { rule: rule.name, size: 12 }
                                     "{rule.name}"
                                 }
                             }
@@ -170,7 +172,10 @@ fn RulePage(rule: CatalogEntry) -> Element {
         section { class: "panel rule-page {tone}",
             a { class: "rule-back", href: Route::Rules(None).href(), "← All rules" }
             div { class: "finding-head",
-                h2 { class: "rule-title", "{rule.name}" }
+                h2 { class: "rule-title",
+                    RuleIcon { rule: rule.name, size: 18 }
+                    "{rule.name}"
+                }
                 if rule.basis == Basis::Names {
                     span {
                         class: "heuristic",
