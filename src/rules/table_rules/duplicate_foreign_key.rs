@@ -1,4 +1,4 @@
-//! Submodule providing the `UniqueForeignKey` constraint, which enforces
+//! Submodule providing the `DuplicateForeignKey` constraint, which enforces
 //! that foreign keys are unique per table, meaning that no two foreign keys
 //! have the same columns in a single table.
 
@@ -21,13 +21,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `UniqueForeignKey` constraint.
+/// `duplicate_foreign_key` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = UniqueForeignKey::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = DuplicateForeignKey::default().into();
 ///
 /// let invalid_schema =
 ///     ParserDB::parse::<GenericDialect>(
@@ -48,26 +48,26 @@ use crate::{
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema).is_ok());
 /// ```
-pub struct UniqueForeignKey<DB>(std::marker::PhantomData<DB>);
+pub struct DuplicateForeignKey<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for UniqueForeignKey<DB> {
+impl<DB> Default for DuplicateForeignKey<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<UniqueForeignKey<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: UniqueForeignKey<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<DuplicateForeignKey<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: DuplicateForeignKey<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_table_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for UniqueForeignKey<DB> {
+impl<DB> Rule for DuplicateForeignKey<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "UniqueForeignKey",
+            name: rule_name!(DuplicateForeignKey),
             group: LintGroup::Complexity,
             rationale: "A duplicated foreign key enforces nothing more and is checked again on every write.",
             source: None,
@@ -83,7 +83,7 @@ CREATE TABLE notes (id INT PRIMARY KEY, account_id INT REFERENCES accounts (id))
     }
 }
 
-impl<DB: DatabaseLike> TableRule for UniqueForeignKey<DB> {
+impl<DB: DatabaseLike> TableRule for DuplicateForeignKey<DB> {
     type Database = DB;
 
     fn check_table(

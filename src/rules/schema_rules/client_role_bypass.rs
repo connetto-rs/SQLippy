@@ -95,7 +95,7 @@ impl<DB: DatabaseLike + 'static> From<SettableMembershipInBypassingRole<DB>>
 impl<DB> Rule for ClientRoleBypassesRowLevelSecurity<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "ClientRoleBypassesRowLevelSecurity",
+            name: rule_name!(ClientRoleBypassesRowLevelSecurity),
             group: LintGroup::Correctness,
             rationale: "Superusers and roles with BYPASSRLS skip every policy, so a role clients act as sees and changes every row.",
             source: SOURCE,
@@ -116,7 +116,7 @@ impl<DB> Rule for ClientRoleBypassesRowLevelSecurity<DB> {
 impl<DB> Rule for SettableMembershipInBypassingRole<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "SettableMembershipInBypassingRole",
+            name: rule_name!(SettableMembershipInBypassingRole),
             group: LintGroup::Suspicious,
             rationale: "A client role that can SET ROLE to a superuser or BYPASSRLS role takes on its attributes and skips every policy.",
             source: SOURCE,

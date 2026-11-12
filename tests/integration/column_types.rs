@@ -11,14 +11,14 @@ fn findings<C: Constrainer<Database = ParserDB>>(
     sql: &str,
 ) -> Vec<(String, Level, String, String)> {
     const TYPE_RULES: [&str; 8] = [
-        "TimestampWithoutTimeZone",
-        "TimeWithTimeZone",
-        "ZeroPrecisionTimestamp",
-        "BlankPaddedCharacter",
-        "MoneyType",
-        "JsonType",
-        "ScaledNumeric",
-        "ClientWrittenScaledNumeric",
+        "timestamp_without_time_zone",
+        "time_with_time_zone",
+        "zero_precision_timestamp",
+        "blank_padded_character",
+        "money_type",
+        "json_type",
+        "scaled_numeric",
+        "client_written_scaled_numeric",
     ];
     let database = ParserDB::parse::<PostgreSqlDialect>(sql).expect("schema parses");
     constrainer
@@ -69,22 +69,22 @@ fn flawed_column_types_are_reported() {
                o CHAR);"
         ),
         pairs(&[
-            ("TimestampWithoutTimeZone", "t.a"),
-            ("TimestampWithoutTimeZone", "t.b"),
-            ("TimestampWithoutTimeZone", "t.m"),
-            ("TimeWithTimeZone", "t.c"),
-            ("TimeWithTimeZone", "t.d"),
-            ("ZeroPrecisionTimestamp", "t.e"),
-            ("ZeroPrecisionTimestamp", "t.m"),
-            ("BlankPaddedCharacter", "t.f"),
-            ("BlankPaddedCharacter", "t.g"),
-            ("BlankPaddedCharacter", "t.o"),
-            ("MoneyType", "t.h"),
-            ("JsonType", "t.i"),
-            ("JsonType", "t.l"),
-            ("ScaledNumeric", "t.j"),
-            ("ScaledNumeric", "t.k"),
-            ("ScaledNumeric", "t.n"),
+            ("timestamp_without_time_zone", "t.a"),
+            ("timestamp_without_time_zone", "t.b"),
+            ("timestamp_without_time_zone", "t.m"),
+            ("time_with_time_zone", "t.c"),
+            ("time_with_time_zone", "t.d"),
+            ("zero_precision_timestamp", "t.e"),
+            ("zero_precision_timestamp", "t.m"),
+            ("blank_padded_character", "t.f"),
+            ("blank_padded_character", "t.g"),
+            ("blank_padded_character", "t.o"),
+            ("money_type", "t.h"),
+            ("json_type", "t.i"),
+            ("json_type", "t.l"),
+            ("scaled_numeric", "t.j"),
+            ("scaled_numeric", "t.k"),
+            ("scaled_numeric", "t.n"),
         ])
     );
 }
@@ -118,21 +118,21 @@ fn casts_calls_and_declared_types_elsewhere_are_reported() {
                AS $$ BEGIN RETURN now()::timestamp::text; END $$;"
         ),
         pairs(&[
-            ("TimestampWithoutTimeZone", "t.p"),
-            ("TimestampWithoutTimeZone", "stamp"),
-            ("TimestampWithoutTimeZone", "mv"),
-            ("TimestampWithoutTimeZone", "g()"),
-            ("TimeWithTimeZone", "t.lunch"),
-            ("TimeWithTimeZone", "v"),
-            ("ZeroPrecisionTimestamp", "t.at"),
-            ("BlankPaddedCharacter", "f(CHAR)"),
-            ("MoneyType", "t"),
-            ("MoneyType", "t"),
-            ("JsonType", "v"),
-            ("JsonType", "v"),
-            ("JsonType", "f(CHAR)"),
-            ("JsonType", "f(CHAR)"),
-            ("ScaledNumeric", "f(CHAR)"),
+            ("timestamp_without_time_zone", "t.p"),
+            ("timestamp_without_time_zone", "stamp"),
+            ("timestamp_without_time_zone", "mv"),
+            ("timestamp_without_time_zone", "g()"),
+            ("time_with_time_zone", "t.lunch"),
+            ("time_with_time_zone", "v"),
+            ("zero_precision_timestamp", "t.at"),
+            ("blank_padded_character", "f(CHAR)"),
+            ("money_type", "t"),
+            ("money_type", "t"),
+            ("json_type", "v"),
+            ("json_type", "v"),
+            ("json_type", "f(CHAR)"),
+            ("json_type", "f(CHAR)"),
+            ("scaled_numeric", "f(CHAR)"),
         ])
     );
 }
@@ -145,7 +145,7 @@ fn a_policy_comparing_a_timestamp_column_to_an_uncast_literal_is_not_reported() 
              ALTER TABLE t ENABLE ROW LEVEL SECURITY;
              CREATE POLICY p ON t USING (at > '2020-01-01');"
         ),
-        pairs(&[("TimestampWithoutTimeZone", "t.at")])
+        pairs(&[("timestamp_without_time_zone", "t.at")])
     );
 }
 
@@ -164,14 +164,19 @@ fn client_written_tables_get_the_echo_and_the_suspicious_numeric_rule() {
         .map(|(rule, level, object, message)| (rule, level, object, message.contains("echo")))
         .collect();
     let expected: Vec<(String, Level, String, bool)> = [
-        ("ZeroPrecisionTimestamp", Level::Warn, "other.a", false),
-        ("ZeroPrecisionTimestamp", Level::Warn, "synced.a", true),
-        ("BlankPaddedCharacter", Level::Warn, "synced.b", true),
-        ("BlankPaddedCharacter", Level::Warn, "synced", true),
-        ("JsonType", Level::Warn, "synced.c", true),
-        ("JsonType", Level::Warn, "synced.p", true),
-        ("ScaledNumeric", Level::Warn, "other.d", false),
-        ("ClientWrittenScaledNumeric", Level::Warn, "synced.d", true),
+        ("zero_precision_timestamp", Level::Warn, "other.a", false),
+        ("zero_precision_timestamp", Level::Warn, "synced.a", true),
+        ("blank_padded_character", Level::Warn, "synced.b", true),
+        ("blank_padded_character", Level::Warn, "synced", true),
+        ("json_type", Level::Warn, "synced.c", true),
+        ("json_type", Level::Warn, "synced.p", true),
+        ("scaled_numeric", Level::Warn, "other.d", false),
+        (
+            "client_written_scaled_numeric",
+            Level::Warn,
+            "synced.d",
+            true,
+        ),
     ]
     .into_iter()
     .map(|(rule, level, object, echo)| (rule.to_owned(), level, object.to_owned(), echo))
@@ -187,7 +192,7 @@ fn a_rule_registered_alone_runs_at_warn() {
             .into_iter()
             .map(|(rule, level, _, _)| (rule, level))
             .collect::<Vec<_>>(),
-        [("ScaledNumeric".to_owned(), Level::Warn)]
+        [("scaled_numeric".to_owned(), Level::Warn)]
     );
 }
 
@@ -204,8 +209,8 @@ fn the_default_constrainer_applies_each_group() {
     assert_eq!(
         levels,
         [
-            ("TimestampWithoutTimeZone".to_owned(), Level::Warn),
-            ("JsonType".to_owned(), Level::Warn),
+            ("timestamp_without_time_zone".to_owned(), Level::Warn),
+            ("json_type".to_owned(), Level::Warn),
         ]
     );
 }

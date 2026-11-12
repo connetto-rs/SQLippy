@@ -51,7 +51,7 @@ fn a_policy_reading_its_own_table_is_a_denied_cycle() {
     assert_eq!(
         cycles(&cycle_rules(), &database),
         [(
-            "PolicyReadCycle".to_owned(),
+            "policy_read_cycle".to_owned(),
             Level::Deny,
             vec!["memberships.memberships_admin".to_owned()]
         )]
@@ -71,7 +71,7 @@ fn a_two_table_cycle_is_reported_once_with_both_policies_in_order() {
     let found = cycles(&cycle_rules(), &database);
     assert_eq!(found.len(), 1);
     let (rule, level, sites) = &found[0];
-    assert_eq!((rule.as_str(), *level), ("PolicyReadCycle", Level::Deny));
+    assert_eq!((rule.as_str(), *level), ("policy_read_cycle", Level::Deny));
     let mut rotated = sites.clone();
     let start = rotated
         .iter()
@@ -111,7 +111,7 @@ fn a_write_self_read_is_a_cycle_when_a_select_policy_holds_a_subquery() {
     assert_eq!(
         cycles(&cycle_rules(), &database),
         [(
-            "PolicyReadCycle".to_owned(),
+            "policy_read_cycle".to_owned(),
             Level::Deny,
             vec!["team_admins.team_admins_insert".to_owned()]
         )]
@@ -133,7 +133,7 @@ fn a_write_policy_closes_a_cycle_through_another_table() {
     assert_eq!(
         cycles(&cycle_rules(), &database),
         [(
-            "PolicyReadCycle".to_owned(),
+            "policy_read_cycle".to_owned(),
             Level::Deny,
             vec!["t.t_ins".to_owned(), "u.u_read".to_owned()]
         )]
@@ -157,7 +157,7 @@ fn a_cycle_over_roles_the_schema_keeps_apart_is_a_latent_warning() {
     assert_eq!(found.len(), 1);
     assert_eq!(
         (found[0].0.as_str(), found[0].1),
-        ("LatentPolicyReadCycle", Level::Warn)
+        ("latent_policy_read_cycle", Level::Warn)
     );
 }
 
@@ -170,7 +170,7 @@ fn a_role_holding_both_roles_makes_the_cycle_a_denied_error() {
     assert_eq!(found.len(), 1);
     assert_eq!(
         (found[0].0.as_str(), found[0].1),
-        ("PolicyReadCycle", Level::Deny)
+        ("policy_read_cycle", Level::Deny)
     );
 }
 
@@ -224,12 +224,12 @@ fn a_read_through_a_view_expands_the_base_table_as_the_role_the_view_checks() {
         (
             "CREATE VIEW bv WITH (security_invoker) AS SELECT id FROM b;",
             cycle,
-            &["PolicyReadCycle"][..],
+            &["policy_read_cycle"][..],
         ),
         (
             "CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO vo;",
             cycle,
-            &["PolicyReadCycle"],
+            &["policy_read_cycle"],
         ),
         (
             "CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO vb;",
@@ -245,27 +245,27 @@ fn a_read_through_a_view_expands_the_base_table_as_the_role_the_view_checks() {
             "ALTER TABLE b OWNER TO vt; ALTER TABLE b FORCE ROW LEVEL SECURITY;
              CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO vt;",
             cycle,
-            &["PolicyReadCycle"],
+            &["policy_read_cycle"],
         ),
         (
             "CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO vo;",
             "CREATE POLICY pa ON a USING (id IN (SELECT id FROM bv));
              CREATE POLICY pb ON b TO reader USING (id IN (SELECT id FROM a));
              CREATE POLICY pb_vo ON b TO vo USING (true);",
-            &["LatentPolicyReadCycle"],
+            &["latent_policy_read_cycle"],
         ),
         (
             "CREATE VIEW bv AS SELECT id FROM b; ALTER VIEW bv OWNER TO vo;",
             "CREATE POLICY pa ON a TO reader USING (id IN (SELECT id FROM bv));
              CREATE POLICY pa_vo ON a TO vo USING (true);
              CREATE POLICY pb ON b TO vo USING (id IN (SELECT id FROM a));",
-            &["LatentPolicyReadCycle"],
+            &["latent_policy_read_cycle"],
         ),
         (
             "CREATE VIEW inner_v WITH (security_invoker) AS SELECT id FROM b;
              CREATE VIEW bv AS SELECT id FROM inner_v; ALTER VIEW bv OWNER TO vb;",
             cycle,
-            &["PolicyReadCycle"],
+            &["policy_read_cycle"],
         ),
         (
             "CREATE VIEW inner_v AS SELECT id FROM b; ALTER VIEW inner_v OWNER TO vb;
@@ -327,12 +327,12 @@ fn a_policy_call_reading_back_into_the_table_recurses_as_the_role_the_function_r
     };
     let definer = plpgsql("SECURITY DEFINER");
     let cases = [
-        (sql.to_owned(), &["FunctionMediatedPolicyCycle"][..]),
-        (plpgsql(""), &["FunctionMediatedPolicyCycle"]),
+        (sql.to_owned(), &["function_mediated_policy_cycle"][..]),
+        (plpgsql(""), &["function_mediated_policy_cycle"]),
         (definer.clone(), &[]),
         (
             format!("{definer} ALTER FUNCTION f(INT) OWNER TO fo;"),
-            &["FunctionMediatedPolicyCycle"],
+            &["function_mediated_policy_cycle"],
         ),
         (format!("{definer} ALTER FUNCTION f(INT) OWNER TO fb;"), &[]),
         (
@@ -344,7 +344,7 @@ fn a_policy_call_reading_back_into_the_table_recurses_as_the_role_the_function_r
              CREATE FUNCTION f(x INT) RETURNS BOOLEAN LANGUAGE sql STABLE
                AS 'SELECT EXISTS (SELECT 1 FROM public.bv WHERE bv.id = x)';"
                 .to_owned(),
-            &["FunctionMediatedPolicyCycle"],
+            &["function_mediated_policy_cycle"],
         ),
         (
             "CREATE MATERIALIZED VIEW m AS SELECT id FROM b;
@@ -358,14 +358,14 @@ fn a_policy_call_reading_back_into_the_table_recurses_as_the_role_the_function_r
                AS 'SELECT EXISTS (SELECT 1 FROM public.b WHERE b.id = x)';
              CREATE FUNCTION f(x INT) RETURNS BOOLEAN LANGUAGE sql STABLE AS 'SELECT public.g(x)';"
                 .to_owned(),
-            &["FunctionMediatedPolicyCycle"],
+            &["function_mediated_policy_cycle"],
         ),
         (
             "CREATE FUNCTION f(x INT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS 'BEGIN
                IF x > 100 THEN RETURN public.f(x - 1); END IF;
                RETURN EXISTS (SELECT 1 FROM public.b WHERE b.id = x); END';"
                 .to_owned(),
-            &["FunctionMediatedPolicyCycle"],
+            &["function_mediated_policy_cycle"],
         ),
     ];
     for (functions, expected) in cases {
@@ -429,7 +429,7 @@ fn an_allowance_naming_a_listed_policy_suppresses_the_cycle() {
     let database = parse(SELF_LOOP);
     let mut constrainer = cycle_rules();
     constrainer.allow_policy(
-        "PolicyReadCycle",
+        "policy_read_cycle",
         TargetName::new("memberships", false),
         "memberships_admin",
     );
@@ -442,12 +442,12 @@ fn an_allowance_for_another_rule_or_policy_suppresses_nothing_and_is_unused() {
     let database = parse(SELF_LOOP);
     let mut constrainer = cycle_rules();
     constrainer.allow_policy(
-        "LatentPolicyReadCycle",
+        "latent_policy_read_cycle",
         TargetName::new("memberships", false),
         "memberships_admin",
     );
     constrainer.allow_policy(
-        "PolicyReadCycle",
+        "policy_read_cycle",
         TargetName::new("memberships", false),
         "other_policy",
     );
@@ -472,7 +472,7 @@ fn an_allowance_left_after_the_policy_is_fixed_fails_validation() {
     );
     let mut constrainer = cycle_rules();
     constrainer.allow_policy(
-        "PolicyReadCycle",
+        "policy_read_cycle",
         TargetName::new("memberships", false),
         "memberships_admin",
     );
@@ -483,7 +483,7 @@ fn an_allowance_left_after_the_policy_is_fixed_fails_validation() {
     };
     assert_eq!(
         (allowance.rule(), allowance.policy()),
-        ("PolicyReadCycle", "memberships_admin")
+        ("policy_read_cycle", "memberships_admin")
     );
 }
 
@@ -491,9 +491,9 @@ fn an_allowance_left_after_the_policy_is_fixed_fails_validation() {
 fn an_allowance_for_a_rule_at_allow_is_unused() {
     let database = parse(SELF_LOOP);
     let mut constrainer = cycle_rules();
-    constrainer.set_rule_level("PolicyReadCycle", Level::Allow);
+    constrainer.set_rule_level("policy_read_cycle", Level::Allow);
     constrainer.allow_policy(
-        "PolicyReadCycle",
+        "policy_read_cycle",
         TargetName::new("memberships", false),
         "memberships_admin",
     );
@@ -509,7 +509,7 @@ fn the_default_constrainer_denies_policy_read_cycles() {
     let raised = DefaultConstrainer::<ParserDB>::default().diagnostics(&database);
     assert!(raised.iter().any(|error| matches!(
         error,
-        Error::Violation(violation) if violation.rule().name == "PolicyReadCycle" && violation.level() == Level::Deny
+        Error::Violation(violation) if violation.rule().name == "policy_read_cycle" && violation.level() == Level::Deny
     )));
 }
 
@@ -534,7 +534,7 @@ fn a_policy_for_a_session_principal_still_recurses() {
         assert_eq!(
             cycles(&cycle_rules(), &database),
             [(
-                "PolicyReadCycle".to_owned(),
+                "policy_read_cycle".to_owned(),
                 Level::Deny,
                 vec!["memberships.admins".to_owned()]
             )],
@@ -553,7 +553,7 @@ fn a_role_reaching_both_roles_through_shared_ancestry_makes_the_cycle_denied() {
     assert_eq!(found.len(), 1);
     assert_eq!(
         (found[0].0.as_str(), found[0].1),
-        ("PolicyReadCycle", Level::Deny)
+        ("policy_read_cycle", Level::Deny)
     );
 }
 
@@ -601,7 +601,7 @@ fn a_role_that_does_not_inherit_its_memberships_leaves_the_cycle_latent() {
     assert_eq!(found.len(), 1);
     assert_eq!(
         (found[0].0.as_str(), found[0].1),
-        ("LatentPolicyReadCycle", Level::Warn)
+        ("latent_policy_read_cycle", Level::Warn)
     );
 }
 
@@ -624,7 +624,7 @@ fn a_latent_cycle_may_pass_through_a_policy_for_everyone() {
     assert_eq!(found.len(), 1);
     assert_eq!(
         (found[0].0.as_str(), found[0].2.len()),
-        ("LatentPolicyReadCycle", 3)
+        ("latent_policy_read_cycle", 3)
     );
 }
 
@@ -673,7 +673,7 @@ fn an_unused_allowance_names_its_table() {
     let database = parse("CREATE TABLE memberships (owner_id INT);");
     let mut constrainer = cycle_rules();
     constrainer.allow_policy(
-        "PolicyReadCycle",
+        "policy_read_cycle",
         TargetName::new("memberships", false),
         "admins",
     );

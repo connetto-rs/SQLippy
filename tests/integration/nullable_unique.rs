@@ -15,7 +15,7 @@ fn findings<C: Constrainer<Database = ParserDB>>(
         .diagnostics(&database)
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == "NullableUniqueColumn" => {
+            Error::Violation(violation) if violation.rule().name == "nullable_unique_column" => {
                 Some((violation.level(), violation.message().to_owned()))
             }
             Error::Violation(_) | Error::Inactive(_) => None,

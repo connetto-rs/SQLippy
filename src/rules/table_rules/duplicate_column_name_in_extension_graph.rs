@@ -1,4 +1,4 @@
-//! Submodule providing the `UniqueColumnNamesInExtensionGraph` constraint,
+//! Submodule providing the `DuplicateColumnNameInExtensionGraph` constraint,
 //! which enforces that column names are unique within an extension graph.
 
 use std::collections::HashSet;
@@ -21,14 +21,14 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `UniqueColumnNamesInExtensionGraph` constraint.
+/// `duplicate_column_name_in_extension_graph` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> =
-///     UniqueColumnNamesInExtensionGraph::default().into();
+///     DuplicateColumnNameInExtensionGraph::default().into();
 ///
 /// // Invalid: child_table has 'name' column, which also exists in parent_table
 /// let invalid_schema = ParserDB::parse::<GenericDialect>(
@@ -101,28 +101,28 @@ use crate::{
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&invalid_transitive).is_err());
 /// ```
-pub struct UniqueColumnNamesInExtensionGraph<DB>(std::marker::PhantomData<DB>);
+pub struct DuplicateColumnNameInExtensionGraph<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for UniqueColumnNamesInExtensionGraph<DB> {
+impl<DB> Default for DuplicateColumnNameInExtensionGraph<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<UniqueColumnNamesInExtensionGraph<DB>>
+impl<DB: DatabaseLike + 'static> From<DuplicateColumnNameInExtensionGraph<DB>>
     for GenericConstrainer<DB>
 {
-    fn from(constraint: UniqueColumnNamesInExtensionGraph<DB>) -> Self {
+    fn from(constraint: DuplicateColumnNameInExtensionGraph<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_table_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for UniqueColumnNamesInExtensionGraph<DB> {
+impl<DB> Rule for DuplicateColumnNameInExtensionGraph<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "UniqueColumnNamesInExtensionGraph",
+            name: rule_name!(DuplicateColumnNameInExtensionGraph),
             group: LintGroup::Suspicious,
             rationale: "A column name repeated across an extension hierarchy makes the merged row ambiguous.",
             source: None,
@@ -138,7 +138,7 @@ CREATE TABLE notes (id INT PRIMARY KEY REFERENCES records (id), description TEXT
     }
 }
 
-impl<DB: DatabaseLike> UniqueColumnNamesInExtensionGraph<DB> {
+impl<DB: DatabaseLike> DuplicateColumnNameInExtensionGraph<DB> {
     /// Helper method to find duplicate column names in the extension graph
     fn find_duplicate_columns(
         database: &DB,
@@ -189,7 +189,7 @@ impl<DB: DatabaseLike> UniqueColumnNamesInExtensionGraph<DB> {
     }
 }
 
-impl<DB: DatabaseLike> TableRule for UniqueColumnNamesInExtensionGraph<DB> {
+impl<DB: DatabaseLike> TableRule for DuplicateColumnNameInExtensionGraph<DB> {
     type Database = DB;
 
     fn check_table(

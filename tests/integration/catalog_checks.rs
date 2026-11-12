@@ -26,7 +26,7 @@ fn a_materialized_view_over_a_protected_table_reached_by_a_client_is_reported() 
     ] {
         assert_eq!(
             findings(ReachableMaterializedView::default(), supabase(), &format!("{DOCS}{sql}")),
-            [finding("ReachableMaterializedView", Level::Warn, "doc_owners")],
+            [finding("reachable_materialized_view", Level::Warn, "doc_owners")],
             "{sql}"
         );
     }
@@ -42,7 +42,7 @@ fn a_materialized_view_in_an_exposed_schema_is_reached_without_a_grant() {
             &sql,
         ),
         [finding(
-            "ReachableMaterializedView",
+            "reachable_materialized_view",
             Level::Warn,
             "doc_owners"
         )]
@@ -92,7 +92,7 @@ fn a_cascading_delete_into_a_table_with_a_delete_policy_is_reported() {
                 ),
             ),
             [finding(
-                "CascadeIntoRowLevelSecurityTable",
+                "cascade_into_row_level_security_table",
                 Level::Warn,
                 "kids (unnamed foreign key)"
             )],
@@ -122,7 +122,7 @@ fn every_referential_action_that_rewrites_rows_past_their_policies_is_reported()
                 ),
             ),
             [finding(
-                "CascadeIntoRowLevelSecurityTable",
+                "cascade_into_row_level_security_table",
                 Level::Warn,
                 "kids (unnamed foreign key)"
             )],
@@ -204,15 +204,31 @@ fn a_child_without_row_level_security_under_a_protected_ancestor_is_reported() {
             ),
         ),
         [
-            finding("ChildWithoutRowLevelSecurity", Level::Warn, "events_2026"),
             finding(
-                "ChildWithoutRowLevelSecurity",
+                "child_without_row_level_security",
+                Level::Warn,
+                "events_2026"
+            ),
+            finding(
+                "child_without_row_level_security",
                 Level::Warn,
                 "events_2026_h1"
             ),
-            finding("ChildWithoutRowLevelSecurity", Level::Warn, "logs_child"),
-            finding("ChildWithoutRowLevelSecurity", Level::Warn, "events_2025"),
-            finding("ChildWithoutRowLevelSecurity", Level::Warn, "logs_remote"),
+            finding(
+                "child_without_row_level_security",
+                Level::Warn,
+                "logs_child"
+            ),
+            finding(
+                "child_without_row_level_security",
+                Level::Warn,
+                "events_2025"
+            ),
+            finding(
+                "child_without_row_level_security",
+                Level::Warn,
+                "logs_remote"
+            ),
         ]
     );
 }
@@ -248,7 +264,7 @@ fn a_client_role_that_bypasses_row_level_security_is_denied() {
                 &format!("CREATE ROLE app_user {attribute}; CREATE ROLE migrator BYPASSRLS;"),
             ),
             [finding(
-                "ClientRoleBypassesRowLevelSecurity",
+                "client_role_bypasses_row_level_security",
                 Level::Deny,
                 "app_user"
             )],
@@ -269,7 +285,7 @@ fn a_client_role_that_can_set_a_bypassing_role_is_reported() {
              CREATE ROLE other IN ROLE bypasser;",
         ),
         [finding(
-            "SettableMembershipInBypassingRole",
+            "settable_membership_in_bypassing_role",
             Level::Warn,
             "app_user"
         )]
@@ -306,7 +322,7 @@ fn bypass_attributes_changed_by_alter_role_decide_the_finding() {
     ] {
         let expected: &[(String, Level, String)] = if denied {
             &[finding(
-                "ClientRoleBypassesRowLevelSecurity",
+                "client_role_bypasses_row_level_security",
                 Level::Deny,
                 "app_user",
             )]
@@ -336,7 +352,7 @@ fn a_role_made_bypassing_by_alter_role_is_reported_through_settable_membership()
              ALTER ROLE staff BYPASSRLS;",
         ),
         [finding(
-            "SettableMembershipInBypassingRole",
+            "settable_membership_in_bypassing_role",
             Level::Warn,
             "app_user"
         )]
@@ -352,11 +368,11 @@ fn bypass_rules_wait_for_a_declared_client_role() {
         inactive_declarations(&constrainer),
         [
             (
-                "ClientRoleBypassesRowLevelSecurity",
+                "client_role_bypasses_row_level_security",
                 Declaration::ClientRoles
             ),
             (
-                "SettableMembershipInBypassingRole",
+                "settable_membership_in_bypassing_role",
                 Declaration::ClientRoles
             ),
         ]
@@ -403,7 +419,7 @@ fn a_policy_to_the_creating_role_is_reported_in_any_deployment() {
                 Deployment::default(),
                 &format!("{DOCS}CREATE POLICY mine ON docs TO {role} USING (true);"),
             ),
-            [finding("PolicyToCreatingRole", Level::Warn, "docs.mine")],
+            [finding("policy_to_creating_role", Level::Warn, "docs.mine")],
             "{role}"
         );
     }
@@ -430,8 +446,8 @@ fn a_role_keyed_clause_is_reported_only_when_the_deployment_is_pooled() {
             &sql,
         ),
         [
-            finding("RoleKeyedPolicyWhenPooled", Level::Warn, "docs.mine"),
-            finding("RoleKeyedPolicyWhenPooled", Level::Warn, "docs.theirs"),
+            finding("role_keyed_policy_when_pooled", Level::Warn, "docs.mine"),
+            finding("role_keyed_policy_when_pooled", Level::Warn, "docs.theirs"),
         ]
     );
     assert_eq!(

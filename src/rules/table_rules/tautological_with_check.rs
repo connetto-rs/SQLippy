@@ -58,7 +58,7 @@ impl<DB: DatabaseLike + 'static> From<TautologicalWithCheck<DB>> for GenericCons
 impl<DB> Rule for TautologicalWithCheck<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "TautologicalWithCheck",
+            name: rule_name!(TautologicalWithCheck),
             group: LintGroup::Suspicious,
             rationale: "An explicit always-true WITH CHECK replaces the default check against USING, so a caller can write rows the policy would never let them read.",
             source: Some("https://www.postgresql.org/docs/current/sql-createpolicy.html"),

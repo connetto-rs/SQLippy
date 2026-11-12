@@ -68,7 +68,7 @@ impl<DB: DatabaseLike + 'static> From<NotInNullableSubquery<DB>> for GenericCons
 impl<DB> Rule for NotInNullableSubquery<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "NotInNullableSubquery",
+            name: rule_name!(NotInNullableSubquery),
             group: LintGroup::Suspicious,
             rationale: "NOT IN is never true once the subquery yields a NULL, so a nullable column makes it silently return no row.",
             source: Some("https://wiki.postgresql.org/wiki/Don%27t_Do_This"),

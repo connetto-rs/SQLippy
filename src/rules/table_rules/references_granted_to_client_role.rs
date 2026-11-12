@@ -52,7 +52,7 @@ impl<DB: DatabaseLike + 'static> From<ReferencesGrantedToClientRole<DB>>
 impl<DB> Rule for ReferencesGrantedToClientRole<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "ReferencesGrantedToClientRole",
+            name: rule_name!(ReferencesGrantedToClientRole),
             group: LintGroup::Pedantic,
             rationale: "Referential integrity checks bypass row-level security, so a foreign key the grantee creates tells it which keys exist among rows it cannot read.",
             source: Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html"),

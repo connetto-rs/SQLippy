@@ -56,7 +56,7 @@ impl<DB: DatabaseLike + 'static> From<ReachableMaterializedView<DB>> for Generic
 impl<DB> Rule for ReachableMaterializedView<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "ReachableMaterializedView",
+            name: rule_name!(ReachableMaterializedView),
             group: LintGroup::Suspicious,
             rationale: "A materialized view cannot have row-level security, so it shows a client every row its refreshing role could read from the protected tables.",
             source: Some(

@@ -34,7 +34,7 @@ fn findings<C: Constrainer<Database = ParserDB>>(
         .diagnostics(&database)
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == "UncachedPolicyCall" => {
+            Error::Violation(violation) if violation.rule().name == "uncached_policy_call" => {
                 let Location::Policies(sites) = violation.location() else {
                     panic!("a policy finding is located on policies");
                 };

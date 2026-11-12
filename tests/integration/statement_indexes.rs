@@ -223,18 +223,18 @@ fn the_default_constrainer_runs_index_rules_at_their_group_levels() {
     assert_eq!(
         rules(&constrainer),
         [
-            ("ExpressionDefeatsIndex", Level::Warn),
-            ("UnindexedCorrelatedSelect", Level::Warn)
+            ("expression_defeats_index", Level::Warn),
+            ("unindexed_correlated_select", Level::Warn)
         ]
     );
     constrainer.set_group_level(LintGroup::Pedantic, Level::Warn);
     assert_eq!(
         rules(&constrainer),
         [
-            ("ExpressionDefeatsIndex", Level::Warn),
-            ("UnindexedFilter", Level::Warn),
-            ("UnindexedFilter", Level::Warn),
-            ("UnindexedCorrelatedSelect", Level::Warn),
+            ("expression_defeats_index", Level::Warn),
+            ("unindexed_filter", Level::Warn),
+            ("unindexed_filter", Level::Warn),
+            ("unindexed_correlated_select", Level::Warn),
         ]
     );
 }

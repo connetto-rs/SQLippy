@@ -1,4 +1,4 @@
-//! Submodule providing the `SingularColumnName` constraint, which enforces
+//! Submodule providing the `PluralColumnName` constraint, which enforces
 //! that the last segment of column names is singular.
 
 use inflection_rs::inflection::singularize;
@@ -19,13 +19,13 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `SingularColumnName` constraint.
+/// `plural_column_name` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = SingularColumnName::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = PluralColumnName::default().into();
 ///
 /// let invalid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE mytable (users INT);").unwrap();
 /// assert!(constrainer.validate_schema(&invalid_schema).is_err());
@@ -52,26 +52,26 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 ///     assert_eq!(constrainer.validate_schema(&schema).is_ok(), singular, "{name}");
 /// }
 /// ```
-pub struct SingularColumnName<DB>(std::marker::PhantomData<DB>);
+pub struct PluralColumnName<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for SingularColumnName<DB> {
+impl<DB> Default for PluralColumnName<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<SingularColumnName<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: SingularColumnName<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<PluralColumnName<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: PluralColumnName<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_column_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for SingularColumnName<DB> {
+impl<DB> Rule for PluralColumnName<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "SingularColumnName",
+            name: rule_name!(PluralColumnName),
             group: LintGroup::Style,
             rationale: "One naming convention keeps queries predictable, and this crate names a column after the single value it holds.",
             source: None,
@@ -85,7 +85,7 @@ impl<DB> Rule for SingularColumnName<DB> {
     }
 }
 
-impl<DB: DatabaseLike> ColumnRule for SingularColumnName<DB> {
+impl<DB: DatabaseLike> ColumnRule for PluralColumnName<DB> {
     type Database = DB;
 
     fn check_column(

@@ -27,7 +27,7 @@ fn not_in_over_a_nullable_column_is_reported_wherever_it_is_written() {
     let constrainer: GenericConstrainer<ParserDB> = NotInNullableSubquery::default().into();
     let found = objects(
         &constrainer,
-        "NotInNullableSubquery",
+        "not_in_nullable_subquery",
         &format!(
             "{PAIRS}
              ALTER TABLE a ENABLE ROW LEVEL SECURITY;
@@ -59,7 +59,7 @@ fn not_in_over_non_null_or_filtered_columns_and_other_forms_pass() {
         assert_eq!(
             objects(
                 &constrainer,
-                "NotInNullableSubquery",
+                "not_in_nullable_subquery",
                 &format!("{PAIRS} CREATE VIEW v AS {view};")
             ),
             Vec::<String>::new(),
@@ -83,7 +83,7 @@ fn checks_that_can_turn_false_are_reported() {
     ] {
         let found = findings(
             &constrainer,
-            "TimeDependentCheck",
+            "time_dependent_check",
             &format!(
                 "CREATE FUNCTION stable_limit() RETURNS INT LANGUAGE sql STABLE AS 'SELECT 1';
                  CREATE TABLE t (at TIMESTAMPTZ, expires DATE, x INT, CHECK ({check}));"
@@ -112,7 +112,7 @@ fn upper_bounds_by_the_current_time_and_immutable_checks_pass() {
         assert_eq!(
             findings(
                 &constrainer,
-                "TimeDependentCheck",
+                "time_dependent_check",
                 &format!(
                     "CREATE FUNCTION doubled(v INT) RETURNS INT LANGUAGE sql IMMUTABLE AS 'SELECT v * 2';
                      CREATE TABLE t (at TIMESTAMPTZ, expires DATE, x INT, name TEXT, CHECK ({check}));"
@@ -129,7 +129,7 @@ fn immutable_functions_reading_what_can_change_are_reported() {
     let constrainer: GenericConstrainer<ParserDB> = ImpureImmutableFunction::default().into();
     let found = findings(
         &constrainer,
-        "ImpureImmutableFunction",
+        "impure_immutable_function",
         "CREATE TABLE rates (rate NUMERIC);
          CREATE FUNCTION rate() RETURNS NUMERIC LANGUAGE sql IMMUTABLE
            SET search_path = '' AS $$ SELECT max(rate) FROM public.rates $$;
@@ -156,16 +156,16 @@ fn immutable_functions_reading_what_can_change_are_reported() {
     );
 }
 
-/// Resolution of every `PastTimeColumnRule` finding on `sql` under `deployment`.
+/// Resolution of every `unchecked_past_timestamp` finding on `sql` under `deployment`.
 fn past_time_resolutions(deployment: Deployment, sql: &str) -> Vec<String> {
-    let mut constrainer: GenericConstrainer<ParserDB> = PastTimeColumnRule::default().into();
+    let mut constrainer: GenericConstrainer<ParserDB> = UncheckedPastTimestamp::default().into();
     constrainer.set_deployment(deployment);
     let database = ParserDB::parse::<PostgreSqlDialect>(sql).expect("schema parses");
     constrainer
         .diagnostics(&database)
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == "PastTimeColumnRule" => {
+            Error::Violation(violation) if violation.rule().name == "unchecked_past_timestamp" => {
                 Some(violation.resolution().to_owned())
             }
             _ => None,
@@ -255,9 +255,9 @@ fn the_default_constrainer_warns_for_each_rule() {
     );
     let constrainer = DefaultConstrainer::<ParserDB>::default();
     for rule in [
-        "NotInNullableSubquery",
-        "TimeDependentCheck",
-        "ImpureImmutableFunction",
+        "not_in_nullable_subquery",
+        "time_dependent_check",
+        "impure_immutable_function",
     ] {
         let found = findings(&constrainer, rule, &sql);
         assert_eq!(found.len(), 1, "{rule}");

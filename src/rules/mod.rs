@@ -1,5 +1,18 @@
 //! Submodule providing structs to add custom rules on SQL schemas.
 
+/// Derives a rule's configuration key from its type identifier.
+macro_rules! rule_name {
+    ($name:ident) => {{
+        const LEN: usize = $crate::lint::snake_len(stringify!($name));
+        const BYTES: [u8; LEN] = $crate::lint::to_snake::<LEN>(stringify!($name));
+        const NAME: &str = match core::str::from_utf8(&BYTES) {
+            Ok(name) => name,
+            Err(_) => panic!("rule names must be UTF-8"),
+        };
+        NAME
+    }};
+}
+
 /// Defines a rule's struct, its `Default`, the constrainer that runs it alone
 /// through `$register`, and its metadata with its `$example`, deciding from
 /// declared structure unless a `$basis` follows.
@@ -39,7 +52,7 @@ macro_rules! rule_definition {
         impl<DB> Rule for $name<DB> {
             fn metadata(&self) -> &'static RuleMetadata {
                 static METADATA: RuleMetadata = RuleMetadata {
-                    name: stringify!($name),
+                    name: rule_name!($name),
                     group: $group,
                     rationale: $rationale,
                     source: $source,
@@ -76,3 +89,22 @@ mod policy_support;
 pub mod rust_keywords;
 mod statement_support;
 mod type_support;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rule_names_split_acronyms_and_digit_boundaries() {
+        for (actual, expected) in [
+            (rule_name!(A), "a"),
+            (rule_name!(Rule), "rule"),
+            (rule_name!(MissingPrimaryKey), "missing_primary_key"),
+            (rule_name!(XMLHttpRequest), "xml_http_request"),
+            (rule_name!(UUID), "uuid"),
+            (rule_name!(Rule2Name), "rule2_name"),
+            (rule_name!(HTTP2Parser), "http2_parser"),
+            (rule_name!(RuleXML), "rule_xml"),
+        ] {
+            assert_eq!(actual, expected);
+        }
+    }
+}

@@ -51,7 +51,7 @@ const DOCS: &str = "CREATE ROLE readers; CREATE ROLE editors_role;
 fn arrays(policy: &str) -> Vec<String> {
     sites(
         &ArrayMembershipPolicy::default().into(),
-        "ArrayMembershipPolicy",
+        "array_membership_policy",
         &format!("{DOCS} {policy}"),
     )
 }
@@ -96,7 +96,7 @@ fn a_declared_credential_counts_as_the_caller() {
     let constrainer: GenericConstrainer<ParserDB> = ArrayMembershipPolicy::default().into();
     let sql = format!("{DOCS} CREATE POLICY p ON docs USING (auth.uid() = ANY (editors));");
     assert_eq!(
-        findings(&constrainer, "ArrayMembershipPolicy", &sql),
+        findings(&constrainer, "array_membership_policy", &sql),
         Vec::<(Level, String, String)>::new()
     );
     let mut constrainer = constrainer;
@@ -106,7 +106,7 @@ fn a_declared_credential_counts_as_the_caller() {
             .expect("credential parses"),
     );
     assert_eq!(
-        findings(&constrainer, "ArrayMembershipPolicy", &sql)
+        findings(&constrainer, "array_membership_policy", &sql)
             .into_iter()
             .map(|(_, _, site)| site)
             .collect::<Vec<_>>(),
@@ -120,7 +120,7 @@ const DENY: &str =
 fn deny_lists(policies: &str) -> Vec<String> {
     sites(
         &DenyListPolicy::default().into(),
-        "DenyListPolicy",
+        "deny_list_policy",
         &format!("{DOCS} {policies}"),
     )
 }
@@ -189,7 +189,7 @@ fn deny_lists_over_real_grants_and_other_restrictions_pass() {
 fn filters(sql: &str) -> Vec<String> {
     sites(
         &UnindexedPolicyFilter::default().into(),
-        "UnindexedPolicyFilter",
+        "unindexed_policy_filter",
         &format!("{DOCS} {sql}"),
     )
 }
@@ -288,13 +288,13 @@ fn the_default_constrainer_applies_each_group_level() {
             .map(|(level, object, _)| (level, object))
             .collect::<Vec<_>>()
     };
-    assert_eq!(levels("ArrayMembershipPolicy"), []);
+    assert_eq!(levels("array_membership_policy"), []);
     assert_eq!(
-        levels("DenyListPolicy"),
+        levels("deny_list_policy"),
         [(Level::Warn, "docs.blocked".to_owned())]
     );
     assert_eq!(
-        levels("UnindexedPolicyFilter"),
+        levels("unindexed_policy_filter"),
         [
             (Level::Warn, "docs.blocked".to_owned()),
             (Level::Warn, "docs.edit".to_owned())
@@ -303,7 +303,7 @@ fn the_default_constrainer_applies_each_group_level() {
     let mut pedantic = DefaultConstrainer::<ParserDB>::default();
     pedantic.set_group_level(LintGroup::Pedantic, Level::Warn);
     assert_eq!(
-        findings(&pedantic, "ArrayMembershipPolicy", &sql)
+        findings(&pedantic, "array_membership_policy", &sql)
             .into_iter()
             .map(|(level, object, _)| (level, object))
             .collect::<Vec<_>>(),

@@ -28,7 +28,8 @@ fn findings<C: Constrainer<Database = ParserDB>>(
         .into_iter()
         .filter_map(|error| match error {
             Error::Violation(violation)
-                if violation.rule().name == "UnscopedUniqueConstraintOnRowLevelSecurityTable" =>
+                if violation.rule().name
+                    == "unscoped_unique_constraint_on_row_level_security_table" =>
             {
                 Some((violation.level(), violation.message().to_owned()))
             }
@@ -74,7 +75,7 @@ fn the_rule_waits_for_a_credential_and_warns_by_default() {
             .inactive_rules()
             .iter()
             .any(|inactive| inactive.rule().name
-                == "UnscopedUniqueConstraintOnRowLevelSecurityTable")
+                == "unscoped_unique_constraint_on_row_level_security_table")
     );
     constrainer.set_deployment(deployment());
     assert_eq!(findings(&constrainer, "").len(), 1);

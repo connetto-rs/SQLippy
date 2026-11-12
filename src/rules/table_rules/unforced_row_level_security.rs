@@ -55,7 +55,7 @@ impl<DB: DatabaseLike + 'static> From<UnforcedRowLevelSecurity<DB>> for GenericC
 impl<DB> Rule for UnforcedRowLevelSecurity<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "UnforcedRowLevelSecurity",
+            name: rule_name!(UnforcedRowLevelSecurity),
             group: LintGroup::Suspicious,
             rationale: "The table owner bypasses every policy unless row-level security is forced, and applications often connect as the role that owns the tables.",
             source: Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html"),

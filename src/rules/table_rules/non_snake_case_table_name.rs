@@ -1,4 +1,4 @@
-//! Submodule providing the `SnakeCaseTableName` constraint, which enforces that
+//! Submodule providing the `NonSnakeCaseTableName` constraint, which enforces that
 //! table names follow `snake_case` style.
 
 use heck::ToSnakeCase;
@@ -16,13 +16,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `SnakeCaseTableName` constraint.
+/// `non_snake_case_table_name` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = SnakeCaseTableName::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = NonSnakeCaseTableName::default().into();
 ///
 /// // Invalid: PascalCase
 /// let invalid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE MyTable (id INT);").unwrap();
@@ -46,26 +46,26 @@ use crate::{
 /// let valid_schema3 = ParserDB::parse::<GenericDialect>("CREATE TABLE user_accounts (id INT);").unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema3).is_ok());
 /// ```
-pub struct SnakeCaseTableName<DB>(std::marker::PhantomData<DB>);
+pub struct NonSnakeCaseTableName<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for SnakeCaseTableName<DB> {
+impl<DB> Default for NonSnakeCaseTableName<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<SnakeCaseTableName<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: SnakeCaseTableName<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<NonSnakeCaseTableName<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: NonSnakeCaseTableName<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_table_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for SnakeCaseTableName<DB> {
+impl<DB> Rule for NonSnakeCaseTableName<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "SnakeCaseTableName",
+            name: rule_name!(NonSnakeCaseTableName),
             group: LintGroup::Style,
             rationale: "Snake case keeps multi-word names readable after PostgreSQL folds unquoted identifiers to lower case.",
             source: Some(
@@ -81,7 +81,7 @@ impl<DB> Rule for SnakeCaseTableName<DB> {
     }
 }
 
-impl<DB: DatabaseLike> TableRule for SnakeCaseTableName<DB> {
+impl<DB: DatabaseLike> TableRule for NonSnakeCaseTableName<DB> {
     type Database = DB;
 
     fn check_table(

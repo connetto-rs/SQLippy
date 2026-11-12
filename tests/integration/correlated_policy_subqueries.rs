@@ -99,7 +99,7 @@ fn the_default_constrainer_warns_about_correlated_policy_subqueries() {
                 matches!(
                     error,
                     Error::Violation(violation)
-                        if violation.rule().name == "CorrelatedPolicySubquery"
+                        if violation.rule().name == "correlated_policy_subquery"
                             && violation.rule().group == LintGroup::Perf
                             && violation.level() == Level::Warn
                 )

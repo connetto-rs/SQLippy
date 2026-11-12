@@ -113,7 +113,7 @@ impl<DB: DatabaseLike + 'static> From<PrefixRedundantIndex<DB>> for GenericConst
 impl<DB> Rule for PrefixRedundantIndex<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "PrefixRedundantIndex",
+            name: rule_name!(PrefixRedundantIndex),
             group: LintGroup::Perf,
             rationale: "An index whose columns lead another index of the same method serves no lookup the longer one cannot, and still costs space and every write.",
             source: Some("https://github.com/pmpetit/pglinter/blob/main/docs/rules/README.md"),

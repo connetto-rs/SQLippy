@@ -5,7 +5,7 @@
 use crate::common::{finding, findings, parse};
 use sqlippy::prelude::*;
 
-/// Objects `FloatingPointMoney` reports on `sql` under `deployment`.
+/// Objects `floating_point_money` reports on `sql` under `deployment`.
 fn money(deployment: Deployment, sql: &str) -> Vec<String> {
     objects(FloatingPointMoney::default(), deployment, sql)
 }
@@ -86,17 +86,23 @@ fn the_default_constrainer_warns_for_floating_point_money() {
         ))
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == "FloatingPointMoney" => Some((
-                violation.rule().name.to_owned(),
-                violation.level(),
-                violation.object().to_owned(),
-            )),
+            Error::Violation(violation) if violation.rule().name == "floating_point_money" => {
+                Some((
+                    violation.rule().name.to_owned(),
+                    violation.level(),
+                    violation.object().to_owned(),
+                ))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
         raised,
-        [finding("FloatingPointMoney", Level::Warn, "ledger.amount")]
+        [finding(
+            "floating_point_money",
+            Level::Warn,
+            "ledger.amount"
+        )]
     );
 }
 
@@ -235,12 +241,12 @@ fn the_default_constrainer_runs_the_name_hints_after_money_as_pedantic() {
          );",
     );
     let hints = [
-        "FlagNotBoolean",
-        "UuidStoredAsText",
-        "MomentStoredAsText",
-        "AddressStoredAsText",
-        "JsonStoredAsText",
-        "FractionalCount",
+        "flag_not_boolean",
+        "uuid_stored_as_text",
+        "moment_stored_as_text",
+        "address_stored_as_text",
+        "json_stored_as_text",
+        "fractional_count",
     ];
     let raised = |constrainer: &DefaultConstrainer<ParserDB>| {
         constrainer
@@ -262,12 +268,12 @@ fn the_default_constrainer_runs_the_name_hints_after_money_as_pedantic() {
     assert_eq!(
         raised(&constrainer),
         [
-            finding("FlagNotBoolean", Level::Warn, "t.is_active"),
-            finding("UuidStoredAsText", Level::Warn, "t.item_uuid"),
-            finding("MomentStoredAsText", Level::Warn, "t.created_at"),
-            finding("AddressStoredAsText", Level::Warn, "t.client_ip"),
-            finding("JsonStoredAsText", Level::Warn, "t.payload_json"),
-            finding("FractionalCount", Level::Warn, "t.item_count")
+            finding("flag_not_boolean", Level::Warn, "t.is_active"),
+            finding("uuid_stored_as_text", Level::Warn, "t.item_uuid"),
+            finding("moment_stored_as_text", Level::Warn, "t.created_at"),
+            finding("address_stored_as_text", Level::Warn, "t.client_ip"),
+            finding("json_stored_as_text", Level::Warn, "t.payload_json"),
+            finding("fractional_count", Level::Warn, "t.item_count")
         ]
     );
 }
@@ -411,13 +417,17 @@ fn typed_moments_and_names_not_ending_in_a_moment_word_are_not_reported() {
 fn the_past_time_rule_leaves_a_text_moment_to_the_moment_hint() {
     let sql = "CREATE TABLE events (created_at TEXT, updated_at TIMESTAMPTZ);";
     assert_eq!(
-        objects(PastTimeColumnRule::default(), Deployment::default(), sql),
+        objects(
+            UncheckedPastTimestamp::default(),
+            Deployment::default(),
+            sql
+        ),
         ["events.updated_at"]
     );
     let german = Vocabulary::default().with_moment_term("datum");
     assert_eq!(
         objects(
-            PastTimeColumnRule::default(),
+            UncheckedPastTimestamp::default(),
             Deployment::default().with_vocabulary(german.clone()),
             sql
         ),
@@ -572,7 +582,7 @@ fn a_flag_prefix_leaves_the_name_to_the_flag_hint() {
         UuidStoredAsText::default().into(),
         JsonStoredAsText::default().into(),
         FractionalCount::default().into(),
-        PastTimeColumnRule::default().into(),
+        UncheckedPastTimestamp::default().into(),
     ] {
         assert_eq!(
             objects(rule, Deployment::default(), sql),

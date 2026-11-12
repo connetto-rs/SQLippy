@@ -96,7 +96,7 @@ impl<DB: DatabaseLike + 'static> From<RoleKeyedPolicyWhenPooled<DB>> for Generic
 impl<DB> Rule for PolicyToCreatingRole<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "PolicyToCreatingRole",
+            name: rule_name!(PolicyToCreatingRole),
             group: LintGroup::Suspicious,
             rationale: "PostgreSQL resolves CURRENT_USER, CURRENT_ROLE and SESSION_USER in a policy's TO list when the policy is created, so it applies to the migration's role and never to the callers it seems to name.",
             source: Some("https://www.postgresql.org/docs/current/sql-createpolicy.html"),
@@ -119,7 +119,7 @@ CREATE POLICY readable ON notes TO authenticated USING (true);",
 impl<DB> Rule for RoleKeyedPolicyWhenPooled<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "RoleKeyedPolicyWhenPooled",
+            name: rule_name!(RoleKeyedPolicyWhenPooled),
             group: LintGroup::Suspicious,
             rationale: "In a pooled deployment every caller shares one database role, so a policy keyed on the role admits every caller or none.",
             source: None,

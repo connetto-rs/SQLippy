@@ -48,7 +48,7 @@ fn a_permissive_tautology_kills_a_narrower_policy_for_the_same_command_and_roles
              CREATE POLICY own ON docs FOR SELECT USING (owner = current_user);"
         ),
         [(
-            "DeadPermissivePolicy".to_owned(),
+            "dead_permissive_policy".to_owned(),
             Level::Deny,
             "docs.own -> docs.everyone".to_owned()
         )]
@@ -157,7 +157,7 @@ fn a_true_write_check_beside_a_row_reading_filter_is_suspicious() {
             "CREATE POLICY own ON docs FOR UPDATE USING (owner = current_user) WITH CHECK (true);"
         ),
         [(
-            "TautologicalWithCheck".to_owned(),
+            "tautological_with_check".to_owned(),
             Level::Warn,
             "docs.own".to_owned()
         )]
@@ -215,7 +215,7 @@ fn row_level_security_without_force_lets_the_owner_bypass_it() {
              CREATE POLICY p ON docs USING (id > 0);"
         ),
         [(
-            "UnforcedRowLevelSecurity".to_owned(),
+            "unforced_row_level_security".to_owned(),
             Level::Warn,
             "docs".to_owned()
         )]
@@ -237,7 +237,7 @@ fn forced_or_policy_free_tables_are_not_reported() {
 }
 
 fn unenabled(sql: &str) -> Vec<(String, Level, String)> {
-    findings(&PoliciesRequireRowLevelSecurity::default().into(), sql)
+    findings(&PolicyWithoutRowLevelSecurity::default().into(), sql)
 }
 
 #[test]
@@ -257,7 +257,7 @@ fn policies_on_a_table_without_row_level_security_enabled_are_denied() {
         assert_eq!(
             unenabled(sql),
             [(
-                "PoliciesRequireRowLevelSecurity".to_owned(),
+                "policy_without_row_level_security".to_owned(),
                 Level::Deny,
                 "docs".to_owned()
             )],
@@ -300,9 +300,9 @@ fn the_default_constrainer_registers_the_policy_checks_at_their_group_defaults()
         })
         .collect();
     for expected in [
-        ("DeadPermissivePolicy", Level::Deny),
-        ("TautologicalWithCheck", Level::Warn),
-        ("UnforcedRowLevelSecurity", Level::Warn),
+        ("dead_permissive_policy", Level::Deny),
+        ("tautological_with_check", Level::Warn),
+        ("unforced_row_level_security", Level::Warn),
     ] {
         assert!(
             raised

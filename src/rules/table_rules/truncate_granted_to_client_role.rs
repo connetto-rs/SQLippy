@@ -100,7 +100,7 @@ impl<DB: DatabaseLike + 'static> From<TruncateGrantedToAppRole<DB>> for GenericC
 impl<DB> Rule for TruncateGrantedToAnonymousRole<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "TruncateGrantedToAnonymousRole",
+            name: rule_name!(TruncateGrantedToAnonymousRole),
             group: LintGroup::Correctness,
             rationale: RATIONALE,
             source: SOURCE,
@@ -123,7 +123,7 @@ GRANT DELETE ON notes TO anon;",
 impl<DB> Rule for TruncateGrantedToAppRole<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "TruncateGrantedToAppRole",
+            name: rule_name!(TruncateGrantedToAppRole),
             group: LintGroup::Suspicious,
             rationale: RATIONALE,
             source: SOURCE,

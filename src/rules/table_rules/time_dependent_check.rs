@@ -110,7 +110,7 @@ impl<DB: DatabaseLike + 'static> From<TimeDependentCheck<DB>> for GenericConstra
 impl<DB> Rule for TimeDependentCheck<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "TimeDependentCheck",
+            name: rule_name!(TimeDependentCheck),
             group: LintGroup::Suspicious,
             rationale: "PostgreSQL assumes a CHECK is immutable and tests it only when a row is written, so a check that turns false as time passes leaves stored rows that fail it, and a dump of them fails to restore.",
             source: Some("https://www.postgresql.org/docs/current/ddl-constraints.html"),

@@ -63,7 +63,7 @@ impl<DB: DatabaseLike + 'static> From<GrantOptionToClientRole<DB>> for GenericCo
 impl<DB> Rule for GrantOptionToClientRole<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "GrantOptionToClientRole",
+            name: rule_name!(GrantOptionToClientRole),
             group: LintGroup::Suspicious,
             rationale: "A client role holding a grant option passes the privilege on to any role it reaches, outside the schema's review.",
             source: Some("https://www.postgresql.org/docs/current/sql-grant.html"),

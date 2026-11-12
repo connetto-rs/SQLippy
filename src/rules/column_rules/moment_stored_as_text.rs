@@ -25,7 +25,7 @@ rule_definition!(
     ///
     /// The last word of the name is matched against the deployment's
     /// vocabularies, English unless it selects others, and the type is read
-    /// through arrays and domains. [`PastTimeColumnRule`](crate::rules::PastTimeColumnRule)
+    /// through arrays and domains. [`UncheckedPastTimestamp`](crate::rules::UncheckedPastTimestamp)
     /// leaves the columns this rule reports to it.
     ///
     /// # Example

@@ -1,4 +1,4 @@
-//! Submodule providing the `PoliciesRequireRowLevelSecurity` constraint.
+//! Submodule providing the `PolicyWithoutRowLevelSecurity` constraint.
 
 use sql_traits::traits::{DatabaseLike, TableLike};
 
@@ -13,13 +13,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `PoliciesRequireRowLevelSecurity` constraint.
+/// `policy_without_row_level_security` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = PoliciesRequireRowLevelSecurity::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = PolicyWithoutRowLevelSecurity::default().into();
 ///
 /// // Invalid: Has policy but RLS not enabled
 /// let invalid_schema = ParserDB::parse::<GenericDialect>("
@@ -36,28 +36,28 @@ use crate::{
 /// ").unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema).is_ok());
 /// ```
-pub struct PoliciesRequireRowLevelSecurity<DB>(std::marker::PhantomData<DB>);
+pub struct PolicyWithoutRowLevelSecurity<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for PoliciesRequireRowLevelSecurity<DB> {
+impl<DB> Default for PolicyWithoutRowLevelSecurity<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<PoliciesRequireRowLevelSecurity<DB>>
+impl<DB: DatabaseLike + 'static> From<PolicyWithoutRowLevelSecurity<DB>>
     for GenericConstrainer<DB>
 {
-    fn from(constraint: PoliciesRequireRowLevelSecurity<DB>) -> Self {
+    fn from(constraint: PolicyWithoutRowLevelSecurity<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_table_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for PoliciesRequireRowLevelSecurity<DB> {
+impl<DB> Rule for PolicyWithoutRowLevelSecurity<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "PoliciesRequireRowLevelSecurity",
+            name: rule_name!(PolicyWithoutRowLevelSecurity),
             group: LintGroup::Correctness,
             rationale: "PostgreSQL applies no policy until row-level security is enabled on the table, so the policies restrict nothing.",
             source: Some("https://www.postgresql.org/docs/current/sql-createpolicy.html"),
@@ -74,7 +74,7 @@ CREATE POLICY readable ON notes USING (true);",
     }
 }
 
-impl<DB: DatabaseLike> TableRule for PoliciesRequireRowLevelSecurity<DB> {
+impl<DB: DatabaseLike> TableRule for PolicyWithoutRowLevelSecurity<DB> {
     type Database = DB;
 
     fn check_table(

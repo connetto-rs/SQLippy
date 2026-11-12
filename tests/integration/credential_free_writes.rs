@@ -51,7 +51,7 @@ fn findings(deployment: Deployment, sql: &str) -> Vec<(String, Level, String)> {
 
 fn finding(object: &str) -> (String, Level, String) {
     (
-        "CredentialFreeWrite".to_owned(),
+        "credential_free_write".to_owned(),
         Level::Warn,
         object.to_owned(),
     )
@@ -507,7 +507,7 @@ fn an_allowance_excuses_a_deliberate_anonymous_write() {
     let mut constrainer: GenericConstrainer<ParserDB> = CredentialFreeWrite::default().into();
     constrainer.set_deployment(supabase());
     constrainer.allow_policy(
-        "CredentialFreeWrite",
+        "credential_free_write",
         TargetName::new("guestbook", false),
         "guestbook_insert",
     );

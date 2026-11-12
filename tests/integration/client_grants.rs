@@ -14,7 +14,7 @@ fn a_table_without_row_level_security_granted_to_a_client_role_is_reachable() {
                 &format!("CREATE TABLE secrets (id INT); GRANT SELECT ON secrets TO {grantee};"),
             ),
             [finding(
-                "ReachableTableWithoutRowLevelSecurity",
+                "reachable_table_without_row_level_security",
                 Level::Warn,
                 "secrets"
             )],
@@ -35,7 +35,7 @@ fn a_grant_to_a_role_a_client_role_inherits_reaches_the_client() {
              GRANT SELECT ON secrets TO readers;",
         ),
         [finding(
-            "ReachableTableWithoutRowLevelSecurity",
+            "reachable_table_without_row_level_security",
             Level::Warn,
             "secrets"
         )]
@@ -72,7 +72,7 @@ fn a_table_without_row_level_security_in_an_exposed_schema_is_reachable_without_
             sql,
         ),
         [finding(
-            "ReachableTableWithoutRowLevelSecurity",
+            "reachable_table_without_row_level_security",
             Level::Warn,
             "secrets"
         )]
@@ -107,9 +107,9 @@ fn foreign_tables_a_client_role_reaches_are_reported() {
             foreign,
         ),
         [
-            finding("ReachableForeignTable", Level::Warn, "costs"),
-            finding("ReachableForeignTable", Level::Warn, "sales"),
-            finding("ReachableForeignTable", Level::Warn, "rates"),
+            finding("reachable_foreign_table", Level::Warn, "costs"),
+            finding("reachable_foreign_table", Level::Warn, "sales"),
+            finding("reachable_foreign_table", Level::Warn, "rates"),
         ]
     );
 }
@@ -123,7 +123,7 @@ fn an_unqualified_table_sits_in_the_public_schema() {
             "CREATE TABLE secrets (id INT);",
         ),
         [finding(
-            "ReachableTableWithoutRowLevelSecurity",
+            "reachable_table_without_row_level_security",
             Level::Warn,
             "secrets"
         )]
@@ -148,7 +148,7 @@ fn truncate_granted_to_an_anonymous_role_is_denied() {
                 &format!("{PROTECTED}{grant}"),
             ),
             [finding(
-                "TruncateGrantedToAnonymousRole",
+                "truncate_granted_to_anonymous_role",
                 Level::Deny,
                 "docs"
             )],
@@ -165,7 +165,7 @@ fn truncate_granted_to_an_app_role_warns_once_and_not_for_anonymous_grants() {
             supabase(),
             &format!("{PROTECTED}GRANT TRUNCATE ON docs TO authenticated;"),
         ),
-        [finding("TruncateGrantedToAppRole", Level::Warn, "docs")]
+        [finding("truncate_granted_to_app_role", Level::Warn, "docs")]
     );
     assert_eq!(
         findings(
@@ -205,7 +205,7 @@ fn references_granted_to_a_client_role_on_a_protected_table_is_reported() {
                 &format!("{PROTECTED}{grant}"),
             ),
             [finding(
-                "ReferencesGrantedToClientRole",
+                "references_granted_to_client_role",
                 Level::Warn,
                 "docs"
             )],
@@ -242,7 +242,7 @@ fn a_grant_option_handed_to_a_client_role_is_reported() {
                 supabase(),
                 &format!("CREATE TABLE docs (id INT, email TEXT);{grant}"),
             ),
-            [finding("GrantOptionToClientRole", Level::Warn, "docs")],
+            [finding("grant_option_to_client_role", Level::Warn, "docs")],
             "{grant}"
         );
     }
@@ -295,7 +295,7 @@ fn execute_with_grant_option_or_admin_option_handed_to_a_client_role_is_reported
                 supabase(),
                 &format!("{HELPER}{grant}"),
             ),
-            [finding("GrantOptionToClientRole", Level::Warn, object)],
+            [finding("grant_option_to_client_role", Level::Warn, object)],
             "{grant}"
         );
     }
@@ -338,16 +338,16 @@ fn a_rule_missing_its_declaration_is_listed_once_and_never_runs() {
     };
     assert_eq!(
         (inactive.rule().name, inactive.missing()),
-        ("TruncateGrantedToAppRole", Declaration::AppRoles)
+        ("truncate_granted_to_app_role", Declaration::AppRoles)
     );
     let shown = diagnostics[0].to_string();
     assert!(
-        shown.contains("TruncateGrantedToAppRole") && shown.contains("app roles"),
+        shown.contains("truncate_granted_to_app_role") && shown.contains("app roles"),
         "{shown}"
     );
     assert!(constrainer.validate_schema(&database).is_ok());
 
-    constrainer.set_rule_level("TruncateGrantedToAppRole", Level::Allow);
+    constrainer.set_rule_level("truncate_granted_to_app_role", Level::Allow);
     assert!(constrainer.inactive_rules().is_empty());
 }
 
@@ -361,16 +361,16 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             .map(|inactive| inactive.rule().name)
             .collect::<Vec<_>>(),
         [
-            "TruncateGrantedToAppRole",
-            "RoleKeyedPolicyWhenPooled",
-            "CredentialFreeWrite",
-            "UnscopedUniqueConstraintOnRowLevelSecurityTable",
-            "ClientRoleBypassesRowLevelSecurity",
-            "SettableMembershipInBypassingRole",
-            "SelfAssertedClaimPolicy",
-            "SelfGrantingWrite",
-            "SubjectSettableAttribute",
-            "CredentialSettingWrite",
+            "truncate_granted_to_app_role",
+            "role_keyed_policy_when_pooled",
+            "credential_free_write",
+            "unscoped_unique_constraint_on_row_level_security_table",
+            "client_role_bypasses_row_level_security",
+            "settable_membership_in_bypassing_role",
+            "self_asserted_claim_policy",
+            "self_granting_write",
+            "subject_settable_attribute",
+            "credential_setting_write",
         ]
     );
     constrainer.set_deployment(supabase());
@@ -381,13 +381,13 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             .map(|inactive| inactive.rule().name)
             .collect::<Vec<_>>(),
         [
-            "RoleKeyedPolicyWhenPooled",
-            "CredentialFreeWrite",
-            "UnscopedUniqueConstraintOnRowLevelSecurityTable",
-            "SelfAssertedClaimPolicy",
-            "SelfGrantingWrite",
-            "SubjectSettableAttribute",
-            "CredentialSettingWrite"
+            "role_keyed_policy_when_pooled",
+            "credential_free_write",
+            "unscoped_unique_constraint_on_row_level_security_table",
+            "self_asserted_claim_policy",
+            "self_granting_write",
+            "subject_settable_attribute",
+            "credential_setting_write"
         ]
     );
     let database = parse(&format!(
@@ -407,10 +407,10 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
         })
         .filter(|(rule, _)| {
             [
-                "ReachableTableWithoutRowLevelSecurity",
-                "TruncateGrantedToAnonymousRole",
-                "ReferencesGrantedToClientRole",
-                "GrantOptionToClientRole",
+                "reachable_table_without_row_level_security",
+                "truncate_granted_to_anonymous_role",
+                "references_granted_to_client_role",
+                "grant_option_to_client_role",
             ]
             .contains(&rule.as_str())
         })
@@ -419,12 +419,12 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
     assert_eq!(
         raised,
         [
-            ("GrantOptionToClientRole".to_owned(), Level::Warn),
+            ("grant_option_to_client_role".to_owned(), Level::Warn),
             (
-                "ReachableTableWithoutRowLevelSecurity".to_owned(),
+                "reachable_table_without_row_level_security".to_owned(),
                 Level::Warn
             ),
-            ("TruncateGrantedToAnonymousRole".to_owned(), Level::Deny),
+            ("truncate_granted_to_anonymous_role".to_owned(), Level::Deny),
         ]
     );
 }

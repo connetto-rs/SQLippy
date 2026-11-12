@@ -662,7 +662,7 @@ impl<DB: DatabaseLike + 'static> From<PolicyReadCycle<DB>> for GenericConstraine
 impl<DB> Rule for PolicyReadCycle<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "PolicyReadCycle",
+            name: rule_name!(PolicyReadCycle),
             group: LintGroup::Correctness,
             rationale: "PostgreSQL fails a statement with `infinite recursion detected in policy` when expanding a relation's policies reaches a sublink on a relation it is already expanding.",
             source: SOURCE,
@@ -757,7 +757,7 @@ impl<DB: DatabaseLike + 'static> From<LatentPolicyReadCycle<DB>> for GenericCons
 impl<DB> Rule for LatentPolicyReadCycle<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "LatentPolicyReadCycle",
+            name: rule_name!(LatentPolicyReadCycle),
             group: LintGroup::Suspicious,
             rationale: "A role granted every role these policies name, through a membership the schema cannot show, fails each statement with `infinite recursion detected in policy`.",
             source: SOURCE,
@@ -873,7 +873,7 @@ impl<DB: DatabaseLike + 'static> From<FunctionMediatedPolicyCycle<DB>> for Gener
 impl<DB> Rule for FunctionMediatedPolicyCycle<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "FunctionMediatedPolicyCycle",
+            name: rule_name!(FunctionMediatedPolicyCycle),
             group: LintGroup::Suspicious,
             rationale: "A function a policy calls reads a table whose policies lead back to the calling policy, so PostgreSQL recurses until it fails the statement with `stack depth limit exceeded`.",
             source: Some(

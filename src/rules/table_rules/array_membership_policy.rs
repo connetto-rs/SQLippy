@@ -141,7 +141,7 @@ impl<DB: DatabaseLike + 'static> From<ArrayMembershipPolicy<DB>> for GenericCons
 impl<DB> Rule for ArrayMembershipPolicy<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "ArrayMembershipPolicy",
+            name: rule_name!(ArrayMembershipPolicy),
             group: LintGroup::Pedantic,
             rationale: "An array element carries no foreign key and every grant or revocation rewrites the row, while a membership table with a row per grant is easier to search and scales better.",
             source: Some("https://www.postgresql.org/docs/current/arrays.html"),

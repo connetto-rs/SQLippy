@@ -1,4 +1,4 @@
-//! Submodule providing the `TextualColumnRule` rule.
+//! Submodule providing the `UnboundedTextColumn` rule.
 
 use crate::{
     error::Interruption,
@@ -16,7 +16,7 @@ use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, Database
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = TextualColumnRule::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = UnboundedTextColumn::default().into();
 ///
 /// // Invalid: textual column without any upper bound
 /// let invalid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE users (name TEXT);").unwrap();
@@ -38,26 +38,26 @@ use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, Database
 /// let declared = ParserDB::parse::<GenericDialect>("CREATE TABLE users (name VARCHAR(100));").unwrap();
 /// assert!(constrainer.validate_schema(&declared).is_ok());
 /// ```
-pub struct TextualColumnRule<DB>(std::marker::PhantomData<DB>);
+pub struct UnboundedTextColumn<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for TextualColumnRule<DB> {
+impl<DB> Default for UnboundedTextColumn<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<TextualColumnRule<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: TextualColumnRule<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<UnboundedTextColumn<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: UnboundedTextColumn<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_column_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for TextualColumnRule<DB> {
+impl<DB> Rule for UnboundedTextColumn<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "TextualColumnRule",
+            name: rule_name!(UnboundedTextColumn),
             group: LintGroup::Suspicious,
             rationale: "Without an upper bound one value of a client-writable text column can reach about 1 GB, and a bound in the database is a limit no client can skip.",
             source: Some("https://www.postgresql.org/docs/current/datatype-character.html"),
@@ -71,7 +71,7 @@ impl<DB> Rule for TextualColumnRule<DB> {
     }
 }
 
-impl<DB: DatabaseLike> ColumnRule for TextualColumnRule<DB> {
+impl<DB: DatabaseLike> ColumnRule for UnboundedTextColumn<DB> {
     type Database = DB;
 
     fn check_column(

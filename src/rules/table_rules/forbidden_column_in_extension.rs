@@ -1,4 +1,4 @@
-//! Submodule providing the `NoForbiddenColumnInExtension` constraint, which
+//! Submodule providing the `ForbiddenColumnInExtension` constraint, which
 //! enforces that if a table extends other tables, it cannot have a column with
 //! a forbidden name (by default "extension", but configurable).
 
@@ -17,13 +17,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `NoForbiddenColumnInExtension` constraint.
+/// `forbidden_column_in_extension` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = NoForbiddenColumnInExtension::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = ForbiddenColumnInExtension::default().into();
 ///
 /// let invalid_schema = ParserDB::parse::<GenericDialect>(
 ///     "
@@ -58,7 +58,7 @@ use crate::{
 ///
 /// // Custom forbidden name
 /// let custom_constrainer: GenericConstrainer<ParserDB> =
-///     NoForbiddenColumnInExtension::new("custom_forbidden").into();
+///     ForbiddenColumnInExtension::new("custom_forbidden").into();
 ///
 /// let invalid_custom_schema = ParserDB::parse::<GenericDialect>(
 ///     "
@@ -73,13 +73,13 @@ use crate::{
 /// .unwrap();
 /// assert!(custom_constrainer.validate_schema(&invalid_custom_schema).is_err());
 /// ```
-pub struct NoForbiddenColumnInExtension<DB> {
+pub struct ForbiddenColumnInExtension<DB> {
     forbidden_name: String,
     _phantom: std::marker::PhantomData<DB>,
 }
 
-impl<DB> NoForbiddenColumnInExtension<DB> {
-    /// Creates a new `NoForbiddenColumnInExtension` constraint with a custom
+impl<DB> ForbiddenColumnInExtension<DB> {
+    /// Creates a new `forbidden_column_in_extension` constraint with a custom
     /// forbidden column name.
     ///
     /// # Arguments
@@ -92,8 +92,8 @@ impl<DB> NoForbiddenColumnInExtension<DB> {
     /// ```rust
     /// use sqlippy::prelude::*;
     ///
-    /// let constraint: NoForbiddenColumnInExtension<ParserDB> =
-    ///     NoForbiddenColumnInExtension::new("my_forbidden_column");
+    /// let constraint: ForbiddenColumnInExtension<ParserDB> =
+    ///     ForbiddenColumnInExtension::new("my_forbidden_column");
     /// ```
     pub fn new(forbidden_name: impl Into<String>) -> Self {
         Self {
@@ -103,24 +103,24 @@ impl<DB> NoForbiddenColumnInExtension<DB> {
     }
 }
 
-impl<DB> Default for NoForbiddenColumnInExtension<DB> {
+impl<DB> Default for ForbiddenColumnInExtension<DB> {
     fn default() -> Self {
         Self::new("extension")
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<NoForbiddenColumnInExtension<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: NoForbiddenColumnInExtension<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<ForbiddenColumnInExtension<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: ForbiddenColumnInExtension<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_table_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for NoForbiddenColumnInExtension<DB> {
+impl<DB> Rule for ForbiddenColumnInExtension<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "NoForbiddenColumnInExtension",
+            name: rule_name!(ForbiddenColumnInExtension),
             group: LintGroup::Suspicious,
             rationale: "The extension model keeps the configured column name for its own use, so a column with that name on an extending table collides with it.",
             source: None,
@@ -136,7 +136,7 @@ CREATE TABLE children (id INT PRIMARY KEY, data TEXT, table_kind TEXT, FOREIGN K
     }
 }
 
-impl<DB: DatabaseLike> TableRule for NoForbiddenColumnInExtension<DB> {
+impl<DB: DatabaseLike> TableRule for ForbiddenColumnInExtension<DB> {
     type Database = DB;
 
     fn check_table(

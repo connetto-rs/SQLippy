@@ -45,7 +45,7 @@ fn a_granted_membership_in_a_bypassing_role_is_settable_by_default() {
                 &format!("{BYPASSER}{grant}")
             ),
             [(
-                "SettableMembershipInBypassingRole".to_owned(),
+                "settable_membership_in_bypassing_role".to_owned(),
                 "app_user".to_owned()
             )],
             "{grant}"
@@ -83,7 +83,7 @@ fn a_grant_to_a_role_held_without_inherit_does_not_reach_the_client() {
             &format!("{schema} GRANT readers TO app_user;")
         ),
         [(
-            "ReachableTableWithoutRowLevelSecurity".to_owned(),
+            "reachable_table_without_row_level_security".to_owned(),
             "secrets".to_owned()
         )]
     );

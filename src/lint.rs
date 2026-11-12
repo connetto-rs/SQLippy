@@ -136,7 +136,7 @@ pub struct RuleExample {
 /// Identity, group and explanation shared by every violation of a rule.
 #[derive(Debug)]
 pub struct RuleMetadata {
-    /// The rule's type name, which is its stable configuration key.
+    /// The rule's `snake_case` name and configuration key.
     pub name: &'static str,
     /// The rule's group.
     pub group: LintGroup,
@@ -148,6 +148,49 @@ pub struct RuleMetadata {
     pub basis: Basis,
     /// SQL the rule reports and its corrected form.
     pub example: RuleExample,
+}
+
+/// Whether an uppercase byte begins a snake-case word.
+const fn snake_boundary(bytes: &[u8], index: usize) -> bool {
+    index > 0
+        && bytes[index].is_ascii_uppercase()
+        && (bytes[index - 1].is_ascii_lowercase()
+            || bytes[index - 1].is_ascii_digit()
+            || (bytes[index - 1].is_ascii_uppercase()
+                && index + 1 < bytes.len()
+                && bytes[index + 1].is_ascii_lowercase()))
+}
+
+/// Length of an ASCII type identifier converted to snake case.
+pub(crate) const fn snake_len(name: &str) -> usize {
+    let bytes = name.as_bytes();
+    let mut length = bytes.len();
+    let mut index = 0;
+    while index < bytes.len() {
+        if snake_boundary(bytes, index) {
+            length += 1;
+        }
+        index += 1;
+    }
+    length
+}
+
+/// Converts an ASCII type identifier to snake case in a fixed-size array.
+pub(crate) const fn to_snake<const LEN: usize>(name: &str) -> [u8; LEN] {
+    let bytes = name.as_bytes();
+    let mut result = [0; LEN];
+    let mut input = 0;
+    let mut output = 0;
+    while input < bytes.len() {
+        if snake_boundary(bytes, input) {
+            result[output] = b'_';
+            output += 1;
+        }
+        result[output] = bytes[input].to_ascii_lowercase();
+        input += 1;
+        output += 1;
+    }
+    result
 }
 
 /// A rule with lint metadata.

@@ -69,7 +69,7 @@ impl<DB: DatabaseLike + 'static> From<ExposedDefinerOverProtectedTable<DB>>
 impl<DB> Rule for ExposedDefinerOverProtectedTable<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "ExposedDefinerOverProtectedTable",
+            name: rule_name!(ExposedDefinerOverProtectedTable),
             group: LintGroup::Suspicious,
             rationale: "A `SECURITY DEFINER` function reads and writes with its owner's rights, so letting `PUBLIC` or an anonymous role execute it hands every such caller the owner's view of the row-level-security tables its body touches.",
             source: Some("https://supabase.com/docs/guides/database/database-advisors"),

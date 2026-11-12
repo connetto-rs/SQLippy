@@ -62,7 +62,7 @@ impl<DB: DatabaseLike + 'static> From<ReachableTableWithoutRowLevelSecurity<DB>>
 impl<DB> Rule for ReachableTableWithoutRowLevelSecurity<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "ReachableTableWithoutRowLevelSecurity",
+            name: rule_name!(ReachableTableWithoutRowLevelSecurity),
             group: LintGroup::Suspicious,
             rationale: "A table without row-level security shows every row to each role that reaches it, so a client role reads or changes all of them.",
             source: Some(
