@@ -33,7 +33,7 @@ for error in constrainer.diagnostics(&database) {
 }
 ```
 
-A rule registered on its own, including a single rule converted with `.into()`, runs at least at `warn`. `DefaultConstrainer` registers every rule at its group's default. `allow_policy` excuses one rule's findings on a reviewed policy, and an allowance that excuses nothing fails validation.
+A rule registered on its own, including a single rule converted with `.into()`, runs at least at `warn`. `DefaultConstrainer` uses group defaults, with `binary_send_failure` at `deny` and `unknown_binary_send` at `warn` only for tables selected by the deployment's binary replication methods. `allow_policy` excuses one rule's findings on a reviewed policy, and an allowance that excuses nothing fails validation.
 
 `validate_statement` and `statement_diagnostics` check one parsed statement against the schema with the query rules, such as `outer_column_capture` and `credential_setting_write`. `allow_statement` excuses one rule on a reviewed statement, and schema validation fails once that rule no longer reports it.
 
@@ -47,6 +47,6 @@ A rule registered on its own, including a single rule converted with `.into()`, 
 | `complexity` | `warn` | `duplicate_foreign_key`, `duplicate_check`, `duplicate_unique_index`, `redundant_extension_edge` |
 | `style` | `warn` | `mixed_case_table_name`, `mixed_case_column_name`, `mixed_case_foreign_key_name`, `non_snake_case_table_name`, `non_snake_case_column_name`, `singular_table_name`, `plural_column_name`, `reference_without_id_suffix`, `primary_key_not_named_id`, `serial_column`, `reserved_keyword_identifier` |
 | `pedantic` | `allow` | `array_membership_policy`, `references_granted_to_client_role`, `cascade_into_row_level_security_table`, `unchecked_past_timestamp`, `empty_text_allowed`, `scaled_numeric`, `narrow_integer_key`, `unlogged_table`, `wildcard_view`, `security_barrier_missing_on_filtering_view`, `nullable_unique_column`, `definer_takes_acting_user`, `random_order_limit`, `offset_paging`, `distinct_over_referenced_side`, `unindexed_filter`, `flag_not_boolean`, `uuid_stored_as_text`, `moment_stored_as_text`, `address_stored_as_text`, `json_stored_as_text`, `fractional_count` |
-| `restriction` | `allow` | `rust_keyword_table_name`, `rust_keyword_column_name`, `rust_keyword_foreign_key_name` |
+| `restriction` | `allow` | `rust_keyword_table_name`, `rust_keyword_column_name`, `rust_keyword_foreign_key_name`, `binary_send_failure`, `unknown_binary_send` |
 
 Each rule's documentation states what it reports, and its violations carry the rationale and source.

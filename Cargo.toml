@@ -17,6 +17,11 @@ thiserror = "2.0"
 heck = "0.5"
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main", features = ["visitor"] }
 
+[dev-dependencies]
+diesel = { git = "https://github.com/diesel-rs/diesel", branch = "main", features = ["postgres"] }
+pg_diesel = { git = "https://github.com/connetto-rs/pg_diesel", branch = "main" }
+testcontainers = { version = "0.28", features = ["blocking"] }
+
 # sql-traits requires `sqlparser` from crates.io and patches it to Apache main
 # in its own workspace only, so this crate repeats the patch to build a single
 # parser shared with its own dependency.

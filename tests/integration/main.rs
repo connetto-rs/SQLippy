@@ -1,6 +1,8 @@
 //! Integration tests of the public constrainer API, built as one test binary
 //! so the suite links `sqlippy` and its dependencies once.
 
+mod binary_send;
+mod binary_send_postgres;
 mod common;
 mod rule_examples;
 mod rule_findings;
