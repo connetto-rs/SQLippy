@@ -83,6 +83,10 @@ header .tagline a {
     border-bottom: 1px solid currentColor;
 }
 
+header .tagline .propose-link {
+    font-size: inherit;
+}
+
 /* Top-right action cluster: icon-only links (repo, sponsor heart). */
 .topbar-actions {
     display: flex;
