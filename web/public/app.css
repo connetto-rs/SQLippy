@@ -669,9 +669,17 @@ a.finding-rule:focus-visible {
 }
 
 .example-verdict {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
     margin: 0;
     color: var(--sqy-ok);
     font-size: 0.85rem;
+}
+
+.example-verdict svg {
+    flex: 0 0 auto;
+    margin-top: calc((1lh - 13px) / 2);
 }
 
 .example-findings {

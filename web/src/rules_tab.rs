@@ -248,7 +248,7 @@ fn ExamplePanel(
                 Ok(findings) if findings.is_empty() => rsx! {
                     p { class: "example-verdict clean",
                         Icon { width: 13, height: 13, icon: FaCircleCheck }
-                        " {rule} reports nothing here."
+                        span { "{rule} reports nothing here." }
                     }
                 },
                 Ok(findings) => rsx! {
