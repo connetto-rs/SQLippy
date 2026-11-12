@@ -20,6 +20,7 @@ use sqlparser::{
     parser::Parser,
 };
 
+use crate::rules::walk_support::walk;
 use crate::{deployment::Deployment, error::PolicyClause, rules::grant_support::is_client_written};
 
 /// A type or temporal construct a type rule reports.
@@ -167,7 +168,7 @@ impl Visitor for WrittenTypes {
 /// The flawed constructs written in a node.
 fn written_in<V: Visit + ?Sized>(node: &V) -> Vec<(TypeFlaw, String)> {
     let mut found = WrittenTypes::default();
-    let _ = node.visit(&mut found);
+    let _ = walk(node, &mut found);
     found.0
 }
 

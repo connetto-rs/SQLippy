@@ -4,9 +4,10 @@ use std::ops::ControlFlow;
 
 use sql_traits::traits::DatabaseLike;
 use sqlparser::ast::{
-    Expr, LimitClause, Offset, OrderByKind, Query, Statement, Value, ValueWithSpan, Visit, Visitor,
+    Expr, LimitClause, Offset, OrderByKind, Query, Statement, Value, ValueWithSpan, Visitor,
 };
 
+use crate::rules::walk_support::walk;
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
@@ -35,7 +36,7 @@ fn queries(statement: &Statement, pick: impl FnMut(&Query) -> Option<String>) ->
         pick,
         found: Vec::new(),
     };
-    let _ = statement.visit(&mut queries);
+    let _ = walk(statement, &mut queries);
     queries.found
 }
 

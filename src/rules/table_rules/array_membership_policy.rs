@@ -7,8 +7,9 @@ use sql_traits::{
     structs::{ColumnDefinition, ColumnScope, IdentifierCase},
     traits::{ColumnLike, DataTypeLike, DatabaseLike, PolicyLike, TableLike},
 };
-use sqlparser::ast::{BinaryOperator, Expr, Query, Visit, Visitor};
+use sqlparser::ast::{BinaryOperator, Expr, Query, Visitor};
 
+use crate::rules::walk_support::walk;
 use crate::{
     deployment::Deployment,
     error::{Interruption, PolicySite},
@@ -180,8 +181,7 @@ impl<DB: DatabaseLike> TableRule for ArrayMembershipPolicy<DB> {
                     depth: 0,
                     found: Vec::new(),
                 };
-                expression
-                    .visit(&mut memberships)
+                walk(expression, &mut memberships)
                     .break_value()
                     .map_or(Ok(()), Err)?;
                 for (column, test) in memberships.found {

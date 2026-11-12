@@ -10,9 +10,10 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArguments, InTarget, JoinConstraint, JoinOperator,
-    Query, Select, SelectItem, SetExpr, UnaryOperator, Value, Visit, Visitor,
+    Query, Select, SelectItem, SetExpr, UnaryOperator, Value, Visitor,
 };
 
+use crate::rules::walk_support::walk;
 use crate::{
     deployment::Deployment,
     rules::policy_support::{conjuncts, is_column_reference, sql_set_body, walked_clauses},
@@ -202,18 +203,17 @@ impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
     /// Reads a policy expression on `table`: its comparisons with a
     /// credential, its sublinks and the helpers it calls.
     fn expression(&mut self, table: &'db DB::Table, expression: &Expr) -> Result<(), LookupError> {
-        let mut walk = PolicyWalk {
+        let mut policy = PolicyWalk {
             table: ColumnScope::for_table(table, self.database, IdentifierCase::Folded),
             authority: self,
             depth: 0,
             fed: Vec::new(),
             helpers: Vec::new(),
         };
-        expression
-            .visit(&mut walk)
+        walk(expression, &mut policy)
             .break_value()
             .map_or(Ok(()), Err)?;
-        let helpers = walk.helpers;
+        let helpers = policy.helpers;
         self.read_helpers(helpers)
     }
 
@@ -221,7 +221,7 @@ impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
     /// `fed`.
     fn query(&mut self, query: &Query, fed: bool) -> Result<(), LookupError> {
         let root = ColumnScope::from_query(query, self.database, IdentifierCase::Folded)?;
-        let mut walk = QueryWalk {
+        let mut reads = QueryWalk {
             authority: &*self,
             root: &root,
             top: std::ptr::from_ref(query),
@@ -234,8 +234,8 @@ impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
             },
             helpers: Vec::new(),
         };
-        query.visit(&mut walk).break_value().map_or(Ok(()), Err)?;
-        let (found, helpers) = (walk.found, walk.helpers);
+        walk(query, &mut reads).break_value().map_or(Ok(()), Err)?;
+        let (found, helpers) = (reads.found, reads.helpers);
         self.columns.scopes.extend(found.scopes);
         self.columns.subjects.extend(found.subjects);
         self.columns.attributes.extend(found.attributes);

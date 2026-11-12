@@ -8,9 +8,10 @@ use sql_traits::{
     traits::DatabaseLike,
 };
 use sqlparser::ast::{
-    Expr, Ident, InTarget, ObjectName, Query, Select, SetExpr, Statement, Visit, Visitor,
+    Expr, Ident, InTarget, ObjectName, Query, Select, SetExpr, Statement, Visitor,
 };
 
+use crate::rules::walk_support::walk;
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
@@ -207,7 +208,7 @@ impl<DB: DatabaseLike> QueryRule for OuterColumnCapture<DB> {
             scope: &scope,
             found: Vec::new(),
         };
-        root.visit(&mut captures)
+        walk(&*root, &mut captures)
             .break_value()
             .map_or(Ok(()), Err)?;
         for (subquery, message) in captures.found {

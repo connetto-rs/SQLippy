@@ -2,9 +2,10 @@
 
 use std::ops::ControlFlow;
 
-use sqlparser::ast::{BinaryOperator, Expr, Visit, Visitor};
+use sqlparser::ast::{BinaryOperator, Expr, Visitor};
 
 use crate::rules::policy_support::is_column_reference;
+use crate::rules::walk_support::walk;
 
 /// Functions reading the current time.
 const CLOCKS: [&str; 9] = [
@@ -41,7 +42,7 @@ fn is_constant(expression: &Expr) -> bool {
             ControlFlow::Continue(())
         }
     }
-    expression.visit(&mut Found).is_continue()
+    walk(expression, &mut Found).is_continue()
 }
 
 /// The clock call an upper bound by the current time reads, with an

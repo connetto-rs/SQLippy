@@ -1,1 +1,4 @@
 doc-valid-idents = ["SQLippy", ".."]
+disallowed-methods = [
+    { path = "sqlparser::ast::Visit::visit", reason = "walk through rules::walk_support::walk, which compiles the traversal once per break type" },
+]

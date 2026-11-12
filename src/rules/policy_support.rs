@@ -17,6 +17,7 @@ use sqlparser::{
     parser::Parser,
 };
 
+use crate::rules::walk_support::walk;
 use crate::{deployment::Deployment, error::PolicyClause};
 
 /// Statement command whose policies PostgreSQL applies.
@@ -217,7 +218,7 @@ pub(crate) fn holds_sublink_or_call(expression: &Expr) -> bool {
             }
         }
     }
-    expression.visit(&mut Found).is_break()
+    walk(expression, &mut Found).is_break()
 }
 
 /// Finds column references to the policy's table, or to one of its columns,
@@ -321,11 +322,14 @@ impl<DB: DatabaseLike> Visitor for RowReferences<'_, DB> {
             return ControlFlow::Continue(());
         }
         let reads = match ColumnScope::from_query(query, self.database, IdentifierCase::Folded) {
-            Ok(local) => match query.visit(&mut SublinkReferences {
-                outer: self,
-                local,
-                depth: 0,
-            }) {
+            Ok(local) => match walk(
+                query,
+                &mut SublinkReferences {
+                    outer: self,
+                    local,
+                    depth: 0,
+                },
+            ) {
                 ControlFlow::Continue(()) => Ok(false),
                 ControlFlow::Break(outcome) => outcome.map(|()| true),
             },
@@ -453,7 +457,7 @@ impl Visitor for CallerTerm<'_> {
 /// Whether the node holds a term identifying the caller: a declared
 /// credential, a `current_setting` call or a read of the current role.
 pub(crate) fn holds_caller<V: Visit>(deployment: &Deployment, node: &V) -> bool {
-    node.visit(&mut CallerTerm(deployment)).is_break()
+    walk(node, &mut CallerTerm(deployment)).is_break()
 }
 
 /// Whether a policy operand on `table` is derived from the caller alone,
@@ -485,7 +489,7 @@ fn row_references<'db, DB: DatabaseLike, V: Visit>(
         outside: false,
         correlated: Vec::new(),
     };
-    match node.visit(&mut references) {
+    match walk(node, &mut references) {
         ControlFlow::Break(Some(error)) => Err(error),
         ControlFlow::Continue(()) | ControlFlow::Break(None) => Ok(references),
     }

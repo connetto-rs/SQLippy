@@ -11,9 +11,10 @@ use sql_traits::{
 use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr,
     InTarget, JoinConstraint, JoinOperator, Query, Select, SelectItem, SetExpr, SetOperator,
-    UnaryOperator, Visit, Visitor,
+    UnaryOperator, Visitor,
 };
 
+use crate::rules::walk_support::walk;
 use crate::{
     deployment::Deployment,
     rules::policy_support::{may_aggregate, sql_set_body},
@@ -338,7 +339,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
             else {
                 continue;
             };
-            if let ControlFlow::Break(outcome) = expression.visit(&mut finder) {
+            if let ControlFlow::Break(outcome) = walk(expression, &mut finder) {
                 return outcome.map(|()| true);
             }
         }

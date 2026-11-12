@@ -89,6 +89,7 @@ mod policy_support;
 pub mod rust_keywords;
 mod statement_support;
 mod type_support;
+mod walk_support;
 
 #[cfg(test)]
 mod tests {

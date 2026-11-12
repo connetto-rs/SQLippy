@@ -9,6 +9,7 @@ use sql_traits::{
 };
 use sqlparser::ast::{Expr, Query, Visit, Visitor};
 
+use crate::rules::walk_support::walk;
 use crate::{
     deployment::Deployment,
     error::{Interruption, PolicyClause, PolicySite},
@@ -54,7 +55,7 @@ impl<DB: DatabaseLike> Judge<'_, '_, DB> {
     fn derives<V: Visit>(&self, node: &V, in_sublink: bool) -> Result<bool, LookupError> {
         if in_sublink {
             return Ok(holds_caller(self.deployment, node)
-                && node.visit(&mut ColumnReference).is_continue());
+                && walk(node, &mut ColumnReference).is_continue());
         }
         derives_from_caller(self.database, self.table, self.deployment, node)
     }
@@ -151,12 +152,15 @@ impl<DB: DatabaseLike> Visitor for Filters<'_, '_, DB> {
         ColumnScope::from_query(query, self.judge.database, IdentifierCase::Folded).map_or_else(
             ControlFlow::Break,
             |local| {
-                query.visit(&mut SublinkFilters {
-                    judge: &self.judge,
-                    found: &mut self.found,
-                    local,
-                    depth: 0,
-                })
+                walk(
+                    query,
+                    &mut SublinkFilters {
+                        judge: &self.judge,
+                        found: &mut self.found,
+                        local,
+                        depth: 0,
+                    },
+                )
             },
         )
     }
@@ -275,8 +279,7 @@ impl<DB: DatabaseLike> TableRule for UnindexedPolicyFilter<DB> {
                 depth: 0,
                 found: Vec::new(),
             };
-            expression
-                .visit(&mut filters)
+            walk(expression, &mut filters)
                 .break_value()
                 .map_or(Ok(()), Err)?;
             for Unindexed {
