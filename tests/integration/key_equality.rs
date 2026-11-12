@@ -16,7 +16,7 @@ fn findings<C: Constrainer<Database = ParserDB>>(
         .diagnostics(&database)
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) => (violation.rule().name == "KeyWithoutExactEquality")
+            Error::Violation(violation) => (violation.rule().name == "key_without_exact_equality")
                 .then(|| (violation.level(), violation.object().to_owned())),
             Error::Inactive(_) => None,
             other => panic!("unexpected failure: {other}"),

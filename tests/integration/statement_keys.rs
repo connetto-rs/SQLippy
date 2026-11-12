@@ -480,17 +480,17 @@ fn the_default_constrainer_runs_key_rules_at_their_group_levels() {
     assert_eq!(
         rules(&constrainer),
         [
-            ("UnorderedLimit", Level::Warn),
-            ("UnlinkedFromItem", Level::Warn)
+            ("unordered_limit", Level::Warn),
+            ("unlinked_from_item", Level::Warn)
         ]
     );
-    constrainer.set_rule_level("DistinctOverReferencedSide", Level::Warn);
+    constrainer.set_rule_level("distinct_over_referenced_side", Level::Warn);
     assert_eq!(
         rules(&constrainer),
         [
-            ("UnorderedLimit", Level::Warn),
-            ("UnlinkedFromItem", Level::Warn),
-            ("DistinctOverReferencedSide", Level::Warn),
+            ("unordered_limit", Level::Warn),
+            ("unlinked_from_item", Level::Warn),
+            ("distinct_over_referenced_side", Level::Warn),
         ]
     );
 }

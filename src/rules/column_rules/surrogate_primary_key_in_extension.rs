@@ -1,4 +1,4 @@
-//! Submodule providing the `NoSurrogatePrimaryKeyInExtension` constraint,
+//! Submodule providing the `SurrogatePrimaryKeyInExtension` constraint,
 //! which enforces that primary-key columns in extension tables are not
 //! surrogate keys.
 
@@ -21,13 +21,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating schemas with the
-/// `NoSurrogatePrimaryKeyInExtension` constraint.
+/// `surrogate_primary_key_in_extension` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> =
-///     NoSurrogatePrimaryKeyInExtension::default().into();
+///     SurrogatePrimaryKeyInExtension::default().into();
 ///
 /// let invalid_schema = ParserDB::parse::<GenericDialect>(
 ///     "
@@ -62,28 +62,28 @@ use crate::{
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema).is_ok());
 /// ```
-pub struct NoSurrogatePrimaryKeyInExtension<DB>(std::marker::PhantomData<DB>);
+pub struct SurrogatePrimaryKeyInExtension<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for NoSurrogatePrimaryKeyInExtension<DB> {
+impl<DB> Default for SurrogatePrimaryKeyInExtension<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<NoSurrogatePrimaryKeyInExtension<DB>>
+impl<DB: DatabaseLike + 'static> From<SurrogatePrimaryKeyInExtension<DB>>
     for GenericConstrainer<DB>
 {
-    fn from(constraint: NoSurrogatePrimaryKeyInExtension<DB>) -> Self {
+    fn from(constraint: SurrogatePrimaryKeyInExtension<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_column_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for NoSurrogatePrimaryKeyInExtension<DB> {
+impl<DB> Rule for SurrogatePrimaryKeyInExtension<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "NoSurrogatePrimaryKeyInExtension",
+            name: rule_name!(SurrogatePrimaryKeyInExtension),
             group: LintGroup::Correctness,
             rationale: "An extension row shares its parent's primary key, so a generated or defaulted key cannot hold the parent's value.",
             source: None,
@@ -99,7 +99,7 @@ impl<DB> Rule for NoSurrogatePrimaryKeyInExtension<DB> {
     }
 }
 
-impl<DB: DatabaseLike> ColumnRule for NoSurrogatePrimaryKeyInExtension<DB> {
+impl<DB: DatabaseLike> ColumnRule for SurrogatePrimaryKeyInExtension<DB> {
     type Database = DB;
 
     fn check_column(

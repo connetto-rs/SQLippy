@@ -203,7 +203,7 @@ impl<DB: DatabaseLike + 'static> From<UncachedPolicyCall<DB>> for GenericConstra
 impl<DB> Rule for UncachedPolicyCall<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "UncachedPolicyCall",
+            name: rule_name!(UncachedPolicyCall),
             group: LintGroup::Perf,
             rationale: "PostgreSQL evaluates a policy against each candidate row, so a call that reads nothing from the row runs once per row unless it is wrapped as `(SELECT call)`, which the planner evaluates once.",
             source: Some(

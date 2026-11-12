@@ -151,7 +151,7 @@ impl<DB: DatabaseLike + 'static> From<NestedPolicySubquery<DB>> for GenericConst
 impl<DB> Rule for NestedPolicySubquery<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "NestedPolicySubquery",
+            name: rule_name!(NestedPolicySubquery),
             group: LintGroup::Perf,
             rationale: "PostgreSQL applies a read table's own policies inside a policy subquery, so a subquery in them expands again on every evaluation, while a `SECURITY DEFINER` helper reads the table once without them.",
             source: Some(

@@ -22,7 +22,7 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `ExtensionForeignKeyOnDeleteCascade` constraint.
+/// `extension_foreign_key_on_delete_cascade` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
@@ -109,7 +109,7 @@ impl<DB: DatabaseLike + 'static> From<ExtensionForeignKeyOnDeleteCascade<DB>>
 impl<C> Rule for ExtensionForeignKeyOnDeleteCascade<C> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "ExtensionForeignKeyOnDeleteCascade",
+            name: rule_name!(ExtensionForeignKeyOnDeleteCascade),
             group: LintGroup::Suspicious,
             rationale: "PostgreSQL's default `NO ACTION` refuses to delete a parent row while extension rows reference it, so extension rows have to follow their parent with `ON DELETE CASCADE`.",
             source: Some(

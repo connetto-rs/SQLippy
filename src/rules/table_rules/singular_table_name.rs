@@ -1,4 +1,4 @@
-//! Submodule providing the `PluralTableName` constraint, which enforces that
+//! Submodule providing the `SingularTableName` constraint, which enforces that
 //! the last segment of table names is plural.
 
 use inflection_rs::inflection::pluralize;
@@ -19,13 +19,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `PluralTableName` constraint.
+/// `singular_table_name` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = PluralTableName::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = SingularTableName::default().into();
 ///
 /// // Invalid singular table names
 /// let invalid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE user (id INT);").unwrap();
@@ -60,26 +60,26 @@ use crate::{
 /// let invalid_taxon = ParserDB::parse::<GenericDialect>("CREATE TABLE taxon (id INT);").unwrap();
 /// assert!(constrainer.validate_schema(&invalid_taxon).is_err());
 /// ```
-pub struct PluralTableName<DB>(std::marker::PhantomData<DB>);
+pub struct SingularTableName<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for PluralTableName<DB> {
+impl<DB> Default for SingularTableName<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<PluralTableName<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: PluralTableName<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<SingularTableName<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: SingularTableName<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_table_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for PluralTableName<DB> {
+impl<DB> Rule for SingularTableName<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "PluralTableName",
+            name: rule_name!(SingularTableName),
             group: LintGroup::Style,
             rationale: "One naming convention keeps queries predictable, and this crate names a table after the collection of rows it holds.",
             source: None,
@@ -93,7 +93,7 @@ impl<DB> Rule for PluralTableName<DB> {
     }
 }
 
-impl<DB: DatabaseLike> TableRule for PluralTableName<DB> {
+impl<DB: DatabaseLike> TableRule for SingularTableName<DB> {
     type Database = DB;
 
     fn check_table(

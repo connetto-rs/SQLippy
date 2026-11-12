@@ -227,7 +227,7 @@ impl<DB: DatabaseLike + 'static> From<UnindexedPolicyFilter<DB>> for GenericCons
 impl<DB> Rule for UnindexedPolicyFilter<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "UnindexedPolicyFilter",
+            name: rule_name!(UnindexedPolicyFilter),
             group: LintGroup::Perf,
             rationale: "PostgreSQL evaluates the policy against each candidate row, so a column the policy filters on without an index led by it turns a read into a sequential scan.",
             source: Some(

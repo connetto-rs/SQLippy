@@ -143,7 +143,7 @@ fn tables_with_row_level_security_and_no_policy_are_reported() {
 fn permissive_policies_sharing_a_role_and_command_are_reported_once() {
     let found = findings(
         &GenericConstrainer::from(MultiplePermissivePolicies::default()),
-        "MultiplePermissivePolicies",
+        "multiple_permissive_policies",
         "CREATE ROLE staff; CREATE ROLE manager IN ROLE staff; CREATE ROLE other;
          CREATE TABLE orders (owner TEXT, is_admin BOOL); ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
          CREATE POLICY own ON orders FOR SELECT USING (owner = current_user);
@@ -210,9 +210,9 @@ fn the_default_constrainer_applies_each_group() {
         GRANT SELECT ON visible TO PUBLIC;";
     let constrainer = DefaultConstrainer::<ParserDB>::default();
     let counts: Vec<(&str, usize)> = [
-        "RowLevelSecurityWithoutPolicies",
-        "AutovacuumDisabledTable",
-        "SecurityBarrierMissingOnFilteringView",
+        "row_level_security_without_policies",
+        "autovacuum_disabled_table",
+        "security_barrier_missing_on_filtering_view",
     ]
     .into_iter()
     .map(|rule| (rule, findings(&constrainer, rule, sql).len()))
@@ -220,9 +220,9 @@ fn the_default_constrainer_applies_each_group() {
     assert_eq!(
         counts,
         [
-            ("RowLevelSecurityWithoutPolicies", 1),
-            ("AutovacuumDisabledTable", 1),
-            ("SecurityBarrierMissingOnFilteringView", 0)
+            ("row_level_security_without_policies", 1),
+            ("autovacuum_disabled_table", 1),
+            ("security_barrier_missing_on_filtering_view", 0)
         ]
     );
 }

@@ -1,4 +1,4 @@
-//! Submodule providing the `UniqueCheckRule` constraint, which enforces
+//! Submodule providing the `DuplicateCheck` constraint, which enforces
 //! that check constraints are unique per table, meaning that no two check
 //! constraints have the same clause in a single table.
 
@@ -16,13 +16,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `UniqueCheckRule` rule.
+/// `duplicate_check` rule.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = UniqueCheckRule::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = DuplicateCheck::default().into();
 ///
 /// let invalid_schema =
 ///     ParserDB::parse::<GenericDialect>("CREATE TABLE MyTable (id INT, CHECK (id > 0), CHECK (id > 0));")
@@ -33,26 +33,26 @@ use crate::{
 ///     ParserDB::parse::<GenericDialect>("CREATE TABLE mytable (id INT, CHECK (id > 0));").unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema).is_ok());
 /// ```
-pub struct UniqueCheckRule<DB>(std::marker::PhantomData<DB>);
+pub struct DuplicateCheck<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for UniqueCheckRule<DB> {
+impl<DB> Default for DuplicateCheck<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<UniqueCheckRule<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: UniqueCheckRule<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<DuplicateCheck<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: DuplicateCheck<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_table_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for UniqueCheckRule<DB> {
+impl<DB> Rule for DuplicateCheck<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "UniqueCheckRule",
+            name: rule_name!(DuplicateCheck),
             group: LintGroup::Complexity,
             rationale: "A duplicated check constraint enforces nothing more and is evaluated again on every write.",
             source: None,
@@ -66,7 +66,7 @@ impl<DB> Rule for UniqueCheckRule<DB> {
     }
 }
 
-impl<DB: DatabaseLike> TableRule for UniqueCheckRule<DB> {
+impl<DB: DatabaseLike> TableRule for DuplicateCheck<DB> {
     type Database = DB;
 
     fn check_table(

@@ -1,4 +1,4 @@
-//! Submodule providing the `LowercaseColumnName` constraint, which enforces
+//! Submodule providing the `MixedCaseColumnName` constraint, which enforces
 //! that column names are lowercase.
 
 use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
@@ -14,13 +14,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `LowercaseColumnName` constraint.
+/// `mixed_case_column_name` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = LowercaseColumnName::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = MixedCaseColumnName::default().into();
 ///
 /// let invalid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE mytable (Id INT);").unwrap();
 /// assert!(constrainer.validate_schema(&invalid_schema).is_err());
@@ -28,26 +28,26 @@ use crate::{
 /// let valid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE mytable (id INT);").unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema).is_ok());
 /// ```
-pub struct LowercaseColumnName<DB>(std::marker::PhantomData<DB>);
+pub struct MixedCaseColumnName<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for LowercaseColumnName<DB> {
+impl<DB> Default for MixedCaseColumnName<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<LowercaseColumnName<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: LowercaseColumnName<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<MixedCaseColumnName<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: MixedCaseColumnName<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_column_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for LowercaseColumnName<DB> {
+impl<DB> Rule for MixedCaseColumnName<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "LowercaseColumnName",
+            name: rule_name!(MixedCaseColumnName),
             group: LintGroup::Style,
             rationale: "PostgreSQL folds unquoted identifiers to lower case, so a mixed-case name has to be quoted in every query.",
             source: Some(
@@ -63,7 +63,7 @@ impl<DB> Rule for LowercaseColumnName<DB> {
     }
 }
 
-impl<DB: DatabaseLike> ColumnRule for LowercaseColumnName<DB> {
+impl<DB: DatabaseLike> ColumnRule for MixedCaseColumnName<DB> {
     type Database = DB;
 
     fn check_column(

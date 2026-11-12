@@ -55,7 +55,7 @@ impl<DB: DatabaseLike + 'static> From<ReachableForeignTable<DB>> for GenericCons
 impl<DB> Rule for ReachableForeignTable<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "ReachableForeignTable",
+            name: rule_name!(ReachableForeignTable),
             group: LintGroup::Suspicious,
             rationale: "PostgreSQL applies no row-level security to a foreign table, so a client role reaching one reads or changes every remote row.",
             source: Some(

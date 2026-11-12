@@ -5,13 +5,13 @@ use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 const RULES: [&str; 7] = [
-    "NullableCompositeForeignKey",
-    "UnindexedForeignKey",
-    "SerialColumn",
-    "NarrowIntegerKey",
-    "ClientWrittenCounterKey",
-    "PrefixRedundantIndex",
-    "ScaledNumeric",
+    "nullable_composite_foreign_key",
+    "unindexed_foreign_key",
+    "serial_column",
+    "narrow_integer_key",
+    "client_written_counter_key",
+    "prefix_redundant_index",
+    "scaled_numeric",
 ];
 
 /// Rule, level and object of every finding of this group.
@@ -51,14 +51,14 @@ fn of(rule: &str, sql: &str) -> Vec<String> {
         .collect()
 }
 
-/// The first quoted name of every `PrefixRedundantIndex` message.
+/// The first quoted name of every `prefix_redundant_index` message.
 fn redundant(sql: &str) -> Vec<String> {
     let database = ParserDB::parse::<PostgreSqlDialect>(sql).expect("schema parses");
     every_rule()
         .diagnostics(&database)
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == "PrefixRedundantIndex" => {
+            Error::Violation(violation) if violation.rule().name == "prefix_redundant_index" => {
                 violation.message().split('\'').nth(1).map(str::to_owned)
             }
             _ => None,
@@ -71,7 +71,7 @@ const PARENT: &str = "CREATE TABLE p (a INT NOT NULL, b INT NOT NULL, PRIMARY KE
 #[test]
 fn a_composite_key_that_can_point_nowhere_is_reported() {
     let found = of(
-        "NullableCompositeForeignKey",
+        "nullable_composite_foreign_key",
         &format!(
             "{PARENT}
              CREATE TABLE simple (a INT, b INT NOT NULL, FOREIGN KEY (a, b) REFERENCES p (a, b));
@@ -88,7 +88,7 @@ fn a_composite_key_that_can_point_nowhere_is_reported() {
 #[test]
 fn a_foreign_key_no_index_leads_with_is_reported() {
     let found = of(
-        "UnindexedForeignKey",
+        "unindexed_foreign_key",
         &format!(
             "{PARENT}
              CREATE TABLE bare (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
@@ -122,9 +122,9 @@ fn counters_and_narrow_keys_are_reported_per_table_kind() {
         CREATE TABLE wide (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY);
         CREATE TABLE notes (id BIGSERIAL PRIMARY KEY);
         CREATE TABLE notes_seq (id BIGINT PRIMARY KEY DEFAULT nextval('s'));";
-    assert_eq!(of("SerialColumn", sql), ["logs.id", "logs.big"]);
-    assert_eq!(of("NarrowIntegerKey", sql), ["logs.id", "logs.code"]);
-    assert_eq!(of("ClientWrittenCounterKey", sql), ["notes.id"]);
+    assert_eq!(of("serial_column", sql), ["logs.id", "logs.big"]);
+    assert_eq!(of("narrow_integer_key", sql), ["logs.id", "logs.code"]);
+    assert_eq!(of("client_written_counter_key", sql), ["notes.id"]);
 }
 
 #[test]
@@ -184,15 +184,15 @@ fn each_rule_registered_alone_runs_at_warn() {
     for (constrainer, rule) in [
         (
             GenericConstrainer::from(NullableCompositeForeignKey::default()),
-            "NullableCompositeForeignKey",
+            "nullable_composite_foreign_key",
         ),
         (
             GenericConstrainer::from(UnindexedForeignKey::default()),
-            "UnindexedForeignKey",
+            "unindexed_foreign_key",
         ),
         (
             GenericConstrainer::from(PrefixRedundantIndex::default()),
-            "PrefixRedundantIndex",
+            "prefix_redundant_index",
         ),
     ] {
         let found = findings(&constrainer, &sql);
@@ -216,9 +216,9 @@ fn the_default_constrainer_applies_each_group() {
     assert_eq!(
         levels,
         [
-            ("SerialColumn".to_owned(), Level::Warn),
-            ("NullableCompositeForeignKey".to_owned(), Level::Warn),
-            ("UnindexedForeignKey".to_owned(), Level::Warn),
+            ("serial_column".to_owned(), Level::Warn),
+            ("nullable_composite_foreign_key".to_owned(), Level::Warn),
+            ("unindexed_foreign_key".to_owned(), Level::Warn),
         ]
     );
 }

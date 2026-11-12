@@ -255,7 +255,7 @@ fn the_credential_rule_is_inactive_without_declared_credentials() {
     let database = parse(LOGINS);
     assert_eq!(
         inactive_declarations(&constrainer),
-        [("CredentialSettingWrite", Declaration::Credentials)]
+        [("credential_setting_write", Declaration::Credentials)]
     );
     assert_eq!(
         statement_findings(&constrainer, &database, "SET app.user_id = 'alice'"),
@@ -467,18 +467,18 @@ fn the_default_constrainer_runs_shape_rules_at_their_group_levels() {
     };
     assert_eq!(
         rules(&constrainer, "DELETE FROM notes"),
-        [("UnfilteredWrite", Level::Warn)]
+        [("unfiltered_write", Level::Warn)]
     );
     assert_eq!(
         rules(&constrainer, "SET app.user_id = 'alice'"),
-        [("CredentialSettingWrite", Level::Deny)]
+        [("credential_setting_write", Level::Deny)]
     );
     assert_eq!(
         rules(
             &constrainer,
             "SELECT id FROM teams WHERE id IN (SELECT id FROM banned)"
         ),
-        [("OuterColumnCapture", Level::Deny)]
+        [("outer_column_capture", Level::Deny)]
     );
     let paging = "SELECT id FROM notes ORDER BY random() LIMIT 5 OFFSET 5";
     assert_eq!(rules(&constrainer, paging), []);
@@ -486,8 +486,8 @@ fn the_default_constrainer_runs_shape_rules_at_their_group_levels() {
     assert_eq!(
         rules(&constrainer, paging),
         [
-            ("RandomOrderLimit", Level::Warn),
-            ("OffsetPaging", Level::Warn)
+            ("random_order_limit", Level::Warn),
+            ("offset_paging", Level::Warn)
         ]
     );
 }

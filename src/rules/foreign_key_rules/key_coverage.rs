@@ -56,7 +56,7 @@ impl<DB: DatabaseLike + 'static> From<NullableCompositeForeignKey<DB>> for Gener
 impl<DB> Rule for NullableCompositeForeignKey<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "NullableCompositeForeignKey",
+            name: rule_name!(NullableCompositeForeignKey),
             group: LintGroup::Suspicious,
             rationale: "Under MATCH SIMPLE a composite foreign key with any column NULL needs no matching row, so a partly filled key references nothing.",
             source: Some("https://www.postgresql.org/docs/current/sql-createtable.html"),
@@ -153,7 +153,7 @@ impl<DB: DatabaseLike + 'static> From<UnindexedForeignKey<DB>> for GenericConstr
 impl<DB> Rule for UnindexedForeignKey<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "UnindexedForeignKey",
+            name: rule_name!(UnindexedForeignKey),
             group: LintGroup::Perf,
             rationale: "A delete of a referenced row or an update of its key checks the referencing table, which scans it when no index leads with the foreign key columns.",
             source: Some("https://www.postgresql.org/docs/current/ddl-constraints.html"),

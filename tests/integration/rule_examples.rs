@@ -3,6 +3,32 @@
 use sqlippy::prelude::*;
 use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 
+#[test]
+fn registered_rule_names_are_unique_snake_case() {
+    let constrainer = DefaultConstrainer::<ParserDB>::default();
+    let mut names = std::collections::HashMap::new();
+    for rule in constrainer.rules() {
+        let metadata = rule.metadata();
+        let name = metadata.name;
+        if let Some(previous) = names.insert(name, metadata) {
+            assert!(
+                std::ptr::eq(previous, metadata),
+                "duplicate rule name {name}"
+            );
+        }
+        assert!(
+            !name.is_empty()
+                && !name.starts_with('_')
+                && !name.ends_with('_')
+                && !name.contains("__")
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
+            "invalid rule name {name}"
+        );
+    }
+}
+
 /// Whether a statement is one an application sends rather than schema DDL.
 fn is_application_statement(statement: &Statement) -> bool {
     matches!(

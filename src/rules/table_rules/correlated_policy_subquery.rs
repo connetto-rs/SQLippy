@@ -58,7 +58,7 @@ impl<DB: DatabaseLike + 'static> From<CorrelatedPolicySubquery<DB>> for GenericC
 impl<DB> Rule for CorrelatedPolicySubquery<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "CorrelatedPolicySubquery",
+            name: rule_name!(CorrelatedPolicySubquery),
             group: LintGroup::Perf,
             rationale: "PostgreSQL evaluates a policy against each candidate row, so a subquery joined to the row runs once per row, while a set of the caller's keys is computed once.",
             source: Some(

@@ -1,4 +1,4 @@
-//! Submodule providing the `LowercaseForeignKeyName` constraint, which enforces
+//! Submodule providing the `MixedCaseForeignKeyName` constraint, which enforces
 //! that foreign key names, when defined, are lowercase.
 
 use sql_traits::traits::{DatabaseLike, ForeignKeyLike};
@@ -15,13 +15,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `LowercaseForeignKeyName` constraint.
+/// `mixed_case_foreign_key_name` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = LowercaseForeignKeyName::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = MixedCaseForeignKeyName::default().into();
 ///
 /// let invalid_schema = ParserDB::parse::<GenericDialect>(
 ///     "CREATE TABLE mytable (id INT PRIMARY KEY, CONSTRAINT Fk FOREIGN KEY (id) REFERENCES mytable (id));",
@@ -41,26 +41,26 @@ use crate::{
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema2).is_ok());
 /// ```
-pub struct LowercaseForeignKeyName<C>(std::marker::PhantomData<C>);
+pub struct MixedCaseForeignKeyName<C>(std::marker::PhantomData<C>);
 
-impl<C> Default for LowercaseForeignKeyName<C> {
+impl<C> Default for MixedCaseForeignKeyName<C> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<LowercaseForeignKeyName<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: LowercaseForeignKeyName<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<MixedCaseForeignKeyName<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: MixedCaseForeignKeyName<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_foreign_key_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<C> Rule for LowercaseForeignKeyName<C> {
+impl<C> Rule for MixedCaseForeignKeyName<C> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "LowercaseForeignKeyName",
+            name: rule_name!(MixedCaseForeignKeyName),
             group: LintGroup::Style,
             rationale: "PostgreSQL folds unquoted identifiers to lower case, so a mixed-case name has to be quoted in every statement.",
             source: Some(
@@ -78,7 +78,7 @@ CREATE TABLE children (parent_id INT, CONSTRAINT parent_fk FOREIGN KEY (parent_i
     }
 }
 
-impl<DB: DatabaseLike> ForeignKeyRule for LowercaseForeignKeyName<DB> {
+impl<DB: DatabaseLike> ForeignKeyRule for MixedCaseForeignKeyName<DB> {
     type Database = DB;
 
     fn check_foreign_key(

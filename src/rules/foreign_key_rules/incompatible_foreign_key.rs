@@ -1,4 +1,4 @@
-//! Submodule providing the `CompatibleForeignKey` constraint, which enforces
+//! Submodule providing the `IncompatibleForeignKey` constraint, which enforces
 //! that foreign key columns are compatible with the referenced columns, i.e.
 //! have the same data type and are part of the same extension hierarchy.
 
@@ -22,13 +22,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `CompatibleForeignKey` constraint.
+/// `incompatible_foreign_key` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = CompatibleForeignKey::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = IncompatibleForeignKey::default().into();
 ///
 /// let invalid_data_type = ParserDB::parse::<GenericDialect>(
 ///     "
@@ -119,26 +119,26 @@ use crate::{
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema2).is_ok());
 /// ```
-pub struct CompatibleForeignKey<C>(std::marker::PhantomData<C>);
+pub struct IncompatibleForeignKey<C>(std::marker::PhantomData<C>);
 
-impl<C> Default for CompatibleForeignKey<C> {
+impl<C> Default for IncompatibleForeignKey<C> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<CompatibleForeignKey<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: CompatibleForeignKey<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<IncompatibleForeignKey<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: IncompatibleForeignKey<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_foreign_key_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<C> Rule for CompatibleForeignKey<C> {
+impl<C> Rule for IncompatibleForeignKey<C> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "CompatibleForeignKey",
+            name: rule_name!(IncompatibleForeignKey),
             group: LintGroup::Suspicious,
             rationale: "A foreign key whose columns differ in type from the referenced columns, or that links tables outside one extension hierarchy, usually points at the wrong column.",
             source: None,
@@ -154,7 +154,7 @@ CREATE TABLE children (parent_id INT REFERENCES parents (id));",
     }
 }
 
-impl<DB: DatabaseLike> CompatibleForeignKey<DB> {
+impl<DB: DatabaseLike> IncompatibleForeignKey<DB> {
     fn get_incompatibility_details(
         database: &DB,
         host_table: &<DB as DatabaseLike>::Table,
@@ -251,7 +251,7 @@ impl<DB: DatabaseLike> CompatibleForeignKey<DB> {
     }
 }
 
-impl<DB: DatabaseLike> ForeignKeyRule for CompatibleForeignKey<DB> {
+impl<DB: DatabaseLike> ForeignKeyRule for IncompatibleForeignKey<DB> {
     type Database = DB;
 
     fn check_foreign_key(

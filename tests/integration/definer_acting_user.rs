@@ -32,7 +32,7 @@ fn findings<C: Constrainer<Database = ParserDB>>(constrainer: &C, sql: &str) -> 
         .diagnostics(&database)
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == "DefinerTakesActingUser" => {
+            Error::Violation(violation) if violation.rule().name == "definer_takes_acting_user" => {
                 Some(format!(
                     "{:?} {}: {}",
                     violation.level(),
@@ -177,7 +177,7 @@ fn the_rule_is_pedantic_and_waits_for_a_credential() {
         constrainer
             .inactive_rules()
             .iter()
-            .all(|inactive| inactive.rule().name != "DefinerTakesActingUser")
+            .all(|inactive| inactive.rule().name != "definer_takes_acting_user")
     );
     constrainer.set_deployment(deployment());
     assert_eq!(findings(&constrainer, &function), Vec::<String>::new());
@@ -188,6 +188,6 @@ fn the_rule_is_pedantic_and_waits_for_a_credential() {
         constrainer
             .inactive_rules()
             .iter()
-            .any(|inactive| inactive.rule().name == "DefinerTakesActingUser")
+            .any(|inactive| inactive.rule().name == "definer_takes_acting_user")
     );
 }

@@ -138,7 +138,7 @@ impl<DB: DatabaseLike + 'static> From<OwnerRightsView<DB>> for GenericConstraine
 impl<DB> Rule for OwnerRightsView<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "OwnerRightsView",
+            name: rule_name!(OwnerRightsView),
             group: LintGroup::Suspicious,
             rationale: "A view without `security_invoker` applies its tables' row-level security as its owner, so an owner that bypasses the policies shows every caller every row, and an owner no policy applies to shows them none.",
             source: Some("https://www.postgresql.org/docs/current/sql-createview.html"),

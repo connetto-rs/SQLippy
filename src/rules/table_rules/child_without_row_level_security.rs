@@ -54,7 +54,7 @@ impl<DB: DatabaseLike + 'static> From<ChildWithoutRowLevelSecurity<DB>> for Gene
 impl<DB> Rule for ChildWithoutRowLevelSecurity<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "ChildWithoutRowLevelSecurity",
+            name: rule_name!(ChildWithoutRowLevelSecurity),
             group: LintGroup::Suspicious,
             rationale: "A child table's own policies apply when a query names it directly and its parents' policies are ignored, so a child without row-level security shows every row to a role granted on it.",
             source: Some("https://www.postgresql.org/docs/current/ddl-inherit.html"),

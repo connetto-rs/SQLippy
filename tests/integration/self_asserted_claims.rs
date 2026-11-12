@@ -27,7 +27,9 @@ fn outcomes<C: Constrainer<Database = ParserDB>>(constrainer: &C, sql: &str) -> 
         .diagnostics(&database)
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == "SelfAssertedClaimPolicy" => {
+            Error::Violation(violation)
+                if violation.rule().name == "self_asserted_claim_policy" =>
+            {
                 let Location::Policies(sites) = violation.location() else {
                     panic!("the rule reports policies");
                 };
@@ -179,7 +181,7 @@ fn the_rule_waits_for_a_declared_source_and_denies_by_default() {
         .into_iter()
         .any(|error| {
             matches!(&error, Error::Inactive(rule)
-                if rule.rule().name == "SelfAssertedClaimPolicy"
+                if rule.rule().name == "self_asserted_claim_policy"
                     && rule.missing() == Declaration::SelfAssertedSources)
         });
     assert!(inactive);

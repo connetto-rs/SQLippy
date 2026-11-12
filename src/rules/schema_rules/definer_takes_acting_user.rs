@@ -139,7 +139,7 @@ impl<DB: DatabaseLike + 'static> From<DefinerTakesActingUser<DB>> for GenericCon
 impl<DB> Rule for DefinerTakesActingUser<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "DefinerTakesActingUser",
+            name: rule_name!(DefinerTakesActingUser),
             group: LintGroup::Pedantic,
             rationale: "A definer function bypasses the caller's policies, so one that takes the acting user as an argument instead of reading the credential lets any caller act as anyone.",
             source: Some("https://makerkit.dev/blog/tutorials/supabase-rls-best-practices"),

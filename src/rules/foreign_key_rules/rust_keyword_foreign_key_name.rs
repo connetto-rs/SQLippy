@@ -1,4 +1,4 @@
-//! Submodule providing the `NoRustKeywordForeignKeyName` constraint, which
+//! Submodule providing the `RustKeywordForeignKeyName` constraint, which
 //! enforces that foreign key names are not Rust keywords.
 
 use sql_traits::traits::{DatabaseLike, ForeignKeyLike};
@@ -16,13 +16,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `NoRustKeywordForeignKeyName` constraint.
+/// `rust_keyword_foreign_key_name` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = NoRustKeywordForeignKeyName::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = RustKeywordForeignKeyName::default().into();
 ///
 /// let invalid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE other_table (id INT PRIMARY KEY); CREATE TABLE mytable (id INT, CONSTRAINT struct FOREIGN KEY (id) REFERENCES other_table (id));").unwrap();
 /// assert!(constrainer.validate_schema(&invalid_schema).is_err());
@@ -30,26 +30,26 @@ use crate::{
 /// let valid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE other_table (id INT PRIMARY KEY); CREATE TABLE mytable (id INT, CONSTRAINT my_struct FOREIGN KEY (id) REFERENCES other_table (id));").unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema).is_ok());
 /// ```
-pub struct NoRustKeywordForeignKeyName<DB>(std::marker::PhantomData<DB>);
+pub struct RustKeywordForeignKeyName<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for NoRustKeywordForeignKeyName<DB> {
+impl<DB> Default for RustKeywordForeignKeyName<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<NoRustKeywordForeignKeyName<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: NoRustKeywordForeignKeyName<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<RustKeywordForeignKeyName<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: RustKeywordForeignKeyName<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_foreign_key_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for NoRustKeywordForeignKeyName<DB> {
+impl<DB> Rule for RustKeywordForeignKeyName<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "NoRustKeywordForeignKeyName",
+            name: rule_name!(RustKeywordForeignKeyName),
             group: LintGroup::Restriction,
             rationale: "Code generated from the schema cannot name a Rust item after a keyword without a raw identifier.",
             source: Some("https://doc.rust-lang.org/reference/keywords.html"),
@@ -65,7 +65,7 @@ CREATE TABLE children (parent_id INT, CONSTRAINT parent_fk FOREIGN KEY (parent_i
     }
 }
 
-impl<DB: DatabaseLike> ForeignKeyRule for NoRustKeywordForeignKeyName<DB> {
+impl<DB: DatabaseLike> ForeignKeyRule for RustKeywordForeignKeyName<DB> {
     type Database = DB;
 
     fn check_foreign_key(

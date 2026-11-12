@@ -1,4 +1,4 @@
-//! Submodule providing the `NoRustKeywordTableName` constraint, which enforces
+//! Submodule providing the `RustKeywordTableName` constraint, which enforces
 //! that table names are not Rust keywords.
 
 use sql_traits::traits::{DatabaseLike, TableLike};
@@ -16,13 +16,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `NoRustKeywordTableName` constraint.
+/// `rust_keyword_table_name` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = NoRustKeywordTableName::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = RustKeywordTableName::default().into();
 ///
 /// let invalid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE struct (id INT);").unwrap();
 /// assert!(constrainer.validate_schema(&invalid_schema).is_err());
@@ -30,26 +30,26 @@ use crate::{
 /// let valid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE my_struct (id INT);").unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema).is_ok());
 /// ```
-pub struct NoRustKeywordTableName<DB>(std::marker::PhantomData<DB>);
+pub struct RustKeywordTableName<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for NoRustKeywordTableName<DB> {
+impl<DB> Default for RustKeywordTableName<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<NoRustKeywordTableName<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: NoRustKeywordTableName<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<RustKeywordTableName<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: RustKeywordTableName<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_table_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for NoRustKeywordTableName<DB> {
+impl<DB> Rule for RustKeywordTableName<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "NoRustKeywordTableName",
+            name: rule_name!(RustKeywordTableName),
             group: LintGroup::Restriction,
             rationale: "Code generated from the schema cannot name a Rust item after a keyword without a raw identifier.",
             source: Some("https://doc.rust-lang.org/reference/keywords.html"),
@@ -63,7 +63,7 @@ impl<DB> Rule for NoRustKeywordTableName<DB> {
     }
 }
 
-impl<DB: DatabaseLike> TableRule for NoRustKeywordTableName<DB> {
+impl<DB: DatabaseLike> TableRule for RustKeywordTableName<DB> {
     type Database = DB;
 
     fn check_table(

@@ -1,4 +1,4 @@
-//! Submodule providing the `PastTimeColumnRule` rule.
+//! Submodule providing the `UncheckedPastTimestamp` rule.
 
 use std::time::Duration;
 
@@ -35,7 +35,7 @@ use crate::{
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = PastTimeColumnRule::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = UncheckedPastTimestamp::default().into();
 ///
 /// // Invalid: created_at without constraint
 /// let invalid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE users (created_at TIMESTAMP);").unwrap();
@@ -45,26 +45,26 @@ use crate::{
 /// let valid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE users (created_at TIMESTAMP CHECK (created_at <= NOW()));").unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema).is_ok());
 /// ```
-pub struct PastTimeColumnRule<DB>(std::marker::PhantomData<DB>);
+pub struct UncheckedPastTimestamp<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for PastTimeColumnRule<DB> {
+impl<DB> Default for UncheckedPastTimestamp<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<PastTimeColumnRule<DB>> for GenericConstrainer<DB> {
-    fn from(rule: PastTimeColumnRule<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<UncheckedPastTimestamp<DB>> for GenericConstrainer<DB> {
+    fn from(rule: UncheckedPastTimestamp<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_column_rule(Box::new(rule));
         constrainer
     }
 }
 
-impl<DB> Rule for PastTimeColumnRule<DB> {
+impl<DB> Rule for UncheckedPastTimestamp<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "PastTimeColumnRule",
+            name: rule_name!(UncheckedPastTimestamp),
             group: LintGroup::Pedantic,
             rationale: "A timestamp recording when something happened cannot lie in the future.",
             source: None,
@@ -122,7 +122,7 @@ fn keeps_in_past(expression: &Expr, column: &str) -> bool {
     }
 }
 
-impl<DB: DatabaseLike> ColumnRule for PastTimeColumnRule<DB> {
+impl<DB: DatabaseLike> ColumnRule for UncheckedPastTimestamp<DB> {
     type Database = DB;
 
     fn check_column(

@@ -289,7 +289,7 @@ impl<DB: DatabaseLike + 'static> From<SubjectSettableAttribute<DB>> for GenericC
 impl<DB> Rule for SubjectSettableAttribute<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "SubjectSettableAttribute",
+            name: rule_name!(SubjectSettableAttribute),
             group: LintGroup::Suspicious,
             rationale: "Policies test an authority table's attribute columns to decide what the caller may reach, so a write policy that lets a row's subject set them lets the subject grant themselves that access.",
             source: Some(

@@ -25,7 +25,7 @@ fn findings<C: Constrainer<Database = ParserDB>>(constrainer: &C, sql: &str) -> 
         .diagnostics(&database)
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == "SelfGrantingWrite" => {
+            Error::Violation(violation) if violation.rule().name == "self_granting_write" => {
                 Some(format!("{:?} {}", violation.level(), violation.object()))
             }
             Error::Violation(_) | Error::Inactive(_) => None,
@@ -198,7 +198,7 @@ fn the_rule_waits_for_a_credential_and_warns_by_default() {
         constrainer
             .inactive_rules()
             .iter()
-            .any(|inactive| inactive.rule().name == "SelfGrantingWrite")
+            .any(|inactive| inactive.rule().name == "self_granting_write")
     );
     constrainer.set_deployment(deployment());
     assert_eq!(findings(&constrainer, &sql), ["Warn members.w"]);

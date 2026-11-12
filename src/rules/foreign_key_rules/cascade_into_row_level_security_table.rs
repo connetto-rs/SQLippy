@@ -56,7 +56,7 @@ impl<DB: DatabaseLike + 'static> From<CascadeIntoRowLevelSecurityTable<DB>>
 impl<DB> Rule for CascadeIntoRowLevelSecurityTable<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "CascadeIntoRowLevelSecurityTable",
+            name: rule_name!(CascadeIntoRowLevelSecurityTable),
             group: LintGroup::Pedantic,
             rationale: "Referential actions bypass row-level security, so a cascading delete removes, and a SET NULL, SET DEFAULT or ON UPDATE CASCADE rewrites, rows of the referencing table that its policies would refuse the caller.",
             source: Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html"),

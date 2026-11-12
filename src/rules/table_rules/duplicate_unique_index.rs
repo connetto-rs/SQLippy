@@ -1,4 +1,4 @@
-//! Submodule providing the `UniqueUniqueIndex` constraint, which enforces
+//! Submodule providing the `DuplicateUniqueIndex` constraint, which enforces
 //! that unique indices are unique per table, meaning that no two unique
 //! indices have the same columns in a single table.
 
@@ -16,13 +16,13 @@ use sql_traits::traits::{DatabaseLike, IndexLike, TableLike};
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `UniqueUniqueIndex` constraint.
+/// `duplicate_unique_index` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = UniqueUniqueIndex::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = DuplicateUniqueIndex::default().into();
 ///
 /// let invalid_schema =
 ///     ParserDB::parse::<GenericDialect>("CREATE TABLE MyTable (id INT, UNIQUE (id), UNIQUE (id));").unwrap();
@@ -31,26 +31,26 @@ use sql_traits::traits::{DatabaseLike, IndexLike, TableLike};
 /// let valid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE mytable (id INT, UNIQUE (id));").unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema).is_ok());
 /// ```
-pub struct UniqueUniqueIndex<DB>(std::marker::PhantomData<DB>);
+pub struct DuplicateUniqueIndex<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for UniqueUniqueIndex<DB> {
+impl<DB> Default for DuplicateUniqueIndex<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<UniqueUniqueIndex<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: UniqueUniqueIndex<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<DuplicateUniqueIndex<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: DuplicateUniqueIndex<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_table_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for UniqueUniqueIndex<DB> {
+impl<DB> Rule for DuplicateUniqueIndex<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "UniqueUniqueIndex",
+            name: rule_name!(DuplicateUniqueIndex),
             group: LintGroup::Complexity,
             rationale: "A duplicated unique index enforces nothing more and is maintained again on every write.",
             source: None,
@@ -64,7 +64,7 @@ impl<DB> Rule for UniqueUniqueIndex<DB> {
     }
 }
 
-impl<DB: DatabaseLike> TableRule for UniqueUniqueIndex<DB> {
+impl<DB: DatabaseLike> TableRule for DuplicateUniqueIndex<DB> {
     type Database = DB;
 
     fn check_table(

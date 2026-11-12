@@ -62,7 +62,7 @@ impl<DB: DatabaseLike + 'static> From<DeadPermissivePolicy<DB>> for GenericConst
 impl<DB> Rule for DeadPermissivePolicy<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "DeadPermissivePolicy",
+            name: rule_name!(DeadPermissivePolicy),
             group: LintGroup::Correctness,
             rationale: "PostgreSQL combines permissive policies with OR, so an always-true permissive policy decides every command and role it covers and the narrower policy never changes the outcome.",
             source: Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html"),

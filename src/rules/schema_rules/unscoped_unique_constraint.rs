@@ -80,7 +80,7 @@ impl<DB: DatabaseLike + 'static> From<UnscopedUniqueConstraintOnRowLevelSecurity
 impl<DB> Rule for UnscopedUniqueConstraintOnRowLevelSecurityTable<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "UnscopedUniqueConstraintOnRowLevelSecurityTable",
+            name: rule_name!(UnscopedUniqueConstraintOnRowLevelSecurityTable),
             group: LintGroup::Suspicious,
             rationale: "A unique constraint spans the whole table whatever its policies hide, so a duplicate-key error tells a caller that a value exists in rows it cannot see, such as another tenant's.",
             source: Some("https://www.bytebase.com/blog/postgres-row-level-security-footguns"),

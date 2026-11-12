@@ -60,7 +60,7 @@ impl<DB: DatabaseLike + 'static> From<DefinerWithoutSearchPath<DB>> for GenericC
 impl<DB> Rule for DefinerWithoutSearchPath<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "DefinerWithoutSearchPath",
+            name: rule_name!(DefinerWithoutSearchPath),
             group: LintGroup::Correctness,
             rationale: "A `SECURITY DEFINER` function without its own `search_path` resolves the names in its body under the caller's path, so a caller's temporary table or schema runs in their place with the owner's rights.",
             source: Some(

@@ -144,7 +144,7 @@ pub trait Constrainer: Default {
     /// let rule = constrainer
     ///     .rules()
     ///     .into_iter()
-    ///     .find(|rule| rule.metadata().name == "PluralTableName")
+    ///     .find(|rule| rule.metadata().name == "singular_table_name")
     ///     .unwrap();
     /// assert_eq!(rule.kind(), RuleKind::Table);
     /// assert_eq!(rule.level(), Level::Deny);
@@ -181,7 +181,7 @@ pub trait Constrainer: Default {
     ///     "CREATE TABLE Users (Id INT PRIMARY KEY); CREATE TABLE Teams (Id INT PRIMARY KEY);",
     /// )
     /// .unwrap();
-    /// let constrainer: GenericConstrainer<ParserDB> = LowercaseTableName::default().into();
+    /// let constrainer: GenericConstrainer<ParserDB> = MixedCaseTableName::default().into();
     /// assert_eq!(constrainer.diagnostics(&database).len(), 2);
     /// ```
     fn diagnostics(&self, database: &Self::Database) -> Vec<Error<Self::Database>> {

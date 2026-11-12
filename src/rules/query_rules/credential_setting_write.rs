@@ -415,7 +415,7 @@ impl<DB: DatabaseLike + 'static> From<CredentialSettingWrite<DB>> for GenericCon
 impl<DB> Rule for CredentialSettingWrite<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "CredentialSettingWrite",
+            name: rule_name!(CredentialSettingWrite),
             group: LintGroup::Correctness,
             rationale: "A client that writes the setting policies read as the caller's identity can act as any user.",
             source: Some("https://www.postgresql.org/docs/current/functions-admin.html"),

@@ -29,7 +29,7 @@ fn findings<C: Constrainer<Database = ParserDB>>(
         .diagnostics(&database)
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == "NestedPolicySubquery" => {
+            Error::Violation(violation) if violation.rule().name == "nested_policy_subquery" => {
                 Some((violation.level(), violation.object().to_owned()))
             }
             Error::Violation(_) | Error::Inactive(_) => None,

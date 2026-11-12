@@ -202,7 +202,7 @@ impl<DB: DatabaseLike + 'static> From<SelfAssertedClaimPolicy<DB>> for GenericCo
 impl<DB> Rule for SelfAssertedClaimPolicy<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "SelfAssertedClaimPolicy",
+            name: rule_name!(SelfAssertedClaimPolicy),
             group: LintGroup::Correctness,
             rationale: "A claim or column the caller sets says whatever the caller wants, so a policy granting access on it admits every caller who sets it.",
             source: Some("https://supabase.com/docs/guides/database/postgres/row-level-security"),

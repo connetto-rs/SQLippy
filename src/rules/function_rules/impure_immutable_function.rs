@@ -58,7 +58,7 @@ impl<DB: DatabaseLike + 'static> From<ImpureImmutableFunction<DB>> for GenericCo
 impl<DB> Rule for ImpureImmutableFunction<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "ImpureImmutableFunction",
+            name: rule_name!(ImpureImmutableFunction),
             group: LintGroup::Suspicious,
             rationale: "PostgreSQL assumes an IMMUTABLE function returns the same result for the same arguments forever, so it pre-evaluates calls and indexes and generated columns keep their results, which go stale when the function reads a table or a function that can change.",
             source: Some("https://www.postgresql.org/docs/current/xfunc-volatility.html"),

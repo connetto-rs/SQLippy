@@ -80,7 +80,7 @@ impl<DB: DatabaseLike + 'static> From<KeyWithoutExactEquality<DB>> for GenericCo
 impl<DB> Rule for KeyWithoutExactEquality<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "KeyWithoutExactEquality",
+            name: rule_name!(KeyWithoutExactEquality),
             group: LintGroup::Suspicious,
             rationale: "A key over a type whose equality is not exact merges values that differ or misses values that look the same, and engines without the type, such as SQLite, cannot reproduce PostgreSQL's comparison.",
             source: Some(

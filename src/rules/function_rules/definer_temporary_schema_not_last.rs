@@ -64,7 +64,7 @@ impl<DB: DatabaseLike + 'static> From<DefinerTemporarySchemaNotLast<DB>>
 impl<DB> Rule for DefinerTemporarySchemaNotLast<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "DefinerTemporarySchemaNotLast",
+            name: rule_name!(DefinerTemporarySchemaNotLast),
             group: LintGroup::Correctness,
             rationale: "PostgreSQL searches `pg_temp` first for relations unless the path places it, so a `SECURITY DEFINER` function whose path leaves it implicit or before the end reads a caller's temporary table in place of its own.",
             source: Some(

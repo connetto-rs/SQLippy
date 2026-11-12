@@ -1,4 +1,4 @@
-//! Submodule providing the `NonEmptyTextualColumnRule` rule.
+//! Submodule providing the `EmptyTextAllowed` rule.
 
 use crate::{
     error::Interruption,
@@ -16,7 +16,7 @@ use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, Database
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = NonEmptyTextualColumnRule::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = EmptyTextAllowed::default().into();
 ///
 /// // Invalid: textual column without a not-empty check
 /// let invalid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE users (name TEXT);").unwrap();
@@ -26,26 +26,26 @@ use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, Database
 /// let valid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE users (name TEXT CHECK (name <> ''));").unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema).is_ok());
 /// ```
-pub struct NonEmptyTextualColumnRule<DB>(std::marker::PhantomData<DB>);
+pub struct EmptyTextAllowed<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for NonEmptyTextualColumnRule<DB> {
+impl<DB> Default for EmptyTextAllowed<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<NonEmptyTextualColumnRule<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: NonEmptyTextualColumnRule<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<EmptyTextAllowed<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: EmptyTextAllowed<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_column_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for NonEmptyTextualColumnRule<DB> {
+impl<DB> Rule for EmptyTextAllowed<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "NonEmptyTextualColumnRule",
+            name: rule_name!(EmptyTextAllowed),
             group: LintGroup::Pedantic,
             rationale: "An empty string beside NULL gives a column two spellings of a missing value.",
             source: None,
@@ -59,7 +59,7 @@ impl<DB> Rule for NonEmptyTextualColumnRule<DB> {
     }
 }
 
-impl<DB: DatabaseLike> ColumnRule for NonEmptyTextualColumnRule<DB> {
+impl<DB: DatabaseLike> ColumnRule for EmptyTextAllowed<DB> {
     type Database = DB;
 
     fn check_column(

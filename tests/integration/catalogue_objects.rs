@@ -170,10 +170,10 @@ fn the_default_constrainer_applies_each_group() {
         CREATE VIEW star AS SELECT * FROM child;"#;
     let constrainer = DefaultConstrainer::<ParserDB>::default();
     let levels: Vec<(&str, usize)> = [
-        "TableInheritance",
-        "ReservedKeywordIdentifier",
-        "UnloggedTable",
-        "WildcardView",
+        "table_inheritance",
+        "reserved_keyword_identifier",
+        "unlogged_table",
+        "wildcard_view",
     ]
     .into_iter()
     .map(|rule| (rule, findings(&constrainer, rule, sql).len()))
@@ -181,10 +181,10 @@ fn the_default_constrainer_applies_each_group() {
     assert_eq!(
         levels,
         [
-            ("TableInheritance", 1),
-            ("ReservedKeywordIdentifier", 1),
-            ("UnloggedTable", 0),
-            ("WildcardView", 0)
+            ("table_inheritance", 1),
+            ("reserved_keyword_identifier", 1),
+            ("unlogged_table", 0),
+            ("wildcard_view", 0)
         ]
     );
 }

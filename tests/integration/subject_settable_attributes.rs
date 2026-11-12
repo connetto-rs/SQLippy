@@ -28,7 +28,9 @@ fn findings<C: Constrainer<Database = ParserDB>>(constrainer: &C, sql: &str) -> 
         .diagnostics(&database)
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == "SubjectSettableAttribute" => {
+            Error::Violation(violation)
+                if violation.rule().name == "subject_settable_attribute" =>
+            {
                 Some(format!("{:?} {}", violation.level(), violation.object()))
             }
             Error::Violation(_) | Error::Inactive(_) => None,
@@ -368,6 +370,6 @@ fn the_rule_needs_declared_credentials() {
             .iter()
             .map(|inactive| inactive.rule().name)
             .collect::<Vec<_>>(),
-        ["SubjectSettableAttribute"]
+        ["subject_settable_attribute"]
     );
 }

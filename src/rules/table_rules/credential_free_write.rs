@@ -77,7 +77,7 @@ impl<DB: DatabaseLike + 'static> From<CredentialFreeWrite<DB>> for GenericConstr
 impl<DB> Rule for CredentialFreeWrite<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "CredentialFreeWrite",
+            name: rule_name!(CredentialFreeWrite),
             group: LintGroup::Suspicious,
             rationale: "A write policy that can pass with every credential NULL lets a caller who never signed in insert, change or delete the rows it covers.",
             source: Some(

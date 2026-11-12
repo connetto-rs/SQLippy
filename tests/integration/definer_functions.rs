@@ -212,24 +212,24 @@ fn the_default_constrainer_runs_the_function_rules_at_their_group_levels() {
     let function_rules: Vec<_> = found
         .into_iter()
         .filter(|(rule, _, _)| {
-            rule.starts_with("Definer") || rule == "ExposedDefinerOverProtectedTable"
+            rule.starts_with("definer_") || rule == "exposed_definer_over_protected_table"
         })
         .collect();
     assert_eq!(
         function_rules,
         [
             (
-                "DefinerTemporarySchemaNotLast".to_owned(),
+                "definer_temporary_schema_not_last".to_owned(),
                 Level::Deny,
                 "doc_count()".to_owned()
             ),
             (
-                "DefinerWithoutSearchPath".to_owned(),
+                "definer_without_search_path".to_owned(),
                 Level::Deny,
                 "unpinned()".to_owned()
             ),
             (
-                "ExposedDefinerOverProtectedTable".to_owned(),
+                "exposed_definer_over_protected_table".to_owned(),
                 Level::Warn,
                 "doc_count()".to_owned()
             ),

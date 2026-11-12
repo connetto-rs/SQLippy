@@ -1,4 +1,4 @@
-//! Submodule providing the `HasPrimaryKey` constraint, which enforces that
+//! Submodule providing the `MissingPrimaryKey` constraint, which enforces that
 //! tables have a primary key.
 
 use sql_traits::traits::{DatabaseLike, TableLike};
@@ -14,13 +14,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `HasPrimaryKey` constraint.
+/// `missing_primary_key` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = HasPrimaryKey::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = MissingPrimaryKey::default().into();
 ///
 /// let invalid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE mytable (id INT, name TEXT);").unwrap();
 /// assert!(constrainer.validate_schema(&invalid_schema).is_err());
@@ -29,26 +29,26 @@ use crate::{
 ///     ParserDB::parse::<GenericDialect>("CREATE TABLE mytable (id INT PRIMARY KEY, name TEXT);").unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema).is_ok());
 /// ```
-pub struct HasPrimaryKey<DB>(std::marker::PhantomData<DB>);
+pub struct MissingPrimaryKey<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for HasPrimaryKey<DB> {
+impl<DB> Default for MissingPrimaryKey<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<HasPrimaryKey<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: HasPrimaryKey<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<MissingPrimaryKey<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: MissingPrimaryKey<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_table_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for HasPrimaryKey<DB> {
+impl<DB> Rule for MissingPrimaryKey<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "HasPrimaryKey",
+            name: rule_name!(MissingPrimaryKey),
             group: LintGroup::Suspicious,
             rationale: "A table without a primary key has no declared row identity, so other tables cannot reference its rows and clients cannot address one row.",
             source: Some(
@@ -64,7 +64,7 @@ impl<DB> Rule for HasPrimaryKey<DB> {
     }
 }
 
-impl<DB: DatabaseLike> TableRule for HasPrimaryKey<DB> {
+impl<DB: DatabaseLike> TableRule for MissingPrimaryKey<DB> {
     type Database = DB;
 
     fn check_table(

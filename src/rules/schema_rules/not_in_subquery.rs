@@ -70,7 +70,7 @@ impl<DB: DatabaseLike + 'static> From<NotInSubquery<DB>> for GenericConstrainer<
 impl<DB> Rule for NotInSubquery<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "NotInSubquery",
+            name: rule_name!(NotInSubquery),
             group: LintGroup::Perf,
             rationale: "PostgreSQL never plans NOT IN over a subquery as an anti-join, so once the subquery outgrows work_mem it is re-scanned for every outer row.",
             source: Some("https://wiki.postgresql.org/wiki/Don%27t_Do_This"),

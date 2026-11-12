@@ -1,4 +1,4 @@
-//! Submodule providing the `PrimaryKeyReferenceEndsWithId` constraint, which
+//! Submodule providing the `ReferenceWithoutIdSuffix` constraint, which
 //! enforces that foreign key host columns that reference primary key columns
 //! (directly or indirectly) must have names ending with "id".
 
@@ -20,13 +20,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `PrimaryKeyReferenceEndsWithId` constraint.
+/// `reference_without_id_suffix` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = PrimaryKeyReferenceEndsWithId::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = ReferenceWithoutIdSuffix::default().into();
 ///
 /// let invalid_schema = ParserDB::parse::<GenericDialect>(
 ///     "
@@ -76,28 +76,26 @@ use crate::{
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema_other_fk).is_ok());
 /// ```
-pub struct PrimaryKeyReferenceEndsWithId<C>(std::marker::PhantomData<C>);
+pub struct ReferenceWithoutIdSuffix<C>(std::marker::PhantomData<C>);
 
-impl<C> Default for PrimaryKeyReferenceEndsWithId<C> {
+impl<C> Default for ReferenceWithoutIdSuffix<C> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<PrimaryKeyReferenceEndsWithId<DB>>
-    for GenericConstrainer<DB>
-{
-    fn from(constraint: PrimaryKeyReferenceEndsWithId<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<ReferenceWithoutIdSuffix<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: ReferenceWithoutIdSuffix<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_foreign_key_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<C> Rule for PrimaryKeyReferenceEndsWithId<C> {
+impl<C> Rule for ReferenceWithoutIdSuffix<C> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "PrimaryKeyReferenceEndsWithId",
+            name: rule_name!(ReferenceWithoutIdSuffix),
             group: LintGroup::Style,
             rationale: "Ending every column that references a primary key in `_id` shows at a glance which columns are references.",
             source: None,
@@ -113,7 +111,7 @@ CREATE TABLE children (parent_id INT REFERENCES parents (id));",
     }
 }
 
-impl<DB: DatabaseLike> PrimaryKeyReferenceEndsWithId<DB> {
+impl<DB: DatabaseLike> ReferenceWithoutIdSuffix<DB> {
     /// Returns whether `column` of `table` is the host column of a foreign key
     /// whose referenced columns include a primary key column.
     fn references_primary_key_through_foreign_key(
@@ -139,7 +137,7 @@ impl<DB: DatabaseLike> PrimaryKeyReferenceEndsWithId<DB> {
     }
 }
 
-impl<DB: DatabaseLike> ForeignKeyRule for PrimaryKeyReferenceEndsWithId<DB> {
+impl<DB: DatabaseLike> ForeignKeyRule for ReferenceWithoutIdSuffix<DB> {
     type Database = DB;
 
     fn check_foreign_key(

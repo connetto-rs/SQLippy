@@ -1,4 +1,4 @@
-//! Submodule providing the `NonCompositePrimaryKeyNamedId` constraint, which
+//! Submodule providing the `PrimaryKeyNotNamedId` constraint, which
 //! enforces that if a column is a non-composite primary key, it must be named
 //! "id".
 
@@ -16,13 +16,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating an invalid SQL statement with the
-/// `NonCompositePrimaryKeyNamedId` constraint.
+/// `primary_key_not_named_id` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = NonCompositePrimaryKeyNamedId::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = PrimaryKeyNotNamedId::default().into();
 ///
 /// let invalid_schema =
 ///     ParserDB::parse::<GenericDialect>("CREATE TABLE mytable (pk INT PRIMARY KEY, name TEXT);").unwrap();
@@ -39,28 +39,26 @@ use crate::{
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&valid_composite_schema).is_ok());
 /// ```
-pub struct NonCompositePrimaryKeyNamedId<DB>(std::marker::PhantomData<DB>);
+pub struct PrimaryKeyNotNamedId<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for NonCompositePrimaryKeyNamedId<DB> {
+impl<DB> Default for PrimaryKeyNotNamedId<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<NonCompositePrimaryKeyNamedId<DB>>
-    for GenericConstrainer<DB>
-{
-    fn from(constraint: NonCompositePrimaryKeyNamedId<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<PrimaryKeyNotNamedId<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: PrimaryKeyNotNamedId<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_column_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for NonCompositePrimaryKeyNamedId<DB> {
+impl<DB> Rule for PrimaryKeyNotNamedId<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "NonCompositePrimaryKeyNamedId",
+            name: rule_name!(PrimaryKeyNotNamedId),
             group: LintGroup::Style,
             rationale: "Naming every single-column primary key `id` lets references and generated code find it without a lookup.",
             source: None,
@@ -74,7 +72,7 @@ impl<DB> Rule for NonCompositePrimaryKeyNamedId<DB> {
     }
 }
 
-impl<DB: DatabaseLike> ColumnRule for NonCompositePrimaryKeyNamedId<DB> {
+impl<DB: DatabaseLike> ColumnRule for PrimaryKeyNotNamedId<DB> {
     type Database = DB;
 
     fn check_column(

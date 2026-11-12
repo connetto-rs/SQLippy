@@ -40,7 +40,7 @@ fn not_in_over_a_nullable_column_is_reported_in_every_statement_kind() {
         assert_eq!(
             statement_findings(&constrainer, sql),
             [(
-                "NotInNullableSubquery",
+                "not_in_nullable_subquery",
                 Level::Warn,
                 "id NOT IN (SELECT a_id FROM b)".to_owned()
             )],
@@ -81,18 +81,18 @@ fn not_in_over_a_non_null_or_filtered_column_is_reported_as_slow_only() {
     for (sql, expected) in [
         (
             "SELECT id FROM a WHERE team NOT IN (SELECT team FROM b)",
-            ("NotInSubquery", "team NOT IN (SELECT team FROM b)"),
+            ("not_in_subquery", "team NOT IN (SELECT team FROM b)"),
         ),
         (
             "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b WHERE a_id IS NOT NULL)",
             (
-                "NotInSubquery",
+                "not_in_subquery",
                 "id NOT IN (SELECT a_id FROM b WHERE a_id IS NOT NULL)",
             ),
         ),
         (
             "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b)",
-            ("NotInNullableSubquery", "id NOT IN (SELECT a_id FROM b)"),
+            ("not_in_nullable_subquery", "id NOT IN (SELECT a_id FROM b)"),
         ),
     ] {
         assert_eq!(
@@ -120,7 +120,7 @@ fn slow_not_in_is_reported_wherever_the_schema_writes_it() {
     let constrainer: GenericConstrainer<ParserDB> = NotInSubquery::default().into();
     let found: Vec<_> = findings(
         &constrainer,
-        "NotInSubquery",
+        "not_in_subquery",
         &format!(
             "{PAIRS}
              ALTER TABLE a ENABLE ROW LEVEL SECURITY;
@@ -152,7 +152,7 @@ fn the_default_constrainer_checks_statements_with_query_rules_only() {
             "SELECT id FROM a WHERE team NOT IN (SELECT team FROM b)"
         ),
         [(
-            "NotInSubquery",
+            "not_in_subquery",
             Level::Warn,
             "team NOT IN (SELECT team FROM b)".to_owned()
         )]
@@ -163,7 +163,7 @@ fn the_default_constrainer_checks_statements_with_query_rules_only() {
 #[test]
 fn statement_rules_follow_rule_and_group_levels() {
     let mut constrainer = not_in_rules();
-    constrainer.set_rule_level("NotInNullableSubquery", Level::Deny);
+    constrainer.set_rule_level("not_in_nullable_subquery", Level::Deny);
     constrainer.set_group_level(LintGroup::Perf, Level::Allow);
     assert_eq!(
         statement_findings(
@@ -171,7 +171,7 @@ fn statement_rules_follow_rule_and_group_levels() {
             "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b) AND team NOT IN (SELECT team FROM b)"
         ),
         [(
-            "NotInNullableSubquery",
+            "not_in_nullable_subquery",
             Level::Deny,
             "id NOT IN (SELECT a_id FROM b)".to_owned()
         )]
@@ -211,7 +211,7 @@ fn checking_a_statement_stops_when_the_sink_breaks() {
 fn an_allowance_excuses_its_rule_on_the_same_statement_however_it_is_written() {
     let mut constrainer = not_in_rules();
     constrainer.allow_statement(
-        "NotInNullableSubquery",
+        "not_in_nullable_subquery",
         "select id from a where id not in (select a_id from b)",
     );
     assert_eq!(
@@ -227,7 +227,7 @@ fn an_allowance_excuses_its_rule_on_the_same_statement_however_it_is_written() {
             "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b) AND team > 0"
         ),
         [(
-            "NotInNullableSubquery",
+            "not_in_nullable_subquery",
             Level::Warn,
             "id NOT IN (SELECT a_id FROM b)".to_owned()
         )]
@@ -239,11 +239,11 @@ fn an_allowance_excuses_its_rule_on_the_same_statement_however_it_is_written() {
 fn an_allowance_for_another_rule_excuses_nothing() {
     let mut constrainer = not_in_rules();
     let sql = "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b)";
-    constrainer.allow_statement("NotInSubquery", sql);
+    constrainer.allow_statement("not_in_subquery", sql);
     assert_eq!(
         statement_findings(&constrainer, sql),
         [(
-            "NotInNullableSubquery",
+            "not_in_nullable_subquery",
             Level::Warn,
             "id NOT IN (SELECT a_id FROM b)".to_owned()
         )]
@@ -255,22 +255,22 @@ fn an_allowance_whose_statement_no_longer_violates_its_rule_fails_validation() {
     let fixed = "select id from a where not exists (select 1 from b where b.a_id = a.id)";
     let normalized = "SELECT id FROM a WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.a_id = a.id)";
     for (rule, sql, level, named) in [
-        ("NotInNullableSubquery", fixed, None, normalized),
+        ("not_in_nullable_subquery", fixed, None, normalized),
         (
-            "NotInNullableSubquery",
+            "not_in_nullable_subquery",
             "SELECT FROM WHERE",
             None,
             "SELECT FROM WHERE",
         ),
         (
-            "NotInNullableSubquery",
+            "not_in_nullable_subquery",
             "SELECT 1; SELECT 2",
             None,
             "SELECT 1; SELECT 2",
         ),
         ("NoSuchRule", fixed, None, normalized),
         (
-            "NotInNullableSubquery",
+            "not_in_nullable_subquery",
             "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b)",
             Some(Level::Allow),
             "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b)",
@@ -300,7 +300,7 @@ fn an_allowance_whose_statement_no_longer_violates_its_rule_fails_validation() {
 fn an_allowance_whose_statement_cannot_be_resolved_reports_the_lookup_failure() {
     let mut constrainer = not_in_rules();
     constrainer.allow_statement(
-        "NotInNullableSubquery",
+        "not_in_nullable_subquery",
         "SELECT id FROM a WHERE id NOT IN (SELECT x FROM a.b.c.missing)",
     );
     let diagnostics = constrainer.diagnostics(&schema());
@@ -314,7 +314,7 @@ fn an_allowance_whose_statement_cannot_be_resolved_reports_the_lookup_failure() 
 fn statement_allowances_are_checked_by_the_schema_and_not_by_statements() {
     let mut constrainer = not_in_rules();
     constrainer.allow_statement(
-        "NotInNullableSubquery",
+        "not_in_nullable_subquery",
         "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b)",
     );
     assert_eq!(statement_findings(&constrainer, "SELECT id FROM a"), []);

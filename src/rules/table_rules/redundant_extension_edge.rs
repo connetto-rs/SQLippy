@@ -1,4 +1,4 @@
-//! Submodule providing the `NonRedundantExtensionDag` constraint, which
+//! Submodule providing the `RedundantExtensionEdge` constraint, which
 //! enforces that if a table extends multiple tables (via extension foreign
 //! keys), the extended tables must form a non-redundant DAG structure.
 //!
@@ -21,13 +21,13 @@ use crate::{
 /// # Example
 ///
 /// Here follows an example of validating invalid SQL statements with the
-/// `NonRedundantExtensionDag` constraint.
+/// `redundant_extension_edge` constraint.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::GenericDialect;
 ///
-/// let constrainer: GenericConstrainer<ParserDB> = NonRedundantExtensionDag::default().into();
+/// let constrainer: GenericConstrainer<ParserDB> = RedundantExtensionEdge::default().into();
 ///
 /// // Invalid: Duplicate direct extension to the same table B
 /// // The same primary key column (id) appears in two foreign keys to the same table
@@ -92,26 +92,26 @@ use crate::{
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&valid_dag).is_ok());
 /// ```
-pub struct NonRedundantExtensionDag<DB>(std::marker::PhantomData<DB>);
+pub struct RedundantExtensionEdge<DB>(std::marker::PhantomData<DB>);
 
-impl<DB> Default for NonRedundantExtensionDag<DB> {
+impl<DB> Default for RedundantExtensionEdge<DB> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<DB: DatabaseLike + 'static> From<NonRedundantExtensionDag<DB>> for GenericConstrainer<DB> {
-    fn from(constraint: NonRedundantExtensionDag<DB>) -> Self {
+impl<DB: DatabaseLike + 'static> From<RedundantExtensionEdge<DB>> for GenericConstrainer<DB> {
+    fn from(constraint: RedundantExtensionEdge<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_table_rule(Box::new(constraint));
         constrainer
     }
 }
 
-impl<DB> Rule for NonRedundantExtensionDag<DB> {
+impl<DB> Rule for RedundantExtensionEdge<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "NonRedundantExtensionDag",
+            name: rule_name!(RedundantExtensionEdge),
             group: LintGroup::Complexity,
             rationale: "A redundant extension edge repeats what the hierarchy already implies, so it adds a dependency the schema does not need.",
             source: None,
@@ -127,7 +127,7 @@ CREATE TABLE children (id INT PRIMARY KEY, FOREIGN KEY (id) REFERENCES parents(i
     }
 }
 
-impl<DB: DatabaseLike> TableRule for NonRedundantExtensionDag<DB> {
+impl<DB: DatabaseLike> TableRule for RedundantExtensionEdge<DB> {
     type Database = DB;
 
     fn check_table(

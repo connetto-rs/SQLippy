@@ -129,7 +129,7 @@ impl<DB: DatabaseLike + 'static> From<DenyListPolicy<DB>> for GenericConstrainer
 impl<DB> Rule for DenyListPolicy<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "DenyListPolicy",
+            name: rule_name!(DenyListPolicy),
             group: LintGroup::Suspicious,
             rationale: "A grant to everyone narrowed only by a deny list fails open, so a caller missing from the list keeps access, while a schema that starts from no access and grants up fails closed.",
             source: Some("https://authzed.com/docs/spicedb/best-practices"),

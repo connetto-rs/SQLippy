@@ -145,7 +145,7 @@ impl<DB: DatabaseLike + 'static> From<SelfGrantingWrite<DB>> for GenericConstrai
 impl<DB> Rule for SelfGrantingWrite<DB> {
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
-            name: "SelfGrantingWrite",
+            name: rule_name!(SelfGrantingWrite),
             group: LintGroup::Suspicious,
             rationale: "Policies read an authority table to decide what the caller may reach, so a write that lets the caller choose a row's scope freely lets them grant themselves that scope.",
             source: None,
