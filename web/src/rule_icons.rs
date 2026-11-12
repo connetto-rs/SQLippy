@@ -16,12 +16,12 @@ use dioxus_free_icons::icons::fa_solid_icons::{
     FaIdBadge, FaIdCard, FaInfinity, FaKey, FaLink, FaLinkSlash, FaListOl, FaListUl, FaLocationDot,
     FaLockOpen, FaMagnet, FaMagnifyingGlass, FaMagnifyingGlassArrowRight, FaMagnifyingGlassChart,
     FaMask, FaMoneyBill, FaNotEqual, FaObjectGroup, FaPaperclip, FaPeopleArrowsLeftRight,
-    FaPeopleGroup, FaPlug, FaPuzzlePiece, FaQuoteLeft, FaRegistered, FaRepeat, FaRotateRight,
-    FaRuler, FaScissors, FaShareNodes, FaShield, FaShuffle, FaSignsPost, FaSitemap, FaSkull,
-    FaSliders, FaSnowflake, FaSort, FaSpellCheck, FaSquareMinus, FaSquareRootVariable, FaStopwatch,
-    FaTable, FaTableList, FaTag, FaTags, FaTextHeight, FaTextWidth, FaTrashCan, FaUnderline,
-    FaUserCheck, FaUserGear, FaUserNinja, FaUserPen, FaUserSlash, FaUserTag, FaWater,
-    FaWaterLadder,
+    FaPeopleGroup, FaPlug, FaPlugCircleExclamation, FaPlugCircleXmark, FaPuzzlePiece, FaQuoteLeft,
+    FaRegistered, FaRepeat, FaRotateRight, FaRuler, FaScissors, FaShareNodes, FaShield, FaShuffle,
+    FaSignsPost, FaSitemap, FaSkull, FaSliders, FaSnowflake, FaSort, FaSpellCheck, FaSquareMinus,
+    FaSquareRootVariable, FaStopwatch, FaTable, FaTableList, FaTag, FaTags, FaTextHeight,
+    FaTextWidth, FaTrashCan, FaUnderline, FaUserCheck, FaUserGear, FaUserNinja, FaUserPen,
+    FaUserSlash, FaUserTag, FaWater, FaWaterLadder,
 };
 
 /// Defines `RuleIcon`, rendering the icon each listed rule name maps to, and
@@ -168,6 +168,8 @@ rule_icons! {
     "rust_keyword_column_name" => FaRust,
     "rust_keyword_foreign_key_name" => FaRust,
     "rust_keyword_table_name" => FaRust,
+    "binary_send_failure" => FaPlugCircleXmark,
+    "unknown_binary_send" => FaPlugCircleExclamation,
 }
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,7 @@
 //! Submodule providing constraint structs that can be applied to columns.
 
+mod binary_send;
+pub use binary_send::{BinarySendFailure, UnknownBinarySend};
 mod mixed_case_column_name;
 pub use mixed_case_column_name::MixedCaseColumnName;
 mod rust_keyword_column_name;

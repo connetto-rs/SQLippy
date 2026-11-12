@@ -39,6 +39,8 @@ pub struct Deployment {
     exposed_schemas: Vec<String>,
     credentials: Vec<Expr>,
     client_written_tables: Vec<(String, String)>,
+    binary_replication_tables: Vec<(String, String)>,
+    binary_replication_all_tables: bool,
     self_asserted_claims: Vec<Expr>,
     self_asserted_columns: Vec<SelfAssertedColumn>,
     pooled: Option<bool>,
@@ -67,7 +69,8 @@ impl Deployment {
     /// anonymous role `anon` and the app role `authenticated`, naming the
     /// caller with `current_setting('app.user_id', true)`, trusting no
     /// `current_setting('app.user_metadata', true)` claim, and taking the
-    /// rows of `public.drafts` from clients that author them offline.
+    /// rows of `public.drafts` from clients that author them offline, and
+    /// streaming `public.events` over binary logical replication.
     ///
     /// # Panics
     ///
@@ -81,6 +84,7 @@ impl Deployment {
     /// let deployment = Deployment::example();
     /// assert!(deployment.is_pooled());
     /// assert!(deployment.is_client_written("public", "drafts"));
+    /// assert!(deployment.is_binary_replicated("public", "events"));
     /// ```
     #[must_use]
     pub fn example() -> Self {
@@ -90,6 +94,7 @@ impl Deployment {
             .with_exposed_schema("public")
             .with_pooled(true)
             .with_client_written_table("public", "drafts")
+            .with_binary_replication_table("public", "events")
             .with_credential("current_setting('app.user_id', true)")
             .and_then(|deployment| {
                 deployment.with_self_asserted_claim("current_setting('app.user_metadata', true)")
@@ -205,6 +210,37 @@ impl Deployment {
             .any(|(written_schema, written_table)| {
                 written_schema == schema && written_table == table
             })
+    }
+
+    /// Selects a binary-replicated table by its stored schema and table names.
+    #[must_use]
+    pub fn with_binary_replication_table(
+        mut self,
+        schema: impl Into<String>,
+        table: impl Into<String>,
+    ) -> Self {
+        self.binary_replication_tables
+            .push((schema.into(), table.into()));
+        self
+    }
+
+    /// Selects every table for binary replication checks.
+    #[must_use]
+    pub fn with_binary_replication_all_tables(mut self) -> Self {
+        self.binary_replication_all_tables = true;
+        self
+    }
+
+    /// Returns whether the stored schema and table names select a binary-replicated table.
+    #[must_use]
+    pub fn is_binary_replicated(&self, schema: &str, table: &str) -> bool {
+        self.binary_replication_all_tables
+            || self
+                .binary_replication_tables
+                .iter()
+                .any(|(selected_schema, selected_table)| {
+                    selected_schema == schema && selected_table == table
+                })
     }
 
     /// Declares an expression that identifies the caller, such as

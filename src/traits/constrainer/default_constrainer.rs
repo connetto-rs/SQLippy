@@ -7,13 +7,14 @@ use crate::{
     lint::Level,
     rules::{
         AddressStoredAsText, AliasShadowedByColumn, ArrayMembershipPolicy, AutovacuumDisabledTable,
-        BlankPaddedCharacter, CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
-        ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
-        CorrelatedPolicySubquery, CredentialFreeWrite, CredentialSettingWrite,
-        DeadPermissivePolicy, DefinerTakesActingUser, DefinerTemporarySchemaNotLast,
-        DefinerWithoutSearchPath, DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck,
-        DuplicateColumnNameInExtensionGraph, DuplicateForeignKey, DuplicateUniqueIndex,
-        EmptyTextAllowed, ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
+        BinarySendFailure, BlankPaddedCharacter, CascadeIntoRowLevelSecurityTable,
+        ChildWithoutRowLevelSecurity, ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey,
+        ClientWrittenScaledNumeric, CorrelatedPolicySubquery, CredentialFreeWrite,
+        CredentialSettingWrite, DeadPermissivePolicy, DefinerTakesActingUser,
+        DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
+        DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnNameInExtensionGraph,
+        DuplicateForeignKey, DuplicateUniqueIndex, EmptyTextAllowed,
+        ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FlagNotBoolean,
         FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
         FunctionMediatedPolicyCycle, GrantOptionToClientRole, ImpureImmutableFunction,
@@ -39,8 +40,8 @@ use crate::{
         TruncateGrantedToAppRole, TruncatedIdentifier, TruncatingIntegerDivision,
         UnboundedTextColumn, UncachedPolicyCall, UncheckedPastTimestamp, UnfilteredWrite,
         UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter, UnindexedForeignKey,
-        UnindexedPolicyFilter, UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn,
-        UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
+        UnindexedPolicyFilter, UnknownBinarySend, UnlinkedFromItem, UnloggedTable,
+        UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
         UnscopedUniqueConstraintOnRowLevelSecurityTable, UnvalidatedConstraint, UuidStoredAsText,
         WildcardView, ZeroPrecisionTimestamp,
     },
@@ -54,7 +55,9 @@ use crate::{
 ///
 /// `correctness` rules deny, `suspicious`, `perf`, `complexity` and `style`
 /// rules warn, and `pedantic` and `restriction` rules stay at `allow` until a
-/// level is set for them or their group.
+/// level is set for them or their group. The exceptions are
+/// [`BinarySendFailure`] at `deny` and [`UnknownBinarySend`] at `warn`, which
+/// report only on tables the deployment selects for binary replication.
 ///
 /// # Example
 ///
@@ -144,6 +147,10 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in column_rules {
             constrainer.register_column_rule_with_floor(rule, Level::Allow);
         }
+        constrainer
+            .register_column_rule_with_floor(Box::new(BinarySendFailure::default()), Level::Deny);
+        constrainer
+            .register_column_rule_with_floor(Box::new(UnknownBinarySend::default()), Level::Warn);
         let foreign_key_rules: [Box<dyn ForeignKeyRule<Database = DB>>; 8] = [
             Box::new(NullableCompositeForeignKey::default()),
             Box::new(UnindexedForeignKey::default()),
