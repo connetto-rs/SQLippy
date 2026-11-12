@@ -1,0 +1,76 @@
+name: Lint proposal
+description: Propose a new SQLippy rule.
+title: "[lint] "
+labels: ["enhancement"]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: Name
+      description: A snake_case name stating the defect, so `allow(name)` reads as a sentence.
+      placeholder: missing_primary_key
+    validations:
+      required: true
+  - type: textarea
+    id: reports
+    attributes:
+      label: What it reports
+      description: The SQL shape the rule flags.
+    validations:
+      required: true
+  - type: textarea
+    id: rationale
+    attributes:
+      label: Why it is bad
+      description: What goes wrong in PostgreSQL or in the application when the shape ships.
+    validations:
+      required: true
+  - type: dropdown
+    id: group
+    attributes:
+      label: Group
+      options:
+        - correctness (deny)
+        - suspicious (warn)
+        - perf (warn)
+        - complexity (warn)
+        - style (warn)
+        - pedantic (allow)
+        - restriction (allow)
+    validations:
+      required: true
+  - type: dropdown
+    id: runs_on
+    attributes:
+      label: Runs on
+      multiple: true
+      options:
+        - each table
+        - each column
+        - each foreign key
+        - each function
+        - the whole schema
+        - each application statement
+    validations:
+      required: true
+  - type: textarea
+    id: bad
+    attributes:
+      label: Reported example
+      description: Schema or statement the rule reports.
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: good
+    attributes:
+      label: Corrected example
+      description: The same SQL fixed, which the rule accepts.
+      render: sql
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Source
+      description: A link documenting the problem, such as the PostgreSQL manual or wiki.
