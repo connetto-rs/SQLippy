@@ -6,8 +6,9 @@ use sql_traits::{
     errors::LookupError,
     traits::{CheckConstraintLike, DatabaseLike, FunctionLike, TableLike},
 };
-use sqlparser::ast::{Expr, FunctionArguments, FunctionBehavior, Visit, Visitor};
+use sqlparser::ast::{Expr, FunctionArguments, FunctionBehavior, Visitor};
 
+use crate::rules::walk_support::walk;
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
@@ -140,9 +141,7 @@ impl<DB: DatabaseLike> TableRule for TimeDependentCheck<DB> {
                 exempt: Vec::new(),
                 found: Vec::new(),
             };
-            check
-                .expression(database)
-                .visit(&mut changing)
+            walk(check.expression(database), &mut changing)
                 .break_value()
                 .map_or(Ok(()), Err)?;
             if changing.found.is_empty() {

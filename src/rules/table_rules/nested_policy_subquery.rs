@@ -6,8 +6,9 @@ use sql_traits::{
     errors::LookupError,
     traits::{DataStatementLike, DatabaseLike, PolicyLike, Relation, TableLike},
 };
-use sqlparser::ast::{Expr, Query, Visit, Visitor};
+use sqlparser::ast::{Expr, Query, Visitor};
 
+use crate::rules::walk_support::walk;
 use crate::{
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
@@ -24,7 +25,7 @@ fn holds_subquery(expression: &Expr) -> bool {
             ControlFlow::Break(())
         }
     }
-    expression.visit(&mut Sublink).is_break()
+    walk(expression, &mut Sublink).is_break()
 }
 
 /// The tables the outermost query of each sublink reads directly, with the
@@ -199,8 +200,7 @@ impl<DB: DatabaseLike> TableRule for NestedPolicySubquery<DB> {
                     depth: 0,
                     reads: Vec::new(),
                 };
-                expression
-                    .visit(&mut sublinks)
+                walk(expression, &mut sublinks)
                     .break_value()
                     .map_or(Ok(()), Err)?;
                 for (subquery, read) in sublinks.reads {

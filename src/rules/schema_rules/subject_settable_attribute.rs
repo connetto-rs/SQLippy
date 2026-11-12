@@ -8,9 +8,10 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike},
 };
 use sqlparser::ast::{
-    BinaryOperator, CreatePolicyType, Expr, InTarget, Query, UnaryOperator, Value, Visit, Visitor,
+    BinaryOperator, CreatePolicyType, Expr, InTarget, Query, UnaryOperator, Value, Visitor,
 };
 
+use crate::rules::walk_support::walk;
 use crate::{
     deployment::{Declaration, Deployment},
     error::{Interruption, PolicySite},
@@ -76,8 +77,7 @@ fn admits_subject<DB: DatabaseLike>(
         depth: 0,
         found: false,
     };
-    expression
-        .visit(&mut test)
+    walk(expression, &mut test)
         .break_value()
         .map_or(Ok(()), Err)?;
     Ok(test.found)

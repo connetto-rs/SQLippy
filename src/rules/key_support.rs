@@ -14,6 +14,7 @@ use sqlparser::ast::{
     SelectItem, SelectItemQualifiedWildcardKind, TableFactor, Value, ValueWithSpan, Visit, Visitor,
 };
 
+use crate::rules::walk_support::walk;
 use crate::rules::{
     policy_support::conjuncts,
     statement_support::{OwnLevel, reads_outer},
@@ -233,7 +234,7 @@ fn conditions(select: &Select) -> Vec<Expr> {
     let mut top = TopLevel::default();
     for from in &select.from {
         for join in &from.joins {
-            let _ = join.join_operator.visit(&mut top);
+            let _ = walk(&join.join_operator, &mut top);
         }
     }
     select.selection.iter().cloned().chain(top.found).collect()

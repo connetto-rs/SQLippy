@@ -7,11 +7,12 @@ use sql_traits::{
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::{
-    ast::{BinaryOperator, Expr, FunctionSecurity, Value, Visit, Visitor},
+    ast::{BinaryOperator, Expr, FunctionSecurity, Value, Visitor},
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
 
+use crate::rules::walk_support::walk;
 use crate::{
     deployment::Declaration,
     error::Interruption,
@@ -232,9 +233,9 @@ impl<DB: DatabaseLike> SchemaRule for DefinerTakesActingUser<DB> {
                 .body()
                 .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok())
                 .unwrap_or_default();
-            let _ = statements.visit(&mut reads);
+            let _ = walk(&statements, &mut reads);
             if let Ok(Some(body)) = function.body_expression(database) {
-                let _ = body.as_ref().visit(&mut reads);
+                let _ = walk(body.as_ref(), &mut reads);
             }
             let (false, Some(compared)) = (reads.reads_credential, reads.compared) else {
                 continue;

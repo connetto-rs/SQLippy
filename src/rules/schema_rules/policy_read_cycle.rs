@@ -11,8 +11,9 @@ use sql_traits::{
         ViewLike,
     },
 };
-use sqlparser::ast::{CreatePolicyCommand, Expr, FunctionSecurity, Query, Visit, Visitor};
+use sqlparser::ast::{CreatePolicyCommand, Expr, FunctionSecurity, Query, Visitor};
 
+use crate::rules::walk_support::walk;
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
@@ -286,7 +287,7 @@ fn sublink_reads<'db, DB: DatabaseLike>(
         found: false,
         reads: Vec::new(),
     };
-    if let ControlFlow::Break(error) = expression.visit(&mut collector) {
+    if let ControlFlow::Break(error) = walk(expression, &mut collector) {
         return Err(error);
     }
     Ok((collector.found, collector.reads))

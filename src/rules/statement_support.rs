@@ -18,6 +18,7 @@ use sqlparser::{
     parser::Parser,
 };
 
+use crate::rules::walk_support::walk;
 use crate::{error::Interruption, traits::Reporter};
 
 /// A `SELECT` over `relations` with `projection` and `selection` under
@@ -116,7 +117,7 @@ impl<F: FnMut(&Expr) -> Result<(), LookupError>> OwnLevel<F> {
 
     /// Runs `check` over one clause of the `SELECT`.
     pub(crate) fn over<V: Visit + ?Sized>(&mut self, part: &V) -> Result<(), LookupError> {
-        part.visit(self).break_value().map_or(Ok(()), Err)
+        walk(part, self).break_value().map_or(Ok(()), Err)
     }
 
     /// Runs `check` over every clause of `select` that holds expressions:
@@ -191,8 +192,9 @@ pub(crate) fn reads_outer<DB: DatabaseLike>(
 ) -> Result<bool, LookupError> {
     let local = ColumnScope::from_query(subquery, database, IdentifierCase::Folded)?;
     let mut reads = false;
-    subquery
-        .visit(&mut Queries {
+    walk(
+        subquery,
+        &mut Queries {
             check: |query: &Query, _| {
                 selects(&query.body).into_iter().try_for_each(|select| {
                     let scopes = local
@@ -217,9 +219,10 @@ pub(crate) fn reads_outer<DB: DatabaseLike>(
                 })
             },
             existence: Vec::new(),
-        })
-        .break_value()
-        .map_or(Ok(()), Err)?;
+        },
+    )
+    .break_value()
+    .map_or(Ok(()), Err)?;
     Ok(reads)
 }
 /// Whether `expression` calls `random`.
@@ -271,10 +274,13 @@ pub(crate) fn check_queries<DB: DatabaseLike>(
         return Ok(());
     };
     let scope = ColumnScope::from_query(&root, database, IdentifierCase::Folded)?;
-    root.visit(&mut Queries {
-        check: |query: &Query, existence| check(&scope, query, existence),
-        existence: Vec::new(),
-    })
+    walk(
+        &*root,
+        &mut Queries {
+            check: |query: &Query, existence| check(&scope, query, existence),
+            existence: Vec::new(),
+        },
+    )
     .break_value()
     .map_or(Ok(()), Err)
 }

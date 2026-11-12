@@ -17,6 +17,7 @@ use sqlparser::{
     tokenizer::{Token, Tokenizer, Word},
 };
 
+use crate::rules::walk_support::walk;
 use crate::{
     deployment::{Declaration, Deployment},
     error::Interruption,
@@ -128,7 +129,7 @@ impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
     fn new(database: &'db DB, deployment: &Deployment) -> Self {
         let mut keys = CredentialKeys(Vec::new());
         for credential in deployment.credentials() {
-            let _ = credential.visit(&mut keys);
+            let _ = walk(credential, &mut keys);
         }
         Self {
             database,
@@ -257,7 +258,7 @@ impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
             credentials: self,
             found: Vec::new(),
         };
-        let _ = node.visit(&mut writes);
+        let _ = walk(node, &mut writes);
         !writes.found.is_empty()
     }
 
@@ -447,7 +448,7 @@ impl<DB: DatabaseLike> QueryRule for CredentialSettingWrite<DB> {
             credentials: &mut credentials,
             found: Vec::new(),
         };
-        let _ = statement.visit(&mut writes);
+        let _ = walk(statement, &mut writes);
         for (found, write) in writes.found {
             let effect = match write {
                 Write::Key(key) => format!("writes the credential setting '{key}'"),

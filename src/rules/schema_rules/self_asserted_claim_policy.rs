@@ -7,8 +7,9 @@ use sql_traits::{
     structs::{ColumnDefinition, ColumnDefinitionScope, ColumnScope, IdentifierCase},
     traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike},
 };
-use sqlparser::ast::{Expr, Query, SetExpr, Visit, Visitor};
+use sqlparser::ast::{Expr, Query, SetExpr, Visitor};
 
+use crate::rules::walk_support::walk;
 use crate::{
     deployment::{Declaration, Deployment},
     error::{Interruption, PolicySite},
@@ -122,11 +123,14 @@ impl<DB: DatabaseLike> Visitor for SelfAssertedRead<'_, '_, DB> {
         ColumnScope::from_query(query, self.database, IdentifierCase::Folded)
             .map_err(Err)
             .map_or_else(ControlFlow::Break, |root| {
-                query.visit(&mut SublinkReads {
-                    outer: self,
-                    root: &root,
-                    selects: Vec::new(),
-                })
+                walk(
+                    query,
+                    &mut SublinkReads {
+                        outer: self,
+                        root: &root,
+                        selects: Vec::new(),
+                    },
+                )
             })
     }
 
@@ -258,7 +262,7 @@ impl<DB: DatabaseLike> SchemaRule for SelfAssertedClaimPolicy<DB> {
                         table: ColumnScope::for_table(table, database, IdentifierCase::Folded),
                         depth: 0,
                     };
-                    if let ControlFlow::Break(read) = expression.visit(&mut reads) {
+                    if let ControlFlow::Break(read) = walk(expression, &mut reads) {
                         sites.push(PolicySite {
                             table: Box::new(table.clone()),
                             policy: Box::new(policy.clone()),

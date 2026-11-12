@@ -15,6 +15,7 @@ use sqlparser::ast::{
     SelectItemQualifiedWildcardKind, SetExpr, Statement, Visit, Visitor,
 };
 
+use crate::rules::walk_support::walk;
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
@@ -86,7 +87,7 @@ fn single_answer(select: &Select) -> bool {
                 }
         )
     });
-    constants || (!grouped && select.projection.visit(&mut Aggregate).is_break())
+    constants || (!grouped && walk(&select.projection, &mut Aggregate).is_break())
 }
 
 query_rule!(

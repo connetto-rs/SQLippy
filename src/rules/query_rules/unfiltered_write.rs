@@ -3,8 +3,9 @@
 use std::ops::ControlFlow;
 
 use sql_traits::traits::DatabaseLike;
-use sqlparser::ast::{Delete, Statement, Update, Visit, Visitor};
+use sqlparser::ast::{Delete, Statement, Update, Visitor};
 
+use crate::rules::walk_support::walk;
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
@@ -82,7 +83,7 @@ impl<DB: DatabaseLike> QueryRule for UnfilteredWrite<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         let mut unfiltered = Unfiltered(Vec::new());
-        let _ = statement.visit(&mut unfiltered);
+        let _ = walk(statement, &mut unfiltered);
         for found in unfiltered.0 {
             reporter.statement(
                 statement,

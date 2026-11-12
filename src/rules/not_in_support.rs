@@ -14,6 +14,7 @@ use sqlparser::{
     parser::Parser,
 };
 
+use crate::rules::walk_support::walk;
 use crate::{
     error::{Interruption, PolicySite},
     rules::policy_support::{conjuncts, walked_clauses},
@@ -97,7 +98,7 @@ fn not_ins<DB: DatabaseLike, V: Visit + ?Sized>(
         database,
         found: Vec::new(),
     };
-    node.visit(&mut found).break_value().map_or(Ok(()), Err)?;
+    walk(node, &mut found).break_value().map_or(Ok(()), Err)?;
     Ok(found.found)
 }
 

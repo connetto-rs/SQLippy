@@ -9,12 +9,13 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         Expr, FunctionArguments, FunctionBehavior, FunctionSecurity, Query, SetExpr, Statement,
-        Visit, Visitor,
+        Visitor,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
 
+use crate::rules::walk_support::walk;
 use crate::{
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
@@ -34,7 +35,7 @@ fn reads_a_column(expression: &Expr) -> bool {
             }
         }
     }
-    expression.visit(&mut Names).is_break()
+    walk(expression, &mut Names).is_break()
 }
 
 /// Whether a parsed body is one `SELECT` of one expression and nothing else.
@@ -245,8 +246,7 @@ impl<DB: DatabaseLike> TableRule for UncachedPolicyCall<DB> {
                     within: None,
                     findings: Vec::new(),
                 };
-                expression
-                    .visit(&mut calls)
+                walk(expression, &mut calls)
                     .break_value()
                     .map_or(Ok(()), Err)?;
                 for Finding { call, volatile } in calls.findings {

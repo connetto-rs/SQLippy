@@ -4,8 +4,9 @@
 use std::ops::ControlFlow;
 
 use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
-use sqlparser::ast::{Expr, Owner, Visit, Visitor};
+use sqlparser::ast::{Expr, Owner, Visitor};
 
+use crate::rules::walk_support::walk;
 use crate::{
     deployment::Declaration,
     error::{Interruption, PolicyClause, PolicySite},
@@ -206,7 +207,7 @@ impl<DB: DatabaseLike> TableRule for RoleKeyedPolicyWhenPooled<DB> {
             let sites: Vec<_> = clauses
                 .into_iter()
                 .filter_map(|(clause, expression)| {
-                    let ControlFlow::Break(read) = expression?.visit(&mut RoleRead) else {
+                    let ControlFlow::Break(read) = walk(expression?, &mut RoleRead) else {
                         return None;
                     };
                     Some(PolicySite {
