@@ -22,14 +22,15 @@ pub fn RulesTab(selected: Option<String>) -> Element {
     let rules = use_hook(|| Rc::new(catalog()));
     let mut query = use_signal(String::new);
     let mut group = use_signal::<Option<LintGroup>>(|| None);
-    let needle = query.read().to_lowercase();
+    let needle = query.read().trim().to_lowercase();
+    let snake_needle = needle.replace(' ', "_");
     let chosen = group();
     let shown: Vec<&CatalogEntry> = rules
         .iter()
         .filter(|rule| chosen.is_none_or(|group| group == rule.group))
         .filter(|rule| {
             needle.is_empty()
-                || rule.name.to_lowercase().contains(&needle)
+                || rule.name.contains(&snake_needle)
                 || rule.rationale.to_lowercase().contains(&needle)
         })
         .collect();
