@@ -4,6 +4,7 @@
 mod analysis;
 mod catalog;
 mod examples;
+mod proposal;
 mod route;
 mod rule_icons;
 mod rules_tab;
@@ -24,6 +25,7 @@ use sqlippy::prelude::{Basis, Level, LintGroup};
 
 use crate::analysis::{Finding, Report, analyze};
 use crate::examples::{EXAMPLES, ExampleIcon};
+use crate::proposal::{ProposeLint, proposal_url};
 use crate::route::{Route, use_route};
 use crate::rule_icons::RuleIcon;
 use crate::rules_tab::RulesTab;
@@ -261,7 +263,7 @@ fn App() -> Element {
                         run_check(sql, pedantic, report, error);
                     },
                 }
-                FindingsPane { report: report.read().clone(), stale: error.read().is_some() }
+                FindingsPane { report: report.read().clone(), stale: error.read().is_some(), sql }
             }
             }
         }
@@ -404,7 +406,7 @@ fn InputPane(
 /// `stale` marks a report of the last SQL that parsed, kept while the editor
 /// holds SQL that does not.
 #[component]
-fn FindingsPane(report: Option<Report>, stale: bool) -> Element {
+fn FindingsPane(report: Option<Report>, stale: bool, sql: Signal<String>) -> Element {
     let Some(report) = report else {
         return rsx! {
             section { class: "panel",
@@ -477,6 +479,10 @@ fn FindingsPane(report: Option<Report>, stale: bool) -> Element {
                 for (i, finding) in report.findings.iter().enumerate() {
                     FindingCard { key: "{i}", finding: finding.clone() }
                 }
+            }
+            p { class: "propose-row",
+                "Something wrong in this SQL that SQLippy misses? "
+                ProposeLint { label: "Propose a lint", href: proposal_url(Some(&sql.read())) }
             }
         }
     }

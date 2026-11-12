@@ -640,6 +640,28 @@ a.finding-rule:focus-visible {
     font-weight: 700;
 }
 
+.propose-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--sqy-accent);
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-decoration: none;
+    border-bottom: 1px solid currentColor;
+}
+
+.propose-link:hover,
+.propose-link:focus-visible {
+    border-bottom-width: 2px;
+}
+
+.propose-row {
+    margin: 0;
+    color: var(--sqy-muted);
+    font-size: 0.85rem;
+}
+
 .rule-overview p {
     margin: 0 0 12px;
 }

@@ -14,6 +14,7 @@ use sqlippy::prelude::{Basis, DefaultConstrainer, LintGroup, ParserDB};
 
 use crate::analysis::analyze;
 use crate::catalog::{CatalogEntry, catalog, kind_phrase};
+use crate::proposal::{ProposeLint, proposal_url};
 use crate::route::Route;
 use crate::rule_icons::RuleIcon;
 use crate::{Tone, code_theme, settings};
@@ -49,6 +50,7 @@ pub fn RulesTab(selected: Option<String>) -> Element {
                         "Rules"
                         span { class: "panel-sub", "{shown.len()} of {rules.len()}" }
                     }
+                    ProposeLint { label: "Propose", href: proposal_url(None) }
                 }
                 input {
                     class: "rule-search",
@@ -124,6 +126,10 @@ pub fn RulesTab(selected: Option<String>) -> Element {
                                     }
                                 }
                             }
+                        }
+                        p { class: "propose-row",
+                            "Missing a check? "
+                            ProposeLint { label: "Propose a new lint", href: proposal_url(None) }
                         }
                     }
                 },
