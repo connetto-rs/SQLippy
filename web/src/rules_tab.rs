@@ -7,7 +7,8 @@ use dioxus::prelude::*;
 use dioxus_code_editor::{CodeEditor, Language};
 use dioxus_free_icons::Icon;
 use dioxus_free_icons::icons::fa_solid_icons::{
-    FaBook, FaCircleCheck, FaTriangleExclamation, FaWrench,
+    FaBan, FaBook, FaBug, FaCircleCheck, FaDiagramProject, FaEye, FaGaugeHigh, FaGlasses,
+    FaLayerGroup, FaPaintbrush, FaTriangleExclamation, FaWrench,
 };
 use sqlippy::prelude::{Basis, DefaultConstrainer, LintGroup, ParserDB};
 
@@ -61,13 +62,15 @@ pub fn RulesTab(selected: Option<String>) -> Element {
                         class: if chosen.is_none() { "pill active" } else { "pill" },
                         "aria-pressed": chosen.is_none().to_string(),
                         onclick: move |_| group.set(None),
+                        Icon { width: 12, height: 12, icon: FaLayerGroup }
                         "all"
                     }
                     for candidate in LintGroup::ALL {
                         button {
-                            class: if chosen == Some(candidate) { "pill active" } else { "pill" },
+                            class: if chosen == Some(candidate) { "pill group-pill active {group_tone(candidate)}" } else { "pill group-pill {group_tone(candidate)}" },
                             "aria-pressed": (chosen == Some(candidate)).to_string(),
                             onclick: move |_| group.set(Some(candidate)),
+                            GroupIcon { group: candidate }
                             "{candidate}"
                         }
                     }
@@ -75,8 +78,11 @@ pub fn RulesTab(selected: Option<String>) -> Element {
                 nav { class: "rule-links", aria_label: "Rules",
                     for heading in LintGroup::ALL {
                         if shown.iter().any(|rule| rule.group == heading) {
-                            h3 { key: "{heading}", class: "rule-group-heading",
-                                "{heading}"
+                            h3 { key: "{heading}", class: "rule-group-heading {group_tone(heading)}",
+                                span { class: "rule-group-name",
+                                    GroupIcon { group: heading }
+                                    "{heading}"
+                                }
                                 span { class: "rule-group-level", "{heading.default_level()} by default" }
                             }
                             for rule in shown.iter().filter(|rule| rule.group == heading) {
@@ -106,8 +112,9 @@ pub fn RulesTab(selected: Option<String>) -> Element {
                             for heading in LintGroup::ALL {
                                 li { key: "{heading}",
                                     button {
-                                        class: "pill",
+                                        class: "pill group-pill {group_tone(heading)}",
                                         onclick: move |_| group.set(Some(heading)),
+                                        GroupIcon { group: heading }
                                         "{heading}"
                                     }
                                     span {
@@ -120,6 +127,25 @@ pub fn RulesTab(selected: Option<String>) -> Element {
                 },
             }
         }
+    }
+}
+
+/// The tone class a group's rules run at by default.
+fn group_tone(group: LintGroup) -> &'static str {
+    Tone::of(group.default_level(), group).class()
+}
+
+/// The icon that marks `group` in the pills and the rule index.
+#[component]
+fn GroupIcon(group: LintGroup) -> Element {
+    match group {
+        LintGroup::Correctness => rsx! { Icon { width: 12, height: 12, icon: FaBug } },
+        LintGroup::Suspicious => rsx! { Icon { width: 12, height: 12, icon: FaEye } },
+        LintGroup::Perf => rsx! { Icon { width: 12, height: 12, icon: FaGaugeHigh } },
+        LintGroup::Complexity => rsx! { Icon { width: 12, height: 12, icon: FaDiagramProject } },
+        LintGroup::Style => rsx! { Icon { width: 12, height: 12, icon: FaPaintbrush } },
+        LintGroup::Pedantic => rsx! { Icon { width: 12, height: 12, icon: FaGlasses } },
+        LintGroup::Restriction => rsx! { Icon { width: 12, height: 12, icon: FaBan } },
     }
 }
 

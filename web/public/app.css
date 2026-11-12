@@ -245,6 +245,21 @@ header .tagline a {
     border-color: var(--sqy-ink);
 }
 
+.group-pill {
+    color: var(--lvl);
+    border-color: color-mix(in srgb, var(--lvl) 45%, transparent);
+}
+
+.group-pill:hover {
+    background: color-mix(in srgb, var(--lvl) 10%, transparent);
+}
+
+.group-pill.active {
+    background: var(--lvl);
+    border-color: var(--lvl);
+    color: var(--sqy-bg);
+}
+
 .control-group {
     display: flex;
     flex-direction: column;
@@ -377,7 +392,7 @@ header .tagline a {
     border-radius: 999px;
     font-size: 0.8rem;
     font-weight: 600;
-    color: #fff;
+    color: var(--sqy-bg);
     background: var(--lvl, var(--sqy-muted));
 }
 
@@ -540,6 +555,16 @@ a.finding-rule:focus-visible {
     gap: 2px;
     overflow-y: auto;
     min-height: 0;
+}
+
+.rule-group-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.rule-group-name svg {
+    color: var(--lvl);
 }
 
 .rule-group-heading {
