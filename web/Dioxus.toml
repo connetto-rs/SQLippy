@@ -1,0 +1,21 @@
+[application]
+name = "sqlippy-web"
+default_platform = "web"
+
+[web.app]
+title = "SQLippy: lints for SQL schemas"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "public"]
+
+# Linked at build time so the first paint is styled.
+[web.resource]
+style = ["/app.css"]
+
+[web.resource.dev]
+
+# binaryen cannot parse the DWARF current rustc emits.
+[web.wasm_opt]
+debug = false
+level = "4"
