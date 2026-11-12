@@ -113,7 +113,7 @@ impl Display for Level {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Basis {
     /// Declared structure, such as types, keys, constraints and policies,
-    /// so every finding is exact.
+    /// read without interpreting what names mean.
     Declared,
     /// Words in object names, such as `price` or `is_active`, so a finding
     /// is a guess about what the object means.
