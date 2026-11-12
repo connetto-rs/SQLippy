@@ -389,3 +389,56 @@ fn rules_that_read_names_say_they_guess() {
         assert_eq!(metadata.basis, Basis::Declared, "{}", metadata.name);
     }
 }
+
+#[test]
+fn a_constrainer_lists_its_rules_with_their_kind_level_and_requirements() {
+    let mut constrainer = DefaultConstrainer::<ParserDB>::default();
+    let find = |rules: &[RegisteredRule], name: &str| {
+        let matching: Vec<RegisteredRule> = rules
+            .iter()
+            .copied()
+            .filter(|rule| rule.metadata().name == name)
+            .collect();
+        assert_eq!(matching.len(), 1, "{name} is registered once");
+        matching[0]
+    };
+
+    let rules = constrainer.rules();
+    let table = find(&rules, "LowercaseTableName");
+    assert_eq!(table.kind(), RuleKind::Table);
+    assert_eq!(table.level(), Level::Warn);
+    assert_eq!(table.requires(), [].as_slice());
+    assert_eq!(find(&rules, "SnakeCaseColumnName").kind(), RuleKind::Column);
+    assert_eq!(
+        find(&rules, "UnindexedForeignKey").kind(),
+        RuleKind::ForeignKey
+    );
+    let not_in: Vec<RuleKind> = rules
+        .iter()
+        .filter(|rule| rule.metadata().name == "NotInNullableSubquery")
+        .map(RegisteredRule::kind)
+        .collect();
+    assert_eq!(
+        not_in,
+        [RuleKind::Schema, RuleKind::Query],
+        "checks both stored SQL and statements"
+    );
+    assert_eq!(
+        find(&rules, "DefinerWithoutSearchPath").kind(),
+        RuleKind::Function
+    );
+    let query = find(&rules, "OuterColumnCapture");
+    assert_eq!(query.kind(), RuleKind::Query);
+    assert_eq!(query.level(), Level::Deny);
+    assert_eq!(
+        find(&rules, "TruncateGrantedToAppRole").requires(),
+        [Declaration::AppRoles].as_slice()
+    );
+    assert_eq!(find(&rules, "FlagNotBoolean").level(), Level::Allow);
+
+    constrainer.set_group_level(LintGroup::Pedantic, Level::Warn);
+    constrainer.set_rule_level("LowercaseTableName", Level::Deny);
+    let rules = constrainer.rules();
+    assert_eq!(find(&rules, "FlagNotBoolean").level(), Level::Warn);
+    assert_eq!(find(&rules, "LowercaseTableName").level(), Level::Deny);
+}
