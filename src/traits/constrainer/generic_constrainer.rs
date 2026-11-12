@@ -11,7 +11,7 @@ use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 use crate::{
     deployment::Deployment,
     error::{Allowance, Error, InactiveRule, Interruption, PolicyAllowance, StatementAllowance},
-    lint::{Level, LintGroup, Rule, RuleMetadata},
+    lint::{Level, LintGroup, RegisteredRule, Rule, RuleKind, RuleMetadata},
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, QueryRule, Reporter, SchemaRule,
         TableRule,
@@ -171,6 +171,19 @@ fn inactive<R: Rule + ?Sized>(
         })
 }
 
+/// Each entry of `registered` as a rule of `kind`.
+fn listed<R: Rule + ?Sized>(
+    registered: &[Registered<R>],
+    kind: RuleKind,
+) -> impl Iterator<Item = RegisteredRule> {
+    registered.iter().map(move |entry| RegisteredRule {
+        metadata: entry.rule.metadata(),
+        requires: entry.rule.requires(),
+        kind,
+        level: entry.level,
+    })
+}
+
 /// The single PostgreSQL statement `sql` holds.
 fn single_statement(sql: &str) -> Option<Statement> {
     let [statement] = Parser::parse_sql(&PostgreSqlDialect {}, sql)
@@ -284,6 +297,16 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             .chain(inactive(&self.schemas, deployment))
             .chain(inactive(&self.functions, deployment))
             .chain(inactive(&self.queries, deployment))
+            .collect()
+    }
+
+    pub(crate) fn rules(&self) -> Vec<RegisteredRule> {
+        listed(&self.tables, RuleKind::Table)
+            .chain(listed(&self.columns, RuleKind::Column))
+            .chain(listed(&self.foreign_keys, RuleKind::ForeignKey))
+            .chain(listed(&self.schemas, RuleKind::Schema))
+            .chain(listed(&self.functions, RuleKind::Function))
+            .chain(listed(&self.queries, RuleKind::Query))
             .collect()
     }
 

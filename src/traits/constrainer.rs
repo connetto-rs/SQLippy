@@ -9,7 +9,7 @@ use sqlparser::ast::Statement;
 use crate::{
     deployment::Deployment,
     error::{Error, InactiveRule},
-    lint::{Level, LintGroup},
+    lint::{Level, LintGroup, RegisteredRule},
     traits::{ColumnRule, ForeignKeyRule, FunctionRule, QueryRule, SchemaRule, TableRule},
 };
 
@@ -129,6 +129,28 @@ pub trait Constrainer: Default {
     /// ```
     fn inactive_rules(&self) -> Vec<InactiveRule> {
         self.constrainer().inactive_rules()
+    }
+
+    /// Returns every registered rule with what it runs on, the level it runs
+    /// at here and the declarations it needs, in registration order.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlippy::prelude::*;
+    ///
+    /// let mut constrainer = DefaultConstrainer::<ParserDB>::default();
+    /// constrainer.set_group_level(LintGroup::Style, Level::Deny);
+    /// let rule = constrainer
+    ///     .rules()
+    ///     .into_iter()
+    ///     .find(|rule| rule.metadata().name == "PluralTableName")
+    ///     .unwrap();
+    /// assert_eq!(rule.kind(), RuleKind::Table);
+    /// assert_eq!(rule.level(), Level::Deny);
+    /// ```
+    fn rules(&self) -> Vec<RegisteredRule> {
+        self.constrainer().rules()
     }
 
     /// Passes every violation, lookup failure and unused allowance to `sink`

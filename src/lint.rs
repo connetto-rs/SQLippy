@@ -146,3 +146,55 @@ pub trait Rule {
         &[]
     }
 }
+
+/// What a rule is run on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuleKind {
+    /// Each table.
+    Table,
+    /// Each column.
+    Column,
+    /// Each foreign key.
+    ForeignKey,
+    /// The schema as a whole.
+    Schema,
+    /// Each function.
+    Function,
+    /// Each statement an application sends.
+    Query,
+}
+
+/// A rule registered on a constrainer and the level it runs at there.
+#[derive(Debug, Clone, Copy)]
+pub struct RegisteredRule {
+    pub(crate) metadata: &'static RuleMetadata,
+    pub(crate) requires: &'static [Declaration],
+    pub(crate) kind: RuleKind,
+    pub(crate) level: Level,
+}
+
+impl RegisteredRule {
+    /// Returns the rule's metadata.
+    #[must_use]
+    pub fn metadata(&self) -> &'static RuleMetadata {
+        self.metadata
+    }
+
+    /// Returns the declarations the rule cannot run without.
+    #[must_use]
+    pub fn requires(&self) -> &'static [Declaration] {
+        self.requires
+    }
+
+    /// Returns what the rule is run on.
+    #[must_use]
+    pub fn kind(&self) -> RuleKind {
+        self.kind
+    }
+
+    /// Returns the level the rule runs at on its constrainer.
+    #[must_use]
+    pub fn level(&self) -> Level {
+        self.level
+    }
+}
