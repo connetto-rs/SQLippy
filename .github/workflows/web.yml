@@ -1,0 +1,42 @@
+name: Web CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: Web demo
+    runs-on: ubuntu-26.04
+    # The web crate builds sql-traits and sqlparser from scratch on a cold cache.
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: web
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy on the wasm build
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Run tests
+        run: cargo test
