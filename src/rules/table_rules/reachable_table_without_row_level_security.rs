@@ -4,7 +4,7 @@ use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::client_reach,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -69,6 +69,11 @@ impl<DB> Rule for ReachableTableWithoutRowLevelSecurity<DB> {
                 "https://github.com/supabase/splinter/blob/main/lints/0013_rls_disabled_in_public.sql",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE public.notes (id INT PRIMARY KEY);",
+                good: "CREATE TABLE public.notes (id INT PRIMARY KEY);\n\
+ALTER TABLE public.notes ENABLE ROW LEVEL SECURITY;",
+            },
         };
         &METADATA
     }

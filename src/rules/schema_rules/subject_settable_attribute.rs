@@ -14,7 +14,7 @@ use sqlparser::ast::{
 use crate::{
     deployment::{Declaration, Deployment},
     error::{Interruption, PolicySite},
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         authority_support::{TableColumn, authority_columns, credential_compared, is_literal},
         policy_support::{
@@ -296,6 +296,20 @@ impl<DB> Rule for SubjectSettableAttribute<DB> {
                 "https://supabase.com/docs/guides/database/postgres/column-level-security",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE profiles (id TEXT PRIMARY KEY, is_admin BOOL);\n\
+CREATE TABLE docs (id INT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY docs_admin ON docs USING (EXISTS (SELECT 1 FROM profiles p WHERE p.id = current_setting('app.user_id', true) AND p.is_admin));\n\
+CREATE POLICY own ON profiles FOR UPDATE USING (id = current_setting('app.user_id', true));",
+                good: "CREATE TABLE profiles (id TEXT PRIMARY KEY, is_admin BOOL);\n\
+CREATE TABLE docs (id INT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY docs_admin ON docs USING (EXISTS (SELECT 1 FROM profiles p WHERE p.id = current_setting('app.user_id', true) AND p.is_admin));\n\
+CREATE POLICY own ON profiles FOR UPDATE USING (id = current_setting('app.user_id', true)) WITH CHECK (id = current_setting('app.user_id', true) AND NOT is_admin);",
+            },
         };
         &METADATA
     }

@@ -5,7 +5,7 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
 use heck::ToSnakeCase;
@@ -70,6 +70,10 @@ impl<DB> Rule for SnakeCaseColumnName<DB> {
                 "https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE t (\"myColumn\" INT);",
+                good: "CREATE TABLE t (my_column INT);",
+            },
         };
         &METADATA
     }

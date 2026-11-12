@@ -17,7 +17,9 @@ pub mod prelude {
             Allowance, Error, InactiveRule, Interruption, Location, PolicyAllowance, PolicyClause,
             PolicySite, StatementAllowance, StatementSite, Violation,
         },
-        lint::{Basis, Level, LintGroup, RegisteredRule, Rule, RuleKind, RuleMetadata},
+        lint::{
+            Basis, Level, LintGroup, RegisteredRule, Rule, RuleExample, RuleKind, RuleMetadata,
+        },
         rules::*,
         traits::*,
         vocabulary::Vocabulary,

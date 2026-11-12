@@ -4,7 +4,7 @@ use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::name_support::{NameHint, names_money},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -43,6 +43,10 @@ rule_definition!(
     LintGroup::Suspicious,
     "Floating-point types store most decimal fractions approximately, so summed amounts drift by fractions of a cent and fail to equal the exact total.",
     Some("https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-FLOAT"),
+    RuleExample {
+        bad: "CREATE TABLE t (total_price REAL);",
+        good: "CREATE TABLE t (total_price NUMERIC);",
+    },
     Basis::Names
 );
 

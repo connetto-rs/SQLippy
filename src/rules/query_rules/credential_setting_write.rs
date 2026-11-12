@@ -20,7 +20,7 @@ use sqlparser::{
 use crate::{
     deployment::{Declaration, Deployment},
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::schema_of,
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, reporter::signature},
 };
@@ -420,6 +420,10 @@ impl<DB> Rule for CredentialSettingWrite<DB> {
             rationale: "A client that writes the setting policies read as the caller's identity can act as any user.",
             source: Some("https://www.postgresql.org/docs/current/functions-admin.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "SELECT set_config('app.user_id', 'alice', false);",
+                good: "SELECT current_setting('app.user_id', true);",
+            },
         };
         &METADATA
     }

@@ -4,9 +4,11 @@
 macro_rules! schema_rule {
     (
         $(#[$doc:meta])*
-        $name:ident, $group:expr, $rationale:literal, $source:expr
+        $name:ident, $group:expr, $rationale:literal, $source:expr, $example:expr
     ) => {
-        rule_definition!($(#[$doc])* $name, register_schema_rule, $group, $rationale, $source);
+        rule_definition!(
+            $(#[$doc])* $name, register_schema_rule, $group, $rationale, $source, $example
+        );
     };
 }
 

@@ -12,7 +12,7 @@ use sqlparser::ast::{Expr, Query, SetExpr, Visit, Visitor};
 use crate::{
     deployment::{Declaration, Deployment},
     error::{Interruption, PolicySite},
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         grant_support::schema_of,
         policy_support::{is_column_reference, walked_clauses},
@@ -207,6 +207,14 @@ impl<DB> Rule for SelfAssertedClaimPolicy<DB> {
             rationale: "A claim or column the caller sets says whatever the caller wants, so a policy granting access on it admits every caller who sets it.",
             source: Some("https://supabase.com/docs/guides/database/postgres/row-level-security"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE docs (owner TEXT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON docs USING (owner = current_setting('app.user_metadata', true));",
+                good: "CREATE TABLE docs (owner TEXT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON docs USING (owner = current_setting('app.user_id', true));",
+            },
         };
         &METADATA
     }

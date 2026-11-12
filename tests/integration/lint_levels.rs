@@ -253,6 +253,10 @@ impl Rule for LookupFailsOn {
             rationale: "Test rule.",
             source: None,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE t (id INT);",
+                good: "CREATE TABLE u (id INT);",
+            },
         };
         &METADATA
     }

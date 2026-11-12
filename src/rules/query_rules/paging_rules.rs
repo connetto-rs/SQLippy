@@ -9,7 +9,7 @@ use sqlparser::ast::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::statement_support::{is_random, row_limit},
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
@@ -99,7 +99,13 @@ query_rule!(
     RandomOrderLimit,
     LintGroup::Pedantic,
     "ORDER BY random() with a LIMIT sorts every row to keep a few, and the faster TABLESAMPLE methods do not draw a fair sample.",
-    Some("https://www.postgresql.org/docs/current/sql-select.html")
+    Some("https://www.postgresql.org/docs/current/sql-select.html"),
+    RuleExample {
+        bad: "CREATE TABLE items (id INT PRIMARY KEY);\n\
+SELECT id FROM items ORDER BY random() LIMIT 10;",
+        good: "CREATE TABLE items (id INT PRIMARY KEY);\n\
+SELECT id FROM items TABLESAMPLE SYSTEM (1) LIMIT 10;",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for RandomOrderLimit<DB> {
@@ -152,7 +158,13 @@ query_rule!(
     OffsetPaging,
     LintGroup::Pedantic,
     "OFFSET makes the server compute and discard every skipped row, and a row inserted between pages shifts the next page.",
-    Some("https://www.postgresql.org/docs/current/queries-limit.html")
+    Some("https://www.postgresql.org/docs/current/queries-limit.html"),
+    RuleExample {
+        bad: "CREATE TABLE items (id INT PRIMARY KEY);\n\
+SELECT id FROM items ORDER BY id LIMIT 10 OFFSET 100;",
+        good: "CREATE TABLE items (id INT PRIMARY KEY);\n\
+SELECT id FROM items WHERE id > 100 ORDER BY id LIMIT 10;",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for OffsetPaging<DB> {

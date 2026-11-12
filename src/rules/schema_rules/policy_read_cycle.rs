@@ -15,7 +15,7 @@ use sqlparser::ast::{CreatePolicyCommand, Expr, FunctionSecurity, Query, Visit, 
 
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         function_rules::unreadable_body,
         policy_support::{Command, held_by_name, held_roles, policy_roles, walked_clauses},
@@ -667,6 +667,14 @@ impl<DB> Rule for PolicyReadCycle<DB> {
             rationale: "PostgreSQL fails a statement with `infinite recursion detected in policy` when expanding a relation's policies reaches a sublink on a relation it is already expanding.",
             source: SOURCE,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE memberships (owner_id INT, member_id TEXT);\n\
+ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON memberships USING (owner_id IN (SELECT owner_id FROM memberships m WHERE m.member_id = current_setting('app.user_id', true)));",
+                good: "CREATE TABLE memberships (owner_id INT, member_id TEXT);\n\
+ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON memberships USING (member_id = current_setting('app.user_id', true));",
+            },
         };
         &METADATA
     }
@@ -754,6 +762,24 @@ impl<DB> Rule for LatentPolicyReadCycle<DB> {
             rationale: "A role granted every role these policies name, through a membership the schema cannot show, fails each statement with `infinite recursion detected in policy`.",
             source: SOURCE,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE ROLE admin;\n\
+CREATE ROLE reader;\n\
+CREATE TABLE members (owner TEXT);\n\
+CREATE TABLE owners (id TEXT);\n\
+ALTER TABLE members ENABLE ROW LEVEL SECURITY;\n\
+ALTER TABLE owners ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY m ON members FOR SELECT TO admin USING (owner IN (SELECT id FROM owners));\n\
+CREATE POLICY o ON owners FOR SELECT TO reader USING (id IN (SELECT owner FROM members));",
+                good: "CREATE ROLE admin;\n\
+CREATE ROLE reader;\n\
+CREATE TABLE members (owner TEXT);\n\
+CREATE TABLE owners (id TEXT);\n\
+ALTER TABLE members ENABLE ROW LEVEL SECURITY;\n\
+ALTER TABLE owners ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY m ON members FOR SELECT TO admin USING (owner IN (SELECT id FROM owners));\n\
+CREATE POLICY o ON owners FOR SELECT TO reader USING (id = current_setting('app.user_id', true));",
+            },
         };
         &METADATA
     }
@@ -854,6 +880,26 @@ impl<DB> Rule for FunctionMediatedPolicyCycle<DB> {
                 "https://supabase.com/docs/guides/database/postgres/row-level-security#use-security-definer-functions",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE ROLE helper BYPASSRLS;\n\
+CREATE TABLE a (id INT);\n\
+CREATE TABLE b (id INT);\n\
+ALTER TABLE a ENABLE ROW LEVEL SECURITY;\n\
+ALTER TABLE b ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY pb ON b USING (id IN (SELECT id FROM a));\n\
+CREATE FUNCTION in_b(x INT) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY INVOKER SET search_path = '' AS $$ SELECT EXISTS (SELECT 1 FROM public.b WHERE b.id = x) $$;\n\
+ALTER FUNCTION in_b(INT) OWNER TO helper;\n\
+CREATE POLICY pa ON a USING (in_b(id));",
+                good: "CREATE ROLE helper BYPASSRLS;\n\
+CREATE TABLE a (id INT);\n\
+CREATE TABLE b (id INT);\n\
+ALTER TABLE a ENABLE ROW LEVEL SECURITY;\n\
+ALTER TABLE b ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY pb ON b USING (id IN (SELECT id FROM a));\n\
+CREATE FUNCTION in_b(x INT) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$ SELECT EXISTS (SELECT 1 FROM public.b WHERE b.id = x) $$;\n\
+ALTER FUNCTION in_b(INT) OWNER TO helper;\n\
+CREATE POLICY pa ON a USING (in_b(id));",
+            },
         };
         &METADATA
     }

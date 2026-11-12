@@ -9,7 +9,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{Command, held_by_name, policy_roles},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
@@ -143,6 +143,16 @@ impl<DB> Rule for OwnerRightsView<DB> {
             rationale: "A view without `security_invoker` applies its tables' row-level security as its owner, so an owner that bypasses the policies shows every caller every row, and an owner no policy applies to shows them none.",
             source: Some("https://www.postgresql.org/docs/current/sql-createview.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE docs (id INT, owner TEXT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON docs USING (owner = current_setting('app.user_id', true));\n\
+CREATE VIEW doc_ids AS SELECT id FROM docs;",
+                good: "CREATE TABLE docs (id INT, owner TEXT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON docs USING (owner = current_setting('app.user_id', true));\n\
+CREATE VIEW doc_ids WITH (security_invoker = true) AS SELECT id FROM docs;",
+            },
         };
         &METADATA
     }

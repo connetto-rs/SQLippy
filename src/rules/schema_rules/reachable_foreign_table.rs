@@ -4,7 +4,7 @@ use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::client_reach,
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
@@ -62,6 +62,17 @@ impl<DB> Rule for ReachableForeignTable<DB> {
                 "https://github.com/supabase/splinter/blob/main/lints/0017_foreign_table_in_api.sql",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE SCHEMA private;\n\
+CREATE FOREIGN DATA WRAPPER warehouse_fdw;\n\
+CREATE SERVER warehouse FOREIGN DATA WRAPPER warehouse_fdw;\n\
+CREATE FOREIGN TABLE private.sales (id INT) SERVER warehouse;\n\
+GRANT SELECT ON private.sales TO PUBLIC;",
+                good: "CREATE SCHEMA private;\n\
+CREATE FOREIGN DATA WRAPPER warehouse_fdw;\n\
+CREATE SERVER warehouse FOREIGN DATA WRAPPER warehouse_fdw;\n\
+CREATE FOREIGN TABLE private.sales (id INT) SERVER warehouse;",
+            },
         };
         &METADATA
     }

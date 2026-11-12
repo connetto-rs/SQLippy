@@ -15,7 +15,7 @@ use sqlparser::{
 use crate::{
     deployment::Declaration,
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{authority_support::authority_columns, function_rules::unreadable_body},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
@@ -144,6 +144,16 @@ impl<DB> Rule for DefinerTakesActingUser<DB> {
             rationale: "A definer function bypasses the caller's policies, so one that takes the acting user as an argument instead of reading the credential lets any caller act as anyone.",
             source: Some("https://makerkit.dev/blog/tutorials/supabase-rls-best-practices"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE docs (owner TEXT, body TEXT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON docs USING (owner = current_setting('app.user_id', true));\n\
+CREATE FUNCTION user_docs(who TEXT) RETURNS SETOF TEXT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$ SELECT body FROM public.docs WHERE owner = who $$;",
+                good: "CREATE TABLE docs (owner TEXT, body TEXT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON docs USING (owner = current_setting('app.user_id', true));\n\
+CREATE FUNCTION user_docs() RETURNS SETOF TEXT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$ SELECT body FROM public.docs WHERE owner = current_setting('app.user_id', true) $$;",
+            },
         };
         &METADATA
     }

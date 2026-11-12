@@ -4,7 +4,7 @@ use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
 
 use crate::{
     error::{Interruption, PolicySite},
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{correlated_subqueries, walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -65,6 +65,14 @@ impl<DB> Rule for CorrelatedPolicySubquery<DB> {
                 "https://supabase.com/docs/guides/database/postgres/row-level-security-performance",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE docs (team_id INT);\n\
+CREATE TABLE team_user (team_id INT, user_id TEXT);\n\
+CREATE POLICY p ON docs USING (current_setting('app.user_id', true) IN (SELECT user_id FROM team_user WHERE team_user.team_id = docs.team_id));",
+                good: "CREATE TABLE docs (team_id INT);\n\
+CREATE TABLE team_user (team_id INT, user_id TEXT);\n\
+CREATE POLICY p ON docs USING (team_id IN (SELECT team_id FROM team_user WHERE user_id = current_setting('app.user_id', true)));",
+            },
         };
         &METADATA
     }

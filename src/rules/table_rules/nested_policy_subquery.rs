@@ -10,7 +10,7 @@ use sqlparser::ast::{Expr, Query, Visit, Visitor};
 
 use crate::{
     error::{Interruption, PolicySite},
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{Command, held_by_name, policy_roles, walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -158,6 +158,22 @@ impl<DB> Rule for NestedPolicySubquery<DB> {
                 "https://supabase.com/docs/guides/database/postgres/row-level-security#use-security-definer-functions",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE docs (team INT);\n\
+CREATE TABLE members (team INT, member TEXT);\n\
+CREATE TABLE admins (member TEXT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+ALTER TABLE members ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY docs_p ON docs USING (team IN (SELECT team FROM members WHERE member = current_setting('app.user_id', true)));\n\
+CREATE POLICY members_p ON members USING (member IN (SELECT member FROM admins));",
+                good: "CREATE TABLE docs (team INT);\n\
+CREATE TABLE members (team INT, member TEXT);\n\
+CREATE TABLE admins (member TEXT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+ALTER TABLE members ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY docs_p ON docs USING (team IN (SELECT team FROM members WHERE member = current_setting('app.user_id', true)));\n\
+CREATE POLICY members_p ON members USING (member = current_setting('app.user_id', true));",
+            },
         };
         &METADATA
     }

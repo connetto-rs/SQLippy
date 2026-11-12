@@ -2,6 +2,7 @@
 //! so the suite links `sqlippy` and its dependencies once.
 
 mod common;
+mod rule_examples;
 mod rule_findings;
 
 mod catalog_checks;

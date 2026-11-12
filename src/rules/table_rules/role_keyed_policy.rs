@@ -9,7 +9,7 @@ use sqlparser::ast::{Expr, Owner, Visit, Visitor};
 use crate::{
     deployment::Declaration,
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{is_role_read, walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -101,6 +101,16 @@ impl<DB> Rule for PolicyToCreatingRole<DB> {
             rationale: "PostgreSQL resolves CURRENT_USER, CURRENT_ROLE and SESSION_USER in a policy's TO list when the policy is created, so it applies to the migration's role and never to the callers it seems to name.",
             source: Some("https://www.postgresql.org/docs/current/sql-createpolicy.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE ROLE authenticated;\n\
+CREATE TABLE notes (id INT PRIMARY KEY);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY readable ON notes TO CURRENT_USER USING (true);",
+                good: "CREATE ROLE authenticated;\n\
+CREATE TABLE notes (id INT PRIMARY KEY);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY readable ON notes TO authenticated USING (true);",
+            },
         };
         &METADATA
     }
@@ -114,6 +124,14 @@ impl<DB> Rule for RoleKeyedPolicyWhenPooled<DB> {
             rationale: "In a pooled deployment every caller shares one database role, so a policy keyed on the role admits every caller or none.",
             source: None,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON notes USING (owner = current_user);",
+                good: "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON notes USING (owner = current_setting('app.user_id', true));",
+            },
         };
         &METADATA
     }

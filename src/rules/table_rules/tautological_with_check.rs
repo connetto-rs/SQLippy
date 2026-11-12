@@ -5,7 +5,7 @@ use sqlparser::ast::CreatePolicyCommand;
 
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{is_tautology, reads_row},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -63,6 +63,14 @@ impl<DB> Rule for TautologicalWithCheck<DB> {
             rationale: "An explicit always-true WITH CHECK replaces the default check against USING, so a caller can write rows the policy would never let them read.",
             source: Some("https://www.postgresql.org/docs/current/sql-createpolicy.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON notes FOR UPDATE USING (owner = current_setting('app.user_id', true)) WITH CHECK (true);",
+                good: "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON notes FOR UPDATE USING (owner = current_setting('app.user_id', true));",
+            },
         };
         &METADATA
     }

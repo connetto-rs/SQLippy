@@ -10,7 +10,7 @@ use sqlparser::ast::{Expr, FunctionArguments, FunctionBehavior, Visit, Visitor};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::clock_support::{bound_clock, is_clock, upper_bound},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -115,6 +115,10 @@ impl<DB> Rule for TimeDependentCheck<DB> {
             rationale: "PostgreSQL assumes a CHECK is immutable and tests it only when a row is written, so a check that turns false as time passes leaves stored rows that fail it, and a dump of them fails to restore.",
             source: Some("https://www.postgresql.org/docs/current/ddl-constraints.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE events (id INT PRIMARY KEY, recorded TIMESTAMPTZ CHECK (recorded > now()));",
+                good: "CREATE TABLE events (id INT PRIMARY KEY, recorded TIMESTAMPTZ CHECK (recorded <= now()));",
+            },
         };
         &METADATA
     }

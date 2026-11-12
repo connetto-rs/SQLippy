@@ -7,7 +7,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         name_support::{NameHint, names_count},
         type_support::underlying_type,
@@ -52,6 +52,10 @@ rule_definition!(
     LintGroup::Pedantic,
     "A count of things is a whole number, while a floating-point or numeric column stores 2.5 items, and ten float counts of 0.1 sum to 1.0000001.",
     Some("https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-INT"),
+    RuleExample {
+        bad: "CREATE TABLE t (item_count REAL);",
+        good: "CREATE TABLE t (item_count INTEGER);",
+    },
     Basis::Names
 );
 

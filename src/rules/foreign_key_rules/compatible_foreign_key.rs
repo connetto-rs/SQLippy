@@ -11,7 +11,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -143,6 +143,12 @@ impl<C> Rule for CompatibleForeignKey<C> {
             rationale: "A foreign key whose columns differ in type from the referenced columns, or that links tables outside one extension hierarchy, usually points at the wrong column.",
             source: None,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (parent_id SMALLINT REFERENCES parents (id));",
+                good: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (parent_id INT REFERENCES parents (id));",
+            },
         };
         &METADATA
     }

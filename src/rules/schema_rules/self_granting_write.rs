@@ -9,7 +9,7 @@ use sqlparser::ast::{BinaryOperator, CreatePolicyType, Expr};
 use crate::{
     deployment::Declaration,
     error::{Interruption, PolicySite},
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         authority_support::authority_columns,
         credential_support::CredentialJudge,
@@ -150,6 +150,24 @@ impl<DB> Rule for SelfGrantingWrite<DB> {
             rationale: "Policies read an authority table to decide what the caller may reach, so a write that lets the caller choose a row's scope freely lets them grant themselves that scope.",
             source: None,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE teams (id INT PRIMARY KEY);\n\
+CREATE TABLE members (team_id INT REFERENCES teams (id), member TEXT);\n\
+CREATE TABLE invitations (team_id INT, invitee TEXT);\n\
+CREATE TABLE docs (team_id INT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+ALTER TABLE members ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY docs_read ON docs FOR SELECT USING (team_id IN (SELECT team_id FROM members WHERE member = current_setting('app.user_id', true)));\n\
+CREATE POLICY join_team ON members FOR INSERT WITH CHECK (member = current_setting('app.user_id', true));",
+                good: "CREATE TABLE teams (id INT PRIMARY KEY);\n\
+CREATE TABLE members (team_id INT REFERENCES teams (id), member TEXT);\n\
+CREATE TABLE invitations (team_id INT, invitee TEXT);\n\
+CREATE TABLE docs (team_id INT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+ALTER TABLE members ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY docs_read ON docs FOR SELECT USING (team_id IN (SELECT team_id FROM members WHERE member = current_setting('app.user_id', true)));\n\
+CREATE POLICY join_team ON members FOR INSERT WITH CHECK (member = current_setting('app.user_id', true) AND team_id IN (SELECT team_id FROM invitations WHERE invitee = current_setting('app.user_id', true)));",
+            },
         };
         &METADATA
     }

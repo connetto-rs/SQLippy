@@ -5,7 +5,7 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, DomainLike, PolicyLike, Table
 
 use crate::{
     error::{Interruption, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::type_support::{TypeFlaw, TypeSite, type_uses},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
@@ -135,10 +135,12 @@ fn report<DB: DatabaseLike>(
 macro_rules! type_rule {
     (
         $(#[$doc:meta])*
-        $name:ident, $group:expr, $rationale:literal, $source:expr,
+        $name:ident, $group:expr, $rationale:literal, $source:expr, $example:expr,
         $wording:expr
     ) => {
-        rule_definition!($(#[$doc])* $name, register_schema_rule, $group, $rationale, $source);
+        rule_definition!(
+            $(#[$doc])* $name, register_schema_rule, $group, $rationale, $source, $example
+        );
 
         impl<DB: DatabaseLike> SchemaRule for $name<DB> {
             type Database = DB;
@@ -176,6 +178,10 @@ type_rule!(
     LintGroup::Suspicious,
     "A timestamp without time zone stores a wall-clock reading with no zone, so the database cannot tell which moment it names, and a change of TimeZone shifts its comparisons with the current time.",
     WIKI,
+    RuleExample {
+        bad: "CREATE TABLE events (at TIMESTAMP);",
+        good: "CREATE TABLE events (at TIMESTAMPTZ);",
+    },
     Wording {
         flaw: TypeFlaw::NaiveTimestamp,
         tables: Tables::All,
@@ -205,6 +211,10 @@ type_rule!(
     LintGroup::Suspicious,
     "A time with time zone carries an offset without a date, so it cannot follow daylight saving, and PostgreSQL implements it only for SQL compliance.",
     WIKI,
+    RuleExample {
+        bad: "CREATE TABLE events (at TIMETZ);",
+        good: "CREATE TABLE events (at TIME);",
+    },
     Wording {
         flaw: TypeFlaw::TimeWithTimeZone,
         tables: Tables::All,
@@ -234,6 +244,10 @@ type_rule!(
     LintGroup::Suspicious,
     "A timestamp with precision 0 rounds the fractional second instead of truncating it, so storing the current time can store a moment up to half a second in the future.",
     WIKI,
+    RuleExample {
+        bad: "CREATE TABLE events (at TIMESTAMPTZ(0));",
+        good: "CREATE TABLE events (at TIMESTAMPTZ);",
+    },
     Wording {
         flaw: TypeFlaw::RoundedTimestamp,
         tables: Tables::All,
@@ -264,6 +278,10 @@ type_rule!(
     LintGroup::Suspicious,
     "char(n) pads values with spaces to its width and accepts shorter ones, so stored values differ from the values written.",
     WIKI,
+    RuleExample {
+        bad: "CREATE TABLE products (code CHAR(5));",
+        good: "CREATE TABLE products (code VARCHAR(5));",
+    },
     Wording {
         flaw: TypeFlaw::BlankPaddedCharacter,
         tables: Tables::All,
@@ -294,6 +312,10 @@ type_rule!(
     LintGroup::Suspicious,
     "money rounds to the locale's fraction digits and stores no currency, so fractions of a cent are lost and the amount's currency depends on a server setting.",
     WIKI,
+    RuleExample {
+        bad: "CREATE TABLE products (price MONEY);",
+        good: "CREATE TABLE products (price NUMERIC);",
+    },
     Wording {
         flaw: TypeFlaw::Money,
         tables: Tables::All,
@@ -322,6 +344,10 @@ type_rule!(
     LintGroup::Perf,
     "json keeps the input text and reparses it on every use, while jsonb stores a parsed form that is faster to process and supports indexing.",
     Some("https://www.postgresql.org/docs/current/datatype-json.html"),
+    RuleExample {
+        bad: "CREATE TABLE documents (body JSON);",
+        good: "CREATE TABLE documents (body JSONB);",
+    },
     Wording {
         flaw: TypeFlaw::Json,
         tables: Tables::All,
@@ -356,6 +382,10 @@ type_rule!(
     LintGroup::Pedantic,
     "numeric(p, s) rounds a value with more fractional digits than s, so the database stores a value nobody wrote, and a check on the same column only sees the rounded value.",
     Some("https://www.postgresql.org/docs/current/datatype-numeric.html"),
+    RuleExample {
+        bad: "CREATE TABLE products (price NUMERIC(10, 2));",
+        good: "CREATE TABLE products (price NUMERIC CHECK (price = round(price, 2)) CHECK (abs(price) < 10 ^ 8));",
+    },
     Wording {
         flaw: TypeFlaw::ScaledNumeric,
         tables: Tables::Others,
@@ -386,6 +416,10 @@ type_rule!(
     LintGroup::Suspicious,
     "numeric(p, s) rounds a value with more fractional digits than s, so on a table clients write the server stores a value the client never wrote and the echo rewrites the client's row.",
     Some("https://www.postgresql.org/docs/current/datatype-numeric.html"),
+    RuleExample {
+        bad: "CREATE TABLE public.drafts (price NUMERIC(10, 2));",
+        good: "CREATE TABLE public.drafts (price NUMERIC CHECK (price = round(price, 2)) CHECK (abs(price) < 10 ^ 8));",
+    },
     Wording {
         flaw: TypeFlaw::ScaledNumeric,
         tables: Tables::ClientWritten,

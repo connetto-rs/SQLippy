@@ -11,7 +11,7 @@ use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -116,6 +116,12 @@ impl<DB> Rule for NonRedundantExtensionDag<DB> {
             rationale: "A redundant extension edge repeats what the hierarchy already implies, so it adds a dependency the schema does not need.",
             source: None,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (id INT PRIMARY KEY, FOREIGN KEY (id) REFERENCES parents(id), FOREIGN KEY (id) REFERENCES parents(id));",
+                good: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (id INT PRIMARY KEY, FOREIGN KEY (id) REFERENCES parents(id));",
+            },
         };
         &METADATA
     }

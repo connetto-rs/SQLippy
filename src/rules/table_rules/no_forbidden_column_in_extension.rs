@@ -6,7 +6,7 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -125,6 +125,12 @@ impl<DB> Rule for NoForbiddenColumnInExtension<DB> {
             rationale: "The extension model keeps the configured column name for its own use, so a column with that name on an extending table collides with it.",
             source: None,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (id INT PRIMARY KEY, extension TEXT, most_concrete_table TEXT, FOREIGN KEY (id) REFERENCES parents(id));",
+                good: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (id INT PRIMARY KEY, data TEXT, table_kind TEXT, FOREIGN KEY (id) REFERENCES parents(id));",
+            },
         };
         &METADATA
     }

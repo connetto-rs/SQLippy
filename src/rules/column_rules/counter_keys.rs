@@ -9,7 +9,7 @@ use sqlparser::{ast::Expr, dialect::PostgreSqlDialect, parser::Parser};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::is_client_written,
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -94,7 +94,11 @@ rule_definition!(
     register_column_rule,
     LintGroup::Style,
     "A serial column owns a separate sequence that needs its own grants and dependency handling, while an identity column keeps the counter part of the column.",
-    Some("https://wiki.postgresql.org/wiki/Don%27t_Do_This")
+    Some("https://wiki.postgresql.org/wiki/Don%27t_Do_This"),
+    RuleExample {
+        bad: "CREATE TABLE t (id BIGSERIAL);",
+        good: "CREATE TABLE t (id BIGINT GENERATED ALWAYS AS IDENTITY);",
+    }
 );
 
 impl<DB: DatabaseLike> ColumnRule for SerialColumn<DB> {
@@ -141,7 +145,11 @@ rule_definition!(
     register_column_rule,
     LintGroup::Pedantic,
     "An integer key overflows at 2,147,483,647 values over the table's lifetime, and a smallint key at 32,767.",
-    Some("https://github.com/sbdchd/squawk/blob/master/docs/docs/prefer-bigint-over-int.md")
+    Some("https://github.com/sbdchd/squawk/blob/master/docs/docs/prefer-bigint-over-int.md"),
+    RuleExample {
+        bad: "CREATE TABLE t (id INT PRIMARY KEY);",
+        good: "CREATE TABLE t (id BIGINT PRIMARY KEY);",
+    }
 );
 
 impl<DB: DatabaseLike> ColumnRule for NarrowIntegerKey<DB> {
@@ -201,7 +209,11 @@ rule_definition!(
     register_column_rule,
     LintGroup::Suspicious,
     "Each replica of a client-written table mints its own counter values, so two offline clients mint the same key and the server refuses the second row when it syncs.",
-    None
+    None,
+    RuleExample {
+        bad: "CREATE TABLE public.drafts (id BIGSERIAL PRIMARY KEY);",
+        good: "CREATE TABLE public.drafts (id UUID PRIMARY KEY DEFAULT gen_random_uuid());",
+    }
 );
 
 impl<DB: DatabaseLike> ColumnRule for ClientWrittenCounterKey<DB> {

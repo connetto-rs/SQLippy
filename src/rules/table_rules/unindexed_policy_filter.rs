@@ -12,7 +12,7 @@ use sqlparser::ast::{Expr, Query, Visit, Visitor};
 use crate::{
     deployment::Deployment,
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         index_support::{Side, comparison_sides, indexed},
         policy_support::{derives_from_caller, holds_caller, is_column_reference},
@@ -234,6 +234,15 @@ impl<DB> Rule for UnindexedPolicyFilter<DB> {
                 "https://supabase.com/docs/guides/database/postgres/row-level-security#add-indexes",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON notes USING (owner = current_setting('app.user_id', true));",
+                good: "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON notes USING (owner = current_setting('app.user_id', true));\n\
+CREATE INDEX notes_owner ON notes (owner);",
+            },
         };
         &METADATA
     }

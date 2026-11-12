@@ -5,7 +5,7 @@ use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -55,6 +55,10 @@ impl<DB> Rule for HasPrimaryKey<DB> {
                 "https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-PRIMARY-KEYS",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE notes (id INT, body TEXT);",
+                good: "CREATE TABLE notes (id INT PRIMARY KEY, body TEXT);",
+            },
         };
         &METADATA
     }

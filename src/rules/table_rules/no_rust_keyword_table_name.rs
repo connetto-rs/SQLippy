@@ -5,7 +5,7 @@ use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::rust_keywords::is_rust_keyword,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -54,6 +54,10 @@ impl<DB> Rule for NoRustKeywordTableName<DB> {
             rationale: "Code generated from the schema cannot name a Rust item after a keyword without a raw identifier.",
             source: Some("https://doc.rust-lang.org/reference/keywords.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE struct (id INT);",
+                good: "CREATE TABLE structs (id INT);",
+            },
         };
         &METADATA
     }

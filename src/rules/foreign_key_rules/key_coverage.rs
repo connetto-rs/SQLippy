@@ -8,7 +8,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -61,6 +61,12 @@ impl<DB> Rule for NullableCompositeForeignKey<DB> {
             rationale: "Under MATCH SIMPLE a composite foreign key with any column NULL needs no matching row, so a partly filled key references nothing.",
             source: Some("https://www.postgresql.org/docs/current/sql-createtable.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE parents (a INT, b INT, PRIMARY KEY (a, b));\n\
+CREATE TABLE children (a INT, b INT, FOREIGN KEY (a, b) REFERENCES parents (a, b));",
+                good: "CREATE TABLE parents (a INT, b INT, PRIMARY KEY (a, b));\n\
+CREATE TABLE children (a INT, b INT, FOREIGN KEY (a, b) REFERENCES parents (a, b) MATCH FULL);",
+            },
         };
         &METADATA
     }
@@ -152,6 +158,13 @@ impl<DB> Rule for UnindexedForeignKey<DB> {
             rationale: "A delete of a referenced row or an update of its key checks the referencing table, which scans it when no index leads with the foreign key columns.",
             source: Some("https://www.postgresql.org/docs/current/ddl-constraints.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (parent_id INT REFERENCES parents (id));",
+                good: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (parent_id INT REFERENCES parents (id));\n\
+CREATE INDEX ON children (parent_id);",
+            },
         };
         &METADATA
     }

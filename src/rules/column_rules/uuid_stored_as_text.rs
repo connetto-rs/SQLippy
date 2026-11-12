@@ -4,7 +4,7 @@ use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::name_support::{NameHint, names_uuid},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -43,6 +43,10 @@ rule_definition!(
     LintGroup::Pedantic,
     "Text compares a uuid by its spelling, so upper-case and lower-case forms of one uuid are two values, malformed text is accepted, and each value takes 40 bytes against the 16 of a uuid column.",
     Some("https://www.postgresql.org/docs/current/datatype-uuid.html"),
+    RuleExample {
+        bad: "CREATE TABLE t (owner_uuid TEXT);",
+        good: "CREATE TABLE t (owner_uuid UUID);",
+    },
     Basis::Names
 );
 

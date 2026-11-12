@@ -10,7 +10,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -127,6 +127,12 @@ impl<DB> Rule for UniqueColumnNamesInExtensionGraph<DB> {
             rationale: "A column name repeated across an extension hierarchy makes the merged row ambiguous.",
             source: None,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE records (id INT PRIMARY KEY, name TEXT);\n\
+CREATE TABLE notes (id INT PRIMARY KEY REFERENCES records (id), name TEXT);",
+                good: "CREATE TABLE records (id INT PRIMARY KEY, name TEXT);\n\
+CREATE TABLE notes (id INT PRIMARY KEY REFERENCES records (id), description TEXT);",
+            },
         };
         &METADATA
     }

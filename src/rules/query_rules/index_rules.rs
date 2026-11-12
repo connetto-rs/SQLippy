@@ -9,7 +9,7 @@ use sqlparser::ast::{BinaryOperator, DataType, Expr, SelectItem, SetExpr, Statem
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         index_support::{Side, comparison_sides, expression_indexed, indexed, leading},
         key_support::{Instance, instances},
@@ -111,7 +111,15 @@ query_rule!(
     ExpressionDefeatsIndex,
     LintGroup::Perf,
     "PostgreSQL can only use an index for the expression it indexes, so a function or cast around an indexed column makes it read the whole table.",
-    Some("https://www.postgresql.org/docs/current/indexes-expressional.html")
+    Some("https://www.postgresql.org/docs/current/indexes-expressional.html"),
+    RuleExample {
+        bad: "CREATE TABLE users (email TEXT);\n\
+CREATE INDEX users_email ON users (email);\n\
+SELECT email FROM users WHERE lower(email) = 'alice@example.com';",
+        good: "CREATE TABLE users (email TEXT);\n\
+CREATE INDEX users_email ON users (lower(email));\n\
+SELECT email FROM users WHERE lower(email) = 'alice@example.com';",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for ExpressionDefeatsIndex<DB> {
@@ -282,7 +290,14 @@ query_rule!(
     UnindexedFilter,
     LintGroup::Pedantic,
     "A WHERE that no index can serve makes PostgreSQL read every row of the table to find the ones it keeps.",
-    Some("https://www.postgresql.org/docs/current/indexes-types.html")
+    Some("https://www.postgresql.org/docs/current/indexes-types.html"),
+    RuleExample {
+        bad: "CREATE TABLE users (id INT PRIMARY KEY, score INT);\n\
+SELECT id FROM users WHERE score = 1;",
+        good: "CREATE TABLE users (id INT PRIMARY KEY, score INT);\n\
+CREATE INDEX users_score ON users (score);\n\
+SELECT id FROM users WHERE score = 1;",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for UnindexedFilter<DB> {
@@ -393,7 +408,16 @@ query_rule!(
     UnindexedCorrelatedSelect,
     LintGroup::Perf,
     "A scalar subquery in the select list runs once per outer row, and without an index on the column it correlates on each run reads the whole table.",
-    None
+    None,
+    RuleExample {
+        bad: "CREATE TABLE teams (id INT PRIMARY KEY);\n\
+CREATE TABLE users (team_id INT);\n\
+SELECT t.id, (SELECT count(*) FROM users AS u WHERE u.team_id = t.id) FROM teams AS t;",
+        good: "CREATE TABLE teams (id INT PRIMARY KEY);\n\
+CREATE TABLE users (team_id INT);\n\
+CREATE INDEX users_team_id ON users (team_id);\n\
+SELECT t.id, (SELECT count(*) FROM users AS u WHERE u.team_id = t.id) FROM teams AS t;",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for UnindexedCorrelatedSelect<DB> {

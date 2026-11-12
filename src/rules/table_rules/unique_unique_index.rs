@@ -4,7 +4,7 @@
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 use sql_traits::errors::LookupError;
@@ -55,6 +55,10 @@ impl<DB> Rule for UniqueUniqueIndex<DB> {
             rationale: "A duplicated unique index enforces nothing more and is maintained again on every write.",
             source: None,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE accounts (id INT PRIMARY KEY, email TEXT, UNIQUE (email), UNIQUE (email));",
+                good: "CREATE TABLE accounts (id INT PRIMARY KEY, email TEXT, UNIQUE (email));",
+            },
         };
         &METADATA
     }

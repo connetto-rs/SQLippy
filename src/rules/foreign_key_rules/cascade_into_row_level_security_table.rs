@@ -5,7 +5,7 @@ use sqlparser::ast::{CreatePolicyCommand, ReferentialAction};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -61,6 +61,16 @@ impl<DB> Rule for CascadeIntoRowLevelSecurityTable<DB> {
             rationale: "Referential actions bypass row-level security, so a cascading delete removes, and a SET NULL, SET DEFAULT or ON UPDATE CASCADE rewrites, rows of the referencing table that its policies would refuse the caller.",
             source: Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (parent_id INT REFERENCES parents (id) ON DELETE CASCADE);\n\
+ALTER TABLE children ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY children_delete ON children FOR DELETE USING (false);",
+                good: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (parent_id INT REFERENCES parents (id) ON DELETE RESTRICT);\n\
+ALTER TABLE children ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY children_delete ON children FOR DELETE USING (false);",
+            },
         };
         &METADATA
     }

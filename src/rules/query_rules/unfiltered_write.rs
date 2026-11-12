@@ -7,7 +7,7 @@ use sqlparser::ast::{Delete, Statement, Update, Visit, Visitor};
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
 
@@ -63,7 +63,13 @@ query_rule!(
     UnfilteredWrite,
     LintGroup::Suspicious,
     "An UPDATE or DELETE without a WHERE rewrites or removes every row it reaches, which is rarely what a forgotten filter meant.",
-    Some("https://dev.mysql.com/doc/refman/8.4/en/mysql-tips.html")
+    Some("https://dev.mysql.com/doc/refman/8.4/en/mysql-tips.html"),
+    RuleExample {
+        bad: "CREATE TABLE notes (id INT PRIMARY KEY);\n\
+DELETE FROM notes;",
+        good: "CREATE TABLE notes (id INT PRIMARY KEY);\n\
+DELETE FROM notes WHERE id = 1;",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for UnfilteredWrite<DB> {

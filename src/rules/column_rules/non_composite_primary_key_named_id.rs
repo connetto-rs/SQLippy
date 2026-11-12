@@ -6,7 +6,7 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
 
@@ -65,6 +65,10 @@ impl<DB> Rule for NonCompositePrimaryKeyNamedId<DB> {
             rationale: "Naming every single-column primary key `id` lets references and generated code find it without a lookup.",
             source: None,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE t (pk INT PRIMARY KEY);",
+                good: "CREATE TABLE t (id INT PRIMARY KEY);",
+            },
         };
         &METADATA
     }

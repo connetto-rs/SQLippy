@@ -8,7 +8,7 @@ use sqlparser::ast::{Expr, IndexType};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{is_column_reference, unnested},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -118,6 +118,13 @@ impl<DB> Rule for PrefixRedundantIndex<DB> {
             rationale: "An index whose columns lead another index of the same method serves no lookup the longer one cannot, and still costs space and every write.",
             source: Some("https://github.com/pmpetit/pglinter/blob/main/docs/rules/README.md"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT, created TIMESTAMPTZ);\n\
+CREATE INDEX notes_owner_created ON notes (owner, created);\n\
+CREATE INDEX notes_owner ON notes (owner);",
+                good: "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT, created TIMESTAMPTZ);\n\
+CREATE INDEX notes_owner_created ON notes (owner, created);",
+            },
         };
         &METADATA
     }

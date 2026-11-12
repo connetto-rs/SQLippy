@@ -5,7 +5,7 @@ use sqlparser::ast::Statement;
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::not_in_support::NotInCheck,
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule},
 };
@@ -73,6 +73,14 @@ impl<DB> Rule for NotInNullableSubquery<DB> {
             rationale: "NOT IN is never true once the subquery yields a NULL, so a nullable column makes it silently return no row.",
             source: Some("https://wiki.postgresql.org/wiki/Don%27t_Do_This"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE a (id INT);\n\
+CREATE TABLE b (a_id INT);\n\
+SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b);",
+                good: "CREATE TABLE a (id INT);\n\
+CREATE TABLE b (a_id INT);\n\
+SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b WHERE a_id IS NOT NULL);",
+            },
         };
         &METADATA
     }

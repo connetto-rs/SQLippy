@@ -6,7 +6,7 @@ use sql_traits::traits::{CheckConstraintLike, DatabaseLike, TableLike};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -78,6 +78,10 @@ impl<DB> Rule for NoTautologicalCheckRule<DB> {
             rationale: "A check that every row satisfies constrains nothing, so the condition it was meant to enforce is missing.",
             source: Some("https://www.postgresql.org/docs/current/sql-createtable.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE people (id INT PRIMARY KEY, age INT CHECK (true));",
+                good: "CREATE TABLE people (id INT PRIMARY KEY, age INT CHECK (age > 0));",
+            },
         };
         &METADATA
     }

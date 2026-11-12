@@ -7,7 +7,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
 
@@ -50,7 +50,11 @@ schema_rule!(
     NullableUniqueColumn,
     LintGroup::Pedantic,
     "A unique constraint treats every NULL as distinct by default, so rows that hold NULL in a constrained column can repeat everything else.",
-    Some("https://www.postgresql.org/docs/current/ddl-constraints.html")
+    Some("https://www.postgresql.org/docs/current/ddl-constraints.html"),
+    RuleExample {
+        bad: "CREATE TABLE users (email TEXT UNIQUE);",
+        good: "CREATE TABLE users (email TEXT UNIQUE NULLS NOT DISTINCT);",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for NullableUniqueColumn<DB> {

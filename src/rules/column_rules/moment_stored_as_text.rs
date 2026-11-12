@@ -4,7 +4,7 @@ use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::name_support::{NameHint, names_moment},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -45,6 +45,10 @@ rule_definition!(
     LintGroup::Pedantic,
     "Text compares a date by its characters, so impossible dates are stored, `2026-1-9` sorts after `2026-01-10`, and range filters and time arithmetic need a cast on every read.",
     Some("https://www.postgresql.org/docs/current/datatype-datetime.html"),
+    RuleExample {
+        bad: "CREATE TABLE t (start_date TEXT);",
+        good: "CREATE TABLE t (start_date DATE);",
+    },
     Basis::Names
 );
 

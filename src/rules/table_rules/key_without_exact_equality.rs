@@ -14,7 +14,7 @@ use sqlparser::ast::Expr;
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::unnested,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -87,6 +87,10 @@ impl<DB> Rule for KeyWithoutExactEquality<DB> {
                 "https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-FLOAT",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE spans (id INT, span INTERVAL PRIMARY KEY);",
+                good: "CREATE TABLE spans (id INT PRIMARY KEY, span INTERVAL);",
+            },
         };
         &METADATA
     }

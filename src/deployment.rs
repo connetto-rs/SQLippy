@@ -62,6 +62,41 @@ fn parse_expression(expression: &str) -> Result<Expr, ParserError> {
 }
 
 impl Deployment {
+    /// The deployment every [`RuleExample`](crate::lint::RuleExample) is
+    /// written for, a pooled API serving the `public` schema to the
+    /// anonymous role `anon` and the app role `authenticated`, naming the
+    /// caller with `current_setting('app.user_id', true)`, trusting no
+    /// `current_setting('app.user_metadata', true)` claim, and taking the
+    /// rows of `public.drafts` from clients that author them offline.
+    ///
+    /// # Panics
+    ///
+    /// Never panics, since the declared expressions are fixed PostgreSQL.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlippy::prelude::*;
+    ///
+    /// let deployment = Deployment::example();
+    /// assert!(deployment.is_pooled());
+    /// assert!(deployment.is_client_written("public", "drafts"));
+    /// ```
+    #[must_use]
+    pub fn example() -> Self {
+        Self::default()
+            .with_anonymous_role("anon")
+            .with_app_role("authenticated")
+            .with_exposed_schema("public")
+            .with_pooled(true)
+            .with_client_written_table("public", "drafts")
+            .with_credential("current_setting('app.user_id', true)")
+            .and_then(|deployment| {
+                deployment.with_self_asserted_claim("current_setting('app.user_metadata', true)")
+            })
+            .expect("the example's expressions are PostgreSQL")
+    }
+
     /// Declares a role that callers holding no credential act as.
     #[must_use]
     pub fn with_anonymous_role(mut self, role: impl Into<String>) -> Self {

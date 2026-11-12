@@ -5,7 +5,7 @@ use sql_traits::traits::{DatabaseLike, ForeignKeyLike};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::rust_keywords::is_rust_keyword,
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
@@ -54,6 +54,12 @@ impl<DB> Rule for NoRustKeywordForeignKeyName<DB> {
             rationale: "Code generated from the schema cannot name a Rust item after a keyword without a raw identifier.",
             source: Some("https://doc.rust-lang.org/reference/keywords.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (parent_id INT, CONSTRAINT struct FOREIGN KEY (parent_id) REFERENCES parents (id));",
+                good: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (parent_id INT, CONSTRAINT parent_fk FOREIGN KEY (parent_id) REFERENCES parents (id));",
+            },
         };
         &METADATA
     }

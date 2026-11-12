@@ -7,7 +7,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, TableRule},
 };
 
@@ -59,6 +59,15 @@ impl<DB> Rule for ChildWithoutRowLevelSecurity<DB> {
             rationale: "A child table's own policies apply when a query names it directly and its parents' policies are ignored, so a child without row-level security shows every row to a role granted on it.",
             source: Some("https://www.postgresql.org/docs/current/ddl-inherit.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE events (at DATE) PARTITION BY RANGE (at);\n\
+ALTER TABLE events ENABLE ROW LEVEL SECURITY;\n\
+CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');",
+                good: "CREATE TABLE events (at DATE) PARTITION BY RANGE (at);\n\
+ALTER TABLE events ENABLE ROW LEVEL SECURITY;\n\
+CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');\n\
+ALTER TABLE events_2026 ENABLE ROW LEVEL SECURITY;",
+            },
         };
         &METADATA
     }

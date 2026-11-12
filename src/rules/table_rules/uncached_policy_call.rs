@@ -17,7 +17,7 @@ use sqlparser::{
 
 use crate::{
     error::{Interruption, PolicySite},
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::walked_clauses,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -210,6 +210,14 @@ impl<DB> Rule for UncachedPolicyCall<DB> {
                 "https://supabase.com/docs/guides/database/postgres/row-level-security#call-functions-with-select",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON notes USING (owner = current_setting('app.user_id', true));",
+                good: "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON notes USING (owner = (SELECT current_setting('app.user_id', true)));",
+            },
         };
         &METADATA
     }
