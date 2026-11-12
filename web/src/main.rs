@@ -193,7 +193,9 @@ fn App() -> Element {
                 p { class: "tagline",
                     "A Rust crate of "
                     a { href: CLIPPY_URL, target: "_blank", rel: "noopener", "Clippy" }
-                    "-style lints for PostgreSQL schemas and the queries sent to them, each explaining what is wrong and how to fix it, running in your browser."
+                    "-style lints for PostgreSQL schemas and the queries sent to them, each explaining what is wrong and how to fix it, running in your browser. "
+                    "Something wrong in this SQL that SQLippy misses? "
+                    ProposeLint { label: "Propose a lint", href: proposal_url(Some(&sql.read())) }
                 }
             }
             nav { class: "tabs", aria_label: "Sections",
@@ -263,7 +265,7 @@ fn App() -> Element {
                         run_check(sql, pedantic, report, error);
                     },
                 }
-                FindingsPane { report: report.read().clone(), stale: error.read().is_some(), sql }
+                FindingsPane { report: report.read().clone(), stale: error.read().is_some() }
             }
             }
         }
@@ -406,7 +408,7 @@ fn InputPane(
 /// `stale` marks a report of the last SQL that parsed, kept while the editor
 /// holds SQL that does not.
 #[component]
-fn FindingsPane(report: Option<Report>, stale: bool, sql: Signal<String>) -> Element {
+fn FindingsPane(report: Option<Report>, stale: bool) -> Element {
     let Some(report) = report else {
         return rsx! {
             section { class: "panel",
@@ -479,10 +481,6 @@ fn FindingsPane(report: Option<Report>, stale: bool, sql: Signal<String>) -> Ele
                 for (i, finding) in report.findings.iter().enumerate() {
                     FindingCard { key: "{i}", finding: finding.clone() }
                 }
-            }
-            p { class: "propose-row",
-                "Something wrong in this SQL that SQLippy misses? "
-                ProposeLint { label: "Propose a lint", href: proposal_url(Some(&sql.read())) }
             }
         }
     }
