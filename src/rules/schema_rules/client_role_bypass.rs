@@ -6,7 +6,7 @@ use sql_traits::traits::{DatabaseLike, RoleLike, RoleMembershipLike};
 use crate::{
     deployment::{Declaration, Deployment},
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
 
@@ -100,6 +100,10 @@ impl<DB> Rule for ClientRoleBypassesRowLevelSecurity<DB> {
             rationale: "Superusers and roles with BYPASSRLS skip every policy, so a role clients act as sees and changes every row.",
             source: SOURCE,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE ROLE authenticated BYPASSRLS;",
+                good: "CREATE ROLE authenticated NOBYPASSRLS;",
+            },
         };
         &METADATA
     }
@@ -117,6 +121,14 @@ impl<DB> Rule for SettableMembershipInBypassingRole<DB> {
             rationale: "A client role that can SET ROLE to a superuser or BYPASSRLS role takes on its attributes and skips every policy.",
             source: SOURCE,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE ROLE bypasser BYPASSRLS;\n\
+CREATE ROLE authenticated;\n\
+GRANT bypasser TO authenticated WITH SET TRUE;",
+                good: "CREATE ROLE bypasser BYPASSRLS;\n\
+CREATE ROLE authenticated;\n\
+GRANT bypasser TO authenticated WITH SET FALSE;",
+            },
         };
         &METADATA
     }

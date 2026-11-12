@@ -13,7 +13,7 @@ use sqlparser::ast::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         policy_support::unnested,
         statement_support::{Finding, check_select_expressions, report},
@@ -190,7 +190,13 @@ query_rule!(
     TimestampBetween,
     LintGroup::Suspicious,
     "BETWEEN includes both ends, so on continuous time values adjacent ranges overlap at their boundary and a closing time such as 23:59:59 misses fractional seconds.",
-    Some("https://wiki.postgresql.org/wiki/Don%27t_Do_This")
+    Some("https://wiki.postgresql.org/wiki/Don%27t_Do_This"),
+    RuleExample {
+        bad: "CREATE TABLE events (occurred_at TIMESTAMPTZ);\n\
+SELECT occurred_at FROM events WHERE occurred_at BETWEEN '2026-01-01 00:00+00' AND '2026-01-02 00:00+00';",
+        good: "CREATE TABLE events (occurred_at TIMESTAMPTZ);\n\
+SELECT occurred_at FROM events WHERE occurred_at >= '2026-01-01 00:00+00' AND occurred_at < '2026-01-02 00:00+00';",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for TimestampBetween<DB> {
@@ -258,7 +264,13 @@ query_rule!(
     SessionTimeZoneDependence,
     LintGroup::Suspicious,
     "PostgreSQL converts between timestamp with and without time zone in the session's TimeZone, so the result changes with that setting.",
-    Some("https://www.postgresql.org/docs/current/datatype-datetime.html")
+    Some("https://www.postgresql.org/docs/current/datatype-datetime.html"),
+    RuleExample {
+        bad: "CREATE TABLE events (occurred_at TIMESTAMPTZ);\n\
+SELECT occurred_at::date FROM events;",
+        good: "CREATE TABLE events (occurred_at TIMESTAMPTZ);\n\
+SELECT (occurred_at AT TIME ZONE 'UTC')::date FROM events;",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for SessionTimeZoneDependence<DB> {
@@ -357,7 +369,13 @@ query_rule!(
     TruncatingIntegerDivision,
     LintGroup::Suspicious,
     "Integer division truncates toward zero, so scaling the quotient afterwards keeps only whole multiples.",
-    Some("https://www.postgresql.org/docs/current/functions-math.html")
+    Some("https://www.postgresql.org/docs/current/functions-math.html"),
+    RuleExample {
+        bad: "CREATE TABLE results (score INT, total INT);\n\
+SELECT score / total * 100 FROM results;",
+        good: "CREATE TABLE results (score INT, total INT);\n\
+SELECT score * 100 / total FROM results;",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for TruncatingIntegerDivision<DB> {

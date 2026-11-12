@@ -12,7 +12,7 @@ use sqlparser::ast::{BinaryOperator, Expr, Query, Visit, Visitor};
 use crate::{
     deployment::Deployment,
     error::{Interruption, PolicySite},
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{derives_from_caller, walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -146,6 +146,12 @@ impl<DB> Rule for ArrayMembershipPolicy<DB> {
             rationale: "An array element carries no foreign key and every grant or revocation rewrites the row, while a membership table with a row per grant is easier to search and scales better.",
             source: Some("https://www.postgresql.org/docs/current/arrays.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE docs (owner TEXT, editors TEXT[]);\n\
+CREATE POLICY edit ON docs USING (current_setting('app.user_id', true) = ANY (editors));",
+                good: "CREATE TABLE docs (owner TEXT, editors TEXT[]);\n\
+CREATE POLICY edit ON docs USING (owner = current_setting('app.user_id', true));",
+            },
         };
         &METADATA
     }

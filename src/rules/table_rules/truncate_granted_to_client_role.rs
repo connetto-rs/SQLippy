@@ -9,7 +9,7 @@ use sqlparser::ast::Action;
 use crate::{
     deployment::Declaration,
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::{ClientRoles, grantee_list, grants_privilege},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -105,6 +105,16 @@ impl<DB> Rule for TruncateGrantedToAnonymousRole<DB> {
             rationale: RATIONALE,
             source: SOURCE,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE ROLE anon;\n\
+CREATE TABLE notes (id INT PRIMARY KEY);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+GRANT DELETE, TRUNCATE ON notes TO anon;",
+                good: "CREATE ROLE anon;\n\
+CREATE TABLE notes (id INT PRIMARY KEY);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+GRANT DELETE ON notes TO anon;",
+            },
         };
         &METADATA
     }
@@ -118,6 +128,16 @@ impl<DB> Rule for TruncateGrantedToAppRole<DB> {
             rationale: RATIONALE,
             source: SOURCE,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE ROLE authenticated;\n\
+CREATE TABLE notes (id INT PRIMARY KEY);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+GRANT DELETE, TRUNCATE ON notes TO authenticated;",
+                good: "CREATE ROLE authenticated;\n\
+CREATE TABLE notes (id INT PRIMARY KEY);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+GRANT DELETE ON notes TO authenticated;",
+            },
         };
         &METADATA
     }

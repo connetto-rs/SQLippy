@@ -11,7 +11,7 @@ use sqlparser::ast::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         key_support::named,
         policy_support::unnested,
@@ -113,7 +113,13 @@ query_rule!(
     AliasShadowedByColumn,
     LintGroup::Suspicious,
     "PostgreSQL resolves a GROUP BY or window name to an input column before a select-list alias, so naming an alias after another column groups or orders by that column instead.",
-    Some("https://www.postgresql.org/docs/current/sql-select.html")
+    Some("https://www.postgresql.org/docs/current/sql-select.html"),
+    RuleExample {
+        bad: "CREATE TABLE people (id INT, name TEXT);\n\
+SELECT lower(name) AS name, count(*) FROM people GROUP BY name;",
+        good: "CREATE TABLE people (id INT, name TEXT);\n\
+SELECT lower(name) AS low, count(*) FROM people GROUP BY low;",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for AliasShadowedByColumn<DB> {
@@ -199,7 +205,13 @@ query_rule!(
     SelfComparison,
     LintGroup::Suspicious,
     "A column compared with itself reads as always true, but the comparison is never true for NULL.",
-    Some("https://www.postgresql.org/docs/current/functions-comparison.html")
+    Some("https://www.postgresql.org/docs/current/functions-comparison.html"),
+    RuleExample {
+        bad: "CREATE TABLE people (id INT, name TEXT);\n\
+SELECT id FROM people WHERE name = name;",
+        good: "CREATE TABLE people (id INT, name TEXT);\n\
+SELECT id FROM people WHERE name = 'Alice';",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for SelfComparison<DB> {

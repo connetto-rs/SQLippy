@@ -5,7 +5,7 @@ use sqlparser::ast::FunctionSecurity;
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
 };
 
@@ -74,6 +74,15 @@ impl<DB> Rule for ExposedDefinerOverProtectedTable<DB> {
             rationale: "A `SECURITY DEFINER` function reads and writes with its owner's rights, so letting `PUBLIC` or an anonymous role execute it hands every such caller the owner's view of the row-level-security tables its body touches.",
             source: Some("https://supabase.com/docs/guides/database/database-advisors"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE docs (id INT, owner TEXT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS 'SELECT count(*) FROM public.docs';",
+                good: "CREATE TABLE docs (id INT, owner TEXT);\n\
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS 'SELECT count(*) FROM public.docs';\n\
+REVOKE EXECUTE ON FUNCTION doc_count() FROM PUBLIC;",
+            },
         };
         &METADATA
     }

@@ -13,7 +13,7 @@ use sqlparser::ast::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::statement_support::{OwnLevel, root_query},
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
@@ -178,7 +178,15 @@ query_rule!(
     OuterColumnCapture,
     LintGroup::Correctness,
     "A subquery may read the columns of the queries around it, so a name its own tables lack silently becomes the outer row's value.",
-    Some("https://www.postgresql.org/docs/current/functions-subquery.html")
+    Some("https://www.postgresql.org/docs/current/functions-subquery.html"),
+    RuleExample {
+        bad: "CREATE TABLE teams (id INT);\n\
+CREATE TABLE banned (team_id INT);\n\
+SELECT id FROM teams WHERE id IN (SELECT id FROM banned);",
+        good: "CREATE TABLE teams (id INT);\n\
+CREATE TABLE banned (team_id INT);\n\
+SELECT id FROM teams WHERE id IN (SELECT team_id FROM banned);",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for OuterColumnCapture<DB> {

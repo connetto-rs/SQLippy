@@ -4,7 +4,7 @@ use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::name_support::{NameHint, names_json},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -44,6 +44,10 @@ rule_definition!(
     LintGroup::Pedantic,
     "Text stores any string, so a malformed document is accepted and every read of a key or path needs a cast to json.",
     Some("https://www.postgresql.org/docs/current/datatype-json.html"),
+    RuleExample {
+        bad: "CREATE TABLE t (payload_json TEXT);",
+        good: "CREATE TABLE t (payload_json JSONB);",
+    },
     Basis::Names
 );
 

@@ -5,7 +5,7 @@ use sqlparser::ast::CreatePolicyType;
 
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{Command, applied, covers, is_tautology, policy_roles},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -67,6 +67,14 @@ impl<DB> Rule for DeadPermissivePolicy<DB> {
             rationale: "PostgreSQL combines permissive policies with OR, so an always-true permissive policy decides every command and role it covers and the narrower policy never changes the outcome.",
             source: Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE docs (owner TEXT);\n\
+CREATE POLICY everyone ON docs FOR SELECT USING (true);\n\
+CREATE POLICY own ON docs FOR SELECT USING (owner = current_setting('app.user_id', true));",
+                good: "CREATE TABLE docs (owner TEXT);\n\
+CREATE POLICY everyone ON docs FOR SELECT USING (true);\n\
+CREATE POLICY own ON docs AS RESTRICTIVE FOR SELECT USING (owner = current_setting('app.user_id', true));",
+            },
         };
         &METADATA
     }

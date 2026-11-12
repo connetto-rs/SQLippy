@@ -2,7 +2,7 @@
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
 use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, TableLike};
@@ -50,6 +50,10 @@ impl<DB> Rule for NonEmptyTextualColumnRule<DB> {
             rationale: "An empty string beside NULL gives a column two spellings of a missing value.",
             source: None,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE users (name TEXT);",
+                good: "CREATE TABLE users (name TEXT CHECK (name <> ''));",
+            },
         };
         &METADATA
     }

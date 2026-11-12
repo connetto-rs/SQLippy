@@ -7,7 +7,7 @@ use sqlparser::ast::Action;
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::{ClientRoles, column_grants_on, grantee_list, grants_privilege},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -57,6 +57,16 @@ impl<DB> Rule for ReferencesGrantedToClientRole<DB> {
             rationale: "Referential integrity checks bypass row-level security, so a foreign key the grantee creates tells it which keys exist among rows it cannot read.",
             source: Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE ROLE anon;\n\
+CREATE TABLE accounts (id INT PRIMARY KEY);\n\
+ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;\n\
+GRANT SELECT, REFERENCES ON accounts TO anon;",
+                good: "CREATE ROLE anon;\n\
+CREATE TABLE accounts (id INT PRIMARY KEY);\n\
+ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;\n\
+GRANT SELECT ON accounts TO anon;",
+            },
         };
         &METADATA
     }

@@ -5,7 +5,7 @@ use sqlparser::ast::FunctionBehavior;
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::function_rules::unreadable_body,
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
 };
@@ -63,6 +63,12 @@ impl<DB> Rule for ImpureImmutableFunction<DB> {
             rationale: "PostgreSQL assumes an IMMUTABLE function returns the same result for the same arguments forever, so it pre-evaluates calls and indexes and generated columns keep their results, which go stale when the function reads a table or a function that can change.",
             source: Some("https://www.postgresql.org/docs/current/xfunc-volatility.html"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE rates (rate NUMERIC);\n\
+CREATE FUNCTION rate() RETURNS NUMERIC LANGUAGE sql IMMUTABLE SET search_path = '' AS 'SELECT max(rate) FROM public.rates';",
+                good: "CREATE TABLE rates (rate NUMERIC);\n\
+CREATE FUNCTION rate() RETURNS NUMERIC LANGUAGE sql STABLE SET search_path = '' AS 'SELECT max(rate) FROM public.rates';",
+            },
         };
         &METADATA
     }

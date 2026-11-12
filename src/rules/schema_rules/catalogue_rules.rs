@@ -14,7 +14,7 @@ use sqlparser::ast::Action;
 
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
 
@@ -41,7 +41,16 @@ schema_rule!(
     QueryRewriteRule,
     LintGroup::Suspicious,
     "A rule rewrites the query before it runs, so it re-evaluates expressions such as defaults and sequences and does not do what it looks like it does.",
-    WIKI
+    WIKI,
+    RuleExample {
+        bad: "CREATE TABLE entries (id INT);\n\
+CREATE TABLE audit (id INT);\n\
+CREATE RULE log_insert AS ON INSERT TO entries DO ALSO INSERT INTO audit VALUES (NEW.id);",
+        good: "CREATE TABLE entries (id INT);\n\
+CREATE TABLE audit (id INT);\n\
+CREATE FUNCTION record_insert() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN INSERT INTO audit VALUES (NEW.id); RETURN NEW; END $$;\n\
+CREATE TRIGGER log_insert AFTER INSERT ON entries FOR EACH ROW EXECUTE FUNCTION record_insert();",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for QueryRewriteRule<DB> {
@@ -101,7 +110,13 @@ schema_rule!(
     TableInheritance,
     LintGroup::Suspicious,
     "Indexes, unique constraints and foreign keys apply to single tables, not to their inheritance children, so a key unique in the parent repeats across children and a foreign key to the parent misses the children's rows.",
-    Some("https://www.postgresql.org/docs/current/ddl-inherit.html")
+    Some("https://www.postgresql.org/docs/current/ddl-inherit.html"),
+    RuleExample {
+        bad: "CREATE TABLE parent (id INT PRIMARY KEY);\n\
+CREATE TABLE child () INHERITS (parent);",
+        good: "CREATE TABLE parent (id INT PRIMARY KEY);\n\
+CREATE TABLE child (id INT PRIMARY KEY);",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for TableInheritance<DB> {
@@ -270,7 +285,11 @@ schema_rule!(
     TruncatedIdentifier,
     LintGroup::Suspicious,
     "PostgreSQL keeps only the first 63 bytes of an identifier, so two long names can collide and code naming the long form finds nothing.",
-    Some("https://www.postgresql.org/docs/current/sql-syntax-lexical.html")
+    Some("https://www.postgresql.org/docs/current/sql-syntax-lexical.html"),
+    RuleExample {
+        bad: "CREATE TABLE reports (this_column_name_is_longer_than_the_sixty_three_byte_limit_for_sql INT);",
+        good: "CREATE TABLE reports (report_id INT);",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for TruncatedIdentifier<DB> {
@@ -424,7 +443,11 @@ schema_rule!(
     ReservedKeywordIdentifier,
     LintGroup::Style,
     "A name that is a reserved keyword is a syntax error unquoted, so every statement naming it must quote it.",
-    Some("https://www.postgresql.org/docs/current/sql-keywords-appendix.html")
+    Some("https://www.postgresql.org/docs/current/sql-keywords-appendix.html"),
+    RuleExample {
+        bad: "CREATE TABLE orders (\"order\" INT);",
+        good: "CREATE TABLE orders (order_id INT);",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for ReservedKeywordIdentifier<DB> {
@@ -477,7 +500,14 @@ schema_rule!(
     UnvalidatedConstraint,
     LintGroup::Suspicious,
     "A constraint added NOT VALID checks only rows written afterwards, so rows that existed before it are never checked until it is validated.",
-    Some("https://www.postgresql.org/docs/current/sql-altertable.html")
+    Some("https://www.postgresql.org/docs/current/sql-altertable.html"),
+    RuleExample {
+        bad: "CREATE TABLE counts (amount INT);\n\
+ALTER TABLE counts ADD CONSTRAINT positive CHECK (amount > 0) NOT VALID;",
+        good: "CREATE TABLE counts (amount INT);\n\
+ALTER TABLE counts ADD CONSTRAINT positive CHECK (amount > 0) NOT VALID;\n\
+ALTER TABLE counts VALIDATE CONSTRAINT positive;",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for UnvalidatedConstraint<DB> {
@@ -538,7 +568,11 @@ schema_rule!(
     PublicSchemaCreate,
     LintGroup::Suspicious,
     "Any role holding CREATE on a schema can create objects in it that shadow others through search_path.",
-    Some("https://www.postgresql.org/docs/current/ddl-schemas.html")
+    Some("https://www.postgresql.org/docs/current/ddl-schemas.html"),
+    RuleExample {
+        bad: "GRANT CREATE ON SCHEMA public TO PUBLIC;",
+        good: "GRANT USAGE ON SCHEMA public TO PUBLIC;",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for PublicSchemaCreate<DB> {
@@ -593,7 +627,11 @@ schema_rule!(
     UnloggedTable,
     LintGroup::Pedantic,
     "An unlogged table is truncated after a crash or unclean shutdown, is not replicated to standbys, and is left out of logical replication.",
-    Some("https://www.postgresql.org/docs/current/sql-createtable.html")
+    Some("https://www.postgresql.org/docs/current/sql-createtable.html"),
+    RuleExample {
+        bad: "CREATE UNLOGGED TABLE entries (id INT);",
+        good: "CREATE TABLE entries (id INT);",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for UnloggedTable<DB> {
@@ -638,7 +676,13 @@ schema_rule!(
     WildcardView,
     LintGroup::Pedantic,
     "PostgreSQL expands the star when the view is created, so columns added to the table later never appear in the view.",
-    Some("https://www.postgresql.org/docs/current/sql-createview.html")
+    Some("https://www.postgresql.org/docs/current/sql-createview.html"),
+    RuleExample {
+        bad: "CREATE TABLE entries (id INT, body TEXT);\n\
+CREATE VIEW visible AS SELECT * FROM entries;",
+        good: "CREATE TABLE entries (id INT, body TEXT);\n\
+CREATE VIEW visible AS SELECT id, body FROM entries;",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for WildcardView<DB> {

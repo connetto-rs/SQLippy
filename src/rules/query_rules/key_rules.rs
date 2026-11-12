@@ -17,7 +17,7 @@ use sqlparser::ast::{
 
 use crate::{
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         key_support::{
             Instance, determined, equalities, equality_keys, instances, named, order_of, references,
@@ -127,7 +127,13 @@ query_rule!(
     UnorderedLimit,
     LintGroup::Suspicious,
     "Without an ORDER BY that covers a unique key, LIMIT and OFFSET pick whichever rows PostgreSQL meets first, which can change between runs.",
-    Some("https://www.postgresql.org/docs/current/queries-limit.html")
+    Some("https://www.postgresql.org/docs/current/queries-limit.html"),
+    RuleExample {
+        bad: "CREATE TABLE tasks (id INT PRIMARY KEY, priority INT);\n\
+SELECT id FROM tasks ORDER BY priority LIMIT 1;",
+        good: "CREATE TABLE tasks (id INT PRIMARY KEY, priority INT);\n\
+SELECT id FROM tasks ORDER BY priority, id LIMIT 1;",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for UnorderedLimit<DB> {
@@ -212,7 +218,13 @@ query_rule!(
     UnorderedDistinctOn,
     LintGroup::Suspicious,
     "DISTINCT ON keeps the first row of each group, and an ORDER BY that leaves ties within the group lets that row change between runs.",
-    Some("https://www.postgresql.org/docs/current/sql-select.html")
+    Some("https://www.postgresql.org/docs/current/sql-select.html"),
+    RuleExample {
+        bad: "CREATE TABLE tasks (id INT PRIMARY KEY, priority INT);\n\
+SELECT DISTINCT ON (priority) id FROM tasks ORDER BY priority;",
+        good: "CREATE TABLE tasks (id INT PRIMARY KEY, priority INT);\n\
+SELECT DISTINCT ON (priority) id FROM tasks ORDER BY priority, id;",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for UnorderedDistinctOn<DB> {
@@ -321,7 +333,15 @@ query_rule!(
     UnlinkedFromItem,
     LintGroup::Suspicious,
     "A table in a comma-separated FROM that no condition links to the others pairs each of its rows with every row of the rest.",
-    None
+    None,
+    RuleExample {
+        bad: "CREATE TABLE teams (id INT PRIMARY KEY);\n\
+CREATE TABLE members (team_id INT REFERENCES teams (id));\n\
+SELECT teams.id FROM teams, members;",
+        good: "CREATE TABLE teams (id INT PRIMARY KEY);\n\
+CREATE TABLE members (team_id INT REFERENCES teams (id));\n\
+SELECT teams.id FROM teams, members WHERE members.team_id = teams.id;",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for UnlinkedFromItem<DB> {
@@ -482,7 +502,15 @@ query_rule!(
     DistinctOverReferencedSide,
     LintGroup::Pedantic,
     "A DISTINCT over a foreign-key join that selects only the referenced side builds every matching child row before collapsing them, where EXISTS stops at the first.",
-    None
+    None,
+    RuleExample {
+        bad: "CREATE TABLE teams (id INT PRIMARY KEY);\n\
+CREATE TABLE members (team_id INT REFERENCES teams (id));\n\
+SELECT DISTINCT teams.id FROM teams JOIN members ON members.team_id = teams.id;",
+        good: "CREATE TABLE teams (id INT PRIMARY KEY);\n\
+CREATE TABLE members (team_id INT REFERENCES teams (id));\n\
+SELECT teams.id FROM teams WHERE EXISTS (SELECT 1 FROM members WHERE members.team_id = teams.id);",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for DistinctOverReferencedSide<DB> {
@@ -680,7 +708,15 @@ query_rule!(
     UnreadOuterJoin,
     LintGroup::Suspicious,
     "An outer join that nothing else reads and whose condition pins no unique key repeats each row once per match while adding nothing else.",
-    None
+    None,
+    RuleExample {
+        bad: "CREATE TABLE teams (id INT PRIMARY KEY);\n\
+CREATE TABLE members (team_id INT);\n\
+SELECT teams.id FROM teams LEFT JOIN members ON members.team_id = teams.id;",
+        good: "CREATE TABLE teams (id INT PRIMARY KEY);\n\
+CREATE TABLE members (team_id INT);\n\
+SELECT teams.id FROM teams;",
+    }
 );
 
 impl<DB: DatabaseLike> QueryRule for UnreadOuterJoin<DB> {

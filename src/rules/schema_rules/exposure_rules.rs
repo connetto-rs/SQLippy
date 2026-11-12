@@ -12,7 +12,7 @@ use sqlparser::ast::{Action, FunctionSecurity, SetExpr};
 use crate::{
     deployment::Deployment,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::{ClientRoles, grantee_list, grants_privilege, schema_of},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
@@ -70,7 +70,12 @@ schema_rule!(
     "A SECURITY DEFINER function runs with its owner's privileges, so a client role that can call it in an exposed schema gets them for whatever the function does.",
     Some(
         "https://github.com/supabase/splinter/blob/main/lints/0028_anon_security_definer_function_executable.sql"
-    )
+    ),
+    RuleExample {
+        bad: "CREATE FUNCTION bump() RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS 'SELECT 1';",
+        good: "CREATE FUNCTION bump() RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS 'SELECT 1';\n\
+REVOKE EXECUTE ON FUNCTION bump() FROM PUBLIC;",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for SecurityDefinerFunctionExposed<DB> {
@@ -148,7 +153,13 @@ schema_rule!(
     ExtensionInExposedSchema,
     LintGroup::Suspicious,
     "An extension's functions and objects in a schema clients reach widen what clients can call, and a schema on the search path trusts every role that can create objects in it.",
-    Some("https://github.com/supabase/splinter/blob/main/lints/0014_extension_in_public.sql")
+    Some("https://github.com/supabase/splinter/blob/main/lints/0014_extension_in_public.sql"),
+    RuleExample {
+        bad: "CREATE SCHEMA extensions;\n\
+CREATE EXTENSION pgcrypto WITH SCHEMA public;",
+        good: "CREATE SCHEMA extensions;\n\
+CREATE EXTENSION pgcrypto WITH SCHEMA extensions;",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for ExtensionInExposedSchema<DB> {
@@ -199,7 +210,14 @@ schema_rule!(
     ReachableSequence,
     LintGroup::Suspicious,
     "SELECT on a sequence reveals its current value and UPDATE or USAGE lets a role advance it, so a client role can read or burn the numbers other tables draw from.",
-    Some("https://www.postgresql.org/docs/current/ddl-priv.html")
+    Some("https://www.postgresql.org/docs/current/ddl-priv.html"),
+    RuleExample {
+        bad: "CREATE SCHEMA private;\n\
+CREATE SEQUENCE private.ticket_seq;\n\
+GRANT USAGE ON SEQUENCE private.ticket_seq TO PUBLIC;",
+        good: "CREATE SCHEMA private;\n\
+CREATE SEQUENCE private.ticket_seq;",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for ReachableSequence<DB> {
@@ -272,7 +290,13 @@ schema_rule!(
     SecurityBarrierMissingOnFilteringView,
     LintGroup::Pedantic,
     "A view without security_barrier cannot reliably conceal the rows its WHERE hides, since a caller's leaky function or an index scan can run before the view's filter.",
-    Some("https://www.postgresql.org/docs/current/rules-privileges.html")
+    Some("https://www.postgresql.org/docs/current/rules-privileges.html"),
+    RuleExample {
+        bad: "CREATE TABLE phones (person TEXT, phone TEXT);\n\
+CREATE VIEW visible AS SELECT person FROM phones WHERE phone NOT LIKE '412%';",
+        good: "CREATE TABLE phones (person TEXT, phone TEXT);\n\
+CREATE VIEW visible WITH (security_barrier = true) AS SELECT person FROM phones WHERE phone NOT LIKE '412%';",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for SecurityBarrierMissingOnFilteringView<DB> {

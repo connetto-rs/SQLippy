@@ -120,6 +120,19 @@ pub enum Basis {
     Names,
 }
 
+/// PostgreSQL scripts showing what a rule reports and the same SQL fixed.
+///
+/// Each script holds the schema statements and, for a query rule, the
+/// application statements checked against that schema. Both are written for
+/// [`Deployment::example`](crate::deployment::Deployment::example).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuleExample {
+    /// SQL the rule reports.
+    pub bad: &'static str,
+    /// The same SQL corrected, which the rule does not report.
+    pub good: &'static str,
+}
+
 /// Identity, group and explanation shared by every violation of a rule.
 #[derive(Debug)]
 pub struct RuleMetadata {
@@ -133,6 +146,8 @@ pub struct RuleMetadata {
     pub source: Option<&'static str>,
     /// What the rule decides its findings from.
     pub basis: Basis,
+    /// SQL the rule reports and its corrected form.
+    pub example: RuleExample,
 }
 
 /// A rule with lint metadata.

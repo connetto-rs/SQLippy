@@ -9,7 +9,7 @@ use sql_traits::{
 use crate::{
     deployment::Declaration,
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::authority_support::{TableColumn, authority_columns},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
@@ -85,6 +85,16 @@ impl<DB> Rule for UnscopedUniqueConstraintOnRowLevelSecurityTable<DB> {
             rationale: "A unique constraint spans the whole table whatever its policies hide, so a duplicate-key error tells a caller that a value exists in rows it cannot see, such as another tenant's.",
             source: Some("https://www.bytebase.com/blog/postgres-row-level-security-footguns"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE users (id INT PRIMARY KEY, email TEXT, owner TEXT);\n\
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON users USING (owner = current_setting('app.user_id', true));\n\
+CREATE UNIQUE INDEX users_email ON users (email);",
+                good: "CREATE TABLE users (id INT PRIMARY KEY, email TEXT, owner TEXT);\n\
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON users USING (owner = current_setting('app.user_id', true));\n\
+CREATE UNIQUE INDEX users_email ON users (owner, email);",
+            },
         };
         &METADATA
     }

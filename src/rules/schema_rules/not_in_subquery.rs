@@ -5,7 +5,7 @@ use sqlparser::ast::Statement;
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::not_in_support::NotInCheck,
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule},
 };
@@ -75,6 +75,14 @@ impl<DB> Rule for NotInSubquery<DB> {
             rationale: "PostgreSQL never plans NOT IN over a subquery as an anti-join, so once the subquery outgrows work_mem it is re-scanned for every outer row.",
             source: Some("https://wiki.postgresql.org/wiki/Don%27t_Do_This"),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE a (id INT);\n\
+CREATE TABLE b (a_id INT NOT NULL);\n\
+SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b);",
+                good: "CREATE TABLE a (id INT);\n\
+CREATE TABLE b (a_id INT NOT NULL);\n\
+SELECT id FROM a WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.a_id = a.id);",
+            },
         };
         &METADATA
     }

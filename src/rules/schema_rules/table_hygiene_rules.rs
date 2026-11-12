@@ -9,7 +9,7 @@ use sqlparser::ast::CreatePolicyType;
 
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{LintGroup, Rule, RuleMetadata},
+    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{Command, held_by_name, policy_roles},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
@@ -37,7 +37,14 @@ schema_rule!(
     RowLevelSecurityWithoutPolicies,
     LintGroup::Suspicious,
     "With row-level security enabled and no policy, PostgreSQL denies every row to every role but the owner, so the table looks empty to the application.",
-    Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html")
+    Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html"),
+    RuleExample {
+        bad: "CREATE TABLE audit (id INT);\n\
+ALTER TABLE audit ENABLE ROW LEVEL SECURITY;",
+        good: "CREATE TABLE audit (id INT);\n\
+ALTER TABLE audit ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY audit_read ON audit FOR SELECT USING (true);",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for RowLevelSecurityWithoutPolicies<DB> {
@@ -97,7 +104,16 @@ schema_rule!(
     "PostgreSQL evaluates every permissive policy that applies to a role and command for each row, so several of them cost more than one policy holding the whole condition.",
     Some(
         "https://github.com/supabase/splinter/blob/main/lints/0006_multiple_permissive_policies.sql"
-    )
+    ),
+    RuleExample {
+        bad: "CREATE TABLE orders (owner TEXT, is_admin BOOL);\n\
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own ON orders FOR SELECT USING (owner = current_setting('app.user_id', true));\n\
+CREATE POLICY admin ON orders FOR SELECT USING (is_admin);",
+        good: "CREATE TABLE orders (owner TEXT, is_admin BOOL);\n\
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY own_or_admin ON orders FOR SELECT USING (owner = current_setting('app.user_id', true) OR is_admin);",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for MultiplePermissivePolicies<DB> {
@@ -206,7 +222,11 @@ schema_rule!(
     RegColumnType,
     LintGroup::Suspicious,
     "A column of a reg* type stores object identifiers that pg_upgrade cannot carry over, so it blocks an in-place upgrade.",
-    Some("https://www.postgresql.org/docs/current/pgupgrade.html")
+    Some("https://www.postgresql.org/docs/current/pgupgrade.html"),
+    RuleExample {
+        bad: "CREATE TABLE namespaces (name REGNAMESPACE);",
+        good: "CREATE TABLE namespaces (name TEXT);",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for RegColumnType<DB> {
@@ -261,7 +281,11 @@ schema_rule!(
     AutovacuumDisabledTable,
     LintGroup::Perf,
     "Without autovacuum, dead tuples accumulate and the table bloats, and its statistics go stale.",
-    Some("https://github.com/supabase/splinter/blob/main/lints/0030_autovacuum_disabled.sql")
+    Some("https://github.com/supabase/splinter/blob/main/lints/0030_autovacuum_disabled.sql"),
+    RuleExample {
+        bad: "CREATE TABLE staging (id INT) WITH (autovacuum_enabled = false);",
+        good: "CREATE TABLE staging (id INT);",
+    }
 );
 
 impl<DB: DatabaseLike> SchemaRule for AutovacuumDisabledTable<DB> {

@@ -4,7 +4,7 @@ use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::name_support::{NameHint, names_address},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -44,6 +44,10 @@ rule_definition!(
     LintGroup::Pedantic,
     "Text compares an address by its characters, so `999.1.1.1` is stored, `10.0.0.10` sorts before `10.0.0.9`, and asking whether an address lies in a network needs a cast on every read.",
     Some("https://www.postgresql.org/docs/current/datatype-net-types.html"),
+    RuleExample {
+        bad: "CREATE TABLE t (client_ip TEXT);",
+        good: "CREATE TABLE t (client_ip INET);",
+    },
     Basis::Names
 );
 

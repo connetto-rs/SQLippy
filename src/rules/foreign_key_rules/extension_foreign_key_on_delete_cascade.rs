@@ -7,7 +7,7 @@ use sqlparser::ast::ReferentialAction;
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -116,6 +116,12 @@ impl<C> Rule for ExtensionForeignKeyOnDeleteCascade<C> {
                 "https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-FK",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (id INT PRIMARY KEY REFERENCES parents (id));",
+                good: "CREATE TABLE parents (id INT PRIMARY KEY);\n\
+CREATE TABLE children (id INT PRIMARY KEY REFERENCES parents (id) ON DELETE CASCADE);",
+            },
         };
         &METADATA
     }

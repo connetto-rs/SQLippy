@@ -4,7 +4,7 @@ use sql_traits::traits::{DatabaseLike, FunctionLike};
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
 };
 
@@ -67,6 +67,12 @@ impl<DB> Rule for DefinerWithoutSearchPath<DB> {
                 "https://www.postgresql.org/docs/current/sql-createfunction.html#SQL-CREATEFUNCTION-SECURITY",
             ),
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE docs (id INT);\n\
+CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER AS 'SELECT count(*) FROM public.docs';",
+                good: "CREATE TABLE docs (id INT);\n\
+CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS 'SELECT count(*) FROM public.docs';",
+            },
         };
         &METADATA
     }

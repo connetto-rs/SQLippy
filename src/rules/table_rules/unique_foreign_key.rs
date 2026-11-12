@@ -11,7 +11,7 @@ use sql_traits::{
 
 use crate::{
     error::Interruption,
-    lint::{Basis, LintGroup, Rule, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -72,6 +72,12 @@ impl<DB> Rule for UniqueForeignKey<DB> {
             rationale: "A duplicated foreign key enforces nothing more and is checked again on every write.",
             source: None,
             basis: Basis::Declared,
+            example: RuleExample {
+                bad: "CREATE TABLE accounts (id INT PRIMARY KEY);\n\
+CREATE TABLE notes (id INT PRIMARY KEY, account_id INT REFERENCES accounts (id), FOREIGN KEY (account_id) REFERENCES accounts (id));",
+                good: "CREATE TABLE accounts (id INT PRIMARY KEY);\n\
+CREATE TABLE notes (id INT PRIMARY KEY, account_id INT REFERENCES accounts (id));",
+            },
         };
         &METADATA
     }
