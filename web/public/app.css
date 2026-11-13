@@ -446,7 +446,8 @@ header .tagline .propose-link {
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
 }
 
-.finding details,
+.finding summary,
+.finding details[open],
 .finding a:not(.finding-rule) {
     position: relative;
     z-index: 1;
@@ -485,7 +486,7 @@ a.finding-rule {
 a.finding-rule::after {
     content: "";
     position: absolute;
-    inset: 0;
+    inset: -1px -1px -1px -4px;
     border-radius: inherit;
 }
 
