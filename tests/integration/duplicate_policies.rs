@@ -96,7 +96,8 @@ fn restrictive_copies_running_a_volatile_function_are_not_reported() {
         CREATE FUNCTION app.coinflip(a INT, b INT) RETURNS BOOL LANGUAGE sql VOLATILE
             AS 'SELECT random() < 0.5';
         CREATE OPERATOR app.<?> (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
-        CREATE OPERATOR ~~ (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);";
+        CREATE OPERATOR ~~ (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
+        CREATE OPERATOR !~~ (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);";
     for check in [
         "random() < 0.5",
         "undeclared_flag()",
@@ -104,6 +105,8 @@ fn restrictive_copies_running_a_volatile_function_are_not_reported() {
         "tenant OPERATOR(app.<%>) 1",
         "tenant ~~ ANY (ARRAY[1])",
         "tenant ~~ ALL (ARRAY[1])",
+        "tenant LIKE 1",
+        "tenant NOT LIKE 1",
     ] {
         assert_eq!(
             findings(&format!(
