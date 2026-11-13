@@ -28,6 +28,7 @@ mod owner_rights_views;
 mod policy_advisories;
 mod policy_checks;
 mod policy_read_cycles;
+mod restrictive_without_permissive;
 mod role_memberships;
 mod self_asserted_claims;
 mod self_granting_writes;
