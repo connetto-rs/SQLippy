@@ -1,24 +1,30 @@
 //! Submodule providing the `UnsatisfiablePolicy` rule.
 
 use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
-use sqlparser::ast::CreatePolicyType;
+use sqlparser::ast::{CreatePolicyType, Expr};
 
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::policy_support::is_contradiction,
+    rules::policy_support::{Command, applied, is_contradiction},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
-/// Struct defining a rule that reports a permissive policy clause false for
-/// every row.
+/// Struct defining a rule that reports a permissive policy that grants no
+/// command it covers.
 ///
-/// A permissive policy grants access, so a `USING` false for every row, such
-/// as `false` or `owner = current_setting('app.user_id', true) AND false`,
-/// lets no row be seen, updated or deleted through it, and a `WITH CHECK`
-/// false for every row lets no row be written through it. A restrictive
-/// policy false for every row denies its commands outright, which is a
-/// deliberate lockout, and is not reported.
+/// PostgreSQL combines the `USING` clauses of the permissive policies of a
+/// command with `OR`, and their `WITH CHECK` clauses with a separate `OR`,
+/// so a permissive policy adds nothing only when every clause it applies to
+/// every command it covers is false for every row, such as `USING (false)`
+/// or `USING (owner = current_setting('app.user_id', true) AND false)`. Such
+/// a policy grants nothing alone or beside others. A `FOR ALL USING (false)
+/// WITH CHECK (owner = current_user)` still grants `INSERT`, and a `FOR
+/// UPDATE USING (owner = current_user) WITH CHECK (false)` still lets the
+/// rows it shows be updated into what another policy's `WITH CHECK` accepts,
+/// so neither is reported. A restrictive policy false for every row denies
+/// its commands outright, which is a deliberate lockout, and is not
+/// reported.
 ///
 /// # Example
 ///
@@ -92,31 +98,39 @@ impl<DB: DatabaseLike> TableRule for UnsatisfiablePolicy<DB> {
             if policy.policy_type() == CreatePolicyType::Restrictive {
                 continue;
             }
-            let mut sites: Vec<PolicySite<DB>> = Vec::new();
-            for (clause, expression) in [
-                (PolicyClause::Using, policy.using_expression(database)?),
-                (PolicyClause::WithCheck, policy.check_expression(database)?),
-            ] {
-                let Some(expression) = expression else {
+            let mut clauses: Vec<(PolicyClause, &Expr)> = Vec::new();
+            let mut contributes = false;
+            'commands: for command in Command::ALL {
+                if !command.covered_by(policy.command()) {
                     continue;
-                };
-                if is_contradiction(database, table, expression)? {
-                    sites.push(PolicySite {
-                        table: Box::new(table.clone()),
-                        policy: Box::new(policy.clone()),
-                        clause,
-                        expression: expression.to_string(),
-                    });
+                }
+                for clause in applied(database, policy, command)? {
+                    if !is_contradiction(database, table, clause.expression)? {
+                        contributes = true;
+                        break 'commands;
+                    }
+                    if !clauses.iter().any(|(seen, _)| *seen == clause.clause) {
+                        clauses.push((clause.clause, clause.expression));
+                    }
                 }
             }
-            if sites.is_empty() {
+            if contributes || clauses.is_empty() {
                 continue;
             }
+            let sites: Vec<PolicySite<DB>> = clauses
+                .into_iter()
+                .map(|(clause, expression)| PolicySite {
+                    table: Box::new(table.clone()),
+                    policy: Box::new(policy.clone()),
+                    clause,
+                    expression: expression.to_string(),
+                })
+                .collect();
             let name = policy.name();
             reporter.policies(
                 sites,
                 format!(
-                    "Policy '{name}' on '{}' grants nothing, since a clause of it is false for every row.",
+                    "Policy '{name}' on '{}' grants nothing, since every clause it applies is false for every row.",
                     table.table_name()
                 ),
                 format!(

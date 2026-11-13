@@ -63,10 +63,12 @@ fn a_permissive_condition_that_admits_every_row_is_reported() {
 
 #[test]
 fn a_deliberate_public_read_is_not_reported() {
-    assert_eq!(
-        tautological("CREATE POLICY everyone ON docs FOR SELECT USING (true);"),
-        []
-    );
+    for public in [
+        "CREATE POLICY everyone ON docs FOR SELECT USING (true);",
+        "CREATE POLICY everyone ON docs FOR SELECT USING ((true));",
+    ] {
+        assert_eq!(tautological(public), [], "{public}");
+    }
     assert_eq!(tautological(OWN), []);
 }
 
@@ -92,6 +94,22 @@ fn a_restrictive_policy_that_restricts_nothing_is_reported() {
 }
 
 #[test]
+fn a_restrictive_policy_that_still_checks_writes_is_not_reported() {
+    for floor in [
+        "CREATE POLICY floor ON docs AS RESTRICTIVE USING (true) WITH CHECK (owner = current_user);",
+        "CREATE POLICY floor ON docs AS RESTRICTIVE FOR UPDATE USING (true) WITH CHECK (owner = current_user);",
+    ] {
+        assert_eq!(tautological(&format!("{OWN} {floor}")), [], "{floor}");
+    }
+    assert_eq!(
+        tautological(&format!(
+            "{OWN} CREATE POLICY floor ON docs AS RESTRICTIVE USING (true) WITH CHECK (true);"
+        )),
+        [finding("tautological_policy", "docs.floor -> docs.floor")]
+    );
+}
+
+#[test]
 fn a_permissive_policy_that_admits_no_row_is_reported() {
     for policy in [
         "CREATE POLICY own ON docs FOR SELECT USING (false);",
@@ -105,6 +123,36 @@ fn a_permissive_policy_that_admits_no_row_is_reported() {
         );
     }
     assert_eq!(unsatisfiable(OWN), []);
+}
+
+#[test]
+fn a_permissive_policy_that_still_grants_a_command_is_not_reported() {
+    for policy in [
+        "CREATE POLICY own ON docs USING (false) WITH CHECK (owner = current_user);",
+        "CREATE POLICY own ON docs FOR UPDATE USING (owner = current_user) WITH CHECK (owner = current_user OR false);",
+        "CREATE POLICY own ON docs FOR UPDATE USING (owner = current_user) WITH CHECK (false);",
+    ] {
+        assert_eq!(unsatisfiable(policy), [], "{policy}");
+    }
+    assert_eq!(
+        unsatisfiable("CREATE POLICY own ON docs USING (false);"),
+        [finding("unsatisfiable_policy", "docs.own")]
+    );
+    assert_eq!(
+        unsatisfiable("CREATE POLICY own ON docs USING (false) WITH CHECK (false);"),
+        [finding("unsatisfiable_policy", "docs.own -> docs.own")]
+    );
+}
+
+#[test]
+fn policies_whose_impossible_stages_complement_each_other_are_not_reported() {
+    assert_eq!(
+        unsatisfiable(
+            "CREATE POLICY p1 ON docs FOR UPDATE USING (false) WITH CHECK (owner = current_user);
+             CREATE POLICY p2 ON docs FOR UPDATE USING (owner = current_user) WITH CHECK (false);"
+        ),
+        []
+    );
 }
 
 #[test]
