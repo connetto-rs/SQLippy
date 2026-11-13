@@ -125,6 +125,11 @@ fn writes_whose_where_reads_no_column_are_reported() {
                 "DELETE FROM notes WHERE owner = $1",
                 "DELETE FROM notes WHERE EXISTS (SELECT 1 FROM users WHERE users.name = notes.owner)",
                 "DELETE FROM notes USING users WHERE users.id = notes.id",
+                "DELETE FROM notes WHERE random() < 0.5",
+                "DELETE FROM notes WHERE nextval('note_ids') % 2 = 0",
+                "UPDATE notes SET body = 'x' WHERE clock_timestamp() > '2020-01-01'",
+                "DELETE FROM notes WHERE undeclared_flag()",
+                "DELETE FROM notes WHERE upper('a') = 'A'",
             ]
         ),
         [
@@ -136,6 +141,39 @@ fn writes_whose_where_reads_no_column_are_reported() {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec!["DELETE FROM notes WHERE upper('a') = 'A'".to_owned()],
+        ]
+    );
+}
+
+#[test]
+fn a_where_whose_operator_runs_a_volatile_function_is_not_reported() {
+    let constrainer = query_rule(UnfilteredWrite::default());
+    let database = parse(&format!(
+        "{NOTES}
+         CREATE SCHEMA app;
+         CREATE FUNCTION app.coinflip(a INT, b INT) RETURNS BOOL LANGUAGE sql VOLATILE
+             AS 'SELECT random() < 0.5';
+         CREATE OPERATOR app.<?> (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);"
+    ));
+    assert_eq!(
+        reported(
+            &constrainer,
+            &database,
+            &[
+                "DELETE FROM notes WHERE 1 OPERATOR(app.<?>) 1",
+                "DELETE FROM notes WHERE 1 OPERATOR(app.<%>) 1",
+                "DELETE FROM notes WHERE 1 + 1 = 2",
+            ]
+        ),
+        [
+            vec![],
+            vec![],
+            vec!["DELETE FROM notes WHERE 1 + 1 = 2".to_owned()],
         ]
     );
 }
