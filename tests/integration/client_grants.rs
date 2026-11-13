@@ -364,6 +364,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             "truncate_granted_to_app_role",
             "role_keyed_policy_when_pooled",
             "credential_free_write",
+            "null_credential_read",
             "unscoped_unique_constraint_on_row_level_security_table",
             "client_role_bypasses_row_level_security",
             "settable_membership_in_bypassing_role",
@@ -383,6 +384,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
         [
             "role_keyed_policy_when_pooled",
             "credential_free_write",
+            "null_credential_read",
             "unscoped_unique_constraint_on_row_level_security_table",
             "self_asserted_claim_policy",
             "self_granting_write",

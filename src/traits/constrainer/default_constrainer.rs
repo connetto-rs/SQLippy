@@ -22,9 +22,9 @@ use crate::{
         LatentPolicyReadCycle, MissingPrimaryKey, MixedCaseColumnName, MixedCaseForeignKeyName,
         MixedCaseTableName, MomentStoredAsText, MoneyType, MultiplePermissivePolicies,
         NarrowIntegerKey, NestedPolicySubquery, NonSnakeCaseColumnName, NonSnakeCaseTableName,
-        NotInNullableSubquery, NotInSubquery, NullableCompositeForeignKey, NullableUniqueColumn,
-        OffsetPaging, OuterColumnCapture, OwnerRightsView, PluralColumnName, PolicyReadCycle,
-        PolicyToCreatingRole, PolicyWithoutRowLevelSecurity, PrefixRedundantIndex,
+        NotInNullableSubquery, NotInSubquery, NullCredentialRead, NullableCompositeForeignKey,
+        NullableUniqueColumn, OffsetPaging, OuterColumnCapture, OwnerRightsView, PluralColumnName,
+        PolicyReadCycle, PolicyToCreatingRole, PolicyWithoutRowLevelSecurity, PrefixRedundantIndex,
         PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RandomOrderLimit,
         ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
         ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge, ReferenceWithoutIdSuffix,
@@ -83,7 +83,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 35] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 36] = [
             Box::new(TimeDependentCheck::default()),
             Box::new(PrefixRedundantIndex::default()),
             Box::new(MissingPrimaryKey::default()),
@@ -119,6 +119,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(PolicyToCreatingRole::default()),
             Box::new(RoleKeyedPolicyWhenPooled::default()),
             Box::new(CredentialFreeWrite::default()),
+            Box::new(NullCredentialRead::default()),
         ];
         for rule in table_rules {
             constrainer.register_table_rule_with_floor(rule, Level::Allow);
