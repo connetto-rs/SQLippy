@@ -442,8 +442,7 @@ header .tagline .propose-link {
 
 .finding:hover,
 .finding:focus-within {
-    border-color: var(--sqy-accent);
-    border-left-color: var(--lvl, var(--sqy-accent));
+    border-color: var(--lvl, var(--sqy-accent));
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
 }
 
@@ -492,7 +491,7 @@ a.finding-rule::after {
 
 .finding:hover a.finding-rule,
 a.finding-rule:focus-visible {
-    color: var(--sqy-accent);
+    color: var(--lvl, var(--sqy-accent));
     border-bottom-color: currentColor;
 }
 
