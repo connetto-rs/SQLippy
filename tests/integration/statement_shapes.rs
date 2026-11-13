@@ -108,6 +108,38 @@ fn writes_without_a_where_are_reported() {
     );
 }
 
+#[test]
+fn writes_whose_where_reads_no_column_are_reported() {
+    let constrainer = query_rule(UnfilteredWrite::default());
+    let database = parse(NOTES);
+    assert_eq!(
+        reported(
+            &constrainer,
+            &database,
+            &[
+                "DELETE FROM notes WHERE 1 = 1",
+                "UPDATE notes SET body = 'x' WHERE 1 = 0",
+                "DELETE FROM notes WHERE $1",
+                "DELETE FROM notes WHERE now() > '2020-01-01'",
+                "DELETE FROM notes WHERE (true)",
+                "DELETE FROM notes WHERE owner = $1",
+                "DELETE FROM notes WHERE EXISTS (SELECT 1 FROM users WHERE users.name = notes.owner)",
+                "DELETE FROM notes USING users WHERE users.id = notes.id",
+            ]
+        ),
+        [
+            vec!["DELETE FROM notes WHERE 1 = 1".to_owned()],
+            vec!["UPDATE notes SET body = 'x' WHERE 1 = 0".to_owned()],
+            vec!["DELETE FROM notes WHERE $1".to_owned()],
+            vec!["DELETE FROM notes WHERE now() > '2020-01-01'".to_owned()],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        ]
+    );
+}
+
 const LOGINS: &str = "
     CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT, body TEXT);
     CREATE FUNCTION login(who TEXT) RETURNS VOID LANGUAGE plpgsql AS $$
