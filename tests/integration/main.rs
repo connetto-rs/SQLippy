@@ -11,6 +11,7 @@ mod catalog_checks;
 mod catalogue_objects;
 mod client_grants;
 mod column_types;
+mod constant_policy_clauses;
 mod correlated_policy_subqueries;
 mod credential_free_writes;
 mod definer_acting_user;

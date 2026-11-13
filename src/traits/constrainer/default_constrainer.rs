@@ -35,15 +35,15 @@ use crate::{
         SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SerialColumn,
         SessionTimeZoneDependence, SettableMembershipInBypassingRole, SingularTableName,
         SubjectSettableAttribute, SurrogatePrimaryKeyInExtension, TableInheritance,
-        TautologicalCheck, TautologicalWithCheck, TimeDependentCheck, TimeWithTimeZone,
-        TimestampBetween, TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole,
-        TruncateGrantedToAppRole, TruncatedIdentifier, TruncatingIntegerDivision,
-        UnboundedTextColumn, UncachedPolicyCall, UncheckedPastTimestamp, UnfilteredWrite,
-        UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter, UnindexedForeignKey,
-        UnindexedPolicyFilter, UnknownBinarySend, UnlinkedFromItem, UnloggedTable,
-        UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
-        UnscopedUniqueConstraintOnRowLevelSecurityTable, UnvalidatedConstraint, UuidStoredAsText,
-        WildcardView, ZeroPrecisionTimestamp,
+        TautologicalCheck, TautologicalPolicy, TautologicalWithCheck, TimeDependentCheck,
+        TimeWithTimeZone, TimestampBetween, TimestampWithoutTimeZone,
+        TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
+        TruncatingIntegerDivision, UnboundedTextColumn, UncachedPolicyCall, UncheckedPastTimestamp,
+        UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
+        UnindexedForeignKey, UnindexedPolicyFilter, UnknownBinarySend, UnlinkedFromItem,
+        UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
+        UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
+        UnvalidatedConstraint, UuidStoredAsText, WildcardView, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -83,7 +83,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 35] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 37] = [
             Box::new(TimeDependentCheck::default()),
             Box::new(PrefixRedundantIndex::default()),
             Box::new(MissingPrimaryKey::default()),
@@ -103,6 +103,8 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(DuplicateUniqueIndex::default()),
             Box::new(DeadPermissivePolicy::default()),
             Box::new(TautologicalWithCheck::default()),
+            Box::new(TautologicalPolicy::default()),
+            Box::new(UnsatisfiablePolicy::default()),
             Box::new(UnforcedRowLevelSecurity::default()),
             Box::new(CorrelatedPolicySubquery::default()),
             Box::new(NestedPolicySubquery::default()),
