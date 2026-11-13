@@ -166,6 +166,29 @@ pub(crate) fn held_by_name<DB: DatabaseLike>(database: &DB, role: &str) -> BTree
     )
 }
 
+/// The roles each anonymous caller holds: one set per declared anonymous
+/// role, with the roles it inherits, and an empty set for a caller holding
+/// only `PUBLIC`.
+pub(crate) fn anonymous_callers<DB: DatabaseLike>(
+    database: &DB,
+    deployment: &Deployment,
+) -> Vec<BTreeSet<String>> {
+    deployment
+        .anonymous_roles()
+        .map(|role| held_by_name(database, role))
+        .chain([BTreeSet::new()])
+        .collect()
+}
+
+/// Whether `policy` applies to a caller holding the roles `held`.
+pub(crate) fn applies_to<DB: DatabaseLike>(
+    database: &DB,
+    policy: &DB::Policy,
+    held: &BTreeSet<String>,
+) -> bool {
+    policy_roles(database, policy).is_none_or(|roles| roles.iter().any(|role| held.contains(role)))
+}
+
 /// Returns whether a policy for `deciding` roles applies to every role of
 /// `policy`, either role list being `None` for `PUBLIC`.
 pub(crate) fn covers<DB: DatabaseLike>(
