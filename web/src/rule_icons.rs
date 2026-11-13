@@ -132,6 +132,7 @@ rule_icons! {
     "duplicate_check" => FaCopy,
     "duplicate_foreign_key" => FaPaperclip,
     "duplicate_unique_index" => FaClone,
+    "duplicate_policy" => FaCopy,
     "mixed_case_column_name" => FaTextHeight,
     "mixed_case_foreign_key_name" => FaICursor,
     "mixed_case_table_name" => FaFont,

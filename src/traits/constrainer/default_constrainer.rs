@@ -13,7 +13,7 @@ use crate::{
         CredentialSettingWrite, DeadPermissivePolicy, DefinerTakesActingUser,
         DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
         DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnNameInExtensionGraph,
-        DuplicateForeignKey, DuplicateUniqueIndex, EmptyTextAllowed,
+        DuplicateForeignKey, DuplicatePolicy, DuplicateUniqueIndex, EmptyTextAllowed,
         ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FlagNotBoolean,
         FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
@@ -83,7 +83,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 35] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 36] = [
             Box::new(TimeDependentCheck::default()),
             Box::new(PrefixRedundantIndex::default()),
             Box::new(MissingPrimaryKey::default()),
@@ -102,6 +102,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(DuplicateForeignKey::default()),
             Box::new(DuplicateUniqueIndex::default()),
             Box::new(DeadPermissivePolicy::default()),
+            Box::new(DuplicatePolicy::default()),
             Box::new(TautologicalWithCheck::default()),
             Box::new(UnforcedRowLevelSecurity::default()),
             Box::new(CorrelatedPolicySubquery::default()),
