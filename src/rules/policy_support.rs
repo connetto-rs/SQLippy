@@ -525,3 +525,12 @@ pub(crate) fn is_tautology<DB: DatabaseLike>(
 ) -> Result<bool, LookupError> {
     Ok(table.expression_truth(database, expression, IdentifierCase::AsWritten)? == Some(true))
 }
+
+/// Returns whether PostgreSQL can prove the expression false for every row.
+pub(crate) fn is_contradiction<DB: DatabaseLike>(
+    database: &DB,
+    table: &DB::Table,
+    expression: &Expr,
+) -> Result<bool, LookupError> {
+    Ok(table.expression_truth(database, expression, IdentifierCase::AsWritten)? == Some(false))
+}
