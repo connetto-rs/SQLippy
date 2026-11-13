@@ -88,3 +88,40 @@ fn three_copies_are_reported_against_the_first() {
         ["docs.a -> docs.b", "docs.a -> docs.c"]
     );
 }
+
+#[test]
+fn restrictive_copies_running_a_volatile_function_are_not_reported() {
+    const COINFLIP: &str = "
+        CREATE SCHEMA app;
+        CREATE FUNCTION app.coinflip(a INT, b INT) RETURNS BOOL LANGUAGE sql VOLATILE
+            AS 'SELECT random() < 0.5';
+        CREATE OPERATOR app.<?> (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
+        CREATE OPERATOR ~~ (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);";
+    for check in [
+        "random() < 0.5",
+        "undeclared_flag()",
+        "tenant OPERATOR(app.<?>) 1",
+        "tenant OPERATOR(app.<%>) 1",
+        "tenant ~~ ANY (ARRAY[1])",
+        "tenant ~~ ALL (ARRAY[1])",
+    ] {
+        assert_eq!(
+            findings(&format!(
+                "{COINFLIP}
+                 CREATE POLICY a ON docs AS RESTRICTIVE FOR INSERT WITH CHECK ({check});
+                 CREATE POLICY b ON docs AS RESTRICTIVE FOR INSERT WITH CHECK ({check});"
+            )),
+            Vec::<String>::new(),
+            "{check}"
+        );
+    }
+    assert_eq!(
+        findings(
+            "CREATE POLICY a ON docs AS RESTRICTIVE FOR INSERT WITH CHECK (upper(owner) = 'A');
+             CREATE POLICY b ON docs AS RESTRICTIVE FOR INSERT WITH CHECK (upper(owner) = 'A');
+             CREATE POLICY c ON docs FOR INSERT WITH CHECK (random() < 0.5);
+             CREATE POLICY d ON docs FOR INSERT WITH CHECK (random() < 0.5);"
+        ),
+        ["docs.a -> docs.b", "docs.c -> docs.d"]
+    );
+}

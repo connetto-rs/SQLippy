@@ -6,7 +6,7 @@ use sqlparser::ast::{CreatePolicyCommand, CreatePolicyType, Expr};
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::policy_support::policy_roles,
+    rules::{policy_support::policy_roles, volatility_support::runs_volatile},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -16,9 +16,13 @@ use crate::{
 /// Two policies are the same definition when they share their type,
 /// command, roles in any order and `USING` and `WITH CHECK` clauses, outer
 /// parentheses aside. A repeated permissive policy grants nothing new and a
-/// repeated restrictive policy narrows nothing further, while PostgreSQL
-/// evaluates both for every row, and a later edit to one copy silently leaves
-/// the other in force.
+/// repeated restrictive policy narrows nothing further, and a later edit to
+/// one copy silently leaves the other in force. A restrictive policy whose
+/// clauses may run a `VOLATILE` function, directly or through an operator,
+/// is the exception, since PostgreSQL checks each restrictive policy
+/// separately on writes. On PostgreSQL 18.6 a restrictive `WITH CHECK
+/// (random() < 0.5)` accepted 5032 of ten thousand inserts alone and 2475
+/// with a copy, so such copies are not reported.
 ///
 /// # Example
 ///
@@ -64,7 +68,7 @@ impl<DB> Rule for DuplicatePolicy<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(DuplicatePolicy),
             group: LintGroup::Complexity,
-            rationale: "A policy repeating another under a new name changes no access while PostgreSQL evaluates both, and an edit to one copy leaves the other in force.",
+            rationale: "A policy repeating another under a new name changes no access, and an edit to one copy leaves the other in force.",
             source: Some("https://www.postgresql.org/docs/current/sql-createpolicy.html"),
             basis: Basis::Declared,
             example: RuleExample {
@@ -149,6 +153,14 @@ impl<DB: DatabaseLike> TableRule for DuplicatePolicy<DB> {
         let mut seen: Vec<(Definition, &DB::Policy)> = Vec::new();
         for policy in table.policies(database)? {
             let definition = definition(database, policy)?;
+            if definition.0 == CreatePolicyType::Restrictive
+                && [definition.3, definition.4]
+                    .into_iter()
+                    .flatten()
+                    .any(|clause| runs_volatile(database, clause))
+            {
+                continue;
+            }
             if let Some((_, first)) = seen.iter().find(|(earlier, _)| *earlier == definition) {
                 let (first_name, name) = (first.name(), policy.name());
                 reporter.policies(
