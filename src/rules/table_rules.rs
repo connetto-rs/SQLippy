@@ -32,6 +32,8 @@ mod dead_permissive_policy;
 pub use dead_permissive_policy::DeadPermissivePolicy;
 mod tautological_with_check;
 pub use tautological_with_check::TautologicalWithCheck;
+mod restrictive_without_permissive;
+pub use restrictive_without_permissive::RestrictiveWithoutPermissive;
 mod unforced_row_level_security;
 pub use unforced_row_level_security::UnforcedRowLevelSecurity;
 mod reachable_table_without_row_level_security;

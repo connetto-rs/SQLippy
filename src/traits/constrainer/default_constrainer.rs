@@ -29,8 +29,8 @@ use crate::{
         ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
         ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge, ReferenceWithoutIdSuffix,
         ReferencesGrantedToClientRole, RegColumnType, ReservedKeywordIdentifier,
-        RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
-        RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
+        RestrictiveWithoutPermissive, RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies,
+        RustKeywordColumnName, RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
         SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
         SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SerialColumn,
         SessionTimeZoneDependence, SettableMembershipInBypassingRole, SingularTableName,
@@ -83,7 +83,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 35] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 36] = [
             Box::new(TimeDependentCheck::default()),
             Box::new(PrefixRedundantIndex::default()),
             Box::new(MissingPrimaryKey::default()),
@@ -103,6 +103,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(DuplicateUniqueIndex::default()),
             Box::new(DeadPermissivePolicy::default()),
             Box::new(TautologicalWithCheck::default()),
+            Box::new(RestrictiveWithoutPermissive::default()),
             Box::new(UnforcedRowLevelSecurity::default()),
             Box::new(CorrelatedPolicySubquery::default()),
             Box::new(NestedPolicySubquery::default()),
