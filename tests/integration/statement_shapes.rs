@@ -158,7 +158,8 @@ fn a_where_whose_operator_runs_a_volatile_function_is_not_reported() {
          CREATE SCHEMA app;
          CREATE FUNCTION app.coinflip(a INT, b INT) RETURNS BOOL LANGUAGE sql VOLATILE
              AS 'SELECT random() < 0.5';
-         CREATE OPERATOR app.<?> (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);"
+         CREATE OPERATOR app.<?> (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
+         CREATE OPERATOR ~~ (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);"
     ));
     assert_eq!(
         reported(
@@ -167,10 +168,14 @@ fn a_where_whose_operator_runs_a_volatile_function_is_not_reported() {
             &[
                 "DELETE FROM notes WHERE 1 OPERATOR(app.<?>) 1",
                 "DELETE FROM notes WHERE 1 OPERATOR(app.<%>) 1",
+                "DELETE FROM notes WHERE 1 ~~ ANY (ARRAY[1])",
+                "DELETE FROM notes WHERE 1 ~~ ALL (ARRAY[1])",
                 "DELETE FROM notes WHERE 1 + 1 = 2",
             ]
         ),
         [
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec!["DELETE FROM notes WHERE 1 + 1 = 2".to_owned()],

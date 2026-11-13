@@ -2,78 +2,26 @@
 
 use std::ops::ControlFlow;
 
-use sql_traits::{
-    traits::{DatabaseLike, FunctionLike, OperatorLike},
-    utils::identifier_resolution::normalize_identifier,
-};
-use sqlparser::ast::{
-    BinaryOperator, Delete, Expr, FunctionBehavior, Statement, Update, Value, Visitor,
-};
+use sql_traits::traits::DatabaseLike;
+use sqlparser::ast::{Delete, Expr, Statement, Update, Value, Visitor};
 
-use crate::rules::{policy_support::is_column_reference, walk_support::walk};
+use crate::rules::{
+    policy_support::is_column_reference, volatility_support::runs_volatile, walk_support::walk,
+};
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
 
-/// Finds a term whose value can differ from one row to the next: a column
-/// reference, a call to a function whose name reaches a `VOLATILE` overload
-/// or no known function, or an operator whose name reaches an operator with a
-/// `VOLATILE` or unknown implementation, `OPERATOR(...)` naming no known
-/// operator included.
-struct RowVarying<'a, DB>(&'a DB);
+/// Finds a column reference.
+struct ColumnReference;
 
-impl<DB: DatabaseLike> RowVarying<'_, DB> {
-    /// Whether an operator written `name` may run a `VOLATILE` function,
-    /// `custom` when it is written `OPERATOR(...)`.
-    fn operator_varies(&self, name: &str, custom: bool) -> bool {
-        let Some(operators) = self.0.operators() else {
-            return custom;
-        };
-        let mut matched = false;
-        for operator in operators.filter(|operator| operator.target_name().name() == name) {
-            matched = true;
-            if operator
-                .implementation(self.0)
-                .is_none_or(|function| function.volatility() == FunctionBehavior::Volatile)
-            {
-                return true;
-            }
-        }
-        custom && !matched
-    }
-}
-
-impl<DB: DatabaseLike> Visitor for RowVarying<'_, DB> {
+impl Visitor for ColumnReference {
     type Break = ();
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
-        let varies = match expression {
-            _ if is_column_reference(expression) => true,
-            Expr::Function(call) => call
-                .name
-                .0
-                .last()
-                .and_then(|part| part.as_ident())
-                .is_none_or(|name| {
-                    let name = normalize_identifier(&name.value, name.quote_style.is_some());
-                    let mut reached = self.0.functions_named(&name).peekable();
-                    reached.peek().is_none()
-                        || reached
-                            .any(|function| function.volatility() == FunctionBehavior::Volatile)
-                }),
-            Expr::BinaryOp {
-                op: BinaryOperator::PGCustomBinaryOperator(parts),
-                ..
-            } => parts
-                .last()
-                .is_none_or(|name| self.operator_varies(name, true)),
-            Expr::BinaryOp { op, .. } => self.operator_varies(&op.to_string(), false),
-            Expr::UnaryOp { op, .. } => self.operator_varies(&op.to_string(), false),
-            _ => false,
-        };
-        if varies {
+        if is_column_reference(expression) {
             return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
@@ -104,7 +52,8 @@ impl<DB: DatabaseLike> Visitor for Unfiltered<'_, DB> {
                 None => self.1.push((statement.to_string(), false)),
                 Some(selection)
                     if !is_literal_true(selection)
-                        && walk(selection, &mut RowVarying(self.0)).is_continue() =>
+                        && walk(selection, &mut ColumnReference).is_continue()
+                        && !runs_volatile(self.0, selection) =>
                 {
                     self.1.push((statement.to_string(), true));
                 }
@@ -129,10 +78,10 @@ query_rule!(
     /// evaluated per row and does select a subset, `WHERE random() < 0.5`
     /// deleting 514 of them and an operator implemented by one 511, so
     /// neither is reported, nor is a function or `OPERATOR(...)` the schema
-    /// does not declare. Row-level security narrows the
-    /// write to the rows the policy lets the caller reach, which is still
-    /// every one of them. A deliberate full rewrite is written `WHERE true`
-    /// or `TRUNCATE`, which are not reported.
+    /// does not declare. Row-level security narrows the write to the rows
+    /// the policy lets the caller reach, which is still every one of them. A
+    /// deliberate full rewrite is written `WHERE true` or `TRUNCATE`, which
+    /// are not reported.
     ///
     /// # Example
     ///
