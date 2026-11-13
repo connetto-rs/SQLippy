@@ -159,27 +159,51 @@ fn a_where_whose_operator_runs_a_volatile_function_is_not_reported() {
          CREATE FUNCTION app.coinflip(a INT, b INT) RETURNS BOOL LANGUAGE sql VOLATILE
              AS 'SELECT random() < 0.5';
          CREATE OPERATOR app.<?> (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
-         CREATE OPERATOR ~~ (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);"
+         CREATE OPERATOR ~~ (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
+         CREATE OPERATOR !~~ (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
+         CREATE OPERATOR ~~* (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
+         CREATE OPERATOR !~~* (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
+         CREATE TYPE mood AS ENUM ('a', 'b');
+         CREATE FUNCTION app.moodflip(a mood, b mood) RETURNS BOOL LANGUAGE sql VOLATILE
+             AS 'SELECT random() < 0.5';
+         CREATE OPERATOR = (LEFTARG = mood, RIGHTARG = mood, FUNCTION = app.moodflip);
+         CREATE OPERATOR <> (LEFTARG = mood, RIGHTARG = mood, FUNCTION = app.moodflip);
+         CREATE OPERATOR >= (LEFTARG = mood, RIGHTARG = mood, FUNCTION = app.moodflip);
+         CREATE OPERATOR <= (LEFTARG = mood, RIGHTARG = mood, FUNCTION = app.moodflip);
+         CREATE OPERATOR < (LEFTARG = mood, RIGHTARG = mood, FUNCTION = app.moodflip);
+         CREATE OPERATOR > (LEFTARG = mood, RIGHTARG = mood, FUNCTION = app.moodflip);"
     ));
+    let volatile = [
+        "DELETE FROM notes WHERE 1 OPERATOR(app.<?>) 1",
+        "DELETE FROM notes WHERE 1 OPERATOR(app.<%>) 1",
+        "DELETE FROM notes WHERE 1 ~~ ANY (ARRAY[1])",
+        "DELETE FROM notes WHERE 1 ~~ ALL (ARRAY[1])",
+        "DELETE FROM notes WHERE 1 LIKE 1",
+        "DELETE FROM notes WHERE 1 NOT LIKE 1",
+        "DELETE FROM notes WHERE 1 ILIKE 1",
+        "DELETE FROM notes WHERE 1 NOT ILIKE 1",
+        "DELETE FROM notes WHERE 'a'::mood IN ('a'::mood)",
+        "DELETE FROM notes WHERE 'a'::mood NOT IN ('a'::mood)",
+        "DELETE FROM notes WHERE 'a'::mood IN (SELECT 'a'::mood)",
+        "DELETE FROM notes WHERE 'a'::mood BETWEEN 'a'::mood AND 'a'::mood",
+        "DELETE FROM notes WHERE 'a'::mood NOT BETWEEN 'a'::mood AND 'a'::mood",
+        "DELETE FROM notes WHERE 'a'::mood IS DISTINCT FROM 'a'::mood",
+        "DELETE FROM notes WHERE 'a'::mood IS NOT DISTINCT FROM 'a'::mood",
+        "DELETE FROM notes WHERE CASE 'a'::mood WHEN 'a'::mood THEN true ELSE false END",
+    ];
     assert_eq!(
-        reported(
-            &constrainer,
-            &database,
-            &[
-                "DELETE FROM notes WHERE 1 OPERATOR(app.<?>) 1",
-                "DELETE FROM notes WHERE 1 OPERATOR(app.<%>) 1",
-                "DELETE FROM notes WHERE 1 ~~ ANY (ARRAY[1])",
-                "DELETE FROM notes WHERE 1 ~~ ALL (ARRAY[1])",
-                "DELETE FROM notes WHERE 1 + 1 = 2",
-            ]
-        ),
-        [
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vec!["DELETE FROM notes WHERE 1 + 1 = 2".to_owned()],
-        ]
+        reported(&constrainer, &database, &volatile),
+        vec![Vec::<String>::new(); volatile.len()]
+    );
+    let constant = [
+        "DELETE FROM notes WHERE 1 + 1 = 2",
+        "DELETE FROM notes WHERE 1 IN (1, 2)",
+        "DELETE FROM notes WHERE 1 BETWEEN 0 AND 2",
+        "DELETE FROM notes WHERE 'a' LIKE 'a'",
+    ];
+    assert_eq!(
+        reported(&constrainer, &parse(NOTES), &constant),
+        constant.map(|statement| vec![statement.to_owned()])
     );
 }
 

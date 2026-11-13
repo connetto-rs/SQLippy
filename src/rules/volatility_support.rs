@@ -7,7 +7,7 @@ use sql_traits::{
     traits::{DatabaseLike, FunctionLike, OperatorLike},
     utils::identifier_resolution::normalize_identifier,
 };
-use sqlparser::ast::{BinaryOperator, Expr, FunctionBehavior, Visitor};
+use sqlparser::ast::{BinaryOperator, Expr, FunctionBehavior, InTarget, Visitor};
 
 use crate::rules::walk_support::walk;
 
@@ -41,11 +41,40 @@ fn binary_operator_is_volatile<DB: DatabaseLike>(database: &DB, op: &BinaryOpera
     }
 }
 
+/// The operators PostgreSQL runs for a comparison it spells with keywords,
+/// such as `~~` for `LIKE`, `>=` and `<=` for `BETWEEN` and `=` for `IN`,
+/// `IS DISTINCT FROM` and a `CASE` with an operand.
+fn keyword_operators(expression: &Expr) -> &'static [&'static str] {
+    match expression {
+        Expr::Like { negated: false, .. } => &["~~"],
+        Expr::Like { negated: true, .. } => &["!~~"],
+        Expr::ILike { negated: false, .. } => &["~~*"],
+        Expr::ILike { negated: true, .. } => &["!~~*"],
+        Expr::SimilarTo { negated: false, .. } => &["~"],
+        Expr::SimilarTo { negated: true, .. } => &["!~"],
+        Expr::In {
+            target: InTarget::List(_),
+            negated: true,
+            ..
+        } => &["<>"],
+        Expr::In { .. }
+        | Expr::IsDistinctFrom(..)
+        | Expr::IsNotDistinctFrom(..)
+        | Expr::Case {
+            operand: Some(_), ..
+        } => &["="],
+        Expr::Between { negated: false, .. } => &[">=", "<="],
+        Expr::Between { negated: true, .. } => &["<", ">"],
+        _ => &[],
+    }
+}
+
 /// Whether `expression` itself, apart from its operands and arguments, may
 /// run a `VOLATILE` function: a call whose name reaches a `VOLATILE` overload
-/// or no known function, or an operator, quantified by `ANY` or `ALL` or
-/// not, whose name reaches one with a `VOLATILE` or unknown implementation,
-/// `OPERATOR(...)` naming no known operator included.
+/// or no known function, or an operator, quantified by `ANY` or `ALL`,
+/// spelled with keywords or neither, whose name reaches one with a
+/// `VOLATILE` or unknown implementation, `OPERATOR(...)` naming no known
+/// operator included.
 fn is_volatile_term<DB: DatabaseLike>(database: &DB, expression: &Expr) -> bool {
     match expression {
         Expr::Function(call) => call
@@ -63,7 +92,9 @@ fn is_volatile_term<DB: DatabaseLike>(database: &DB, expression: &Expr) -> bool 
         | Expr::AnyOp { compare_op: op, .. }
         | Expr::AllOp { compare_op: op, .. } => binary_operator_is_volatile(database, op),
         Expr::UnaryOp { op, .. } => operator_is_volatile(database, &op.to_string(), false),
-        _ => false,
+        _ => keyword_operators(expression)
+            .iter()
+            .any(|name| operator_is_volatile(database, name, false)),
     }
 }
 
