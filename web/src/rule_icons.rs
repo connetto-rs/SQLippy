@@ -17,11 +17,11 @@ use dioxus_free_icons::icons::fa_solid_icons::{
     FaLockOpen, FaMagnet, FaMagnifyingGlass, FaMagnifyingGlassArrowRight, FaMagnifyingGlassChart,
     FaMask, FaMoneyBill, FaNotEqual, FaObjectGroup, FaPaperclip, FaPeopleArrowsLeftRight,
     FaPeopleGroup, FaPlug, FaPlugCircleExclamation, FaPlugCircleXmark, FaPuzzlePiece, FaQuoteLeft,
-    FaRegistered, FaRepeat, FaRotateRight, FaRuler, FaScissors, FaShareNodes, FaShield, FaShuffle,
-    FaSignsPost, FaSitemap, FaSkull, FaSliders, FaSnowflake, FaSort, FaSpellCheck, FaSquareMinus,
-    FaSquareRootVariable, FaStopwatch, FaTable, FaTableList, FaTag, FaTags, FaTextHeight,
-    FaTextWidth, FaTrashCan, FaUnderline, FaUserCheck, FaUserGear, FaUserNinja, FaUserPen,
-    FaUserSlash, FaUserTag, FaWater, FaWaterLadder,
+    FaRegistered, FaRepeat, FaRotateRight, FaRuler, FaScissors, FaShareNodes, FaShield,
+    FaShieldHalved, FaShuffle, FaSignsPost, FaSitemap, FaSkull, FaSliders, FaSnowflake, FaSort,
+    FaSpellCheck, FaSquareMinus, FaSquareRootVariable, FaStopwatch, FaTable, FaTableList, FaTag,
+    FaTags, FaTextHeight, FaTextWidth, FaTrashCan, FaUnderline, FaUserCheck, FaUserGear,
+    FaUserNinja, FaUserPen, FaUserSlash, FaUserTag, FaWater, FaWaterLadder,
 };
 
 /// Defines `RuleIcon`, rendering the icon each listed rule name maps to, and
@@ -128,6 +128,7 @@ rule_icons! {
     "unindexed_correlated_select" => FaMagnifyingGlassArrowRight,
     "unindexed_foreign_key" => FaTag,
     "unindexed_policy_filter" => FaMagnifyingGlassChart,
+    "policy_expression_defeats_index" => FaShieldHalved,
     "redundant_extension_edge" => FaBezierCurve,
     "duplicate_check" => FaCopy,
     "duplicate_foreign_key" => FaPaperclip,

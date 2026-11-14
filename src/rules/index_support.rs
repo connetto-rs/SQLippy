@@ -6,13 +6,14 @@ use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
-    traits::{DatabaseLike, IndexLike, TableLike},
+    traits::{ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableLike},
 };
 use sqlparser::ast::{
-    BinaryOperator, Expr, Ident, InTarget, ObjectName, ObjectNamePart, Query, visit_expressions_mut,
+    BinaryOperator, DataType, Expr, Ident, InTarget, ObjectName, ObjectNamePart, Query,
+    visit_expressions_mut,
 };
 
-use crate::rules::policy_support::is_column_reference;
+use crate::rules::{policy_support::is_column_reference, statement_support::OwnLevel};
 
 /// Calls `visit` with each column side and other side a comparison an index
 /// can serve may have.
@@ -154,4 +155,51 @@ pub(crate) fn expression_indexed<DB: DatabaseLike>(
         }
     }
     Ok(false)
+}
+
+/// The side of a comparison unwrapped from parentheses, with the one column
+/// reference of its own level it wraps in a function, a cast or arithmetic,
+/// when it wraps exactly one and is not that column bare.
+pub(crate) fn wrapping(side: &Expr) -> Result<Option<(&Expr, Expr)>, LookupError> {
+    let wrapper = leading(side);
+    if is_column_reference(wrapper) {
+        return Ok(None);
+    }
+    let (mut reference, mut count) = (None, 0_usize);
+    OwnLevel::new(|node: &Expr| {
+        if is_column_reference(node) {
+            count += 1;
+            if count == 1 {
+                reference = Some(node.clone());
+            }
+        }
+        Ok(())
+    })
+    .over(wrapper)?;
+    Ok(reference
+        .filter(|_| count == 1)
+        .map(|reference| (wrapper, reference)))
+}
+
+/// Whether `wrapper`, around `column` of `table`, keeps PostgreSQL from the
+/// index that leads with the column: one does, no index leads with
+/// `wrapper` itself, and `wrapper` is not a cast of a textual column to
+/// text, which keeps the index.
+pub(crate) fn defeats_index<DB: DatabaseLike>(
+    database: &DB,
+    table: &DB::Table,
+    column: &DB::Column,
+    wrapper: &Expr,
+) -> Result<bool, LookupError> {
+    let coercible = match wrapper {
+        Expr::Cast {
+            expr,
+            data_type: DataType::Text | DataType::Varchar(_) | DataType::String(_),
+            ..
+        } => is_column_reference(expr) && column.data_type(database).is_textual(database),
+        _ => false,
+    };
+    Ok(!coercible
+        && indexed(database, table, column)?
+        && !expression_indexed(database, table, wrapper)?)
 }

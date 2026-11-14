@@ -64,6 +64,8 @@ mod deny_list_policy;
 pub use deny_list_policy::DenyListPolicy;
 mod unindexed_policy_filter;
 pub use unindexed_policy_filter::UnindexedPolicyFilter;
+mod policy_expression_defeats_index;
+pub use policy_expression_defeats_index::PolicyExpressionDefeatsIndex;
 mod prefix_redundant_index;
 pub use prefix_redundant_index::PrefixRedundantIndex;
 mod time_dependent_check;
