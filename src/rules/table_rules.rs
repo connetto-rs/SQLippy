@@ -62,6 +62,8 @@ mod array_membership_policy;
 pub use array_membership_policy::ArrayMembershipPolicy;
 mod deny_list_policy;
 pub use deny_list_policy::DenyListPolicy;
+mod policy_reads_unprotected_table;
+pub use policy_reads_unprotected_table::PolicyReadsUnprotectedTable;
 mod unindexed_policy_filter;
 pub use unindexed_policy_filter::UnindexedPolicyFilter;
 mod prefix_redundant_index;

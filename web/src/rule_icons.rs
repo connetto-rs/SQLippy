@@ -15,13 +15,13 @@ use dioxus_free_icons::icons::fa_solid_icons::{
     FaGhost, FaGlobe, FaGripLines, FaHand, FaHandshake, FaHashtag, FaHourglassEnd, FaICursor,
     FaIdBadge, FaIdCard, FaInfinity, FaKey, FaLink, FaLinkSlash, FaListOl, FaListUl, FaLocationDot,
     FaLockOpen, FaMagnet, FaMagnifyingGlass, FaMagnifyingGlassArrowRight, FaMagnifyingGlassChart,
-    FaMask, FaMoneyBill, FaNotEqual, FaObjectGroup, FaPaperclip, FaPeopleArrowsLeftRight,
-    FaPeopleGroup, FaPlug, FaPlugCircleExclamation, FaPlugCircleXmark, FaPuzzlePiece, FaQuoteLeft,
-    FaRegistered, FaRepeat, FaRotateRight, FaRuler, FaScissors, FaShareNodes, FaShield, FaShuffle,
-    FaSignsPost, FaSitemap, FaSkull, FaSliders, FaSnowflake, FaSort, FaSpellCheck, FaSquareMinus,
-    FaSquareRootVariable, FaStopwatch, FaTable, FaTableList, FaTag, FaTags, FaTextHeight,
-    FaTextWidth, FaTrashCan, FaUnderline, FaUserCheck, FaUserGear, FaUserNinja, FaUserPen,
-    FaUserSlash, FaUserTag, FaWater, FaWaterLadder,
+    FaMask, FaMoneyBill, FaNotEqual, FaObjectGroup, FaPaperclip, FaPenToSquare,
+    FaPeopleArrowsLeftRight, FaPeopleGroup, FaPlug, FaPlugCircleExclamation, FaPlugCircleXmark,
+    FaPuzzlePiece, FaQuoteLeft, FaRegistered, FaRepeat, FaRotateRight, FaRuler, FaScissors,
+    FaShareNodes, FaShield, FaShuffle, FaSignsPost, FaSitemap, FaSkull, FaSliders, FaSnowflake,
+    FaSort, FaSpellCheck, FaSquareMinus, FaSquareRootVariable, FaStopwatch, FaTable, FaTableList,
+    FaTag, FaTags, FaTextHeight, FaTextWidth, FaTrashCan, FaUnderline, FaUserCheck, FaUserGear,
+    FaUserNinja, FaUserPen, FaUserSlash, FaUserTag, FaWater, FaWaterLadder,
 };
 
 /// Defines `RuleIcon`, rendering the icon each listed rule name maps to, and
@@ -55,6 +55,7 @@ rule_icons! {
     "outer_column_capture" => FaMagnet,
     "policy_without_row_level_security" => FaLockOpen,
     "policy_read_cycle" => FaArrowsRotate,
+    "policy_reads_unprotected_table" => FaPenToSquare,
     "self_asserted_claim_policy" => FaIdBadge,
     "truncate_granted_to_anonymous_role" => FaTrashCan,
     "alias_shadowed_by_column" => FaCircleHalfStroke,
