@@ -4,6 +4,8 @@ mod definer_without_search_path;
 pub use definer_without_search_path::DefinerWithoutSearchPath;
 mod definer_temporary_schema_not_last;
 pub use definer_temporary_schema_not_last::DefinerTemporarySchemaNotLast;
+mod definer_path_creatable_schema;
+pub use definer_path_creatable_schema::DefinerPathCreatableSchema;
 mod exposed_definer_over_protected_table;
 pub use exposed_definer_over_protected_table::ExposedDefinerOverProtectedTable;
 mod impure_immutable_function;
