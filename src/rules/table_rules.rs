@@ -30,6 +30,8 @@ mod policy_without_row_level_security;
 pub use policy_without_row_level_security::PolicyWithoutRowLevelSecurity;
 mod dead_permissive_policy;
 pub use dead_permissive_policy::DeadPermissivePolicy;
+mod duplicate_policy;
+pub use duplicate_policy::DuplicatePolicy;
 mod tautological_with_check;
 pub use tautological_with_check::TautologicalWithCheck;
 mod unforced_row_level_security;
