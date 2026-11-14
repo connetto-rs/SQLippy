@@ -160,12 +160,21 @@ fn restrictive_copies_casting_through_a_volatile_function_are_not_reported() {
              CREATE POLICY b ON docs AS RESTRICTIVE FOR INSERT WITH CHECK ({check});"
         )
     };
-    assert_eq!(
-        findings_with(options(), &copies("(tenant::app.coin).v = 1")),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        findings_with(options(), &copies("tenant::BIGINT = 1")),
-        ["docs.a -> docs.b"]
-    );
+    for check in [
+        "(tenant::app.coin).v = 1",
+        "((ARRAY[tenant]::app.coin[])[1]).v = 1",
+    ] {
+        assert_eq!(
+            findings_with(options(), &copies(check)),
+            Vec::<String>::new(),
+            "{check}"
+        );
+    }
+    for check in ["tenant::BIGINT = 1", "(ARRAY[tenant]::BIGINT[])[1] = 1"] {
+        assert_eq!(
+            findings_with(options(), &copies(check)),
+            ["docs.a -> docs.b"],
+            "{check}"
+        );
+    }
 }
