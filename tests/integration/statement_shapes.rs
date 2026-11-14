@@ -207,6 +207,48 @@ fn a_where_whose_operator_runs_a_volatile_function_is_not_reported() {
     );
 }
 
+#[test]
+fn a_where_casting_through_a_volatile_function_is_not_reported() {
+    let constrainer = query_rule(UnfilteredWrite::default());
+    let app = |name| TargetName::new(name, false).with_schema("app", false);
+    let database = ParseOptions::default()
+        .with_postgres_catalog(PostgresCatalog::default().with_cast(
+            PostgresCatalogCast::through_function(
+                app("coin"),
+                TargetName::new("bool", false).with_schema("pg_catalog", false),
+                CastContext::Explicit,
+                app("toss"),
+                [app("coin")],
+            ),
+        ))
+        .parse::<sqlparser::dialect::PostgreSqlDialect>(&format!(
+            "{NOTES}
+             CREATE SCHEMA app;
+             CREATE TYPE app.coin AS (v INT);
+             CREATE FUNCTION app.toss(app.coin) RETURNS BOOL LANGUAGE sql VOLATILE
+                 AS 'SELECT random() < 0.5';"
+        ))
+        .expect("schema parses");
+    assert_eq!(
+        reported(
+            &constrainer,
+            &database,
+            &[
+                "DELETE FROM notes WHERE '(1)'::app.coin::BOOL",
+                "DELETE FROM notes WHERE CAST(CAST('(1)' AS app.coin) AS BOOLEAN)",
+                "DELETE FROM notes WHERE 1::BIGINT = 1",
+                "DELETE FROM notes WHERE '1'::INT = 1",
+            ]
+        ),
+        [
+            vec![],
+            vec![],
+            vec!["DELETE FROM notes WHERE 1::BIGINT = 1".to_owned()],
+            vec!["DELETE FROM notes WHERE '1'::INT = 1".to_owned()],
+        ]
+    );
+}
+
 const LOGINS: &str = "
     CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT, body TEXT);
     CREATE FUNCTION login(who TEXT) RETURNS VOID LANGUAGE plpgsql AS $$

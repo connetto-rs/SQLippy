@@ -76,12 +76,12 @@ query_rule!(
     /// `WHERE $1`, has one value for every row, so on PostgreSQL 18 it
     /// deleted all of a thousand notes or none. A `VOLATILE` function is
     /// evaluated per row and does select a subset, `WHERE random() < 0.5`
-    /// deleting 514 of them and an operator implemented by one 511, so
-    /// neither is reported, nor is a function or `OPERATOR(...)` the schema
-    /// does not declare. Row-level security narrows the write to the rows
-    /// the policy lets the caller reach, which is still every one of them. A
-    /// deliberate full rewrite is written `WHERE true` or `TRUNCATE`, which
-    /// are not reported.
+    /// deleting 514 of them, an operator implemented by one 511 and an
+    /// explicit cast through one 4938 of ten thousand, so none is reported,
+    /// nor is a function or `OPERATOR(...)` the schema does not declare.
+    /// Row-level security narrows the write to the rows the policy lets the
+    /// caller reach, which is still every one of them. A deliberate full
+    /// rewrite is written `WHERE true` or `TRUNCATE`, which are not reported.
     ///
     /// # Example
     ///

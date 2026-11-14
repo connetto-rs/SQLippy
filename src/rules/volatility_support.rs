@@ -4,10 +4,11 @@
 use std::ops::ControlFlow;
 
 use sql_traits::{
-    traits::{DatabaseLike, FunctionLike, OperatorLike},
-    utils::identifier_resolution::normalize_identifier,
+    structs::TargetName,
+    traits::{CastLike, CastMethod, DatabaseLike, FunctionLike, OperatorLike},
+    utils::{identifier_resolution::normalize_identifier, normalize_postgres_type},
 };
-use sqlparser::ast::{BinaryOperator, Expr, FunctionBehavior, InTarget, Visitor};
+use sqlparser::ast::{BinaryOperator, DataType, Expr, FunctionBehavior, InTarget, Visitor};
 
 use crate::rules::walk_support::walk;
 
@@ -69,12 +70,39 @@ fn keyword_operators(expression: &Expr) -> &'static [&'static str] {
     }
 }
 
+/// Whether an explicit cast to `data_type` may run a `VOLATILE` function: a
+/// cast to a type of that name, from any source and in any schema, that runs
+/// a `VOLATILE` function or one the database does not hold.
+fn cast_is_volatile<DB: DatabaseLike>(database: &DB, data_type: &DataType) -> bool {
+    let Some(casts) = database.casts() else {
+        return false;
+    };
+    let written = match data_type {
+        DataType::Custom(name, _) => name.0.last().map_or_else(String::new, ToString::to_string),
+        _ => data_type.to_string(),
+    };
+    let written = normalize_postgres_type(&written);
+    casts
+        .filter(|cast| {
+            let target = cast.target_type(database);
+            normalize_postgres_type(
+                &TargetName::new(target.name(), target.name_is_quoted()).to_string(),
+            ) == written
+        })
+        .any(|cast| {
+            cast.method() == CastMethod::Function
+                && cast
+                    .function(database)
+                    .is_none_or(|function| function.volatility() == FunctionBehavior::Volatile)
+        })
+}
+
 /// Whether `expression` itself, apart from its operands and arguments, may
 /// run a `VOLATILE` function: a call whose name reaches a `VOLATILE` overload
-/// or no known function, or an operator, quantified by `ANY` or `ALL`,
-/// spelled with keywords or neither, whose name reaches one with a
-/// `VOLATILE` or unknown implementation, `OPERATOR(...)` naming no known
-/// operator included.
+/// or no known function, an operator, quantified by `ANY` or `ALL`, spelled
+/// with keywords or neither, whose name reaches one with a `VOLATILE` or
+/// unknown implementation, `OPERATOR(...)` naming no known operator
+/// included, or an explicit cast [`cast_is_volatile`] reports.
 fn is_volatile_term<DB: DatabaseLike>(database: &DB, expression: &Expr) -> bool {
     match expression {
         Expr::Function(call) => call
@@ -92,6 +120,7 @@ fn is_volatile_term<DB: DatabaseLike>(database: &DB, expression: &Expr) -> bool 
         | Expr::AnyOp { compare_op: op, .. }
         | Expr::AllOp { compare_op: op, .. } => binary_operator_is_volatile(database, op),
         Expr::UnaryOp { op, .. } => operator_is_volatile(database, &op.to_string(), false),
+        Expr::Cast { data_type, .. } => cast_is_volatile(database, data_type),
         _ => keyword_operators(expression)
             .iter()
             .any(|name| operator_is_volatile(database, name, false)),
@@ -113,8 +142,124 @@ impl<DB: DatabaseLike> Visitor for VolatileTerm<'_, DB> {
 }
 
 /// Whether evaluating `expression` may run a `VOLATILE` function, directly
-/// or through an operator, a call or operator the schema does not declare
-/// included.
+/// or through an operator or an explicit cast, a call or operator the
+/// schema does not declare included.
 pub(crate) fn runs_volatile<DB: DatabaseLike>(database: &DB, expression: &Expr) -> bool {
     walk(expression, &mut VolatileTerm(database)).is_break()
+}
+
+#[cfg(test)]
+mod tests {
+    use sql_traits::prelude::*;
+    use sqlparser::{
+        dialect::{PostgreSqlDialect, SQLiteDialect},
+        parser::Parser,
+    };
+
+    use super::runs_volatile;
+
+    /// Whether `expression`, written for PostgreSQL, may run a `VOLATILE`
+    /// function in `database`.
+    fn volatile(database: &ParserDB, expression: &str) -> bool {
+        let expression = Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(expression)
+            .and_then(|mut parser| parser.parse_expr())
+            .expect("expression parses");
+        runs_volatile(database, &expression)
+    }
+
+    fn postgres(schema: &str) -> ParserDB {
+        ParserDB::parse::<PostgreSqlDialect>(schema).expect("schema parses")
+    }
+
+    #[test]
+    fn keyword_and_prefix_operators_reach_declared_volatile_implementations() {
+        let moods = postgres(
+            "CREATE TYPE mood AS ENUM ('a', 'b');
+             CREATE FUNCTION toss(a mood, b TEXT) RETURNS BOOL LANGUAGE sql VOLATILE
+                 AS 'SELECT random() < 0.5';
+             CREATE FUNCTION toss_pair(a mood, b mood) RETURNS BOOL LANGUAGE sql VOLATILE
+                 AS 'SELECT random() < 0.5';
+             CREATE FUNCTION toss_one(a mood) RETURNS BOOL LANGUAGE sql VOLATILE
+                 AS 'SELECT random() < 0.5';
+             CREATE OPERATOR ~~ (LEFTARG = mood, RIGHTARG = TEXT, FUNCTION = toss);
+             CREATE OPERATOR !~~ (LEFTARG = mood, RIGHTARG = TEXT, FUNCTION = toss);
+             CREATE OPERATOR ~~* (LEFTARG = mood, RIGHTARG = TEXT, FUNCTION = toss);
+             CREATE OPERATOR !~~* (LEFTARG = mood, RIGHTARG = TEXT, FUNCTION = toss);
+             CREATE OPERATOR ~ (LEFTARG = mood, RIGHTARG = TEXT, FUNCTION = toss);
+             CREATE OPERATOR !~ (LEFTARG = mood, RIGHTARG = TEXT, FUNCTION = toss);
+             CREATE OPERATOR = (LEFTARG = mood, RIGHTARG = mood, FUNCTION = toss_pair);
+             CREATE OPERATOR <> (LEFTARG = mood, RIGHTARG = mood, FUNCTION = toss_pair);
+             CREATE OPERATOR >= (LEFTARG = mood, RIGHTARG = mood, FUNCTION = toss_pair);
+             CREATE OPERATOR <= (LEFTARG = mood, RIGHTARG = mood, FUNCTION = toss_pair);
+             CREATE OPERATOR < (LEFTARG = mood, RIGHTARG = mood, FUNCTION = toss_pair);
+             CREATE OPERATOR > (LEFTARG = mood, RIGHTARG = mood, FUNCTION = toss_pair);
+             CREATE OPERATOR - (RIGHTARG = mood, FUNCTION = toss_one);",
+        );
+        for expression in [
+            "'a'::mood LIKE 'a'",
+            "'a'::mood NOT LIKE 'a'",
+            "'a'::mood ILIKE 'a'",
+            "'a'::mood NOT ILIKE 'a'",
+            "'a'::mood SIMILAR TO 'a'",
+            "'a'::mood NOT SIMILAR TO 'a'",
+            "'a'::mood IN ('a'::mood)",
+            "'a'::mood NOT IN ('a'::mood)",
+            "'a'::mood BETWEEN 'a'::mood AND 'a'::mood",
+            "'a'::mood NOT BETWEEN 'a'::mood AND 'a'::mood",
+            "'a'::mood IS DISTINCT FROM 'a'::mood",
+            "'a'::mood IS NOT DISTINCT FROM 'a'::mood",
+            "CASE 'a'::mood WHEN 'a'::mood THEN true ELSE false END",
+            "- 'a'::mood",
+        ] {
+            assert!(volatile(&moods, expression), "{expression}");
+        }
+        let plain = postgres("");
+        for expression in [
+            "'a' LIKE 'a'",
+            "'a' SIMILAR TO 'a'",
+            "1 IN (1, 2)",
+            "1 NOT IN (1, 2)",
+            "1 BETWEEN 0 AND 2",
+            "1 IS DISTINCT FROM 2",
+            "CASE 1 WHEN 1 THEN true ELSE false END",
+            "-1 = -1",
+        ] {
+            assert!(!volatile(&plain, expression), "{expression}");
+        }
+    }
+
+    #[test]
+    fn a_cast_to_a_user_type_reaches_its_volatile_function() {
+        let app = |name| TargetName::new(name, false).with_schema("app", false);
+        let int = || TargetName::new("int4", false).with_schema("pg_catalog", false);
+        let database = ParseOptions::default()
+            .with_postgres_catalog(PostgresCatalog::default().with_cast(
+                PostgresCatalogCast::through_function(
+                    int(),
+                    app("coin"),
+                    CastContext::Explicit,
+                    app("flip"),
+                    [int()],
+                ),
+            ))
+            .parse::<PostgreSqlDialect>(
+                "CREATE SCHEMA app;
+                 CREATE TYPE app.coin AS (v INT);
+                 CREATE FUNCTION app.flip(INT) RETURNS app.coin LANGUAGE sql VOLATILE
+                     AS 'SELECT ROW((random() < 0.5)::INT)::app.coin';",
+            )
+            .expect("schema parses");
+        assert!(volatile(&database, "1::app.coin = '(1)'::app.coin"));
+        assert!(!volatile(&database, "1::BIGINT = 1"));
+    }
+
+    #[test]
+    fn without_a_catalog_only_an_unknown_custom_operator_counts() {
+        let database = ParserDB::parse::<SQLiteDialect>("").expect("schema parses");
+        assert!(volatile(&database, "1 OPERATOR(app.<?>) 1"));
+        for expression in ["1 = 1", "CAST(1 AS INTEGER) = 1"] {
+            assert!(!volatile(&database, expression), "{expression}");
+        }
+    }
 }
