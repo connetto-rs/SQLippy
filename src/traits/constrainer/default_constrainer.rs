@@ -12,11 +12,11 @@ use crate::{
         ClientWrittenScaledNumeric, CorrelatedPolicySubquery, CredentialFreeWrite,
         CredentialSettingWrite, DeadPermissivePolicy, DefinerTakesActingUser,
         DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
-        DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnNameInExtensionGraph,
-        DuplicateForeignKey, DuplicatePolicy, DuplicateUniqueIndex, EmptyTextAllowed,
-        ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
-        ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FlagNotBoolean,
-        FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
+        DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnAssignment,
+        DuplicateColumnNameInExtensionGraph, DuplicateForeignKey, DuplicatePolicy,
+        DuplicateUniqueIndex, EmptyTextAllowed, ExposedDefinerOverProtectedTable,
+        ExpressionDefeatsIndex, ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema,
+        FlagNotBoolean, FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
         FunctionMediatedPolicyCycle, GrantOptionToClientRole, ImpureImmutableFunction,
         IncompatibleForeignKey, JsonStoredAsText, JsonType, KeyWithoutExactEquality,
         LatentPolicyReadCycle, MissingPrimaryKey, MixedCaseColumnName, MixedCaseForeignKeyName,
@@ -196,12 +196,13 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 20] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 21] = [
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
         Box::new(RandomOrderLimit::default()),
         Box::new(OffsetPaging::default()),
         Box::new(UnfilteredWrite::default()),
+        Box::new(DuplicateColumnAssignment::default()),
         Box::new(CredentialSettingWrite::default()),
         Box::new(OuterColumnCapture::default()),
         Box::new(TimestampBetween::default()),
