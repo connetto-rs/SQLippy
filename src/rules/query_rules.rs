@@ -12,6 +12,8 @@ macro_rules! query_rule {
     };
 }
 
+mod assignment_conjunction;
+pub use assignment_conjunction::AssignmentConjunction;
 mod binding_rules;
 pub use binding_rules::{AliasShadowedByColumn, SelfComparison};
 mod credential_setting_write;

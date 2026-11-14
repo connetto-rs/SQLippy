@@ -70,47 +70,46 @@ impl<'s> Targets<'s> {
     }
 }
 
-/// Collects the clauses of each statement that assign or list columns.
-#[derive(Default)]
-struct Clauses<'s>(Vec<Targets<'s>>);
+/// A clause that assigns or lists columns.
+pub(crate) enum Clause<'s> {
+    Assignments(&'static str, &'s [Assignment]),
+    Columns(&'static str, &'s [ObjectName]),
+}
 
-impl<'s> Clauses<'s> {
-    fn statement(&mut self, statement: &'s Statement) {
-        match statement {
-            Statement::Update(Update { assignments, .. }) => {
-                self.0.push(Targets::assignments("SET", assignments));
-            }
-            Statement::Insert(Insert { columns, on, .. }) => {
-                self.0.push(Targets::columns("INSERT column list", columns));
-                if let Some(OnInsert::OnConflict(OnConflict {
-                    action: OnConflictAction::DoUpdate(DoUpdate { assignments, .. }),
-                    ..
-                })) = on
-                {
-                    self.0.push(Targets::assignments(
-                        "ON CONFLICT DO UPDATE SET",
-                        assignments,
-                    ));
-                }
-            }
-            Statement::Merge(Merge { clauses, .. }) => {
-                for clause in clauses {
-                    match &clause.action {
-                        MergeAction::Update(MergeUpdateExpr {
-                            kind: MergeUpdateKind::Set(assignments),
-                            ..
-                        }) => self
-                            .0
-                            .push(Targets::assignments("MERGE UPDATE SET", assignments)),
-                        MergeAction::Insert(MergeInsertExpr { columns, .. }) => self
-                            .0
-                            .push(Targets::columns("MERGE INSERT column list", columns)),
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
+/// Visits each assignment or column-list clause in statement order.
+pub(crate) fn visit_clauses<'s>(statement: &'s Statement, mut visit: impl FnMut(Clause<'s>)) {
+    match statement {
+        Statement::Update(Update { assignments, .. }) => {
+            visit(Clause::Assignments("SET", assignments));
         }
+        Statement::Insert(Insert { columns, on, .. }) => {
+            visit(Clause::Columns("INSERT column list", columns));
+            if let Some(OnInsert::OnConflict(OnConflict {
+                action: OnConflictAction::DoUpdate(DoUpdate { assignments, .. }),
+                ..
+            })) = on
+            {
+                visit(Clause::Assignments(
+                    "ON CONFLICT DO UPDATE SET",
+                    assignments,
+                ));
+            }
+        }
+        Statement::Merge(Merge { clauses, .. }) => {
+            for clause in clauses {
+                match &clause.action {
+                    MergeAction::Update(MergeUpdateExpr {
+                        kind: MergeUpdateKind::Set(assignments),
+                        ..
+                    }) => visit(Clause::Assignments("MERGE UPDATE SET", assignments)),
+                    MergeAction::Insert(MergeInsertExpr { columns, .. }) => {
+                        visit(Clause::Columns("MERGE INSERT column list", columns));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -123,13 +122,15 @@ impl Visitor for Duplicates {
     type Break = ();
 
     fn pre_visit_statement(&mut self, statement: &Statement) -> ControlFlow<()> {
-        let mut clauses = Clauses::default();
-        clauses.statement(statement);
-        for targets in clauses.0 {
+        visit_clauses(statement, |clause| {
+            let targets = match clause {
+                Clause::Assignments(name, assignments) => Targets::assignments(name, assignments),
+                Clause::Columns(name, columns) => Targets::columns(name, columns),
+            };
             for column in targets.duplicated() {
                 self.0.push((targets.clause, column));
             }
-        }
+        });
         ControlFlow::Continue(())
     }
 }
