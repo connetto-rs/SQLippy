@@ -1,5 +1,6 @@
 //! Policies deciding on tables that the roles they restrict may rewrite.
 
+use sql_traits::errors::LookupError;
 use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
@@ -199,5 +200,23 @@ fn an_owner_writes_its_own_table_past_its_row_security() {
              ALTER TABLE members FORCE ROW LEVEL SECURITY; ALTER TABLE members OWNER TO app;"
         )),
         Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_read_table_policy_naming_an_invalid_relation_fails_the_lookup() {
+    let constrainer: GenericConstrainer<ParserDB> = PolicyReadsUnprotectedTable::default().into();
+    let database = ParserDB::parse::<PostgreSqlDialect>(&format!(
+        "{SCHEMA}{MEMBERSHIP} ALTER TABLE members ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY ins ON members FOR INSERT TO app WITH CHECK (team IN (SELECT team FROM x.y.z));"
+    ))
+    .expect("schema parses");
+    let diagnostics = constrainer.diagnostics(&database);
+    assert!(!diagnostics.is_empty());
+    assert!(
+        diagnostics
+            .iter()
+            .all(|error| matches!(error, Error::Lookup(LookupError::InvalidObjectName { .. }))),
+        "{diagnostics:?}"
     );
 }
