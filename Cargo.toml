@@ -22,10 +22,9 @@ diesel = { git = "https://github.com/diesel-rs/diesel", branch = "main", feature
 pg_diesel = { git = "https://github.com/connetto-rs/pg_diesel", branch = "main" }
 testcontainers = { version = "0.28", features = ["blocking"] }
 
-# sql-traits requires `sqlparser` from crates.io and patches it to Apache main
-# in its own workspace only, so this crate repeats the patch to build a single
-# parser shared with its own dependency.
+# sql-traits and pg_diesel patch these to main only in their own workspaces.
 [patch.crates-io]
+diesel = { git = "https://github.com/diesel-rs/diesel", branch = "main" }
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 
 [lints.rust]
