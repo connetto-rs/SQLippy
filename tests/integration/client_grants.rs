@@ -361,6 +361,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             .map(|inactive| inactive.rule().name)
             .collect::<Vec<_>>(),
         [
+            "credential_pattern_policy",
             "truncate_granted_to_app_role",
             "role_keyed_policy_when_pooled",
             "credential_free_write",
@@ -382,6 +383,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             .map(|inactive| inactive.rule().name)
             .collect::<Vec<_>>(),
         [
+            "credential_pattern_policy",
             "role_keyed_policy_when_pooled",
             "credential_free_write",
             "null_credential_read",

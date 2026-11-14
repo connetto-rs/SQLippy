@@ -10,11 +10,12 @@ use crate::{
         AutovacuumDisabledTable, BinarySendFailure, BlankPaddedCharacter,
         CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
         ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
-        CorrelatedPolicySubquery, CredentialFreeWrite, CredentialSettingWrite,
-        DeadPermissivePolicy, DefinerTakesActingUser, DefinerTemporarySchemaNotLast,
-        DefinerWithoutSearchPath, DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck,
-        DuplicateColumnAssignment, DuplicateColumnNameInExtensionGraph, DuplicateForeignKey,
-        DuplicatePolicy, DuplicateUniqueIndex, EmptyTextAllowed, ExposedDefinerOverProtectedTable,
+        CorrelatedPolicySubquery, CredentialFreeWrite, CredentialPatternPolicy,
+        CredentialSettingWrite, DeadPermissivePolicy, DefinerTakesActingUser,
+        DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
+        DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnAssignment,
+        DuplicateColumnNameInExtensionGraph, DuplicateForeignKey, DuplicatePolicy,
+        DuplicateUniqueIndex, EmptyTextAllowed, ExposedDefinerOverProtectedTable,
         ExpressionDefeatsIndex, ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema,
         FlagNotBoolean, FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
         FunctionMediatedPolicyCycle, GrantOptionToClientRole, ImpureImmutableFunction,
@@ -146,7 +147,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 46] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 47] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(RepeatedIndexColumn::default()),
@@ -170,6 +171,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(TautologicalWithCheck::default()),
         Box::new(TautologicalPolicy::default()),
         Box::new(PolicyWithoutRowReference::default()),
+        Box::new(CredentialPatternPolicy::default()),
         Box::new(UnsatisfiablePolicy::default()),
         Box::new(RestrictiveWithoutPermissive::default()),
         Box::new(UnforcedRowLevelSecurity::default()),

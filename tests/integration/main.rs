@@ -15,6 +15,7 @@ mod column_types;
 mod constant_policy_clauses;
 mod correlated_policy_subqueries;
 mod credential_free_writes;
+mod credential_patterns;
 mod definer_acting_user;
 mod definer_functions;
 mod duplicate_column_assignments;
