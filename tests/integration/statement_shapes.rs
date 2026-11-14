@@ -236,15 +236,23 @@ fn a_where_casting_through_a_volatile_function_is_not_reported() {
             &[
                 "DELETE FROM notes WHERE '(1)'::app.coin::BOOL",
                 "DELETE FROM notes WHERE CAST(CAST('(1)' AS app.coin) AS BOOLEAN)",
+                "DELETE FROM notes WHERE (ARRAY['(1)'::app.coin]::BOOL[])[1]",
+                "DELETE FROM notes WHERE (ARRAY[ARRAY['(1)'::app.coin]]::BOOL[][])[1][1]",
+                "DELETE FROM notes WHERE (CAST(ARRAY['(1)'::app.coin] AS BOOLEAN ARRAY))[1]",
                 "DELETE FROM notes WHERE 1::BIGINT = 1",
                 "DELETE FROM notes WHERE '1'::INT = 1",
+                "DELETE FROM notes WHERE (ARRAY[1]::BIGINT[])[1] = 1",
             ]
         ),
         [
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
             vec!["DELETE FROM notes WHERE 1::BIGINT = 1".to_owned()],
             vec!["DELETE FROM notes WHERE '1'::INT = 1".to_owned()],
+            vec!["DELETE FROM notes WHERE (ARRAY[1]::BIGINT[])[1] = 1".to_owned()],
         ]
     );
 }

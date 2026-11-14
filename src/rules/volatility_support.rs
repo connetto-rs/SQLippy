@@ -8,7 +8,9 @@ use sql_traits::{
     traits::{CastLike, CastMethod, DatabaseLike, FunctionLike, OperatorLike},
     utils::{identifier_resolution::normalize_identifier, normalize_postgres_type},
 };
-use sqlparser::ast::{BinaryOperator, DataType, Expr, FunctionBehavior, InTarget, Visitor};
+use sqlparser::ast::{
+    ArrayElemTypeDef, BinaryOperator, DataType, Expr, FunctionBehavior, InTarget, Visitor,
+};
 
 use crate::rules::walk_support::walk;
 
@@ -70,16 +72,32 @@ fn keyword_operators(expression: &Expr) -> &'static [&'static str] {
     }
 }
 
-/// Whether an explicit cast to `data_type` may run a `VOLATILE` function: a
-/// cast to a type of that name, from any source and in any schema, that runs
-/// a `VOLATILE` function or one the database does not hold.
+/// The element type of `data_type` with every array level removed, since a
+/// cast to an array type applies the element type's cast to each element.
+fn element_type(data_type: &DataType) -> &DataType {
+    match data_type {
+        DataType::Array(
+            ArrayElemTypeDef::AngleBracket(element)
+            | ArrayElemTypeDef::SquareBracket(element, _)
+            | ArrayElemTypeDef::Parenthesis(element)
+            | ArrayElemTypeDef::ParenthesisNotNull(element)
+            | ArrayElemTypeDef::Qualified(element, _),
+        ) => element_type(element),
+        _ => data_type,
+    }
+}
+
+/// Whether an explicit cast to `data_type`, or to arrays of it, may run a
+/// `VOLATILE` function: a cast to a type of that name, from any source and
+/// in any schema, that runs a `VOLATILE` function or one the database does
+/// not hold.
 fn cast_is_volatile<DB: DatabaseLike>(database: &DB, data_type: &DataType) -> bool {
     let Some(casts) = database.casts() else {
         return false;
     };
-    let written = match data_type {
+    let written = match element_type(data_type) {
         DataType::Custom(name, _) => name.0.last().map_or_else(String::new, ToString::to_string),
-        _ => data_type.to_string(),
+        element => element.to_string(),
     };
     let written = normalize_postgres_type(&written);
     casts
@@ -230,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cast_to_a_user_type_reaches_its_volatile_function() {
+    fn a_cast_to_a_user_type_or_its_arrays_reaches_its_volatile_function() {
         let app = |name| TargetName::new(name, false).with_schema("app", false);
         let int = || TargetName::new("int4", false).with_schema("pg_catalog", false);
         let database = ParseOptions::default()
@@ -250,8 +268,17 @@ mod tests {
                      AS 'SELECT ROW((random() < 0.5)::INT)::app.coin';",
             )
             .expect("schema parses");
-        assert!(volatile(&database, "1::app.coin = '(1)'::app.coin"));
-        assert!(!volatile(&database, "1::BIGINT = 1"));
+        for expression in [
+            "1::app.coin = '(1)'::app.coin",
+            "((ARRAY[1]::app.coin[])[1]).v = 1",
+            "((ARRAY[ARRAY[1]]::app.coin[][])[1][1]).v = 1",
+            "((CAST(ARRAY[1] AS app.coin ARRAY))[1]).v = 1",
+        ] {
+            assert!(volatile(&database, expression), "{expression}");
+        }
+        for expression in ["1::BIGINT = 1", "(ARRAY[1]::BIGINT[])[1] = 1"] {
+            assert!(!volatile(&database, expression), "{expression}");
+        }
     }
 
     #[test]
