@@ -132,6 +132,7 @@ rule_icons! {
     "null_credential_read" => FaEyeSlash,
     "not_in_subquery" => FaSquareMinus,
     "prefix_redundant_index" => FaTags,
+    "repeated_index_column" => FaClone,
     "uncached_policy_call" => FaBolt,
     "raising_setting_read" => FaTriangleExclamation,
     "unindexed_correlated_select" => FaMagnifyingGlassArrowRight,

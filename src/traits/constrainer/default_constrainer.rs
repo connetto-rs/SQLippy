@@ -29,15 +29,15 @@ use crate::{
         PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
         RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
         ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge, ReferenceWithoutIdSuffix,
-        ReferencesGrantedToClientRole, RegColumnType, ReservedKeywordIdentifier,
-        RestrictiveWithoutPermissive, RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies,
-        RustKeywordColumnName, RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
-        SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
-        SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SerialColumn,
-        SessionTimeZoneDependence, SettableMembershipInBypassingRole, SingularTableName,
-        SubjectSettableAttribute, SurrogatePrimaryKeyInExtension, TableInheritance,
-        TautologicalCheck, TautologicalPolicy, TautologicalWithCheck, TimeDependentCheck,
-        TimeWithTimeZone, TimestampBetween, TimestampWithoutTimeZone,
+        ReferencesGrantedToClientRole, RegColumnType, RepeatedIndexColumn,
+        ReservedKeywordIdentifier, RestrictiveWithoutPermissive, RoleKeyedPolicyWhenPooled,
+        RowLevelSecurityWithoutPolicies, RustKeywordColumnName, RustKeywordForeignKeyName,
+        RustKeywordTableName, ScaledNumeric, SecurityBarrierMissingOnFilteringView,
+        SecurityDefinerFunctionExposed, SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite,
+        SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
+        SingularTableName, SubjectSettableAttribute, SurrogatePrimaryKeyInExtension,
+        TableInheritance, TautologicalCheck, TautologicalPolicy, TautologicalWithCheck,
+        TimeDependentCheck, TimeWithTimeZone, TimestampBetween, TimestampWithoutTimeZone,
         TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
         TruncatingIntegerDivision, UnboundedTextColumn, UncachedPolicyCall, UncheckedPastTimestamp,
         UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
@@ -144,9 +144,10 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 43] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 44] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
+        Box::new(RepeatedIndexColumn::default()),
         Box::new(MissingPrimaryKey::default()),
         Box::new(KeyWithoutExactEquality::default()),
         Box::new(MixedCaseTableName::default()),
