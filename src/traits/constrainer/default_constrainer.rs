@@ -29,14 +29,15 @@ use crate::{
         PublicSchemaCreate, QueryRewriteRule, RandomOrderLimit, ReachableForeignTable,
         ReachableMaterializedView, ReachableSequence, ReachableTableWithoutRowLevelSecurity,
         RedundantExtensionEdge, ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole,
-        RegColumnType, ReservedKeywordIdentifier, RoleKeyedPolicyWhenPooled,
-        RowLevelSecurityWithoutPolicies, RustKeywordColumnName, RustKeywordForeignKeyName,
-        RustKeywordTableName, ScaledNumeric, SecurityBarrierMissingOnFilteringView,
-        SecurityDefinerFunctionExposed, SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite,
-        SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
-        SingularTableName, SubjectSettableAttribute, SurrogatePrimaryKeyInExtension,
-        TableInheritance, TautologicalCheck, TautologicalPolicy, TautologicalWithCheck,
-        TimeDependentCheck, TimeWithTimeZone, TimestampBetween, TimestampWithoutTimeZone,
+        RegColumnType, ReservedKeywordIdentifier, RestrictiveWithoutPermissive,
+        RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
+        RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
+        SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
+        SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SerialColumn,
+        SessionTimeZoneDependence, SettableMembershipInBypassingRole, SingularTableName,
+        SubjectSettableAttribute, SurrogatePrimaryKeyInExtension, TableInheritance,
+        TautologicalCheck, TautologicalPolicy, TautologicalWithCheck, TimeDependentCheck,
+        TimeWithTimeZone, TimestampBetween, TimestampWithoutTimeZone,
         TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
         TruncatingIntegerDivision, UnboundedTextColumn, UncachedPolicyCall, UncheckedPastTimestamp,
         UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
@@ -83,51 +84,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 40] = [
-            Box::new(TimeDependentCheck::default()),
-            Box::new(PrefixRedundantIndex::default()),
-            Box::new(MissingPrimaryKey::default()),
-            Box::new(KeyWithoutExactEquality::default()),
-            Box::new(MixedCaseTableName::default()),
-            Box::new(NonSnakeCaseTableName::default()),
-            Box::new(SingularTableName::default()),
-            Box::new(PolicyWithoutRowLevelSecurity::default()),
-            Box::new(RustKeywordTableName::default()),
-            Box::new(TautologicalCheck::default()),
-            Box::new(UnsatisfiableCheck::default()),
-            Box::new(ForbiddenColumnInExtension::new("most_concrete_table")),
-            Box::new(RedundantExtensionEdge::default()),
-            Box::new(DuplicateCheck::default()),
-            Box::new(DuplicateColumnNameInExtensionGraph::default()),
-            Box::new(DuplicateForeignKey::default()),
-            Box::new(DuplicateUniqueIndex::default()),
-            Box::new(DeadPermissivePolicy::default()),
-            Box::new(DuplicatePolicy::default()),
-            Box::new(TautologicalWithCheck::default()),
-            Box::new(TautologicalPolicy::default()),
-            Box::new(UnsatisfiablePolicy::default()),
-            Box::new(UnforcedRowLevelSecurity::default()),
-            Box::new(CorrelatedPolicySubquery::default()),
-            Box::new(NestedPolicySubquery::default()),
-            Box::new(UncachedPolicyCall::default()),
-            Box::new(UnindexedPolicyFilter::default()),
-            Box::new(ArrayMembershipPolicy::default()),
-            Box::new(DenyListPolicy::default()),
-            Box::new(PolicyReadsUnprotectedTable::default()),
-            Box::new(ReachableTableWithoutRowLevelSecurity::default()),
-            Box::new(TruncateGrantedToAnonymousRole::default()),
-            Box::new(TruncateGrantedToAppRole::default()),
-            Box::new(ReferencesGrantedToClientRole::default()),
-            Box::new(GrantOptionToClientRole::default()),
-            Box::new(ChildWithoutRowLevelSecurity::default()),
-            Box::new(PolicyToCreatingRole::default()),
-            Box::new(RoleKeyedPolicyWhenPooled::default()),
-            Box::new(CredentialFreeWrite::default()),
-            Box::new(NullCredentialRead::default()),
-        ];
-        for rule in table_rules {
-            constrainer.register_table_rule_with_floor(rule, Level::Allow);
-        }
+        register_table_rules(&mut constrainer);
         let column_rules: [Box<dyn ColumnRule<Database = DB>>; 19] = [
             Box::new(SerialColumn::default()),
             Box::new(NarrowIntegerKey::default()),
@@ -182,6 +139,56 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         }
         register_query_rules(&mut constrainer);
         Self { constrainer }
+    }
+}
+
+/// Registers every built-in table rule at its group's default level.
+fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 41] = [
+        Box::new(TimeDependentCheck::default()),
+        Box::new(PrefixRedundantIndex::default()),
+        Box::new(MissingPrimaryKey::default()),
+        Box::new(KeyWithoutExactEquality::default()),
+        Box::new(MixedCaseTableName::default()),
+        Box::new(NonSnakeCaseTableName::default()),
+        Box::new(SingularTableName::default()),
+        Box::new(PolicyWithoutRowLevelSecurity::default()),
+        Box::new(RustKeywordTableName::default()),
+        Box::new(TautologicalCheck::default()),
+        Box::new(UnsatisfiableCheck::default()),
+        Box::new(ForbiddenColumnInExtension::new("most_concrete_table")),
+        Box::new(RedundantExtensionEdge::default()),
+        Box::new(DuplicateCheck::default()),
+        Box::new(DuplicateColumnNameInExtensionGraph::default()),
+        Box::new(DuplicateForeignKey::default()),
+        Box::new(DuplicateUniqueIndex::default()),
+        Box::new(DeadPermissivePolicy::default()),
+        Box::new(DuplicatePolicy::default()),
+        Box::new(TautologicalWithCheck::default()),
+        Box::new(TautologicalPolicy::default()),
+        Box::new(UnsatisfiablePolicy::default()),
+        Box::new(RestrictiveWithoutPermissive::default()),
+        Box::new(UnforcedRowLevelSecurity::default()),
+        Box::new(CorrelatedPolicySubquery::default()),
+        Box::new(NestedPolicySubquery::default()),
+        Box::new(UncachedPolicyCall::default()),
+        Box::new(UnindexedPolicyFilter::default()),
+        Box::new(ArrayMembershipPolicy::default()),
+        Box::new(DenyListPolicy::default()),
+        Box::new(PolicyReadsUnprotectedTable::default()),
+        Box::new(ReachableTableWithoutRowLevelSecurity::default()),
+        Box::new(TruncateGrantedToAnonymousRole::default()),
+        Box::new(TruncateGrantedToAppRole::default()),
+        Box::new(ReferencesGrantedToClientRole::default()),
+        Box::new(GrantOptionToClientRole::default()),
+        Box::new(ChildWithoutRowLevelSecurity::default()),
+        Box::new(PolicyToCreatingRole::default()),
+        Box::new(RoleKeyedPolicyWhenPooled::default()),
+        Box::new(CredentialFreeWrite::default()),
+        Box::new(NullCredentialRead::default()),
+    ];
+    for rule in table_rules {
+        constrainer.register_table_rule_with_floor(rule, Level::Allow);
     }
 }
 
