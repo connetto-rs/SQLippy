@@ -273,6 +273,105 @@ fn partial_and_expression_indexes_do_not_count() {
     }
 }
 
+/// The `docs` and `members` columns the policies below compare, each led by
+/// an index, and a timestamped table.
+const INDEXED: &str = "CREATE INDEX docs_owner ON docs (owner);
+    CREATE INDEX docs_team ON docs (team);
+    CREATE INDEX members_member ON members (member);
+    CREATE TABLE notes (owner TEXT, created TIMESTAMPTZ);
+    CREATE INDEX notes_created ON notes (created);
+    ALTER TABLE notes ENABLE ROW LEVEL SECURITY;";
+
+fn defeated(sql: &str) -> Vec<String> {
+    sites(
+        &PolicyExpressionDefeatsIndex::default().into(),
+        "policy_expression_defeats_index",
+        &format!("{DOCS} {INDEXED} {sql}"),
+    )
+}
+
+#[test]
+fn wrapped_indexed_columns_filtered_by_the_caller_are_reported() {
+    for (sql, site) in [
+        (
+            "CREATE POLICY p ON docs USING (lower(owner) = current_setting('app.user_id', true));",
+            "lower(owner) = current_setting('app.user_id', true)",
+        ),
+        (
+            "CREATE POLICY p ON docs USING (coalesce(team, 0) = current_setting('app.team', true)::INT);",
+            "coalesce(team, 0) = current_setting('app.team', true)::INT",
+        ),
+        (
+            "CREATE POLICY p ON docs USING (current_setting('app.team', true)::INT = team + 0);",
+            "current_setting('app.team', true)::INT = team + 0",
+        ),
+        (
+            "CREATE POLICY p ON notes USING (created::DATE = current_setting('app.day', true)::DATE);",
+            "created::DATE = current_setting('app.day', true)::DATE",
+        ),
+        (
+            "CREATE POLICY p ON docs USING (team IN (
+               SELECT team FROM members WHERE lower(member) = current_setting('app.user_id', true)));",
+            "lower(member) = current_setting('app.user_id', true)",
+        ),
+        (
+            "CREATE POLICY p ON docs USING (
+               lower(owner) = current_setting('app.user_id', true)
+               OR lower(owner) = current_setting('app.delegate', true));",
+            "lower(owner) = current_setting('app.user_id', true)",
+        ),
+    ] {
+        assert_eq!(defeated(sql).join(" | "), site, "{sql}");
+    }
+}
+
+#[test]
+fn bare_text_cast_expression_indexed_or_row_dependent_filters_pass() {
+    for sql in [
+        "CREATE POLICY p ON docs USING (owner = current_setting('app.user_id', true));",
+        "CREATE POLICY p ON docs USING (owner::TEXT = current_setting('app.user_id', true));",
+        "CREATE INDEX docs_lower_owner ON docs (lower(owner));
+         CREATE POLICY p ON docs USING (lower(owner) = current_setting('app.user_id', true));",
+        "CREATE POLICY p ON docs USING (lower(owner) = lower(tags));",
+        "CREATE POLICY p ON docs FOR INSERT WITH CHECK (lower(owner) = current_setting('app.user_id', true));",
+        "CREATE POLICY p ON docs USING (lower(tags) = current_setting('app.tag', true));",
+        "CREATE POLICY p ON docs USING (team IN (
+           SELECT team FROM members WHERE member = current_setting('app.user_id', true)));",
+        "CREATE POLICY p ON docs USING (EXISTS (
+           SELECT 1 FROM (VALUES ('a')) v (x) WHERE lower(v.x) = current_setting('app.user_id', true)));",
+    ] {
+        assert_eq!(defeated(sql), Vec::<String>::new(), "{sql}");
+    }
+}
+
+#[test]
+fn an_ambiguous_filtered_column_is_a_lookup_failure() {
+    let rules: [(GenericConstrainer<ParserDB>, &str); 2] = [
+        (
+            UnindexedPolicyFilter::default().into(),
+            "member = current_user",
+        ),
+        (
+            PolicyExpressionDefeatsIndex::default().into(),
+            "lower(member) = current_user",
+        ),
+    ];
+    for (constrainer, filter) in rules {
+        let database = ParserDB::parse::<PostgreSqlDialect>(&format!(
+            "{DOCS} {INDEXED}
+             CREATE POLICY p ON docs USING (EXISTS (SELECT 1 FROM members a, members b WHERE {filter}));"
+        ))
+        .expect("schema parses");
+        assert!(
+            matches!(
+                constrainer.validate_schema(&database),
+                Err(Error::Lookup(_))
+            ),
+            "{filter}"
+        );
+    }
+}
+
 #[test]
 fn the_default_constrainer_applies_each_group_level() {
     let sql = format!(

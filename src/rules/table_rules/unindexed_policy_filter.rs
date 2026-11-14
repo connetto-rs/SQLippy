@@ -1,184 +1,19 @@
 //! Submodule providing the `UnindexedPolicyFilter` rule.
 
-use std::ops::ControlFlow;
-
 use sql_traits::{
-    errors::LookupError,
-    structs::{ColumnDefinition, ColumnScope, IdentifierCase, PolicyExpression},
+    structs::{ColumnDefinition, PolicyExpression},
     traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike},
 };
-use sqlparser::ast::{Expr, Query, Visit, Visitor};
 
-use crate::rules::walk_support::walk;
 use crate::{
-    deployment::Deployment,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        index_support::{Side, comparison_sides, indexed},
-        policy_support::{derives_from_caller, holds_caller, is_column_reference},
+        index_support::indexed, policy_filter_support::caller_filters,
+        policy_support::is_column_reference,
     },
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
-
-/// Finds a column reference.
-struct ColumnReference;
-
-impl Visitor for ColumnReference {
-    type Break = ();
-
-    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
-        if is_column_reference(expression) {
-            return ControlFlow::Break(());
-        }
-        ControlFlow::Continue(())
-    }
-}
-
-/// A column a policy filters on by the caller with no index leading with it.
-struct Unindexed {
-    table: String,
-    column: String,
-    comparison: String,
-}
-
-/// The policy table and deployment comparisons are judged against.
-struct Judge<'a, 'db, DB: DatabaseLike> {
-    database: &'db DB,
-    table: &'db DB::Table,
-    deployment: &'a Deployment,
-}
-
-impl<DB: DatabaseLike> Judge<'_, '_, DB> {
-    /// Whether a side derives from the caller, judged against the policy's
-    /// row outside sublinks and with no column reference inside them.
-    fn derives<V: Visit>(&self, node: &V, in_sublink: bool) -> Result<bool, LookupError> {
-        if in_sublink {
-            return Ok(holds_caller(self.deployment, node)
-                && walk(node, &mut ColumnReference).is_continue());
-        }
-        derives_from_caller(self.database, self.table, self.deployment, node)
-    }
-
-    fn caller_side(&self, side: Side<'_>, in_sublink: bool) -> Result<bool, LookupError> {
-        match side {
-            Side::Expr(expression) => self.derives(expression, in_sublink),
-            Side::List(list) => self.derives(list, in_sublink),
-            Side::Query(query) => self.derives(query, in_sublink),
-        }
-    }
-
-    /// Records the unindexed columns, resolved through `scope`, that
-    /// `expression` compares with the caller.
-    fn consider(
-        &self,
-        scope: &ColumnScope<'_, '_, DB>,
-        expression: &Expr,
-        in_sublink: bool,
-        found: &mut Vec<Unindexed>,
-    ) -> Result<(), LookupError> {
-        comparison_sides(expression, |column, side| {
-            if !is_column_reference(column) {
-                return Ok(());
-            }
-            let Some(ColumnDefinition::Base { table, column, .. }) =
-                scope.resolve_column_definition(column)?
-            else {
-                return Ok(());
-            };
-            if !self.caller_side(side, in_sublink)? || indexed(self.database, table, column)? {
-                return Ok(());
-            }
-            let (table, column) = (table.table_name(), column.column_name());
-            if !found
-                .iter()
-                .any(|seen| seen.table == table && seen.column == column)
-            {
-                found.push(Unindexed {
-                    table: table.to_owned(),
-                    column: column.to_owned(),
-                    comparison: expression.to_string(),
-                });
-            }
-            Ok(())
-        })
-    }
-}
-
-/// Unindexed columns a policy expression filters on, outside sublinks.
-struct Filters<'a, 'db, DB: DatabaseLike> {
-    judge: Judge<'a, 'db, DB>,
-    scope: ColumnScope<'db, 'db, DB>,
-    depth: usize,
-    found: Vec<Unindexed>,
-}
-
-/// Unindexed columns in the top-level query of one sublink.
-struct SublinkFilters<'f, 'a, 'db, 'q, DB: DatabaseLike> {
-    judge: &'f Judge<'a, 'db, DB>,
-    found: &'f mut Vec<Unindexed>,
-    local: ColumnScope<'q, 'db, DB>,
-    depth: usize,
-}
-
-impl<DB: DatabaseLike> Visitor for SublinkFilters<'_, '_, '_, '_, DB> {
-    type Break = LookupError;
-
-    fn pre_visit_query(&mut self, _query: &Query) -> ControlFlow<LookupError> {
-        self.depth += 1;
-        ControlFlow::Continue(())
-    }
-
-    fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<LookupError> {
-        self.depth -= 1;
-        ControlFlow::Continue(())
-    }
-
-    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<LookupError> {
-        if self.depth != 1 {
-            return ControlFlow::Continue(());
-        }
-        self.judge
-            .consider(&self.local, expression, true, self.found)
-            .map_or_else(ControlFlow::Break, ControlFlow::Continue)
-    }
-}
-
-impl<DB: DatabaseLike> Visitor for Filters<'_, '_, DB> {
-    type Break = LookupError;
-
-    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<LookupError> {
-        self.depth += 1;
-        ColumnScope::from_query(query, self.judge.database, IdentifierCase::Folded).map_or_else(
-            ControlFlow::Break,
-            |local| {
-                walk(
-                    query,
-                    &mut SublinkFilters {
-                        judge: &self.judge,
-                        found: &mut self.found,
-                        local,
-                        depth: 0,
-                    },
-                )
-            },
-        )
-    }
-
-    fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<LookupError> {
-        self.depth -= 1;
-        ControlFlow::Continue(())
-    }
-
-    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<LookupError> {
-        if self.depth != 0 {
-            return ControlFlow::Continue(());
-        }
-        self.judge
-            .consider(&self.scope, expression, false, &mut self.found)
-            .map_or_else(ControlFlow::Break, ControlFlow::Continue)
-    }
-}
 
 /// Struct defining a rule that reports a column a policy filters on by the
 /// caller when no index leads with it.
@@ -269,25 +104,37 @@ impl<DB: DatabaseLike> TableRule for UnindexedPolicyFilter<DB> {
             else {
                 continue;
             };
-            let mut filters = Filters {
-                judge: Judge {
-                    database,
-                    table,
-                    deployment: reporter.deployment(),
+            let mut found: Vec<(String, String, String)> = Vec::new();
+            for ((filtered, column), comparison) in caller_filters(
+                database,
+                table,
+                reporter.deployment(),
+                expression,
+                &mut |scope, column| {
+                    if !is_column_reference(column) {
+                        return Ok(None);
+                    }
+                    let Some(ColumnDefinition::Base { table, column, .. }) =
+                        scope.resolve_column_definition(column)?
+                    else {
+                        return Ok(None);
+                    };
+                    if indexed(database, table, column)? {
+                        return Ok(None);
+                    }
+                    Ok(Some((
+                        table.table_name().to_owned(),
+                        column.column_name().to_owned(),
+                    )))
                 },
-                scope: ColumnScope::for_table(table, database, IdentifierCase::Folded),
-                depth: 0,
-                found: Vec::new(),
-            };
-            walk(expression, &mut filters)
-                .break_value()
-                .map_or(Ok(()), Err)?;
-            for Unindexed {
-                table: filtered,
-                column,
-                comparison,
-            } in filters.found
-            {
+            )? {
+                if !found.iter().any(|(seen_table, seen_column, _)| {
+                    *seen_table == filtered && *seen_column == column
+                }) {
+                    found.push((filtered, column, comparison));
+                }
+            }
+            for (filtered, column, comparison) in found {
                 let name = policy.name();
                 reporter.policies(
                     vec![PolicySite {
