@@ -18,11 +18,11 @@ use crate::{
 /// parentheses aside. A repeated permissive policy grants nothing new and a
 /// repeated restrictive policy narrows nothing further, and a later edit to
 /// one copy silently leaves the other in force. A restrictive policy whose
-/// clauses may run a `VOLATILE` function, directly or through an operator,
-/// is the exception, since PostgreSQL checks each restrictive policy
-/// separately on writes. On PostgreSQL 18.6 a restrictive `WITH CHECK
-/// (random() < 0.5)` accepted 5032 of ten thousand inserts alone and 2475
-/// with a copy, so such copies are not reported.
+/// clauses may run a `VOLATILE` function, directly or through an operator or
+/// an explicit cast, is the exception, since PostgreSQL checks each
+/// restrictive policy separately on writes. On PostgreSQL 18.6 a restrictive
+/// `WITH CHECK (random() < 0.5)` accepted 5032 of ten thousand inserts alone
+/// and 2475 with a copy, so such copies are not reported.
 ///
 /// # Example
 ///

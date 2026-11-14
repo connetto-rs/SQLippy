@@ -13,10 +13,16 @@ const DOCS: &str = "
 /// Objects of every violation the rule raises on `policies` declared on
 /// `docs`.
 fn findings(policies: &str) -> Vec<String> {
+    findings_with(ParseOptions::default(), policies)
+}
+
+/// [`findings`] in a schema parsed with `options`.
+fn findings_with(options: ParseOptions, policies: &str) -> Vec<String> {
     let constrainer: GenericConstrainer<ParserDB> = DuplicatePolicy::default().into();
     constrainer
         .diagnostics(
-            &ParserDB::parse::<PostgreSqlDialect>(&format!("{DOCS} {policies}"))
+            &options
+                .parse::<PostgreSqlDialect>(&format!("{DOCS} {policies}"))
                 .expect("schema parses"),
         )
         .into_iter()
@@ -126,5 +132,40 @@ fn restrictive_copies_running_a_volatile_function_are_not_reported() {
              CREATE POLICY d ON docs FOR INSERT WITH CHECK (random() < 0.5);"
         ),
         ["docs.a -> docs.b", "docs.c -> docs.d"]
+    );
+}
+
+#[test]
+fn restrictive_copies_casting_through_a_volatile_function_are_not_reported() {
+    let app = |name| TargetName::new(name, false).with_schema("app", false);
+    let int = || TargetName::new("int4", false).with_schema("pg_catalog", false);
+    let options = || {
+        ParseOptions::default().with_postgres_catalog(PostgresCatalog::default().with_cast(
+            PostgresCatalogCast::through_function(
+                int(),
+                app("coin"),
+                CastContext::Explicit,
+                app("flip"),
+                [int()],
+            ),
+        ))
+    };
+    let copies = |check: &str| {
+        format!(
+            "CREATE SCHEMA app;
+             CREATE TYPE app.coin AS (v INT);
+             CREATE FUNCTION app.flip(INT) RETURNS app.coin LANGUAGE sql VOLATILE
+                 AS 'SELECT ROW((random() < 0.5)::INT)::app.coin';
+             CREATE POLICY a ON docs AS RESTRICTIVE FOR INSERT WITH CHECK ({check});
+             CREATE POLICY b ON docs AS RESTRICTIVE FOR INSERT WITH CHECK ({check});"
+        )
+    };
+    assert_eq!(
+        findings_with(options(), &copies("(tenant::app.coin).v = 1")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        findings_with(options(), &copies("tenant::BIGINT = 1")),
+        ["docs.a -> docs.b"]
     );
 }

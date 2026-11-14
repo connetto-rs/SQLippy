@@ -4,10 +4,11 @@
 use std::ops::ControlFlow;
 
 use sql_traits::{
-    traits::{DatabaseLike, FunctionLike, OperatorLike},
-    utils::identifier_resolution::normalize_identifier,
+    structs::TargetName,
+    traits::{CastLike, CastMethod, DatabaseLike, FunctionLike, OperatorLike},
+    utils::{identifier_resolution::normalize_identifier, normalize_postgres_type},
 };
-use sqlparser::ast::{BinaryOperator, Expr, FunctionBehavior, InTarget, Visitor};
+use sqlparser::ast::{BinaryOperator, DataType, Expr, FunctionBehavior, InTarget, Visitor};
 
 use crate::rules::walk_support::walk;
 
@@ -69,12 +70,39 @@ fn keyword_operators(expression: &Expr) -> &'static [&'static str] {
     }
 }
 
+/// Whether an explicit cast to `data_type` may run a `VOLATILE` function: a
+/// cast to a type of that name, from any source and in any schema, that runs
+/// a `VOLATILE` function or one the database does not hold.
+fn cast_is_volatile<DB: DatabaseLike>(database: &DB, data_type: &DataType) -> bool {
+    let Some(casts) = database.casts() else {
+        return false;
+    };
+    let written = match data_type {
+        DataType::Custom(name, _) => name.0.last().map_or_else(String::new, ToString::to_string),
+        _ => data_type.to_string(),
+    };
+    let written = normalize_postgres_type(&written);
+    casts
+        .filter(|cast| {
+            let target = cast.target_type(database);
+            normalize_postgres_type(
+                &TargetName::new(target.name(), target.name_is_quoted()).to_string(),
+            ) == written
+        })
+        .any(|cast| {
+            cast.method() == CastMethod::Function
+                && cast
+                    .function(database)
+                    .is_none_or(|function| function.volatility() == FunctionBehavior::Volatile)
+        })
+}
+
 /// Whether `expression` itself, apart from its operands and arguments, may
 /// run a `VOLATILE` function: a call whose name reaches a `VOLATILE` overload
-/// or no known function, or an operator, quantified by `ANY` or `ALL`,
-/// spelled with keywords or neither, whose name reaches one with a
-/// `VOLATILE` or unknown implementation, `OPERATOR(...)` naming no known
-/// operator included.
+/// or no known function, an operator, quantified by `ANY` or `ALL`, spelled
+/// with keywords or neither, whose name reaches one with a `VOLATILE` or
+/// unknown implementation, `OPERATOR(...)` naming no known operator
+/// included, or an explicit cast [`cast_is_volatile`] reports.
 fn is_volatile_term<DB: DatabaseLike>(database: &DB, expression: &Expr) -> bool {
     match expression {
         Expr::Function(call) => call
@@ -92,6 +120,7 @@ fn is_volatile_term<DB: DatabaseLike>(database: &DB, expression: &Expr) -> bool 
         | Expr::AnyOp { compare_op: op, .. }
         | Expr::AllOp { compare_op: op, .. } => binary_operator_is_volatile(database, op),
         Expr::UnaryOp { op, .. } => operator_is_volatile(database, &op.to_string(), false),
+        Expr::Cast { data_type, .. } => cast_is_volatile(database, data_type),
         _ => keyword_operators(expression)
             .iter()
             .any(|name| operator_is_volatile(database, name, false)),
@@ -113,8 +142,8 @@ impl<DB: DatabaseLike> Visitor for VolatileTerm<'_, DB> {
 }
 
 /// Whether evaluating `expression` may run a `VOLATILE` function, directly
-/// or through an operator, a call or operator the schema does not declare
-/// included.
+/// or through an operator or an explicit cast, a call or operator the
+/// schema does not declare included.
 pub(crate) fn runs_volatile<DB: DatabaseLike>(database: &DB, expression: &Expr) -> bool {
     walk(expression, &mut VolatileTerm(database)).is_break()
 }
