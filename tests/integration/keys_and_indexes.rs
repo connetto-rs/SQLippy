@@ -229,6 +229,24 @@ fn an_index_on_a_schema_qualified_table_naming_a_column_twice_is_reported() {
 }
 
 #[test]
+fn only_btree_indexes_are_judged_for_a_repeated_column() {
+    let constrainer = GenericConstrainer::from(RepeatedIndexColumn::default());
+    let database = ParserDB::parse::<PostgreSqlDialect>(
+        "CREATE TABLE d (id INT PRIMARY KEY, a INT, doc JSONB);
+         CREATE INDEX d_doc_both ON d USING gin (doc jsonb_ops, doc jsonb_path_ops);
+         CREATE INDEX d_a_a ON d USING btree (a, a);",
+    )
+    .expect("schema parses");
+    let messages: Vec<String> = constrainer
+        .diagnostics(&database)
+        .into_iter()
+        .map(|error| error.to_string())
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("Index 'd_a_a'"), "{messages:?}");
+}
+
+#[test]
 fn each_rule_registered_alone_runs_at_warn() {
     let sql = format!(
         "{PARENT}
