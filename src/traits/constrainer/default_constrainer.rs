@@ -12,9 +12,9 @@ use crate::{
         ClientWrittenScaledNumeric, CorrelatedPolicySubquery, CredentialFreeWrite,
         CredentialSettingWrite, DeadPermissivePolicy, DefinerTakesActingUser,
         DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
-        DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnNameInExtensionGraph,
-        DuplicateForeignKey, DuplicateUniqueIndex, EmptyTextAllowed,
-        ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
+        DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnAssignment,
+        DuplicateColumnNameInExtensionGraph, DuplicateForeignKey, DuplicateUniqueIndex,
+        EmptyTextAllowed, ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FlagNotBoolean,
         FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
         FunctionMediatedPolicyCycle, GrantOptionToClientRole, ImpureImmutableFunction,
@@ -182,12 +182,13 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 20] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 21] = [
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
         Box::new(RandomOrderLimit::default()),
         Box::new(OffsetPaging::default()),
         Box::new(UnfilteredWrite::default()),
+        Box::new(DuplicateColumnAssignment::default()),
         Box::new(CredentialSettingWrite::default()),
         Box::new(OuterColumnCapture::default()),
         Box::new(TimestampBetween::default()),
