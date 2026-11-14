@@ -5,7 +5,7 @@ use sql_traits::{
     errors::LookupError,
     traits::{ColumnLike, DataTypeLike, DatabaseLike, TableLike},
 };
-use sqlparser::{ast::Expr, dialect::PostgreSqlDialect, parser::Parser};
+use sqlparser::ast::Expr;
 
 use crate::{
     error::Interruption,
@@ -52,23 +52,12 @@ fn in_primary_key<DB: DatabaseLike>(
 
 /// Whether the column's default draws from a sequence.
 fn defaults_to_nextval<C: ColumnLike>(column: &C) -> bool {
-    column
-        .default_value()
-        .and_then(|default| {
-            Parser::new(&PostgreSqlDialect {})
-                .try_with_sql(&default)
-                .ok()?
-                .parse_expr()
-                .ok()
-        })
-        .is_some_and(|default| {
-            matches!(&default, Expr::Function(call) if call
-                .name
-                .0
-                .last()
-                .and_then(|part| part.as_ident())
-                .is_some_and(|ident| ident.value.eq_ignore_ascii_case("nextval")))
-        })
+    matches!(column.default_expression(), Some(Expr::Function(call)) if call
+        .name
+        .0
+        .last()
+        .and_then(|part| part.as_ident())
+        .is_some_and(|ident| ident.value.eq_ignore_ascii_case("nextval")))
 }
 
 rule_definition!(
@@ -229,7 +218,7 @@ impl<DB: DatabaseLike> ColumnRule for ClientWrittenCounterKey<DB> {
         let counted = column.is_serial(database)
             || column.identity_generation(database).is_some()
             || defaults_to_nextval(column)
-            || (is_integer(database, column) && column.default_value().is_none());
+            || (is_integer(database, column) && column.default_expression().is_none());
         if !counted
             || !is_client_written(database, reporter.deployment(), table)
             || !in_primary_key(database, column)?

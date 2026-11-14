@@ -2796,6 +2796,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "seahash"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3011,13 +3017,14 @@ checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#3ec3562be01c43b432526b20259b2078a11589e6"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#8026ed7c3d175b25010aa458804393ef164a8781"
 dependencies = [
  "geometric-traits",
  "once_cell",
  "sha2",
  "sql-values",
  "sqlparser",
+ "sqlparser-canonicalize",
  "sqlparser-plpgsql",
  "thiserror 2.0.21",
  "unicode-normalization",
@@ -3066,6 +3073,16 @@ dependencies = [
  "log",
  "recursive",
  "sqlparser_derive",
+]
+
+[[package]]
+name = "sqlparser-canonicalize"
+version = "0.2.1"
+source = "git+https://github.com/connetto-rs/sqlparser-canonicalize?branch=main#1fde5fd1d49cd1188fe92047fef6d67a6e3b12bd"
+dependencies = [
+ "seahash",
+ "sqlparser",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

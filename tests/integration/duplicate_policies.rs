@@ -106,9 +106,9 @@ fn restrictive_copies_running_a_volatile_function_are_not_reported() {
         CREATE OPERATOR !~~ (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);";
     for check in [
         "random() < 0.5",
-        "undeclared_flag()",
+        "platform.undeclared_flag()",
         "tenant OPERATOR(app.<?>) 1",
-        "tenant OPERATOR(app.<%>) 1",
+        "tenant OPERATOR(platform.<%>) 1",
         "tenant ~~ ANY (ARRAY[1])",
         "tenant ~~ ALL (ARRAY[1])",
         "tenant LIKE 1",

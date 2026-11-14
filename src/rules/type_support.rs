@@ -234,14 +234,7 @@ pub(crate) fn type_uses<'db, DB: DatabaseLike>(
                 .into_iter()
                 .map(|flaw| (flaw, name.clone()))
                 .collect();
-            let default = column.default_value().and_then(|default| {
-                Parser::new(&PostgreSqlDialect {})
-                    .try_with_sql(&default)
-                    .ok()?
-                    .parse_expr()
-                    .ok()
-            });
-            found.extend(default.map_or_default(|default| written_in(&default)));
+            found.extend(column.default_expression().map_or_default(written_in));
             add(TypeSite::Column(column), found);
         }
         for check in table.check_constraints(database)? {
