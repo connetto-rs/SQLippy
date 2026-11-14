@@ -83,7 +83,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 36] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 37] = [
             Box::new(TimeDependentCheck::default()),
             Box::new(PrefixRedundantIndex::default()),
             Box::new(MissingPrimaryKey::default()),
