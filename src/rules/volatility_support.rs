@@ -72,9 +72,10 @@ fn keyword_operators(expression: &Expr) -> &'static [&'static str] {
     }
 }
 
-/// The element type of `data_type` with every array level removed, since a
-/// cast to an array type applies the element type's cast to each element.
-fn element_type(data_type: &DataType) -> &DataType {
+/// The element type of `data_type` with every array level removed, and
+/// whether there was one. PostgreSQL ignores array dimensions, so every
+/// level names one array type.
+fn element_type(data_type: &DataType) -> (&DataType, bool) {
     match data_type {
         DataType::Array(
             ArrayElemTypeDef::AngleBracket(element)
@@ -82,30 +83,44 @@ fn element_type(data_type: &DataType) -> &DataType {
             | ArrayElemTypeDef::Parenthesis(element)
             | ArrayElemTypeDef::ParenthesisNotNull(element)
             | ArrayElemTypeDef::Qualified(element, _),
-        ) => element_type(element),
-        _ => data_type,
+        ) => (element_type(element).0, true),
+        _ => (data_type, false),
     }
 }
 
-/// Whether an explicit cast to `data_type`, or to arrays of it, may run a
-/// `VOLATILE` function: a cast to a type of that name, from any source and
-/// in any schema, that runs a `VOLATILE` function or one the database does
-/// not hold.
+/// A cast's target spelled the way a written type normalizes: the stored
+/// name without its schema, an array type's `_` prefix read as `[]`.
+fn target_spelling(target: &TargetName<'_>) -> String {
+    let name = target.name();
+    match name.strip_prefix('_') {
+        Some(element) if !target.name_is_quoted() => {
+            format!("{}[]", TargetName::new(element, false))
+        }
+        _ => TargetName::new(name, target.name_is_quoted()).to_string(),
+    }
+}
+
+/// Whether an explicit cast to `data_type` may run a `VOLATILE` function: a
+/// cast to a type of that name, from any source and in any schema, that runs
+/// a `VOLATILE` function or one the database does not hold. A cast to an
+/// array type runs a cast to the array type itself when there is one, and
+/// otherwise the element type's cast on each element, so both count.
 fn cast_is_volatile<DB: DatabaseLike>(database: &DB, data_type: &DataType) -> bool {
     let Some(casts) = database.casts() else {
         return false;
     };
-    let written = match element_type(data_type) {
+    let (element, array) = element_type(data_type);
+    let element = match element {
         DataType::Custom(name, _) => name.0.last().map_or_else(String::new, ToString::to_string),
         element => element.to_string(),
     };
-    let written = normalize_postgres_type(&written);
+    let whole = array.then(|| normalize_postgres_type(&format!("{element}[]")).into_owned());
+    let element = normalize_postgres_type(&element);
     casts
         .filter(|cast| {
-            let target = cast.target_type(database);
-            normalize_postgres_type(
-                &TargetName::new(target.name(), target.name_is_quoted()).to_string(),
-            ) == written
+            let spelling = target_spelling(&cast.target_type(database));
+            let target = normalize_postgres_type(&spelling);
+            target == element || whole.as_deref() == Some(&*target)
         })
         .any(|cast| {
             cast.method() == CastMethod::Function
@@ -279,6 +294,35 @@ mod tests {
         for expression in ["1::BIGINT = 1", "(ARRAY[1]::BIGINT[])[1] = 1"] {
             assert!(!volatile(&database, expression), "{expression}");
         }
+    }
+
+    #[test]
+    fn a_cast_to_an_array_type_itself_reaches_its_volatile_function() {
+        let app = |name| TargetName::new(name, false).with_schema("app", false);
+        let database = ParseOptions::default()
+            .with_postgres_catalog(PostgresCatalog::default().with_cast(
+                PostgresCatalogCast::through_function(
+                    app("coin"),
+                    TargetName::new("_bool", false).with_schema("pg_catalog", false),
+                    CastContext::Explicit,
+                    app("toss_all"),
+                    [app("coin")],
+                ),
+            ))
+            .parse::<PostgreSqlDialect>(
+                "CREATE SCHEMA app;
+                 CREATE TYPE app.coin AS (v INT);
+                 CREATE FUNCTION app.toss_all(app.coin) RETURNS BOOL[] LANGUAGE sql VOLATILE
+                     AS 'SELECT ARRAY[random() < 0.5]';",
+            )
+            .expect("schema parses");
+        for expression in [
+            "('(1)'::app.coin::BOOL[])[1]",
+            "(CAST('(1)'::app.coin AS BOOLEAN ARRAY))[1]",
+        ] {
+            assert!(volatile(&database, expression), "{expression}");
+        }
+        assert!(!volatile(&database, "'t'::BOOL"));
     }
 
     #[test]
