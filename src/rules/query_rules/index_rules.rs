@@ -3,15 +3,17 @@
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinition, ColumnDefinitionScope, ColumnScope, IdentifierCase},
-    traits::{ColumnLike, DataTypeLike, DatabaseLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, TableLike},
 };
-use sqlparser::ast::{BinaryOperator, DataType, Expr, SelectItem, SetExpr, Statement};
+use sqlparser::ast::{BinaryOperator, Expr, SelectItem, SetExpr, Statement};
 
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        index_support::{Side, comparison_sides, expression_indexed, indexed, leading},
+        index_support::{
+            Side, comparison_sides, defeats_index, expression_indexed, indexed, leading, wrapping,
+        },
         key_support::{Instance, instances},
         policy_support::{conjuncts, is_column_reference},
         statement_support::{
@@ -42,31 +44,15 @@ fn defeated<DB: DatabaseLike>(
     scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
     expression: &Expr,
 ) -> Result<Option<String>, LookupError> {
-    let expression = leading(expression);
-    if is_column_reference(expression) {
-        return Ok(None);
-    }
-    let columns = own_columns(expression)?;
-    let [reference] = columns.as_slice() else {
+    let Some((wrapper, reference)) = wrapping(expression)? else {
         return Ok(None);
     };
     let Some(ColumnDefinition::Base { table, column, .. }) =
-        scope.resolve_column_definition(reference)?
+        scope.resolve_column_definition(&reference)?
     else {
         return Ok(None);
     };
-    let coercible = match expression {
-        Expr::Cast {
-            expr,
-            data_type: DataType::Text | DataType::Varchar(_) | DataType::String(_),
-            ..
-        } => is_column_reference(expr) && column.data_type(database).is_textual(database),
-        _ => false,
-    };
-    if coercible
-        || !indexed(database, table, column)?
-        || expression_indexed(database, table, expression)?
-    {
+    if !defeats_index(database, table, column, wrapper)? {
         return Ok(None);
     }
     Ok(Some(format!(

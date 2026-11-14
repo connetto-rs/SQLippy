@@ -134,6 +134,7 @@ rule_icons! {
     "unindexed_correlated_select" => FaMagnifyingGlassArrowRight,
     "unindexed_foreign_key" => FaTag,
     "unindexed_policy_filter" => FaMagnifyingGlassChart,
+    "policy_expression_defeats_index" => FaShieldHalved,
     "redundant_extension_edge" => FaBezierCurve,
     "duplicate_check" => FaCopy,
     "duplicate_foreign_key" => FaPaperclip,

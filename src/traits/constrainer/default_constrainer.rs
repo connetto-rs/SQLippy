@@ -24,14 +24,14 @@ use crate::{
         NarrowIntegerKey, NestedPolicySubquery, NonSnakeCaseColumnName, NonSnakeCaseTableName,
         NotInNullableSubquery, NotInSubquery, NullCredentialRead, NullableCompositeForeignKey,
         NullableUniqueColumn, OffsetPaging, OuterColumnCapture, OwnerRightsView, PluralColumnName,
-        PolicyReadCycle, PolicyReadsUnprotectedTable, PolicyToCreatingRole,
-        PolicyWithoutRowLevelSecurity, PrefixRedundantIndex, PrimaryKeyNotNamedId,
-        PublicSchemaCreate, QueryRewriteRule, RandomOrderLimit, ReachableForeignTable,
-        ReachableMaterializedView, ReachableSequence, ReachableTableWithoutRowLevelSecurity,
-        RedundantExtensionEdge, ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole,
-        RegColumnType, ReservedKeywordIdentifier, RestrictiveWithoutPermissive,
-        RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
-        RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
+        PolicyExpressionDefeatsIndex, PolicyReadCycle, PolicyReadsUnprotectedTable,
+        PolicyToCreatingRole, PolicyWithoutRowLevelSecurity, PrefixRedundantIndex,
+        PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RandomOrderLimit,
+        ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
+        ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge, ReferenceWithoutIdSuffix,
+        ReferencesGrantedToClientRole, RegColumnType, ReservedKeywordIdentifier,
+        RestrictiveWithoutPermissive, RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies,
+        RustKeywordColumnName, RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
         SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
         SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SerialColumn,
         SessionTimeZoneDependence, SettableMembershipInBypassingRole, SingularTableName,
@@ -144,7 +144,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 41] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 42] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(MissingPrimaryKey::default()),
@@ -173,6 +173,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(NestedPolicySubquery::default()),
         Box::new(UncachedPolicyCall::default()),
         Box::new(UnindexedPolicyFilter::default()),
+        Box::new(PolicyExpressionDefeatsIndex::default()),
         Box::new(ArrayMembershipPolicy::default()),
         Box::new(DenyListPolicy::default()),
         Box::new(PolicyReadsUnprotectedTable::default()),
