@@ -10,7 +10,7 @@ use sqlparser::{
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::function_reach_support::{Reach, Sought, calls, literal_key},
+    rules::function_reach_support::{Reach, Sought, literal_key, split},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -29,15 +29,25 @@ fn is_custom(key: &str) -> bool {
     key.contains('.')
 }
 
+/// Whether a call qualified by `schema` reaches PostgreSQL's
+/// `current_setting`: unqualified, since `pg_catalog` comes first on every
+/// search path that does not name it later, or qualified by `pg_catalog`.
+/// Any other schema holds a function of the user's.
+fn builtin_schema(schema: Option<&str>) -> bool {
+    schema.is_none_or(|schema| schema.eq_ignore_ascii_case("pg_catalog"))
+}
+
 /// Whether a `current_setting` call may raise when its setting is missing:
-/// it passes no `missing_ok`, or one that is not the literal `true`.
+/// it passes no `missing_ok`, or one that is neither the literal `true` nor
+/// `NULL`, which the strict function answers with `NULL` before reading the
+/// setting.
 fn raises(function: &Function) -> bool {
     !matches!(
         &function.args,
         FunctionArguments::List(list) if matches!(
             list.args.get(1),
             Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))))
-                if matches!(value.value, Value::Boolean(true))
+                if matches!(value.value, Value::Boolean(true) | Value::Null)
         )
     )
 }
@@ -53,9 +63,13 @@ impl Sought for RaisingReads {
         let Expr::Function(function) = expression else {
             return None;
         };
+        let (schema, name) = split(&function.name)?;
         let key = literal_key(function)?;
-        (calls(function, "current_setting") && raises(function) && is_custom(key))
-            .then(|| Read::Key(key.to_owned()))
+        (name.eq_ignore_ascii_case("current_setting")
+            && builtin_schema(schema)
+            && raises(function)
+            && is_custom(key))
+        .then(|| Read::Key(key.to_owned()))
     }
 
     fn statement(&self, _statement: &Statement) -> Option<Read> {
@@ -73,13 +87,23 @@ impl Sought for RaisingReads {
         {
             return None;
         }
+        let schema = match at
+            .checked_sub(2)
+            .map(|before| (tokens[before], tokens[at - 1]))
+        {
+            Some((Token::Word(schema), Token::Period)) => Some(schema.value.as_str()),
+            _ => None,
+        };
+        if !builtin_schema(schema) {
+            return None;
+        }
         Some(match &rest[1..] {
             [Token::SingleQuotedString(key), after @ ..] => {
                 is_custom(key)
                     && !matches!(
                         after,
                         [Token::Comma, Token::Word(missing_ok), Token::RParen, ..]
-                            if missing_ok.keyword == Keyword::TRUE
+                            if matches!(missing_ok.keyword, Keyword::TRUE | Keyword::NULL)
                     )
             }
             _ => false,
@@ -97,17 +121,20 @@ impl Sought for RaisingReads {
 ///
 /// `current_setting('app.user_id')` raises `unrecognized configuration
 /// parameter` in a session that never set the setting, and so does a
-/// `missing_ok` other than `true`, while `current_setting('app.user_id',
-/// true)` reads `NULL` there. Measured on PostgreSQL 18.6 as a role the
-/// policy applies to, every read under such a `USING` clause and every insert
-/// under such a `WITH CHECK` clause failed, with `missing_ok` left out, given
-/// as `false` or read from a column that held `false`, also when another arm
-/// of an `OR` was true for the row. So did a policy calling a SQL or
-/// PL/pgSQL function that reads the setting that way, directly or through
-/// other calls. A session that set the setting once, even if it reset it
-/// since, read `''` instead. Only custom settings, spelled with a dot, are
-/// reported, since every session holds the built-in parameters. A setting
-/// named by an expression and a read built in dynamic SQL are not seen.
+/// `missing_ok` other than `true` or `NULL`, while
+/// `current_setting('app.user_id', true)` reads `NULL` there, as the strict
+/// function does for a `NULL` `missing_ok`. Measured on PostgreSQL 18.6 as a
+/// role the policy applies to, every read under such a `USING` clause and
+/// every insert under such a `WITH CHECK` clause failed, with `missing_ok`
+/// left out, given as `false` or read from a column that held `false`, also
+/// when another arm of an `OR` was true for the row. So did a policy calling
+/// a SQL or PL/pgSQL function that reads the setting that way, directly or
+/// through other calls. A session that set the setting once, even if it
+/// reset it since, read `''` instead. Only custom settings, spelled with a
+/// dot, are reported, since every session holds the built-in parameters. A
+/// `current_setting` qualified by a schema other than `pg_catalog` is the
+/// user's own function and is followed like any other call. A setting named
+/// by an expression and a read built in dynamic SQL are not seen.
 ///
 /// # Example
 ///

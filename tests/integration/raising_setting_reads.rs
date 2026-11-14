@@ -19,7 +19,14 @@ const DOCS: &str = "CREATE TABLE docs (id INT PRIMARY KEY, owner TEXT, is_public
     CREATE FUNCTION me_atomic() RETURNS TEXT LANGUAGE sql STABLE
         BEGIN ATOMIC SELECT current_setting('app.user_id'); END;
     CREATE FUNCTION setting_of(name TEXT) RETURNS TEXT LANGUAGE sql STABLE
-        AS $$ SELECT current_setting(name) $$;";
+        AS $$ SELECT current_setting(name) $$;
+    CREATE FUNCTION me_null() RETURNS TEXT LANGUAGE sql STABLE
+        AS $$ SELECT current_setting('app.user_id', NULL) $$;
+    CREATE SCHEMA app;
+    CREATE FUNCTION app.current_setting(name TEXT) RETURNS TEXT LANGUAGE sql IMMUTABLE
+        AS $$ SELECT 'x' $$;
+    CREATE FUNCTION me_app() RETURNS TEXT LANGUAGE sql STABLE
+        AS $$ SELECT app.current_setting('app.user_id') $$;";
 
 /// The clause and site of every finding the rule raises on `policies`.
 fn reads(policies: &str) -> Vec<String> {
@@ -115,6 +122,10 @@ fn reads_that_tolerate_a_missing_setting_pass() {
         "CREATE POLICY p ON docs USING (owner = current_setting('role'));",
         "CREATE POLICY p ON docs USING (owner = current_setting('search_path'));",
         "CREATE POLICY p ON docs USING (owner = current_setting('search_path', false));",
+        "CREATE POLICY p ON docs USING (owner = current_setting('app.user_id', NULL));",
+        "CREATE POLICY p ON docs USING (owner = me_null());",
+        "CREATE POLICY p ON docs USING (owner = app.current_setting('app.user_id'));",
+        "CREATE POLICY p ON docs USING (owner = me_app());",
         "CREATE POLICY p ON docs USING (is_public);",
     ] {
         assert_eq!(reads(policy), Vec::<String>::new(), "{policy}");
