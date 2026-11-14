@@ -106,7 +106,7 @@ fn upper_bounds_by_the_current_time_and_immutable_checks_pass() {
         "(at)::date <= (now() - interval '1 day')::date",
         "lower(name) = name",
         "doubled(x) > 0",
-        "unknown_check(x)",
+        "platform.unknown_check(x)",
         "name <> current_user",
     ] {
         assert_eq!(
