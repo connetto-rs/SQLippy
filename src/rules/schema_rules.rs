@@ -22,6 +22,8 @@ mod catalogue_rules;
 mod exposure_rules;
 mod not_in_nullable_subquery;
 mod not_in_subquery;
+mod nullable_concatenation;
+pub use nullable_concatenation::NullableConcatenation;
 mod nullable_unique;
 mod owner_rights_view;
 pub use exposure_rules::{
