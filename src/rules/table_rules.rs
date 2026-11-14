@@ -38,6 +38,8 @@ mod tautological_policy;
 pub use tautological_policy::TautologicalPolicy;
 mod unsatisfiable_policy;
 pub use unsatisfiable_policy::UnsatisfiablePolicy;
+mod restrictive_without_permissive;
+pub use restrictive_without_permissive::RestrictiveWithoutPermissive;
 mod unforced_row_level_security;
 pub use unforced_row_level_security::UnforcedRowLevelSecurity;
 mod reachable_table_without_row_level_security;

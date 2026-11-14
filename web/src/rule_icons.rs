@@ -17,12 +17,12 @@ use dioxus_free_icons::icons::fa_solid_icons::{
     FaLink, FaLinkSlash, FaListOl, FaListUl, FaLocationDot, FaLockOpen, FaMagnet,
     FaMagnifyingGlass, FaMagnifyingGlassArrowRight, FaMagnifyingGlassChart, FaMask, FaMoneyBill,
     FaNotEqual, FaObjectGroup, FaPaperclip, FaPenToSquare, FaPeopleArrowsLeftRight, FaPeopleGroup,
-    FaPlug, FaPlugCircleExclamation, FaPlugCircleXmark, FaPuzzlePiece, FaQuoteLeft, FaRegistered,
-    FaRepeat, FaRotateRight, FaRuler, FaScissors, FaShareNodes, FaShield, FaShieldHalved,
-    FaShuffle, FaSignsPost, FaSitemap, FaSkull, FaSliders, FaSnowflake, FaSort, FaSpellCheck,
-    FaSquareMinus, FaSquareRootVariable, FaStopwatch, FaTable, FaTableList, FaTag, FaTags,
-    FaTextHeight, FaTextWidth, FaTrashCan, FaUnderline, FaUserCheck, FaUserGear, FaUserNinja,
-    FaUserPen, FaUserSlash, FaUserTag, FaWater, FaWaterLadder,
+    FaPersonCircleXmark, FaPlug, FaPlugCircleExclamation, FaPlugCircleXmark, FaPuzzlePiece,
+    FaQuoteLeft, FaRegistered, FaRepeat, FaRotateRight, FaRuler, FaScissors, FaShareNodes,
+    FaShield, FaShieldHalved, FaShuffle, FaSignsPost, FaSitemap, FaSkull, FaSliders, FaSnowflake,
+    FaSort, FaSpellCheck, FaSquareMinus, FaSquareRootVariable, FaStopwatch, FaTable, FaTableList,
+    FaTag, FaTags, FaTextHeight, FaTextWidth, FaTrashCan, FaUnderline, FaUserCheck, FaUserGear,
+    FaUserNinja, FaUserPen, FaUserSlash, FaUserTag, FaWater, FaWaterLadder,
 };
 
 /// Defines `RuleIcon`, rendering the icon each listed rule name maps to, and
@@ -48,6 +48,7 @@ rule_icons! {
     "client_role_bypasses_row_level_security" => FaDoorOpen,
     "credential_setting_write" => FaUserPen,
     "dead_permissive_policy" => FaSkull,
+    "restrictive_without_permissive" => FaPersonCircleXmark,
     "definer_temporary_schema_not_last" => FaHourglassEnd,
     "definer_without_search_path" => FaSignsPost,
     "unsatisfiable_check" => FaCircleXmark,
