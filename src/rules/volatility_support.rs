@@ -89,15 +89,21 @@ fn element_type(data_type: &DataType) -> (&DataType, bool) {
 }
 
 /// A cast's target spelled the way a written type normalizes: the stored
-/// name without its schema, an array type's `_` prefix read as `[]`.
-fn target_spelling(target: &TargetName<'_>) -> String {
-    let name = target.name();
-    match name.strip_prefix('_') {
-        Some(element) if !target.name_is_quoted() => {
-            format!("{}[]", TargetName::new(element, false))
-        }
-        _ => TargetName::new(name, target.name_is_quoted()).to_string(),
-    }
+/// name without its schema, and an array type, as the database's type facts
+/// know it, as its element followed by `[]`.
+fn target_spelling<DB: DatabaseLike>(database: &DB, target: TargetName<'_>) -> String {
+    let scalar = TargetName::new(target.name(), target.name_is_quoted()).to_string();
+    database
+        .type_facts(target)
+        .and_then(|facts| {
+            facts.array_element().map(|element| {
+                format!(
+                    "{}[]",
+                    TargetName::new(element.name(), element.name_is_quoted())
+                )
+            })
+        })
+        .unwrap_or(scalar)
 }
 
 /// Whether an explicit cast to `data_type` may run a `VOLATILE` function: a
@@ -118,7 +124,7 @@ fn cast_is_volatile<DB: DatabaseLike>(database: &DB, data_type: &DataType) -> bo
     let element = normalize_postgres_type(&element);
     casts
         .filter(|cast| {
-            let spelling = target_spelling(&cast.target_type(database));
+            let spelling = target_spelling(database, cast.target_type(database));
             let target = normalize_postgres_type(&spelling);
             target == element || whole.as_deref() == Some(&*target)
         })
@@ -323,6 +329,31 @@ mod tests {
             assert!(volatile(&database, expression), "{expression}");
         }
         assert!(!volatile(&database, "'t'::BOOL"));
+    }
+
+    #[test]
+    fn a_scalar_type_named_with_a_leading_underscore_is_no_array() {
+        let app = |name| TargetName::new(name, false).with_schema("app", false);
+        let int = || TargetName::new("int4", false).with_schema("pg_catalog", false);
+        let database = ParseOptions::default()
+            .with_postgres_catalog(PostgresCatalog::default().with_cast(
+                PostgresCatalogCast::through_function(
+                    int(),
+                    app("_coin"),
+                    CastContext::Explicit,
+                    app("flip"),
+                    [int()],
+                ),
+            ))
+            .parse::<PostgreSqlDialect>(
+                "CREATE SCHEMA app;
+                 CREATE TYPE app._coin AS (v INT);
+                 CREATE FUNCTION app.flip(INT) RETURNS app._coin LANGUAGE sql VOLATILE
+                     AS 'SELECT ROW((random() < 0.5)::INT)::app._coin';",
+            )
+            .expect("schema parses");
+        assert!(volatile(&database, "(1::app._coin).v = 1"));
+        assert!(!volatile(&database, "(ARRAY[1]::BIGINT[])[1] = 1"));
     }
 
     #[test]
