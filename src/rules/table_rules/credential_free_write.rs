@@ -1,17 +1,15 @@
 //! Submodule providing the `CredentialFreeWrite` rule.
 
-use std::collections::BTreeSet;
-
 use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::CreatePolicyType;
 
 use crate::{
-    deployment::{Declaration, Deployment},
+    deployment::Declaration,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         credential_support::CredentialJudge,
-        policy_support::{Command, Stage, applied, held_by_name, policy_roles},
+        policy_support::{Command, Stage, anonymous_callers, applied, applies_to},
     },
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -23,13 +21,14 @@ use crate::{
 /// policy reaching `PUBLIC` or a declared anonymous role, on the clause
 /// PostgreSQL applies (`WITH CHECK` or its `USING` fallback for `INSERT`,
 /// `USING` for `UPDATE` and `DELETE`). A clause that can be true with every
-/// declared credential `NULL` is reported, unless a restrictive policy
-/// reaching an anonymous role requires a credential for the same command. A
-/// column compared to the set a set-returning `LANGUAGE sql` helper returns,
-/// written `= ANY (ARRAY(SELECT f()))` or `IN (SELECT f())`, requires a
-/// credential when every `UNION` arm of the helper's body does, reading
-/// nested helpers the same way. The rule is inactive until the deployment
-/// declares a credential.
+/// declared credential `NULL` is reported when some anonymous caller it
+/// applies to, each declared anonymous role or a caller holding only
+/// `PUBLIC`, has no restrictive policy requiring a credential for the same
+/// command. A column compared to the set a set-returning `LANGUAGE sql`
+/// helper returns, written `= ANY (ARRAY(SELECT f()))` or `IN (SELECT f())`,
+/// requires a credential when every `UNION` arm of the helper's body does,
+/// reading nested helpers the same way. The rule is inactive until the
+/// deployment declares a credential.
 ///
 /// # Example
 ///
@@ -109,23 +108,6 @@ const WRITES: [(Command, &str, Stage); 3] = [
     (Command::Delete, "DELETE", Stage::Filter),
 ];
 
-/// Roles whose policies apply to an anonymous caller: the declared anonymous
-/// roles and the roles they inherit.
-fn anonymous_reach<DB: DatabaseLike>(database: &DB, deployment: &Deployment) -> BTreeSet<String> {
-    deployment
-        .anonymous_roles()
-        .flat_map(|role| held_by_name(database, role))
-        .collect()
-}
-
-fn reaches_anonymous<DB: DatabaseLike>(
-    database: &DB,
-    policy: &DB::Policy,
-    reach: &BTreeSet<String>,
-) -> bool {
-    policy_roles(database, policy).is_none_or(|roles| roles.iter().any(|role| reach.contains(role)))
-}
-
 impl<DB: DatabaseLike> TableRule for CredentialFreeWrite<DB> {
     type Database = DB;
 
@@ -139,29 +121,36 @@ impl<DB: DatabaseLike> TableRule for CredentialFreeWrite<DB> {
             return Ok(());
         }
         let deployment = reporter.deployment();
-        let reach = anonymous_reach(database, deployment);
+        let callers = anonymous_callers(database, deployment);
         let policies: Vec<_> = table
             .policies(database)?
-            .filter(|policy| reaches_anonymous(database, policy, &reach))
+            .filter(|policy| {
+                callers
+                    .iter()
+                    .any(|held| applies_to(database, policy, held))
+            })
             .collect();
-        let mut guarded = Vec::new();
+        let mut unguarded = Vec::new();
         for (command, _, stage) in WRITES {
-            let mut requires = false;
-            for policy in &policies {
-                if policy.policy_type() != CreatePolicyType::Restrictive
-                    || !command.covered_by(policy.command())
-                {
-                    continue;
-                }
-                let judge = CredentialJudge::new(database, policy, deployment);
-                for clause in applied(database, policy, command)? {
-                    if clause.stage == stage && judge.requires(clause.expression)? {
-                        requires = true;
+            for held in &callers {
+                let mut requires = false;
+                for policy in &policies {
+                    if policy.policy_type() != CreatePolicyType::Restrictive
+                        || !command.covered_by(policy.command())
+                        || !applies_to(database, policy, held)
+                    {
+                        continue;
+                    }
+                    let judge = CredentialJudge::new(database, policy, deployment);
+                    for clause in applied(database, policy, command)? {
+                        if clause.stage == stage && judge.requires(clause.expression)? {
+                            requires = true;
+                        }
                     }
                 }
-            }
-            if requires {
-                guarded.push(command);
+                if !requires {
+                    unguarded.push((command, held));
+                }
             }
         }
         for policy in &policies {
@@ -172,7 +161,11 @@ impl<DB: DatabaseLike> TableRule for CredentialFreeWrite<DB> {
             let mut commands = Vec::new();
             let mut sites: Vec<PolicySite<DB>> = Vec::new();
             for (command, keyword, stage) in WRITES {
-                if guarded.contains(&command) || !command.covered_by(policy.command()) {
+                if !command.covered_by(policy.command())
+                    || !unguarded
+                        .iter()
+                        .any(|(open, held)| *open == command && applies_to(database, policy, held))
+                {
                     continue;
                 }
                 for clause in applied(database, policy, command)? {

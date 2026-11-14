@@ -519,3 +519,47 @@ fn an_allowance_excuses_a_deliberate_anonymous_write() {
     ));
     assert!(constrainer.diagnostics(&database).is_empty());
 }
+
+/// Findings for `policies` on `notes` with `anon` and `guest` both declared
+/// anonymous.
+fn notes_with_two_anonymous_roles(policies: &str) -> Vec<(String, Level, String)> {
+    findings(
+        supabase().with_anonymous_role("guest"),
+        &format!(
+            "{SUPABASE}
+             CREATE ROLE guest;
+             CREATE TABLE notes (id INT, owner uuid, is_public BOOL);
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             {policies}"
+        ),
+    )
+}
+
+#[test]
+fn a_guard_for_one_anonymous_role_does_not_cover_another() {
+    assert_eq!(
+        notes_with_two_anonymous_roles(
+            "CREATE POLICY open_delete ON notes FOR DELETE TO guest USING (is_public);
+             CREATE POLICY must_login ON notes AS RESTRICTIVE FOR DELETE TO anon USING (auth.uid() IS NOT NULL);"
+        ),
+        [finding("notes.open_delete")]
+    );
+    assert_eq!(
+        notes_with_two_anonymous_roles(
+            "CREATE POLICY open_delete ON notes FOR DELETE TO anon, guest USING (is_public);
+             CREATE POLICY must_login ON notes AS RESTRICTIVE FOR DELETE TO anon, guest USING (auth.uid() IS NOT NULL);"
+        ),
+        []
+    );
+}
+
+#[test]
+fn a_guard_for_a_named_role_does_not_cover_public() {
+    assert_eq!(
+        notes_with_two_anonymous_roles(
+            "CREATE POLICY open_delete ON notes FOR DELETE USING (is_public);
+             CREATE POLICY must_login ON notes AS RESTRICTIVE FOR DELETE TO anon, guest USING (auth.uid() IS NOT NULL);"
+        ),
+        [finding("notes.open_delete")]
+    );
+}
