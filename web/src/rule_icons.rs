@@ -117,6 +117,7 @@ rule_icons! {
     "truncating_integer_division" => FaDivide,
     "unfiltered_write" => FaFilterCircleXmark,
     "duplicate_column_assignment" => FaCodeCompare,
+    "assignment_conjunction" => FaCodeBranch,
     "unforced_row_level_security" => FaCrown,
     "duplicate_column_name_in_extension_graph" => FaSitemap,
     "unlinked_from_item" => FaBorderAll,

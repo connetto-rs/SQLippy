@@ -7,6 +7,7 @@ mod common;
 mod rule_examples;
 mod rule_findings;
 
+mod assignment_conjunctions;
 mod catalog_checks;
 mod catalogue_objects;
 mod client_grants;

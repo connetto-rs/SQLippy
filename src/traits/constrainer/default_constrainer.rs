@@ -6,15 +6,15 @@ use sql_traits::traits::DatabaseLike;
 use crate::{
     lint::Level,
     rules::{
-        AddressStoredAsText, AliasShadowedByColumn, ArrayMembershipPolicy, AutovacuumDisabledTable,
-        BinarySendFailure, BlankPaddedCharacter, CascadeIntoRowLevelSecurityTable,
-        ChildWithoutRowLevelSecurity, ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey,
-        ClientWrittenScaledNumeric, CorrelatedPolicySubquery, CredentialFreeWrite,
-        CredentialSettingWrite, DeadPermissivePolicy, DefinerTakesActingUser,
-        DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
-        DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnAssignment,
-        DuplicateColumnNameInExtensionGraph, DuplicateForeignKey, DuplicatePolicy,
-        DuplicateUniqueIndex, EmptyTextAllowed, ExposedDefinerOverProtectedTable,
+        AddressStoredAsText, AliasShadowedByColumn, ArrayMembershipPolicy, AssignmentConjunction,
+        AutovacuumDisabledTable, BinarySendFailure, BlankPaddedCharacter,
+        CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
+        ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
+        CorrelatedPolicySubquery, CredentialFreeWrite, CredentialSettingWrite,
+        DeadPermissivePolicy, DefinerTakesActingUser, DefinerTemporarySchemaNotLast,
+        DefinerWithoutSearchPath, DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck,
+        DuplicateColumnAssignment, DuplicateColumnNameInExtensionGraph, DuplicateForeignKey,
+        DuplicatePolicy, DuplicateUniqueIndex, EmptyTextAllowed, ExposedDefinerOverProtectedTable,
         ExpressionDefeatsIndex, ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema,
         FlagNotBoolean, FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
         FunctionMediatedPolicyCycle, GrantOptionToClientRole, ImpureImmutableFunction,
@@ -201,13 +201,14 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 21] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 22] = [
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
         Box::new(RandomOrderLimit::default()),
         Box::new(OffsetPaging::default()),
         Box::new(UnfilteredWrite::default()),
         Box::new(DuplicateColumnAssignment::default()),
+        Box::new(AssignmentConjunction::default()),
         Box::new(CredentialSettingWrite::default()),
         Box::new(OuterColumnCapture::default()),
         Box::new(TimestampBetween::default()),
