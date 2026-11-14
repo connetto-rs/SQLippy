@@ -16,6 +16,8 @@ mod binding_rules;
 pub use binding_rules::{AliasShadowedByColumn, SelfComparison};
 mod credential_setting_write;
 pub use credential_setting_write::CredentialSettingWrite;
+mod duplicate_column_assignment;
+pub use duplicate_column_assignment::DuplicateColumnAssignment;
 mod index_rules;
 pub use index_rules::{ExpressionDefeatsIndex, UnindexedCorrelatedSelect, UnindexedFilter};
 mod key_rules;
