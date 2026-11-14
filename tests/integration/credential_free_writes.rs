@@ -221,7 +221,7 @@ fn clauses_a_caller_without_a_credential_can_pass_are_reported() {
         "NOT EXISTS (SELECT 1 FROM members WHERE member = current_setting('app.user_id', true))",
         "EXISTS (SELECT count(*) FROM members WHERE member = current_setting('app.user_id', true))",
         "EXISTS (SELECT 1 FROM members t LEFT JOIN members m ON m.member = current_setting('app.user_id', true))",
-        "EXISTS (SELECT unknown_tally(member) FROM members WHERE member = current_setting('app.user_id', true))",
+        "EXISTS (SELECT platform.unknown_tally(member) FROM members WHERE member = current_setting('app.user_id', true))",
         "owner IN (current_setting('app.user_id', true), 'x')",
         "lower(owner) = 'a'",
         "owner = current_user",

@@ -7,6 +7,7 @@ use sqlparser::dialect::PostgreSqlDialect;
 const SCHEMA: &str = "
     CREATE SCHEMA auth;
     CREATE TABLE auth.users (id TEXT, raw_user_meta_data JSONB, raw_app_meta_data JSONB);
+    CREATE FUNCTION auth.jwt() RETURNS JSONB LANGUAGE sql STABLE AS $$ SELECT NULL::JSONB $$;
     CREATE TABLE profiles (id TEXT, raw_user_meta_data JSONB, team TEXT);
     CREATE TABLE docs (team TEXT, owner TEXT);
     ALTER TABLE docs ENABLE ROW LEVEL SECURITY;";
