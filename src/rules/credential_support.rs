@@ -11,7 +11,7 @@ use sql_traits::{
 use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr,
     InTarget, JoinConstraint, JoinOperator, Query, Select, SelectItem, SetExpr, SetOperator,
-    UnaryOperator, Visitor,
+    UnaryOperator, Value, Visitor,
 };
 
 use crate::rules::walk_support::walk;
@@ -19,6 +19,20 @@ use crate::{
     deployment::Deployment,
     rules::policy_support::{may_aggregate, sql_set_body},
 };
+
+/// Finds a declared credential.
+struct CredentialTerm<'a>(&'a Deployment);
+
+impl Visitor for CredentialTerm<'_> {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
+        if self.0.is_credential(expression) {
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+}
 
 /// Judges the expressions of one policy against the declared credentials.
 pub(crate) struct CredentialJudge<'a, DB: DatabaseLike> {
@@ -56,6 +70,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                 op: UnaryOperator::Minus | UnaryOperator::Plus | UnaryOperator::Not,
                 expr: inner,
             } => self.is_null(inner)?,
+            Expr::Value(literal) => matches!(literal.value, Value::Null),
             Expr::BinaryOp { left, op, right } => {
                 is_strict_operator(op) && (self.is_null(left)? || self.is_null(right)?)
             }
@@ -107,6 +122,8 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                 right,
             } => self.requires(left)? && self.requires(right)?,
             Expr::IsNotNull(inner) => self.is_null(inner)?,
+            Expr::Value(literal) => matches!(literal.value, Value::Boolean(false)),
+            Expr::IsDistinctFrom(left, right) => self.is_null(left)? && self.is_null(right)?,
             Expr::AnyOp { left, right, .. } => {
                 self.is_null(left)?
                     || match right.as_ref() {
@@ -160,6 +177,34 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                 }
             }
             _ => Ok(expression),
+        }
+    }
+
+    /// The operand through which a caller without a credential passes
+    /// `expression` while it reads a declared credential, such as
+    /// `auth.uid() IS NULL` in `auth.uid() IS NULL OR owner = auth.uid()`.
+    /// `None` when the expression requires a credential or only passes
+    /// without one through operands that read none, such as `is_public`.
+    pub(crate) fn absence_admitter<'e>(
+        &self,
+        expression: &'e Expr,
+    ) -> Result<Option<&'e Expr>, LookupError> {
+        if self.requires(expression)?
+            || walk(expression, &mut CredentialTerm(self.deployment)).is_continue()
+        {
+            return Ok(None);
+        }
+        match expression {
+            Expr::Nested(inner) => self.absence_admitter(inner),
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Or | BinaryOperator::And,
+                right,
+            } => match self.absence_admitter(left)? {
+                Some(operand) => Ok(Some(operand)),
+                None => self.absence_admitter(right),
+            },
+            _ => Ok(Some(expression)),
         }
     }
 
