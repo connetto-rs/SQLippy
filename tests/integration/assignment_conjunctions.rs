@@ -103,6 +103,7 @@ fn deliberate_expressions_and_other_tables_pass() {
         "UPDATE t SET flag = b = 2 AND true",
         "UPDATE t SET flag = random() AND b = 2",
         "UPDATE t SET flag = $1 AND b = 2",
+        "UPDATE missing SET flag = true AND b = 2",
     ] {
         assert!(diagnostics(sql).is_empty(), "{sql}");
     }

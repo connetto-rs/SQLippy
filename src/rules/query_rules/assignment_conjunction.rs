@@ -9,8 +9,8 @@ use sql_traits::{
     utils::identifier_resolution::stored_ident_name,
 };
 use sqlparser::ast::{
-    AssignmentTarget, BinaryOperator, Expr, Ident, ObjectName, Statement, TableFactor, TableObject,
-    UnaryOperator, Value, Visitor,
+    BinaryOperator, Expr, Ident, Insert, Merge, ObjectName, Statement, TableFactor, TableObject,
+    TableWithJoins, UnaryOperator, Update, Value, Visitor,
 };
 
 use super::duplicate_column_assignment::{Clause, visit_clauses};
@@ -23,26 +23,36 @@ use crate::{
 
 /// Returns the written relation and its alias.
 fn written_table(statement: &Statement) -> Option<(&ObjectName, Option<&Ident>)> {
-    let factor = match statement {
-        Statement::Update(update) => &update.table.relation,
-        Statement::Merge(merge) => &merge.table,
-        Statement::Insert(insert) => {
-            return match &insert.table {
-                TableObject::TableName(name) => {
-                    Some((name, insert.table_alias.as_ref().map(|alias| &alias.alias)))
-                }
-                _ => None,
-            };
-        }
-        _ => return None,
-    };
-    match factor {
-        TableFactor::Table {
-            name,
-            alias,
-            args: None,
+    match statement {
+        Statement::Insert(Insert {
+            table: TableObject::TableName(name),
+            table_alias,
             ..
-        } => Some((name, alias.as_ref().map(|alias| &alias.name))),
+        }) => Some((name, table_alias.as_ref().map(|alias| &alias.alias))),
+        Statement::Update(Update {
+            table:
+                TableWithJoins {
+                    relation:
+                        TableFactor::Table {
+                            name,
+                            alias,
+                            args: None,
+                            ..
+                        },
+                    ..
+                },
+            ..
+        })
+        | Statement::Merge(Merge {
+            table:
+                TableFactor::Table {
+                    name,
+                    alias,
+                    args: None,
+                    ..
+                },
+            ..
+        }) => Some((name, alias.as_ref().map(|alias| &alias.name))),
         _ => None,
     }
 }
@@ -102,34 +112,34 @@ fn column<'e, DB: DatabaseLike>(
 ) -> Result<Option<&'e Ident>, LookupError> {
     let ident = match unnested(expression) {
         Expr::Identifier(ident) => ident,
-        Expr::CompoundIdentifier(parts) => {
-            let Some((ident, qualifier)) = parts.split_last() else {
-                return Ok(None);
-            };
-            let matches = if let Some(alias) = alias {
-                matches!(qualifier, [part] if stored_ident_name(part) == stored_ident_name(alias))
-            } else {
-                qualifier.len() <= name.0.len()
-                    && qualifier
-                        .iter()
-                        .rev()
-                        .zip(name.0.iter().rev())
-                        .all(|(part, target)| {
-                            target.as_ident().is_some_and(|target| {
-                                stored_ident_name(part) == stored_ident_name(target)
-                            })
-                        })
-            };
-            if !matches {
-                return Ok(None);
-            }
-            ident
-        }
+        Expr::CompoundIdentifier(parts) => match parts.split_last() {
+            Some((ident, qualifier)) if qualifies(qualifier, name, alias) => ident,
+            _ => return Ok(None),
+        },
         _ => return Ok(None),
     };
     Ok(table
         .column(&ident.to_string(), database, IdentifierCase::Folded)?
         .map(|_| ident))
+}
+
+/// Whether a column qualifier names the written relation, by its alias when
+/// it has one and by a suffix of its name otherwise.
+fn qualifies(qualifier: &[Ident], name: &ObjectName, alias: Option<&Ident>) -> bool {
+    if let Some(alias) = alias {
+        matches!(qualifier, [part] if stored_ident_name(part) == stored_ident_name(alias))
+    } else {
+        qualifier.len() <= name.0.len()
+            && qualifier
+                .iter()
+                .rev()
+                .zip(name.0.iter().rev())
+                .all(|(part, target)| {
+                    target
+                        .as_ident()
+                        .is_some_and(|target| stored_ident_name(part) == stored_ident_name(target))
+                })
+    }
 }
 
 /// Collects suspicious assignments in each nested statement.
@@ -145,12 +155,14 @@ impl<DB: DatabaseLike> Conjunctions<'_, DB> {
             return Ok(());
         };
         let rendered = name.to_string();
-        let Ok(target) = TargetName::parse(&rendered) else {
-            return Ok(());
-        };
-        let Some(table) = self
-            .database
-            .resolve_target_table(target, IdentifierCase::Folded)?
+        let Some(table) = TargetName::parse(&rendered)
+            .ok()
+            .map(|target| {
+                self.database
+                    .resolve_target_table(target, IdentifierCase::Folded)
+            })
+            .transpose()?
+            .flatten()
         else {
             return Ok(());
         };
@@ -169,11 +181,8 @@ impl<DB: DatabaseLike> Conjunctions<'_, DB> {
                             None => column(right, name, alias, table, self.database)?,
                         };
                         if let Some(intended) = intended {
-                            let assigned = match &assignment.target {
-                                AssignmentTarget::ColumnName(name) => name.to_string(),
-                                AssignmentTarget::Tuple(_) => assignment.target.to_string(),
-                            };
-                            self.found.push((assigned, intended.to_string()));
+                            self.found
+                                .push((assignment.target.to_string(), intended.to_string()));
                         }
                     }
                     Ok(())
