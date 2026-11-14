@@ -5,10 +5,14 @@ use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 /// Rule name and message of every violation, failing on anything else.
-fn findings(constrainer: &GenericConstrainer<ParserDB>, sql: &str) -> Vec<(String, String)> {
+fn findings(
+    constrainer: &impl Constrainer<Database = ParserDB>,
+    sql: &str,
+) -> Vec<(String, String)> {
     constrainer
         .diagnostics(&ParserDB::parse::<PostgreSqlDialect>(sql).expect("schema parses"))
         .into_iter()
+        .filter(|error| !matches!(error, Error::Inactive(_)))
         .map(|error| match error {
             Error::Violation(violation) => (
                 violation.rule().name.to_owned(),
@@ -77,5 +81,104 @@ fn identity_columns_on_both_sides_of_a_foreign_key_match_only_by_coincidence() {
         raised[0].1.contains("both generate their own values"),
         "{}",
         raised[0].1
+    );
+}
+
+#[test]
+fn narrower_foreign_key_modifiers_lose_parent_keys() {
+    let constrainer = DefaultConstrainer::<ParserDB>::default();
+    for (child, parent) in [
+        ("varchar(10)", "varchar(20)"),
+        ("char(10)", "char(20)"),
+        ("char", "char(20)"),
+        ("varchar(10)", "varchar"),
+        ("bit(10)", "bit(20)"),
+        ("bit", "bit(20)"),
+        ("varbit(10)", "varbit"),
+        ("numeric(10,0)", "numeric(10,2)"),
+        ("numeric(5,2)", "numeric(10,2)"),
+        ("numeric(10,2)", "numeric"),
+        ("timestamp(0)", "timestamp(6)"),
+        ("timestamptz(0)", "timestamptz(6)"),
+        ("time(0)", "time(6)"),
+        ("timetz(0)", "timetz(6)"),
+        ("interval(0)", "interval(6)"),
+    ] {
+        let sql = format!(
+            "CREATE TABLE parents (id {parent} PRIMARY KEY);
+             CREATE TABLE children (parent_id {child} REFERENCES parents(id));"
+        );
+        let raised: Vec<_> = findings(&constrainer, &sql)
+            .into_iter()
+            .filter(|(rule, _)| rule == "narrower_referencing_column")
+            .collect();
+        assert_eq!(raised.len(), 1, "{child} references {parent}");
+        assert!(
+            raised[0].1.contains("children.parent_id"),
+            "{}",
+            raised[0].1
+        );
+        assert!(raised[0].1.contains("parents.id"), "{}", raised[0].1);
+        let message = &raised[0].1;
+        assert!(
+            message.contains("cannot be referenced")
+                || message.contains("different parent row")
+                || message.contains("off its parent"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn foreign_key_modifiers_that_hold_parent_keys_are_accepted() {
+    let constrainer = DefaultConstrainer::<ParserDB>::default();
+    for (child, parent) in [
+        ("varchar(20)", "varchar(20)"),
+        ("varchar(30)", "varchar(20)"),
+        ("varchar", "varchar(20)"),
+        ("varbit", "varbit(20)"),
+        ("numeric", "numeric(10,2)"),
+        ("numeric(12,3)", "numeric(10,2)"),
+        ("timestamp", "timestamp(6)"),
+        ("timestamp(6)", "timestamp(0)"),
+        ("interval", "interval(6)"),
+        ("time", "time(6)"),
+        ("char(10)", "varchar(20)"),
+    ] {
+        let sql = format!(
+            "CREATE TABLE parents (id {parent} PRIMARY KEY);
+             CREATE TABLE children (parent_id {child} REFERENCES parents(id));"
+        );
+        assert!(
+            findings(&constrainer, &sql)
+                .iter()
+                .all(|(rule, _)| rule != "narrower_referencing_column"),
+            "{child} references {parent}"
+        );
+    }
+}
+
+#[test]
+fn composite_foreign_keys_report_each_narrower_pair_once() {
+    let constrainer = DefaultConstrainer::<ParserDB>::default();
+    let raised: Vec<_> = findings(
+        &constrainer,
+        "CREATE TABLE parents (a numeric(10,2), b varchar(20), c int, PRIMARY KEY(a,b,c));
+         CREATE TABLE children (a numeric(5,0), b varchar(10), c int,
+             FOREIGN KEY(a,b,c) REFERENCES parents(a,b,c));",
+    )
+    .into_iter()
+    .filter(|(rule, _)| rule == "narrower_referencing_column")
+    .collect();
+    assert_eq!(raised.len(), 2);
+    assert!(
+        raised
+            .iter()
+            .any(|(_, message)| message.contains("children.a"))
+    );
+    assert!(
+        raised
+            .iter()
+            .any(|(_, message)| message.contains("children.b"))
     );
 }

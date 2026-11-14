@@ -2,6 +2,8 @@
 
 mod incompatible_foreign_key;
 pub use incompatible_foreign_key::IncompatibleForeignKey;
+mod narrower_referencing_column;
+pub use narrower_referencing_column::NarrowerReferencingColumn;
 mod mixed_case_foreign_key_name;
 pub use mixed_case_foreign_key_name::MixedCaseForeignKeyName;
 mod rust_keyword_foreign_key_name;
