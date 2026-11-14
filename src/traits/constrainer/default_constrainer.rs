@@ -25,8 +25,8 @@ use crate::{
         NotInNullableSubquery, NotInSubquery, NullableCompositeForeignKey, NullableUniqueColumn,
         OffsetPaging, OuterColumnCapture, OwnerRightsView, PluralColumnName, PolicyReadCycle,
         PolicyToCreatingRole, PolicyWithoutRowLevelSecurity, PrefixRedundantIndex,
-        PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RandomOrderLimit,
-        ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
+        PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
+        RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
         ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge, ReferenceWithoutIdSuffix,
         ReferencesGrantedToClientRole, RegColumnType, ReservedKeywordIdentifier,
         RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
@@ -83,7 +83,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 35] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 36] = [
             Box::new(TimeDependentCheck::default()),
             Box::new(PrefixRedundantIndex::default()),
             Box::new(MissingPrimaryKey::default()),
@@ -107,6 +107,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(CorrelatedPolicySubquery::default()),
             Box::new(NestedPolicySubquery::default()),
             Box::new(UncachedPolicyCall::default()),
+            Box::new(RaisingSettingRead::default()),
             Box::new(UnindexedPolicyFilter::default()),
             Box::new(ArrayMembershipPolicy::default()),
             Box::new(DenyListPolicy::default()),
