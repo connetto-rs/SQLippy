@@ -591,7 +591,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1861,7 +1861,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2144,7 +2144,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#21561a875fd34368f9863986257bcd9bfde147d5"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#3ec3562be01c43b432526b20259b2078a11589e6"
 dependencies = [
  "geometric-traits",
  "once_cell",
