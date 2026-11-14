@@ -101,11 +101,13 @@ struct SublinkReads<'db, DB: DatabaseLike> {
     policy: &'db DB::Policy,
     depth: usize,
     found: bool,
+    reads_relation: bool,
     reads: Vec<Read<'db, DB>>,
 }
 
 impl<'db, DB: DatabaseLike> SublinkReads<'db, DB> {
     fn push(&mut self, table: &'db DB::Table, checker: Option<Checker>, via: &str, call: bool) {
+        self.reads_relation = true;
         self.found |= call && checker.is_some();
         if !self
             .reads
@@ -155,6 +157,7 @@ impl<'db, DB: DatabaseLike> SublinkReads<'db, DB> {
         via: &str,
         call: bool,
     ) -> Result<(), LookupError> {
+        self.reads_relation = true;
         let database = self.database;
         let rights = Rights::of(database, view.is_security_invoker(), view.owner(database)?);
         for relation in DataStatementLike::<DB>::referenced_relations(view.definition(), database)?
@@ -281,18 +284,37 @@ pub(crate) fn sublink_reads<'db, DB: DatabaseLike, N: Visit + ?Sized>(
     policy: &'db DB::Policy,
     node: Option<&N>,
 ) -> Result<(bool, Vec<Read<'db, DB>>), LookupError> {
-    let Some(node) = node else {
-        return Ok((false, Vec::new()));
-    };
+    let collector = collect_reads(database, policy, node)?;
+    Ok((collector.found, collector.reads))
+}
+
+/// Returns whether a clause reads any table or view through its sublinks or calls.
+pub(crate) fn reads_relation<DB: DatabaseLike>(
+    database: &DB,
+    policy: &DB::Policy,
+    expression: &Expr,
+) -> Result<bool, LookupError> {
+    Ok(collect_reads(database, policy, Some(expression))?.reads_relation)
+}
+
+/// Collects relation reads from a policy clause.
+fn collect_reads<'db, DB: DatabaseLike, N: Visit + ?Sized>(
+    database: &'db DB,
+    policy: &'db DB::Policy,
+    node: Option<&N>,
+) -> Result<SublinkReads<'db, DB>, LookupError> {
     let mut collector = SublinkReads {
         database,
         policy,
         depth: 0,
         found: false,
+        reads_relation: false,
         reads: Vec::new(),
     };
-    if let ControlFlow::Break(error) = walk(node, &mut collector) {
+    if let Some(node) = node
+        && let ControlFlow::Break(error) = walk(node, &mut collector)
+    {
         return Err(error);
     }
-    Ok((collector.found, collector.reads))
+    Ok(collector)
 }
