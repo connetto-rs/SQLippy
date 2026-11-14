@@ -72,6 +72,9 @@ fn distinct_columns_and_fields_alone_pass() {
         "UPDATE u SET p.x = 1, p.x = 2",
         "UPDATE u SET (p.x, p.y) = (1, 2), p.x = 3",
         "UPDATE u SET a = 1, \"A\" = 2",
+        "UPDATE u SET a = 1, \" a\" = 2",
+        "INSERT INTO u (\" a\", a) VALUES (1, 2)",
+        "UPDATE u SET \"\u{e9}\" = 1, \"e\u{301}\" = 2",
         "INSERT INTO u (id, p.x, p.y) VALUES (2, 1, 2)",
         "INSERT INTO u (id, p.x, p.x) VALUES (4, 1, 2)",
         "INSERT INTO u VALUES (6, 1, 1, ROW(1, 1)) ON CONFLICT (id) DO NOTHING",
@@ -81,6 +84,20 @@ fn distinct_columns_and_fields_alone_pass() {
     ] {
         assert_eq!(duplicated(sql), Vec::<String>::new(), "{sql}");
     }
+}
+
+#[test]
+fn names_postgresql_truncates_to_one_column_are_reported() {
+    let kept = "c".repeat(63);
+    let long = "c".repeat(70);
+    assert_eq!(
+        duplicated(&format!("UPDATE u SET {kept} = 1, {long} = 2")),
+        [kept.as_str()]
+    );
+    assert_eq!(
+        duplicated(&format!("INSERT INTO u ({long}, {kept}) VALUES (1, 2)")),
+        [long.as_str()]
+    );
 }
 
 #[test]

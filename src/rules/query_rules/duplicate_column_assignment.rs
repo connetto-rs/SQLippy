@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, ops::ControlFlow};
 
-use sql_traits::{traits::DatabaseLike, utils::identifier_resolution::normalize_identifier};
+use sql_traits::{traits::DatabaseLike, utils::identifier_resolution::stored_ident_name};
 use sqlparser::ast::{
     Assignment, AssignmentTarget, DoUpdate, Insert, Merge, MergeAction, MergeInsertExpr,
     MergeUpdateExpr, MergeUpdateKind, ObjectName, OnConflict, OnConflictAction, OnInsert,
@@ -45,14 +45,14 @@ impl<'s> Targets<'s> {
     /// The columns assigned more than once where at least one assignment is
     /// to the whole column, each as first written, in order.
     fn duplicated(&self) -> Vec<String> {
-        // Column, as first written and as PostgreSQL compares it, the number of
+        // Column, as first written and as PostgreSQL stores it, the number of
         // targets naming it, and whether every one names a subfield of it.
         let mut columns: Vec<(String, Cow<'s, str>, usize, bool)> = Vec::new();
         for &target in &self.targets {
             let Some(column) = target.0.first().and_then(|part| part.as_ident()) else {
                 continue;
             };
-            let key = normalize_identifier(&column.value, column.quote_style.is_some());
+            let key = stored_ident_name(column);
             let partial = target.0.len() > 1;
             match columns.iter_mut().find(|(_, seen, ..)| *seen == key) {
                 Some((_, _, count, all_partial)) => {
