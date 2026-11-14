@@ -4,13 +4,14 @@
 use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
-const RULES: [&str; 7] = [
+const RULES: [&str; 8] = [
     "nullable_composite_foreign_key",
     "unindexed_foreign_key",
     "serial_column",
     "narrow_integer_key",
     "client_written_counter_key",
     "prefix_redundant_index",
+    "repeated_index_column",
     "scaled_numeric",
 ];
 
@@ -171,6 +172,39 @@ fn an_index_another_serves_is_reported() {
          CREATE INDEX t_include ON t (a) INCLUDE (c);",
     );
     assert_eq!(found, ["t_a", "t_b", "t_ab_again", "t_c2"]);
+}
+
+#[test]
+fn an_index_naming_a_column_twice_is_reported() {
+    let constrainer = GenericConstrainer::from(RepeatedIndexColumn::default());
+    let database = ParserDB::parse::<PostgreSqlDialect>(
+        "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, c INT);
+         CREATE INDEX t_a_a ON t (a, a);
+         CREATE UNIQUE INDEX t_b_c_b ON t (b, c, b);
+         CREATE INDEX t_a_b ON t (a, b);
+         CREATE INDEX t_c_lower ON t (c, lower(c::text));
+         CREATE INDEX ON t (c, c);",
+    )
+    .expect("schema parses");
+    let messages: Vec<String> = constrainer
+        .diagnostics(&database)
+        .into_iter()
+        .map(|error| match error {
+            Error::Violation(violation) => {
+                assert_eq!(violation.rule().name, "repeated_index_column");
+                violation.message().to_owned()
+            }
+            other => panic!("unexpected failure: {other}"),
+        })
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "Index 't_a_a' on 't' names column 'a' more than once, and the repeated key orders and constrains nothing the first did not.",
+            "Index 't_b_c_b' on 't' names column 'b' more than once, and the repeated key orders and constrains nothing the first did not.",
+            "Index 't_c_c1_idx' on 't' names column 'c' more than once, and the repeated key orders and constrains nothing the first did not.",
+        ]
+    );
 }
 
 #[test]
