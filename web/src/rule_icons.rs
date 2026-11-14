@@ -86,6 +86,7 @@ rule_icons! {
     "nullable_composite_foreign_key" => FaLink,
     "owner_rights_view" => FaBinoculars,
     "policy_to_creating_role" => FaUserCheck,
+    "policy_targets_bypass_role" => FaDoorOpen,
     "public_schema_create" => FaPeopleGroup,
     "query_rewrite_rule" => FaShuffle,
     "reachable_foreign_table" => FaGlobe,
