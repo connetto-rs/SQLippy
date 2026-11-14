@@ -26,9 +26,9 @@ use crate::{
         NullableCompositeForeignKey, NullableUniqueColumn, OffsetPaging, OuterColumnCapture,
         OwnerRightsView, PluralColumnName, PolicyExpressionDefeatsIndex, PolicyReadCycle,
         PolicyReadsUnprotectedTable, PolicyTargetsBypassRole, PolicyToCreatingRole,
-        PolicyWithoutRowLevelSecurity, PrefixRedundantIndex, PrimaryKeyNotNamedId,
-        PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead, RandomOrderLimit,
-        ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
+        PolicyWithoutRowLevelSecurity, PolicyWithoutRowReference, PrefixRedundantIndex,
+        PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
+        RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
         ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge, ReferenceWithoutIdSuffix,
         ReferencesGrantedToClientRole, RegColumnType, RepeatedIndexColumn,
         ReservedKeywordIdentifier, RestrictiveWithoutPermissive, RoleKeyedPolicyWhenPooled,
@@ -146,7 +146,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 45] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 46] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(RepeatedIndexColumn::default()),
@@ -169,6 +169,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(DuplicatePolicy::default()),
         Box::new(TautologicalWithCheck::default()),
         Box::new(TautologicalPolicy::default()),
+        Box::new(PolicyWithoutRowReference::default()),
         Box::new(UnsatisfiablePolicy::default()),
         Box::new(RestrictiveWithoutPermissive::default()),
         Box::new(UnforcedRowLevelSecurity::default()),

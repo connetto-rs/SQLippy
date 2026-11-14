@@ -33,6 +33,7 @@ mod policy_advisories;
 mod policy_checks;
 mod policy_read_cycles;
 mod policy_targets_bypass_role;
+mod policy_without_row_reference;
 mod raising_setting_reads;
 mod restrictive_without_permissive;
 mod role_memberships;

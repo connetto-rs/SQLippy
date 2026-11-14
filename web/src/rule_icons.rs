@@ -105,6 +105,7 @@ rule_icons! {
     "table_inheritance" => FaCodeBranch,
     "tautological_with_check" => FaCheckDouble,
     "tautological_policy" => FaShieldHalved,
+    "policy_without_row_reference" => FaShieldHalved,
     "unsatisfiable_policy" => FaBan,
     "unbounded_text_column" => FaInfinity,
     "time_dependent_check" => FaCalendarXmark,
