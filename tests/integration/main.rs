@@ -28,6 +28,7 @@ mod lint_candidates;
 mod lint_levels;
 mod name_type_hints;
 mod nested_policy_subqueries;
+mod null_comparisons;
 mod null_credential_reads;
 mod nullable_concatenation;
 mod nullable_unique;

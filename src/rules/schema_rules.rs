@@ -22,6 +22,7 @@ mod catalogue_rules;
 mod exposure_rules;
 mod not_in_nullable_subquery;
 mod not_in_subquery;
+mod null_comparison;
 mod nullable_concatenation;
 pub use nullable_concatenation::NullableConcatenation;
 mod nullable_unique;
@@ -38,6 +39,7 @@ pub use catalogue_rules::{
 };
 pub use not_in_nullable_subquery::NotInNullableSubquery;
 pub use not_in_subquery::NotInSubquery;
+pub use null_comparison::NullComparison;
 pub use table_hygiene_rules::{
     AutovacuumDisabledTable, MultiplePermissivePolicies, RegColumnType,
     RowLevelSecurityWithoutPolicies,
