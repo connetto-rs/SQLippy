@@ -40,3 +40,4 @@ mod statement_types;
 mod subject_settable_attributes;
 mod tenant_unique_constraints;
 mod uncached_policy_calls;
+mod unprotected_policy_reads;

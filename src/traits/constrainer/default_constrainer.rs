@@ -24,9 +24,9 @@ use crate::{
         NarrowIntegerKey, NestedPolicySubquery, NonSnakeCaseColumnName, NonSnakeCaseTableName,
         NotInNullableSubquery, NotInSubquery, NullableCompositeForeignKey, NullableUniqueColumn,
         OffsetPaging, OuterColumnCapture, OwnerRightsView, PluralColumnName, PolicyReadCycle,
-        PolicyToCreatingRole, PolicyWithoutRowLevelSecurity, PrefixRedundantIndex,
-        PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RandomOrderLimit,
-        ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
+        PolicyReadsUnprotectedTable, PolicyToCreatingRole, PolicyWithoutRowLevelSecurity,
+        PrefixRedundantIndex, PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule,
+        RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
         ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge, ReferenceWithoutIdSuffix,
         ReferencesGrantedToClientRole, RegColumnType, ReservedKeywordIdentifier,
         RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
@@ -83,7 +83,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 35] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 36] = [
             Box::new(TimeDependentCheck::default()),
             Box::new(PrefixRedundantIndex::default()),
             Box::new(MissingPrimaryKey::default()),
@@ -110,6 +110,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(UnindexedPolicyFilter::default()),
             Box::new(ArrayMembershipPolicy::default()),
             Box::new(DenyListPolicy::default()),
+            Box::new(PolicyReadsUnprotectedTable::default()),
             Box::new(ReachableTableWithoutRowLevelSecurity::default()),
             Box::new(TruncateGrantedToAnonymousRole::default()),
             Box::new(TruncateGrantedToAppRole::default()),
