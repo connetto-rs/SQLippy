@@ -56,6 +56,7 @@ rule_icons! {
     "surrogate_primary_key_in_extension" => FaPuzzlePiece,
     "tautological_check" => FaEquals,
     "outer_column_capture" => FaMagnet,
+    "nullable_concatenation" => FaLinkSlash,
     "policy_without_row_level_security" => FaLockOpen,
     "policy_read_cycle" => FaArrowsRotate,
     "policy_reads_unprotected_table" => FaPenToSquare,

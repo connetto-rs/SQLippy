@@ -24,22 +24,23 @@ use crate::{
         MixedCaseTableName, MomentStoredAsText, MoneyType, MultiplePermissivePolicies,
         NarrowIntegerKey, NarrowerReferencingColumn, NestedPolicySubquery, NonSnakeCaseColumnName,
         NonSnakeCaseTableName, NotInNullableSubquery, NotInSubquery, NullCredentialRead,
-        NullableCompositeForeignKey, NullableUniqueColumn, OffsetPaging, OuterColumnCapture,
-        OwnerRightsView, PluralColumnName, PolicyExpressionDefeatsIndex, PolicyReadCycle,
-        PolicyReadsUnprotectedTable, PolicyTargetsBypassRole, PolicyToCreatingRole,
-        PolicyWithoutRowLevelSecurity, PolicyWithoutRowReference, PrefixRedundantIndex,
-        PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
-        RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
-        ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge, ReferenceWithoutIdSuffix,
-        ReferencesGrantedToClientRole, RegColumnType, RepeatedIndexColumn,
-        ReservedKeywordIdentifier, RestrictiveWithoutPermissive, RoleKeyedPolicyWhenPooled,
-        RowLevelSecurityWithoutPolicies, RustKeywordColumnName, RustKeywordForeignKeyName,
-        RustKeywordTableName, ScaledNumeric, SecurityBarrierMissingOnFilteringView,
-        SecurityDefinerFunctionExposed, SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite,
-        SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
-        SingularTableName, SubjectSettableAttribute, SurrogatePrimaryKeyInExtension,
-        TableInheritance, TautologicalCheck, TautologicalPolicy, TautologicalWithCheck,
-        TimeDependentCheck, TimeWithTimeZone, TimestampBetween, TimestampWithoutTimeZone,
+        NullableCompositeForeignKey, NullableConcatenation, NullableUniqueColumn, OffsetPaging,
+        OuterColumnCapture, OwnerRightsView, PluralColumnName, PolicyExpressionDefeatsIndex,
+        PolicyReadCycle, PolicyReadsUnprotectedTable, PolicyTargetsBypassRole,
+        PolicyToCreatingRole, PolicyWithoutRowLevelSecurity, PolicyWithoutRowReference,
+        PrefixRedundantIndex, PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule,
+        RaisingSettingRead, RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView,
+        ReachableSequence, ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge,
+        ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole, RegColumnType,
+        RepeatedIndexColumn, ReservedKeywordIdentifier, RestrictiveWithoutPermissive,
+        RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
+        RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
+        SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
+        SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SerialColumn,
+        SessionTimeZoneDependence, SettableMembershipInBypassingRole, SingularTableName,
+        SubjectSettableAttribute, SurrogatePrimaryKeyInExtension, TableInheritance,
+        TautologicalCheck, TautologicalPolicy, TautologicalWithCheck, TimeDependentCheck,
+        TimeWithTimeZone, TimestampBetween, TimestampWithoutTimeZone,
         TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
         TruncatingIntegerDivision, UnboundedTextColumn, UncachedPolicyCall, UncheckedPastTimestamp,
         UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
@@ -203,7 +204,8 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 22] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 23] = [
+        Box::new(NullableConcatenation::default()),
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
         Box::new(RandomOrderLimit::default()),
@@ -234,7 +236,8 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 42] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 43] = [
+        Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
         Box::new(SecurityDefinerFunctionExposed::default()),
