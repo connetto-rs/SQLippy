@@ -21,8 +21,9 @@ use dioxus_free_icons::icons::fa_solid_icons::{
     FaQuoteLeft, FaRegistered, FaRepeat, FaRotateRight, FaRuler, FaScissors, FaShareNodes,
     FaShield, FaShieldHalved, FaShuffle, FaSignsPost, FaSitemap, FaSkull, FaSliders, FaSnowflake,
     FaSort, FaSpellCheck, FaSquareMinus, FaSquareRootVariable, FaStopwatch, FaTable, FaTableList,
-    FaTag, FaTags, FaTextHeight, FaTextWidth, FaTrashCan, FaUnderline, FaUserCheck, FaUserGear,
-    FaUserNinja, FaUserPen, FaUserSlash, FaUserTag, FaWater, FaWaterLadder,
+    FaTag, FaTags, FaTextHeight, FaTextWidth, FaTrashCan, FaTriangleExclamation, FaUnderline,
+    FaUserCheck, FaUserGear, FaUserNinja, FaUserPen, FaUserSlash, FaUserTag, FaWater,
+    FaWaterLadder,
 };
 
 /// Defines `RuleIcon`, rendering the icon each listed rule name maps to, and
@@ -131,6 +132,7 @@ rule_icons! {
     "not_in_subquery" => FaSquareMinus,
     "prefix_redundant_index" => FaTags,
     "uncached_policy_call" => FaBolt,
+    "raising_setting_read" => FaTriangleExclamation,
     "unindexed_correlated_select" => FaMagnifyingGlassArrowRight,
     "unindexed_foreign_key" => FaTag,
     "unindexed_policy_filter" => FaMagnifyingGlassChart,

@@ -1,20 +1,14 @@
 //! Submodule providing the `CredentialSettingWrite` rule.
 
-use std::{borrow::Cow, collections::HashMap, ops::ControlFlow};
+use std::ops::ControlFlow;
 
-use sql_traits::{
-    structs::FunctionBody,
-    traits::{DatabaseLike, FunctionLike},
-    utils::identifier_resolution::normalize_identifier,
-};
+use sql_traits::traits::DatabaseLike;
 use sqlparser::{
     ast::{
-        DiscardObject, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectName,
-        Reset, ResetStatement, Set, Statement, Value, ValueWithSpan, Visit, Visitor,
+        DiscardObject, Expr, Function, ObjectName, Reset, ResetStatement, Set, Statement, Visitor,
     },
-    dialect::PostgreSqlDialect,
     keywords::Keyword,
-    tokenizer::{Token, Tokenizer, Word},
+    tokenizer::{Token, Word},
 };
 
 use crate::rules::walk_support::walk;
@@ -22,8 +16,8 @@ use crate::{
     deployment::{Declaration, Deployment},
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::grant_support::schema_of,
-    traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, reporter::signature},
+    rules::function_reach_support::{Reach, Sought, calls, literal_key},
+    traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
 };
 
 /// How a statement or a function body writes a credential setting.
@@ -38,30 +32,6 @@ enum Write {
     Call,
 }
 
-/// The last part of a name and the schema before it, if any.
-fn split(name: &ObjectName) -> Option<(Option<&str>, &str)> {
-    let mut parts = name.0.iter().rev();
-    let last = parts.next()?.as_ident()?;
-    let schema = parts
-        .next()
-        .and_then(|part| part.as_ident())
-        .map(|ident| ident.value.as_str());
-    Some((schema, last.value.as_str()))
-}
-
-/// The string literal a call passes as its first argument.
-fn literal_key(function: &Function) -> Option<&str> {
-    if let FunctionArguments::List(list) = &function.args
-        && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-            value: Value::SingleQuotedString(key),
-            ..
-        })))) = list.args.first()
-    {
-        return Some(key);
-    }
-    None
-}
-
 /// A setting name as PostgreSQL looks it up, its parts without their
 /// quotes.
 fn setting_name(name: &ObjectName) -> String {
@@ -72,31 +42,6 @@ fn setting_name(name: &ObjectName) -> String {
         .map(|ident| ident.value.as_str())
         .collect();
     parts.join(".")
-}
-
-/// The number of arguments of the call whose opening parenthesis starts
-/// `tokens`.
-fn token_arguments(tokens: &[&Token]) -> usize {
-    let mut depth = 0_usize;
-    let mut arguments = 0;
-    for token in tokens {
-        match token {
-            Token::LParen => {
-                arguments = arguments.max(usize::from(depth == 1));
-                depth += 1;
-            }
-            Token::RParen if depth == 1 => break,
-            Token::RParen => depth -= 1,
-            Token::Comma if depth == 1 => arguments += 1,
-            _ => arguments = arguments.max(usize::from(depth == 1)),
-        }
-    }
-    arguments
-}
-
-/// Whether `function` calls the function named `name`, in any schema.
-fn calls(function: &Function, name: &str) -> bool {
-    split(&function.name).is_some_and(|(_, called)| called.eq_ignore_ascii_case(name))
 }
 
 /// Collects the setting keys the declared credentials read through
@@ -117,25 +62,19 @@ impl Visitor for CredentialKeys {
     }
 }
 
-/// The credential settings of a deployment and the functions known to write
-/// them.
-struct Credentials<'db, DB: DatabaseLike> {
-    database: &'db DB,
+/// The credential settings of a deployment, whose writes the rule looks
+/// for.
+struct Credentials {
     keys: Vec<String>,
-    writers: HashMap<String, bool>,
 }
 
-impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
-    fn new(database: &'db DB, deployment: &Deployment) -> Self {
+impl Credentials {
+    fn new(deployment: &Deployment) -> Self {
         let mut keys = CredentialKeys(Vec::new());
         for credential in deployment.credentials() {
             let _ = walk(credential, &mut keys);
         }
-        Self {
-            database,
-            keys: keys.0,
-            writers: HashMap::new(),
-        }
+        Self { keys: keys.0 }
     }
 
     /// The write of `key`, when it names a credential setting.
@@ -154,6 +93,17 @@ impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
         // such as `'app.' || 'theme'`, so one naming another setting passes.
         literal_key(function).map_or(Some(Write::Unnamed), |key| self.key(key))
     }
+}
+
+impl Sought for Credentials {
+    type Found = Write;
+
+    fn expression(&self, expression: &Expr) -> Option<Write> {
+        let Expr::Function(function) = expression else {
+            return None;
+        };
+        self.set_config(function)
+    }
 
     /// How a `SET`, `RESET` or `DISCARD` statement writes a credential
     /// setting.
@@ -171,133 +121,21 @@ impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
         }
     }
 
-    /// Whether the function a call to `name` with `arguments` arguments
-    /// reaches writes a credential setting. A call without a schema reaches
-    /// the first schema on the search path that holds a function of that
-    /// name accepting that many arguments.
-    fn calls_writer(&mut self, schema: Option<&str>, name: &str, arguments: usize) -> bool {
-        let database = self.database;
-        let declared_in = |function: &DB::Function, schema: &str| {
-            schema_of(database, function.target_name().schema().map(Cow::Borrowed))
-                .eq_ignore_ascii_case(schema)
-        };
-        let named: Vec<&DB::Function> = database
-            .functions()
-            .filter(|function| {
-                function.name().eq_ignore_ascii_case(name)
-                    && function.accepts_argument_count(arguments)
-            })
-            .collect();
-        let schema = schema.map(Cow::Borrowed).or_else(|| {
-            database
-                .search_path()
-                .map(|(path, quoted)| normalize_identifier(path, quoted))
-                .find(|path| named.iter().any(|function| declared_in(function, path)))
-        });
-        named
-            .into_iter()
-            .filter(|function| {
-                schema
-                    .as_deref()
-                    .is_some_and(|schema| declared_in(function, schema))
-            })
-            .any(|function| self.writes(function))
-    }
-
-    /// Whether a function's body writes a credential setting, directly or
-    /// through the functions it calls.
-    fn writes(&mut self, function: &DB::Function) -> bool {
-        let identity = format!(
-            "{}.{}",
-            schema_of(
-                self.database,
-                function.target_name().schema().map(Cow::Borrowed)
-            ),
-            signature(function, self.database)
-        );
-        if let Some(writes) = self.writers.get(&identity) {
-            return *writes;
-        }
-        self.writers.insert(identity.clone(), false);
-        let writes = match function.written_body() {
-            Some(FunctionBody::Text(body)) => self.body_writes(body),
-            Some(FunctionBody::Statements(statements)) => statements
-                .iter()
-                .any(|statement| self.node_writes(statement)),
-            Some(FunctionBody::Expression(expression)) => self.node_writes(expression),
-            Some(FunctionBody::Select(select)) => self.node_writes(select),
-            Some(
-                FunctionBody::Return(_)
-                | FunctionBody::Atomic(_)
-                | FunctionBody::BoundDefinition(_),
-            )
-            | None => {
-                function
-                    .body_expression(self.database)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|body| self.node_writes(body.as_ref()))
-                    || function
-                        .atomic_statements(self.database)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|statements| {
-                            statements
-                                .iter()
-                                .any(|statement| self.node_writes(statement))
-                        })
-            }
-        };
-        self.writers.insert(identity, writes);
-        writes
-    }
-
-    /// Whether a parsed body writes a credential setting.
-    fn node_writes<V: Visit + ?Sized>(&mut self, node: &V) -> bool {
-        let mut writes = Writes {
-            credentials: self,
-            found: Vec::new(),
-        };
-        let _ = walk(node, &mut writes);
-        !writes.found.is_empty()
-    }
-
-    /// Whether a function body, in SQL or PL/pgSQL, writes a credential
-    /// setting, read as tokens so either language is covered.
-    fn body_writes(&mut self, body: &str) -> bool {
-        let tokens = Tokenizer::new(&PostgreSqlDialect {}, body)
-            .tokenize()
-            .unwrap_or_default();
-        let tokens: Vec<&Token> = tokens
-            .iter()
-            .filter(|token| !matches!(token, Token::Whitespace(_)))
-            .collect();
-        (0..tokens.len()).any(|at| self.writes_at(&tokens, at))
-    }
-
-    /// Whether the body tokens starting at `at` write a credential setting:
-    /// a `set_config` call, a call to a writing function, or a `SET` or
-    /// `RESET` of a credential setting or of every setting.
-    fn writes_at(&mut self, tokens: &[&Token], at: usize) -> bool {
+    /// A `set_config` call, or a `SET` or `RESET` of a credential setting or
+    /// of every setting.
+    fn tokens(&self, tokens: &[&Token], at: usize) -> Option<bool> {
         let Some(Token::Word(word)) = tokens.get(at) else {
-            return false;
+            return None;
         };
         let rest = &tokens[at + 1..];
         if let Some(Token::LParen) = rest.first() {
             if word.value.eq_ignore_ascii_case("set_config") {
-                return match rest.get(1) {
+                return Some(match rest.get(1) {
                     Some(Token::SingleQuotedString(key)) => self.key(key).is_some(),
                     _ => true,
-                };
+                });
             }
-            let schema = match at
-                .checked_sub(2)
-                .map(|before| (tokens[before], tokens[at - 1]))
-            {
-                Some((Token::Word(schema), Token::Period)) => Some(schema.value.as_str()),
-                _ => None,
-            };
-            return self.calls_writer(schema, &word.value, token_arguments(rest));
+            return None;
         }
         let rest = match (word.keyword, rest.first()) {
             (Keyword::SET, Some(Token::Word(scope)))
@@ -306,12 +144,12 @@ impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
                 &rest[1..]
             }
             (Keyword::SET | Keyword::RESET, _) => rest,
-            _ => return false,
+            _ => return None,
         };
         if word.keyword == Keyword::RESET
             && matches!(rest.first(), Some(Token::Word(all)) if all.keyword == Keyword::ALL)
         {
-            return true;
+            return Some(true);
         }
         let mut parts = Vec::new();
         let mut rest = rest.iter();
@@ -323,44 +161,11 @@ impl<'db, DB: DatabaseLike> Credentials<'db, DB> {
                 break;
             }
         }
-        self.key(&parts.join(".")).is_some()
-    }
-}
-
-/// Collects the credential writes of a statement or expression.
-struct Writes<'run, 'db, DB: DatabaseLike> {
-    credentials: &'run mut Credentials<'db, DB>,
-    found: Vec<(String, Write)>,
-}
-
-impl<DB: DatabaseLike> Visitor for Writes<'_, '_, DB> {
-    type Break = ();
-
-    fn pre_visit_statement(&mut self, statement: &Statement) -> ControlFlow<()> {
-        if let Some(write) = self.credentials.statement(statement) {
-            self.found.push((statement.to_string(), write));
-        }
-        ControlFlow::Continue(())
+        Some(self.key(&parts.join(".")).is_some())
     }
 
-    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
-        let Expr::Function(function) = expression else {
-            return ControlFlow::Continue(());
-        };
-        let write = self.credentials.set_config(function).or_else(|| {
-            let (schema, name) = split(&function.name)?;
-            let arguments = match &function.args {
-                FunctionArguments::List(list) => list.args.len(),
-                _ => 0,
-            };
-            self.credentials
-                .calls_writer(schema, name, arguments)
-                .then_some(Write::Call)
-        });
-        if let Some(write) = write {
-            self.found.push((expression.to_string(), write));
-        }
-        ControlFlow::Continue(())
+    fn call(&self) -> Write {
+        Write::Call
     }
 }
 
@@ -443,13 +248,8 @@ impl<DB: DatabaseLike> QueryRule for CredentialSettingWrite<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let mut credentials = Credentials::new(database, reporter.deployment());
-        let mut writes = Writes {
-            credentials: &mut credentials,
-            found: Vec::new(),
-        };
-        let _ = walk(statement, &mut writes);
-        for (found, write) in writes.found {
+        let mut reach = Reach::new(database, Credentials::new(reporter.deployment()));
+        for (found, write) in reach.occurrences(statement) {
             let effect = match write {
                 Write::Key(key) => format!("writes the credential setting '{key}'"),
                 Write::Unnamed => {

@@ -26,8 +26,8 @@ use crate::{
         NullableUniqueColumn, OffsetPaging, OuterColumnCapture, OwnerRightsView, PluralColumnName,
         PolicyExpressionDefeatsIndex, PolicyReadCycle, PolicyReadsUnprotectedTable,
         PolicyToCreatingRole, PolicyWithoutRowLevelSecurity, PrefixRedundantIndex,
-        PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RandomOrderLimit,
-        ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
+        PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
+        RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
         ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge, ReferenceWithoutIdSuffix,
         ReferencesGrantedToClientRole, RegColumnType, ReservedKeywordIdentifier,
         RestrictiveWithoutPermissive, RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies,
@@ -144,7 +144,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 42] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 43] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(MissingPrimaryKey::default()),
@@ -172,6 +172,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(CorrelatedPolicySubquery::default()),
         Box::new(NestedPolicySubquery::default()),
         Box::new(UncachedPolicyCall::default()),
+        Box::new(RaisingSettingRead::default()),
         Box::new(UnindexedPolicyFilter::default()),
         Box::new(PolicyExpressionDefeatsIndex::default()),
         Box::new(ArrayMembershipPolicy::default()),
