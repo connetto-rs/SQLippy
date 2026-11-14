@@ -108,6 +108,155 @@ fn writes_without_a_where_are_reported() {
     );
 }
 
+#[test]
+fn writes_whose_where_reads_no_column_are_reported() {
+    let constrainer = query_rule(UnfilteredWrite::default());
+    let database = parse(NOTES);
+    assert_eq!(
+        reported(
+            &constrainer,
+            &database,
+            &[
+                "DELETE FROM notes WHERE 1 = 1",
+                "UPDATE notes SET body = 'x' WHERE 1 = 0",
+                "DELETE FROM notes WHERE $1",
+                "DELETE FROM notes WHERE now() > '2020-01-01'",
+                "DELETE FROM notes WHERE (true)",
+                "DELETE FROM notes WHERE owner = $1",
+                "DELETE FROM notes WHERE EXISTS (SELECT 1 FROM users WHERE users.name = notes.owner)",
+                "DELETE FROM notes USING users WHERE users.id = notes.id",
+                "DELETE FROM notes WHERE random() < 0.5",
+                "DELETE FROM notes WHERE nextval('note_ids') % 2 = 0",
+                "UPDATE notes SET body = 'x' WHERE clock_timestamp() > '2020-01-01'",
+                "DELETE FROM notes WHERE undeclared_flag()",
+                "DELETE FROM notes WHERE upper('a') = 'A'",
+            ]
+        ),
+        [
+            vec!["DELETE FROM notes WHERE 1 = 1".to_owned()],
+            vec!["UPDATE notes SET body = 'x' WHERE 1 = 0".to_owned()],
+            vec!["DELETE FROM notes WHERE $1".to_owned()],
+            vec!["DELETE FROM notes WHERE now() > '2020-01-01'".to_owned()],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec!["DELETE FROM notes WHERE upper('a') = 'A'".to_owned()],
+        ]
+    );
+}
+
+#[test]
+fn a_where_whose_operator_runs_a_volatile_function_is_not_reported() {
+    let constrainer = query_rule(UnfilteredWrite::default());
+    let database = parse(&format!(
+        "{NOTES}
+         CREATE SCHEMA app;
+         CREATE FUNCTION app.coinflip(a INT, b INT) RETURNS BOOL LANGUAGE sql VOLATILE
+             AS 'SELECT random() < 0.5';
+         CREATE OPERATOR app.<?> (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
+         CREATE OPERATOR ~~ (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
+         CREATE OPERATOR !~~ (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
+         CREATE OPERATOR ~~* (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
+         CREATE OPERATOR !~~* (LEFTARG = INT, RIGHTARG = INT, FUNCTION = app.coinflip);
+         CREATE TYPE mood AS ENUM ('a', 'b');
+         CREATE FUNCTION app.moodflip(a mood, b mood) RETURNS BOOL LANGUAGE sql VOLATILE
+             AS 'SELECT random() < 0.5';
+         CREATE OPERATOR = (LEFTARG = mood, RIGHTARG = mood, FUNCTION = app.moodflip);
+         CREATE OPERATOR <> (LEFTARG = mood, RIGHTARG = mood, FUNCTION = app.moodflip);
+         CREATE OPERATOR >= (LEFTARG = mood, RIGHTARG = mood, FUNCTION = app.moodflip);
+         CREATE OPERATOR <= (LEFTARG = mood, RIGHTARG = mood, FUNCTION = app.moodflip);
+         CREATE OPERATOR < (LEFTARG = mood, RIGHTARG = mood, FUNCTION = app.moodflip);
+         CREATE OPERATOR > (LEFTARG = mood, RIGHTARG = mood, FUNCTION = app.moodflip);"
+    ));
+    let volatile = [
+        "DELETE FROM notes WHERE 1 OPERATOR(app.<?>) 1",
+        "DELETE FROM notes WHERE 1 OPERATOR(app.<%>) 1",
+        "DELETE FROM notes WHERE 1 ~~ ANY (ARRAY[1])",
+        "DELETE FROM notes WHERE 1 ~~ ALL (ARRAY[1])",
+        "DELETE FROM notes WHERE 1 LIKE 1",
+        "DELETE FROM notes WHERE 1 NOT LIKE 1",
+        "DELETE FROM notes WHERE 1 ILIKE 1",
+        "DELETE FROM notes WHERE 1 NOT ILIKE 1",
+        "DELETE FROM notes WHERE 'a'::mood IN ('a'::mood)",
+        "DELETE FROM notes WHERE 'a'::mood NOT IN ('a'::mood)",
+        "DELETE FROM notes WHERE 'a'::mood IN (SELECT 'a'::mood)",
+        "DELETE FROM notes WHERE 'a'::mood BETWEEN 'a'::mood AND 'a'::mood",
+        "DELETE FROM notes WHERE 'a'::mood NOT BETWEEN 'a'::mood AND 'a'::mood",
+        "DELETE FROM notes WHERE 'a'::mood IS DISTINCT FROM 'a'::mood",
+        "DELETE FROM notes WHERE 'a'::mood IS NOT DISTINCT FROM 'a'::mood",
+        "DELETE FROM notes WHERE CASE 'a'::mood WHEN 'a'::mood THEN true ELSE false END",
+    ];
+    assert_eq!(
+        reported(&constrainer, &database, &volatile),
+        vec![Vec::<String>::new(); volatile.len()]
+    );
+    let constant = [
+        "DELETE FROM notes WHERE 1 + 1 = 2",
+        "DELETE FROM notes WHERE 1 IN (1, 2)",
+        "DELETE FROM notes WHERE 1 BETWEEN 0 AND 2",
+        "DELETE FROM notes WHERE 'a' LIKE 'a'",
+    ];
+    assert_eq!(
+        reported(&constrainer, &parse(NOTES), &constant),
+        constant.map(|statement| vec![statement.to_owned()])
+    );
+}
+
+#[test]
+fn a_where_casting_through_a_volatile_function_is_not_reported() {
+    let constrainer = query_rule(UnfilteredWrite::default());
+    let app = |name| TargetName::new(name, false).with_schema("app", false);
+    let database = ParseOptions::default()
+        .with_postgres_catalog(PostgresCatalog::default().with_cast(
+            PostgresCatalogCast::through_function(
+                app("coin"),
+                TargetName::new("bool", false).with_schema("pg_catalog", false),
+                CastContext::Explicit,
+                app("toss"),
+                [app("coin")],
+            ),
+        ))
+        .parse::<sqlparser::dialect::PostgreSqlDialect>(&format!(
+            "{NOTES}
+             CREATE SCHEMA app;
+             CREATE TYPE app.coin AS (v INT);
+             CREATE FUNCTION app.toss(app.coin) RETURNS BOOL LANGUAGE sql VOLATILE
+                 AS 'SELECT random() < 0.5';"
+        ))
+        .expect("schema parses");
+    assert_eq!(
+        reported(
+            &constrainer,
+            &database,
+            &[
+                "DELETE FROM notes WHERE '(1)'::app.coin::BOOL",
+                "DELETE FROM notes WHERE CAST(CAST('(1)' AS app.coin) AS BOOLEAN)",
+                "DELETE FROM notes WHERE (ARRAY['(1)'::app.coin]::BOOL[])[1]",
+                "DELETE FROM notes WHERE (ARRAY[ARRAY['(1)'::app.coin]]::BOOL[][])[1][1]",
+                "DELETE FROM notes WHERE (CAST(ARRAY['(1)'::app.coin] AS BOOLEAN ARRAY))[1]",
+                "DELETE FROM notes WHERE 1::BIGINT = 1",
+                "DELETE FROM notes WHERE '1'::INT = 1",
+                "DELETE FROM notes WHERE (ARRAY[1]::BIGINT[])[1] = 1",
+            ]
+        ),
+        [
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec!["DELETE FROM notes WHERE 1::BIGINT = 1".to_owned()],
+            vec!["DELETE FROM notes WHERE '1'::INT = 1".to_owned()],
+            vec!["DELETE FROM notes WHERE (ARRAY[1]::BIGINT[])[1] = 1".to_owned()],
+        ]
+    );
+}
+
 const LOGINS: &str = "
     CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT, body TEXT);
     CREATE FUNCTION login(who TEXT) RETURNS VOID LANGUAGE plpgsql AS $$
