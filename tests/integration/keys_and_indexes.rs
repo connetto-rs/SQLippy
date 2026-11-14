@@ -208,6 +208,27 @@ fn an_index_naming_a_column_twice_is_reported() {
 }
 
 #[test]
+fn an_index_on_a_schema_qualified_table_naming_a_column_twice_is_reported() {
+    let constrainer = GenericConstrainer::from(RepeatedIndexColumn::default());
+    let database = ParserDB::parse::<PostgreSqlDialect>(
+        "CREATE SCHEMA app;
+         CREATE TABLE app.t (id INT PRIMARY KEY, a INT);
+         CREATE INDEX t_a_a ON app.t (a, a);",
+    )
+    .expect("schema parses");
+    let messages: Vec<String> = constrainer
+        .diagnostics(&database)
+        .into_iter()
+        .map(|error| error.to_string())
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0].contains("Index 't_a_a' on 't' names column 'a' more than once"),
+        "{messages:?}"
+    );
+}
+
+#[test]
 fn each_rule_registered_alone_runs_at_warn() {
     let sql = format!(
         "{PARENT}
