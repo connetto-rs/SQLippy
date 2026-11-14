@@ -23,7 +23,9 @@ use crate::{
 /// and constrained the entries, the repeated one adds nothing: rows equal on
 /// the first copy are equal on the second, so the index sorts and enforces
 /// uniqueness exactly as it would without it, while storing every value
-/// again. Indexes over expressions are not judged.
+/// again. Indexes over expressions are not judged, and neither are `UNIQUE`
+/// and `PRIMARY KEY` constraints, which PostgreSQL refuses to create with a
+/// repeated column.
 ///
 /// # Example
 ///
@@ -140,14 +142,10 @@ impl<DB: DatabaseLike> TableRule for RepeatedIndexColumn<DB> {
         table: &<Self::Database as DatabaseLike>::Table,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let mut found = Vec::new();
-        for index in table.unique_indices(database)? {
-            found.extend(repeated(database, index)?);
-        }
         for index in table.indices(database)? {
-            found.extend(repeated(database, index)?);
-        }
-        for (name, column) in found {
+            let Some((name, column)) = repeated(database, index)? else {
+                continue;
+            };
             reporter.table(
                 table,
                 format!(
