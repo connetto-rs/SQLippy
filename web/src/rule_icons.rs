@@ -67,6 +67,7 @@ rule_icons! {
     "client_written_counter_key" => FaListOl,
     "client_written_scaled_numeric" => FaRuler,
     "incompatible_foreign_key" => FaLinkSlash,
+    "narrower_referencing_column" => FaRuler,
     "credential_free_write" => FaUserSlash,
     "deny_list_policy" => FaClipboardList,
     "exposed_definer_over_protected_table" => FaUserNinja,
