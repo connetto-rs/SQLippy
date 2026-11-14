@@ -38,6 +38,8 @@ mod tautological_policy;
 pub use tautological_policy::TautologicalPolicy;
 mod policy_without_row_reference;
 pub use policy_without_row_reference::PolicyWithoutRowReference;
+mod credential_pattern_policy;
+pub use credential_pattern_policy::CredentialPatternPolicy;
 mod unsatisfiable_policy;
 pub use unsatisfiable_policy::UnsatisfiablePolicy;
 mod restrictive_without_permissive;
