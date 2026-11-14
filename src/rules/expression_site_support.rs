@@ -7,7 +7,7 @@ use sql_traits::{
     traits::{CheckConstraintLike, DatabaseLike, FunctionLike, PolicyLike, TableLike, ViewLike},
 };
 use sqlparser::{
-    ast::{Statement, Visit},
+    ast::{Expr, Statement, Value, Visit},
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
@@ -17,6 +17,17 @@ use crate::{
     rules::policy_support::walked_clauses,
     traits::{Reporter, reporter::signature},
 };
+
+/// Whether `expression`, under casts and parentheses, is the `NULL` literal.
+pub(crate) fn is_null_literal(mut expression: &Expr) -> bool {
+    loop {
+        match expression {
+            Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => expression = inner,
+            Expr::Value(literal) => return matches!(literal.value, Value::Null),
+            _ => return false,
+        }
+    }
+}
 
 /// What one rule finds in expressions, and how it explains a finding.
 pub(crate) trait ExpressionFinder {

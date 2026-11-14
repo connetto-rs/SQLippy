@@ -8,17 +8,17 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         expression_site_support::{check_schema, check_statement},
-        not_in_support::NotInCheck,
+        not_in_support::{NotInCheck, NotInOperand},
     },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule},
 };
 
 const CHECK: NotInCheck = NotInCheck {
-    describe: |not_in| {
-        not_in
-            .nullable
-            .as_ref()
-            .map(|column| format!("`{}` over nullable '{column}'", not_in.expression))
+    describe: |not_in| match &not_in.operand {
+        NotInOperand::Subquery(Some(column)) => {
+            Some(format!("`{}` over nullable '{column}'", not_in.expression))
+        }
+        NotInOperand::Subquery(None) | NotInOperand::NullList => None,
     },
     problem: "which returns no row once the subquery yields a NULL",
     resolution: "Use NOT EXISTS, declare the column NOT NULL, or filter it with IS NOT NULL in the subquery.",

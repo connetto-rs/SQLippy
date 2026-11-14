@@ -3,13 +3,15 @@
 use std::{convert::Infallible, ops::ControlFlow};
 
 use sql_traits::{errors::LookupError, traits::DatabaseLike};
-use sqlparser::ast::{BinaryOperator, Expr, Statement, Value, Visit, Visitor};
+use sqlparser::ast::{BinaryOperator, Expr, Statement, Visit, Visitor};
 
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        expression_site_support::{ExpressionFinder, check_schema, check_statement},
+        expression_site_support::{
+            ExpressionFinder, check_schema, check_statement, is_null_literal,
+        },
         walk_support::walk,
     },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule},
@@ -77,17 +79,6 @@ SELECT id FROM t WHERE x IS NULL;",
             },
         };
         &METADATA
-    }
-}
-
-/// Whether `expression`, under casts and parentheses, is the `NULL` literal.
-fn is_null_literal(mut expression: &Expr) -> bool {
-    loop {
-        match expression {
-            Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => expression = inner,
-            Expr::Value(literal) => return matches!(literal.value, Value::Null),
-            _ => return false,
-        }
     }
 }
 

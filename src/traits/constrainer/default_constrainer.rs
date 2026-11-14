@@ -23,7 +23,7 @@ use crate::{
         LatentPolicyReadCycle, MissingPrimaryKey, MixedCaseColumnName, MixedCaseForeignKeyName,
         MixedCaseTableName, MomentStoredAsText, MoneyType, MultiplePermissivePolicies,
         NarrowIntegerKey, NarrowerReferencingColumn, NestedPolicySubquery, NonSnakeCaseColumnName,
-        NonSnakeCaseTableName, NotInNullableSubquery, NotInSubquery, NullComparison,
+        NonSnakeCaseTableName, NotInNullList, NotInNullableSubquery, NotInSubquery, NullComparison,
         NullCredentialRead, NullableCompositeForeignKey, NullableConcatenation,
         NullableUniqueColumn, OffsetPaging, OuterColumnCapture, OwnerRightsView, PluralColumnName,
         PolicyExpressionDefeatsIndex, PolicyReadCycle, PolicyReadsUnprotectedTable,
@@ -204,10 +204,11 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 24] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 25] = [
         Box::new(NullableConcatenation::default()),
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
+        Box::new(NotInNullList::default()),
         Box::new(NullComparison::default()),
         Box::new(RandomOrderLimit::default()),
         Box::new(OffsetPaging::default()),
@@ -237,7 +238,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 44] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 45] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -259,6 +260,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(WildcardView::default()),
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
+        Box::new(NotInNullList::default()),
         Box::new(NullComparison::default()),
         Box::new(TimestampWithoutTimeZone::default()),
         Box::new(TimeWithTimeZone::default()),
