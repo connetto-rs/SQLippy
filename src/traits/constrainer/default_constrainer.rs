@@ -35,15 +35,15 @@ use crate::{
         SecurityDefinerFunctionExposed, SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite,
         SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
         SingularTableName, SubjectSettableAttribute, SurrogatePrimaryKeyInExtension,
-        TableInheritance, TautologicalCheck, TautologicalWithCheck, TimeDependentCheck,
-        TimeWithTimeZone, TimestampBetween, TimestampWithoutTimeZone,
+        TableInheritance, TautologicalCheck, TautologicalPolicy, TautologicalWithCheck,
+        TimeDependentCheck, TimeWithTimeZone, TimestampBetween, TimestampWithoutTimeZone,
         TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
         TruncatingIntegerDivision, UnboundedTextColumn, UncachedPolicyCall, UncheckedPastTimestamp,
         UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
         UnindexedForeignKey, UnindexedPolicyFilter, UnknownBinarySend, UnlinkedFromItem,
         UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
-        UnscopedUniqueConstraintOnRowLevelSecurityTable, UnvalidatedConstraint, UuidStoredAsText,
-        WildcardView, ZeroPrecisionTimestamp,
+        UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
+        UnvalidatedConstraint, UuidStoredAsText, WildcardView, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -83,7 +83,7 @@ pub struct DefaultConstrainer<DB: DatabaseLike> {
 impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
-        let table_rules: [Box<dyn TableRule<Database = DB>>; 38] = [
+        let table_rules: [Box<dyn TableRule<Database = DB>>; 40] = [
             Box::new(TimeDependentCheck::default()),
             Box::new(PrefixRedundantIndex::default()),
             Box::new(MissingPrimaryKey::default()),
@@ -104,6 +104,8 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(DeadPermissivePolicy::default()),
             Box::new(DuplicatePolicy::default()),
             Box::new(TautologicalWithCheck::default()),
+            Box::new(TautologicalPolicy::default()),
+            Box::new(UnsatisfiablePolicy::default()),
             Box::new(UnforcedRowLevelSecurity::default()),
             Box::new(CorrelatedPolicySubquery::default()),
             Box::new(NestedPolicySubquery::default()),
