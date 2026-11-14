@@ -6,7 +6,7 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, IndexLike, TableLike},
     utils::columns_in_expression,
 };
-use sqlparser::ast::Expr;
+use sqlparser::ast::{Expr, IndexType};
 
 use crate::{
     error::Interruption,
@@ -23,9 +23,13 @@ use crate::{
 /// and constrained the entries, the repeated one adds nothing: rows equal on
 /// the first copy are equal on the second, so the index sorts and enforces
 /// uniqueness exactly as it would without it, while storing every value
-/// again. Indexes over expressions are not judged, and neither are `UNIQUE`
-/// and `PRIMARY KEY` constraints, which PostgreSQL refuses to create with a
-/// repeated column.
+/// again. Only btree indexes are judged, since the btree operator classes of
+/// one type share its equality. A `GIN` or `GiST` key serves the operators of
+/// its own operator class, so a column repeated there under another operator
+/// class, as in `USING gin (doc jsonb_ops, doc jsonb_path_ops)`, can serve
+/// operators the first key does not. Indexes over expressions are not judged
+/// either, and neither are `UNIQUE` and `PRIMARY KEY` constraints, which
+/// PostgreSQL refuses to create with a repeated column.
 ///
 /// # Example
 ///
@@ -85,7 +89,7 @@ CREATE INDEX t_a ON t (a);",
 }
 
 /// The name of an index, or its columns when it has none, and the first key
-/// column it names more than once, for an index over plain columns.
+/// column it names more than once, for a btree index over plain columns.
 ///
 /// Each key is resolved on its own because [`IndexLike::columns`] lists every
 /// column once, however many keys name it.
@@ -97,7 +101,11 @@ fn repeated<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
         Expr::Tuple(elements) => elements.iter().collect(),
         single => vec![single],
     };
-    if !elements.iter().all(|element| is_column_reference(element)) {
+    if index
+        .access_method()
+        .is_some_and(|method| *method != IndexType::BTree)
+        || !elements.iter().all(|element| is_column_reference(element))
+    {
         return Ok(None);
     }
     let table = IndexLike::table(index, database);
