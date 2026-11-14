@@ -80,6 +80,7 @@ pub use query_rules::*;
 mod authority_support;
 mod clock_support;
 mod credential_support;
+mod function_reach_support;
 mod grant_support;
 mod index_support;
 mod key_support;
