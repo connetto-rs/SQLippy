@@ -104,6 +104,81 @@ fn not_in_over_a_non_null_or_filtered_column_is_reported_as_slow_only() {
 }
 
 #[test]
+fn not_in_over_a_with_item_reads_the_filters_the_output_passes_through() {
+    let constrainer = not_in_rules();
+    for (sql, expected) in [
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH t AS (SELECT a_id FROM b WHERE a_id IS NOT NULL) SELECT a_id FROM t)",
+            "not_in_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH t(v) AS (SELECT a_id FROM b WHERE a_id IS NOT NULL) SELECT t.v FROM t)",
+            "not_in_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH t AS (SELECT a_id FROM b WHERE a_id IS NOT NULL), u AS (SELECT a_id AS x FROM t) SELECT x FROM u)",
+            "not_in_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH t AS (SELECT a_id FROM b) SELECT a_id FROM t WHERE a_id IS NOT NULL)",
+            "not_in_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH t AS (SELECT a_id FROM b) SELECT a_id FROM t)",
+            "not_in_nullable_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH t AS (SELECT a_id, team FROM b WHERE team IS NOT NULL) SELECT a_id FROM t)",
+            "not_in_nullable_subquery",
+        ),
+    ] {
+        let found: Vec<_> = statement_findings(&constrainer, sql)
+            .into_iter()
+            .map(|(rule, _, _)| rule)
+            .collect();
+        assert_eq!(found, [expected], "{sql}");
+    }
+}
+
+#[test]
+fn not_in_with_a_self_named_item_terminates() {
+    let sql =
+        "SELECT id FROM a WHERE id NOT IN (WITH b AS (SELECT a_id FROM b) SELECT a_id FROM b)";
+    let found = statement_findings(&not_in_rules(), sql);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].1, Level::Warn);
+    assert_eq!(
+        found[0].2,
+        "id NOT IN (WITH b AS (SELECT a_id FROM b) SELECT a_id FROM b)"
+    );
+}
+
+#[test]
+fn not_in_with_items_obey_postgresql_visibility() {
+    let database =
+        ParserDB::parse::<PostgreSqlDialect>(&format!("{PAIRS} CREATE TABLE t (a_id INT);"))
+            .expect("schema parses");
+    let constrainer = not_in_rules();
+    // PostgreSQL 18 returns no rows when the visible source contains a NULL.
+    for (sql, expected) in [
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH u AS (SELECT a_id FROM t), t AS (SELECT a_id FROM b WHERE a_id IS NOT NULL) SELECT a_id FROM u)",
+            "not_in_nullable_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH t AS (SELECT a_id FROM b), u AS (WITH v AS (SELECT a_id FROM t), t AS (SELECT a_id FROM b WHERE a_id IS NOT NULL) SELECT a_id FROM v) SELECT a_id FROM u)",
+            "not_in_nullable_subquery",
+        ),
+    ] {
+        let found: Vec<_> = crate::rule_findings::statement_findings(&constrainer, &database, sql)
+            .into_iter()
+            .map(|(rule, _, _)| rule)
+            .collect();
+        assert_eq!(found, [expected], "{sql}");
+    }
+}
+
+#[test]
 fn membership_tests_without_a_negated_subquery_pass() {
     let constrainer = not_in_rules();
     for sql in [

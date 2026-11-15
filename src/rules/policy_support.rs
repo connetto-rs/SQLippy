@@ -4,14 +4,17 @@ use std::{collections::BTreeSet, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ColumnDefinition, ColumnScope, FunctionKind, IdentifierCase, PolicyExpression},
+    structs::{
+        ColumnDefinition, ColumnDefinitionScope, ColumnScope, FunctionKind, IdentifierCase,
+        PolicyExpression,
+    },
     traits::{DatabaseLike, FunctionLike, PolicyLike, RoleLike, RoleMembershipLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::{
     ast::{
-        BinaryOperator, CreatePolicyCommand, Expr, FunctionArguments, Owner, Query, Statement,
-        Visit, Visitor,
+        BinaryOperator, CreatePolicyCommand, Expr, FunctionArguments, Owner, Query, Select,
+        Statement, Visit, Visitor,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -245,8 +248,8 @@ pub(crate) fn holds_sublink_or_call(expression: &Expr) -> bool {
 }
 
 /// Finds column references to the policy's table, or to one of its columns,
-/// outside sublinks or in the top-level query of a sublink that its own
-/// relations do not resolve.
+/// outside sublinks or anywhere in a sublink, its `WITH` items and nested
+/// sublinks included, that the sublink's own relations do not resolve.
 struct RowReferences<'db, DB: DatabaseLike> {
     database: &'db DB,
     table: ColumnScope<'db, 'db, DB>,
@@ -291,38 +294,52 @@ impl<DB: DatabaseLike> RowReferences<'_, DB> {
     }
 }
 
-/// References in the top-level query of one sublink.
-struct SublinkReferences<'outer, 'db, 'query, DB: DatabaseLike> {
+/// References anywhere in one sublink, each resolved in the `SELECT` holding
+/// it, so a `WITH` item or a nested sublink reading the checked row counts.
+struct SublinkReferences<'outer, 'db, 'query, 'scope, DB: DatabaseLike> {
     outer: &'outer RowReferences<'db, DB>,
-    local: ColumnScope<'query, 'db, DB>,
-    depth: usize,
+    local: &'scope ColumnScope<'query, 'db, DB>,
+    /// One entry per query and per `SELECT` the walk stands in, innermost
+    /// last, `None` for a query's own clauses or a `SELECT` without a scope.
+    scopes: Vec<Option<ColumnDefinitionScope<'scope, 'query, 'db, DB>>>,
 }
 
-impl<DB: DatabaseLike> Visitor for SublinkReferences<'_, '_, '_, DB> {
+impl<DB: DatabaseLike> Visitor for SublinkReferences<'_, '_, '_, '_, DB> {
     type Break = Result<(), LookupError>;
 
     fn pre_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
-        self.depth += 1;
+        self.scopes.push(None);
         ControlFlow::Continue(())
     }
 
     fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
-        self.depth -= 1;
+        self.scopes.pop();
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Self::Break> {
+        self.scopes.push(self.local.scope_for_select(select));
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_select(&mut self, _select: &Select) -> ControlFlow<Self::Break> {
+        self.scopes.pop();
         ControlFlow::Continue(())
     }
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
-        if self.depth != 1 || !is_column_reference(expression) {
+        if !is_column_reference(expression) {
             return ControlFlow::Continue(());
         }
-        decide(
-            self.local
-                .resolve_column_definition(expression)
-                .and_then(|local| match local {
-                    Some(_) => Ok(false),
-                    None => self.outer.reads_table(expression),
-                }),
-        )
+        let local = match self.scopes.as_slice() {
+            [.., Some(select)] => select.resolve_column_definition(expression),
+            [None] => self.local.resolve_column_definition(expression),
+            _ => return ControlFlow::Continue(()),
+        };
+        decide(local.and_then(|local| match local {
+            Some(_) => Ok(false),
+            None => self.outer.reads_table(expression),
+        }))
     }
 }
 
@@ -349,8 +366,8 @@ impl<DB: DatabaseLike> Visitor for RowReferences<'_, DB> {
                 query,
                 &mut SublinkReferences {
                     outer: self,
-                    local,
-                    depth: 0,
+                    local: &local,
+                    scopes: Vec::new(),
                 },
             ) {
                 ControlFlow::Continue(()) => Ok(false),
