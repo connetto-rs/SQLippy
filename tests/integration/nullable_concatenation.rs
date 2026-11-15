@@ -175,6 +175,35 @@ fn nullable_concatenation_reports_plpgsql_expression_sites() {
         "DECLARE label TEXT;
          BEGIN FOR label IN EXECUTE 'SELECT $1' USING (SELECT first || mid FROM people)
          LOOP NULL; END LOOP; END",
+        "DECLARE label TEXT;
+         BEGIN SELECT first || mid INTO label FROM people; END",
+        "DECLARE label TEXT;
+         BEGIN EXECUTE (SELECT first || mid FROM people) INTO label; END",
+        "DECLARE label TEXT;
+         BEGIN label := (SELECT first || mid FROM people); END",
+        "DECLARE labels TEXT[];
+         BEGIN labels[length((SELECT first || mid FROM people))] := 'label'; END",
+        "DECLARE labels TEXT[];
+         BEGIN labels[1:length((SELECT first || mid FROM people))] := ARRAY['label']; END",
+        "BEGIN LOOP EXIT WHEN (SELECT first || mid FROM people) IS NULL; END LOOP; END",
+        "BEGIN LOOP CONTINUE WHEN (SELECT first || mid FROM people) IS NULL; EXIT; END LOOP; END",
+        "BEGIN RAISE NOTICE '%', (SELECT first || mid FROM people); END",
+        "BEGIN RAISE EXCEPTION USING MESSAGE = (SELECT first || mid FROM people); END",
+        "BEGIN ASSERT (SELECT first || mid FROM people) IS NULL; END",
+        "BEGIN ASSERT TRUE, (SELECT first || mid FROM people); END",
+        "DECLARE labels CURSOR FOR SELECT first || mid FROM people;
+         BEGIN OPEN labels; END",
+        "DECLARE labels CURSOR (label TEXT) FOR SELECT label;
+         BEGIN OPEN labels((SELECT first || mid FROM people)); END",
+        "DECLARE labels REFCURSOR;
+         BEGIN OPEN labels FOR SELECT first || mid FROM people; END",
+        "DECLARE labels REFCURSOR;
+         BEGIN OPEN labels FOR EXECUTE (SELECT first || mid FROM people); END",
+        "DECLARE labels REFCURSOR;
+         BEGIN OPEN labels FOR EXECUTE 'SELECT $1' USING (SELECT first || mid FROM people); END",
+        "DECLARE labels REFCURSOR; label TEXT;
+         BEGIN FETCH RELATIVE length((SELECT first || mid FROM people)) FROM labels INTO label;
+         END",
     ] {
         let sql = format!(
             "{SCHEMA} CREATE FUNCTION label() RETURNS VOID LANGUAGE plpgsql AS $$ {body} $$;"
@@ -185,6 +214,15 @@ fn nullable_concatenation_reports_plpgsql_expression_sites() {
             "{body}"
         );
     }
+}
+
+#[test]
+fn nullable_concatenation_reports_plpgsql_returned_values() {
+    let sql = format!(
+        "{SCHEMA} CREATE FUNCTION label() RETURNS TEXT LANGUAGE plpgsql
+           AS $$ BEGIN RETURN (SELECT first || mid FROM people); END $$;"
+    );
+    assert_eq!(findings(&rule(), "nullable_concatenation", &sql).len(), 1);
 }
 
 #[test]
