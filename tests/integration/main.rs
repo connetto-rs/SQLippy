@@ -23,6 +23,7 @@ mod definer_functions;
 mod duplicate_column_assignments;
 mod duplicate_policies;
 mod duplicating_recursive_ctes;
+mod dynamic_sql;
 mod expressions_and_functions;
 mod generated_keys;
 mod invoker_search_path;

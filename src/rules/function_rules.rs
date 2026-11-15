@@ -1,5 +1,7 @@
 //! Submodule providing constraint structs that can be applied to functions.
 
+mod dynamic_sql_injection;
+pub use dynamic_sql_injection::DynamicSqlInjection;
 mod definer_without_search_path;
 pub use definer_without_search_path::DefinerWithoutSearchPath;
 mod definer_temporary_schema_not_last;
