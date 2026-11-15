@@ -120,3 +120,50 @@ fn the_default_constrainer_warns_about_shadowing_items() {
             ))
     );
 }
+
+#[test]
+fn an_item_named_like_a_foreign_table_is_reported() {
+    let constrainer: GenericConstrainer<ParserDB> = CteShadowsRelation::default().into();
+    let found = findings(
+        &constrainer,
+        "cte_shadows_relation",
+        "CREATE FOREIGN DATA WRAPPER shadow_wrapper;
+         CREATE SERVER shadow_server FOREIGN DATA WRAPPER shadow_wrapper;
+         CREATE FOREIGN TABLE external_grants (group_id INT) SERVER shadow_server;
+         CREATE VIEW foreign_shadow AS
+           WITH external_grants AS (SELECT 1 AS group_id)
+           SELECT group_id FROM external_grants;",
+    );
+    let [(level, object, message)] = found.as_slice() else {
+        panic!("expected one finding, got {found:?}");
+    };
+    assert_eq!((*level, object.as_str()), (Level::Warn, "foreign_shadow"));
+    assert!(
+        message.contains("foreign table 'external_grants'"),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_item_named_like_a_materialized_view_is_reported() {
+    let constrainer: GenericConstrainer<ParserDB> = CteShadowsRelation::default().into();
+    let found = findings(
+        &constrainer,
+        "cte_shadows_relation",
+        "CREATE MATERIALIZED VIEW cached_grants AS SELECT 1 AS group_id;
+         CREATE VIEW materialized_shadow AS
+           WITH cached_grants AS (SELECT 2 AS group_id)
+           SELECT group_id FROM cached_grants;",
+    );
+    let [(level, object, message)] = found.as_slice() else {
+        panic!("expected one finding, got {found:?}");
+    };
+    assert_eq!(
+        (*level, object.as_str()),
+        (Level::Warn, "materialized_shadow")
+    );
+    assert!(
+        message.contains("materialized view 'cached_grants'"),
+        "{message}"
+    );
+}
