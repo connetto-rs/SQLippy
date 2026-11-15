@@ -262,6 +262,19 @@ fn nodes_statements(nodes: Vec<Node>, statements: &mut Vec<Statement>) {
             }
             Node::Open(Open::Bound(cursor)) => bound_cursor_statements(cursor, statements),
             Node::Fetch(_) | Node::Diagnostics(_) => {}
+            Node::Exit(exit) => statements.extend(exit.condition.map(Statement::Query)),
+            Node::Return { value } => statements.extend(value.map(Statement::Query)),
+            Node::Raise(raise) => statements.extend(
+                raise
+                    .arguments
+                    .into_iter()
+                    .chain(raise.options)
+                    .map(|argument| Statement::Query(Box::new(argument))),
+            ),
+            Node::Assert(assert) => {
+                statements.push(Statement::Query(assert.condition));
+                statements.extend(assert.message.map(Statement::Query));
+            }
             Node::Block(block) => block_statements(block, statements),
             Node::If(conditional) => {
                 for branch in conditional.branches {

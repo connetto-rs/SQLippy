@@ -1540,7 +1540,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "pg_diesel"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#9efeba6e4022e65b0dc3ec7233bb1f0aa4e59a4c"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
 dependencies = [
  "diesel",
  "pg_diesel_core",
@@ -1554,7 +1554,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_core"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#9efeba6e4022e65b0dc3ec7233bb1f0aa4e59a4c"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1568,7 +1568,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg14"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#9efeba6e4022e65b0dc3ec7233bb1f0aa4e59a4c"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1579,7 +1579,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg15"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#9efeba6e4022e65b0dc3ec7233bb1f0aa4e59a4c"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1590,7 +1590,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg16"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#9efeba6e4022e65b0dc3ec7233bb1f0aa4e59a4c"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1601,7 +1601,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg17"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#9efeba6e4022e65b0dc3ec7233bb1f0aa4e59a4c"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1612,7 +1612,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg18"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#9efeba6e4022e65b0dc3ec7233bb1f0aa4e59a4c"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -2219,7 +2219,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#befe9752f953a6578cb48bc9c5160f683dbce549"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#5c5c77bd3d74984f012da376ad238cd8b4b3fb7e"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -2260,7 +2260,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#96a5132234dda33aa75ab6d3ef045038f106703a"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#5201fb14146885311123dd3f706cdb998962afc7"
 dependencies = [
  "log",
  "recursive",
@@ -2282,7 +2282,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-plpgsql"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#9689d11e7d8a2a98826563c69531e061e77ffd4f"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#02ad90fc06c3b8d90ad30bca1f4d244691627e3f"
 dependencies = [
  "sqlparser",
  "thiserror",
@@ -2291,7 +2291,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#96a5132234dda33aa75ab6d3ef045038f106703a"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#5201fb14146885311123dd3f706cdb998962afc7"
 dependencies = [
  "proc-macro2",
  "quote",
