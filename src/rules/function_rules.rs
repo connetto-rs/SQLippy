@@ -10,6 +10,8 @@ mod exposed_definer_over_protected_table;
 pub use exposed_definer_over_protected_table::ExposedDefinerOverProtectedTable;
 mod impure_immutable_function;
 pub use impure_immutable_function::ImpureImmutableFunction;
+mod invoker_without_search_path;
+pub use invoker_without_search_path::InvokerWithoutSearchPath;
 
 use sql_traits::{
     errors::LookupError,

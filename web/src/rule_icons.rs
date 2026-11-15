@@ -52,6 +52,7 @@ rule_icons! {
     "restrictive_without_permissive" => FaPersonCircleXmark,
     "definer_temporary_schema_not_last" => FaHourglassEnd,
     "definer_without_search_path" => FaSignsPost,
+    "invoker_without_search_path" => FaSignsPost,
     "definer_path_creatable_schema" => FaSignsPost,
     "unsatisfiable_check" => FaCircleXmark,
     "surrogate_primary_key_in_extension" => FaPuzzlePiece,
