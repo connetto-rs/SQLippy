@@ -155,6 +155,9 @@ fn a_foreign_key_an_index_on_a_referenced_unique_key_finds_is_not_reported() {
          CREATE TABLE keyed (parent_id INT NOT NULL, parent_kind INT NOT NULL, other INT,
            PRIMARY KEY (parent_id, other),
            FOREIGN KEY (parent_kind, parent_id) REFERENCES parents (kind, id));
+         CREATE TABLE repeated (parent_id INT NOT NULL, parent_kind INT NOT NULL,
+           FOREIGN KEY (parent_id, parent_kind) REFERENCES parents (id, kind));
+         CREATE INDEX ON repeated (parent_kind, parent_kind, parent_id);
          CREATE TABLE by_kind (parent_id INT NOT NULL, parent_kind INT NOT NULL,
            FOREIGN KEY (parent_id, parent_kind) REFERENCES parents (id, kind));
          CREATE INDEX ON by_kind (parent_kind);
