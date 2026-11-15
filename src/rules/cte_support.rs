@@ -2,12 +2,17 @@
 //! reads, and the terms of a recursive item, shared by the rules on common
 //! table expressions.
 
-use std::{iter, ops::ControlFlow, ptr};
+use std::{borrow::Cow, iter, marker::PhantomData, ops::ControlFlow, ptr};
 
-use sql_traits::utils::identifier_resolution::identifiers_match;
+use sql_traits::{
+    errors::LookupError,
+    structs::{IdentifierCase, TargetName},
+    traits::{DatabaseLike, Relation},
+    utils::identifier_resolution::identifiers_match,
+};
 use sqlparser::ast::{
-    Cte, Expr, Ident, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, Query, Select,
-    SelectItem, SetExpr, SetOperator, SetQuantifier, TableFactor, Visitor,
+    BinaryOperator, Cte, Expr, Ident, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart,
+    Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier, TableFactor, Visit, Visitor,
 };
 
 use crate::rules::{
@@ -306,6 +311,173 @@ impl<'q> RecursiveItem<'q> {
     /// columns.
     pub(crate) fn outputs(&self) -> Option<Vec<&'q Expr>> {
         self.term.projection.iter().map(output_expression).collect()
+    }
+
+    /// The one relation the recursive term reads besides the working table,
+    /// with the name the term reads it by, or `None` when it reads none,
+    /// several, or one that is not a plain relation.
+    pub(crate) fn walked(&self) -> Option<(&'q ObjectName, &'q Ident)> {
+        let mut others = self
+            .term
+            .from
+            .iter()
+            .flat_map(|from| {
+                iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation))
+            })
+            .filter_map(|factor| match factor {
+                TableFactor::Table {
+                    name,
+                    alias,
+                    args: None,
+                    ..
+                } => {
+                    let exposed = match alias {
+                        Some(alias) => &alias.name,
+                        None => name.0.last()?.as_ident()?,
+                    };
+                    (!same_name(exposed, self.working)).then_some(Some((name, exposed)))
+                }
+                _ => Some(None),
+            });
+        let walked = others.next()??;
+        others.next().is_none().then_some(walked)
+    }
+
+    /// The column of the walked relation, read by `exposed`, that
+    /// `expression` names as it stands.
+    pub(crate) fn walked_column<'e>(
+        &self,
+        exposed: &Ident,
+        expression: &'e Expr,
+    ) -> Option<&'e Ident> {
+        match unnested(expression) {
+            Expr::CompoundIdentifier(parts) => match parts.as_slice() {
+                [table, column] if same_name(table, exposed) => Some(column),
+                _ => None,
+            },
+            Expr::Identifier(column) if self.position(column).is_none() => Some(column),
+            _ => None,
+        }
+    }
+
+    /// The columns of the walked relation, read by `exposed`, that a
+    /// condition of the recursive term equates with an expression over the
+    /// working table.
+    pub(crate) fn joined_columns(&self, exposed: &Ident) -> Vec<&'q Ident> {
+        self.conditions()
+            .into_iter()
+            .filter_map(|condition| {
+                let Expr::BinaryOp {
+                    left,
+                    op: BinaryOperator::Eq,
+                    right,
+                } = unnested(condition)
+                else {
+                    return None;
+                };
+                [(left, right), (right, left)]
+                    .into_iter()
+                    .find_map(|(walked, working)| {
+                        self.walked_column(exposed, walked)
+                            .filter(|_| self.reads_working(working))
+                    })
+            })
+            .collect()
+    }
+}
+
+/// The table `name` reads on `path`, or on the database's search path when
+/// `None`.
+pub(crate) fn stored_table<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    name: &ObjectName,
+    path: Option<&[(Cow<'_, str>, bool)]>,
+) -> Result<Option<&'db DB::Table>, LookupError> {
+    let rendered = name.to_string();
+    let Ok(target) = TargetName::parse(&rendered) else {
+        return Ok(None);
+    };
+    let relation = match path {
+        Some(path) => {
+            database.resolve_target_relation_on_path(target, path, IdentifierCase::AsWritten)?
+        }
+        None => database.resolve_target_relation(target, IdentifierCase::AsWritten)?,
+    };
+    Ok(match relation {
+        Some(Relation::Table(table)) => Some(table),
+        _ => None,
+    })
+}
+
+/// Calls `judge` with every item of a `WITH RECURSIVE` clause in `node`
+/// whose recursive term walks one relation no visible `WITH` item claims,
+/// with that relation's name and the name the term reads it by.
+///
+/// # Errors
+///
+/// Returns the first error `judge` returns.
+pub(crate) fn walks<V, E, F>(node: &V, judge: F) -> Result<(), E>
+where
+    V: Visit + ?Sized,
+    F: FnMut(&Cte, &RecursiveItem<'_>, &ObjectName, &Ident) -> Result<(), E>,
+{
+    let mut walks = Walks {
+        scopes: WithScopes::default(),
+        judge,
+        error: PhantomData,
+    };
+    match walk(node, &mut walks) {
+        ControlFlow::Break(error) => Err(error),
+        ControlFlow::Continue(()) => Ok(()),
+    }
+}
+
+/// The visitor behind [`walks`].
+struct Walks<F, E> {
+    scopes: WithScopes,
+    judge: F,
+    error: PhantomData<fn() -> E>,
+}
+
+impl<E, F> Visitor for Walks<F, E>
+where
+    F: FnMut(&Cte, &RecursiveItem<'_>, &ObjectName, &Ident) -> Result<(), E>,
+{
+    type Break = E;
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<E> {
+        self.scopes.enter(query);
+        let Some(with) = query.with.as_ref().filter(|with| with.recursive) else {
+            return ControlFlow::Continue(());
+        };
+        for item in &with.cte_tables {
+            let Some(recursive) = RecursiveItem::split(item) else {
+                continue;
+            };
+            let Some((name, exposed)) = recursive.walked() else {
+                continue;
+            };
+            let claimed = match name.0.as_slice() {
+                [ObjectNamePart::Identifier(written)] => with
+                    .cte_tables
+                    .iter()
+                    .chain(item.query.with.iter().flat_map(|inner| &inner.cte_tables))
+                    .any(|claimant| same_name(written, &claimant.alias.name)),
+                _ => false,
+            };
+            if claimed || self.scopes.binding(name).is_some() {
+                continue;
+            }
+            if let Err(error) = (self.judge)(item, &recursive, name, exposed) {
+                return ControlFlow::Break(error);
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, query: &Query) -> ControlFlow<E> {
+        self.scopes.leave(query);
+        ControlFlow::Continue(())
     }
 }
 
