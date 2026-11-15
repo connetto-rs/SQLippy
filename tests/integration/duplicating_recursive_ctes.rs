@@ -53,9 +53,89 @@ fn a_walk_that_reaches_each_row_once_passes() {
         "WITH RECURSIVE r(id) AS (SELECT 6 UNION ALL SELECT g.parent_id FROM groups AS g, r WHERE r.id = g.id) SELECT id FROM r",
         // 2 rows, the walked name reads the item body's own WITH.
         "WITH RECURSIVE r(id) AS (WITH dag_edges(child, parent) AS (VALUES (1, 0)) SELECT 0 UNION ALL SELECT e.child FROM dag_edges AS e JOIN r ON e.parent = r.id) SELECT id FROM r",
+        // PostgreSQL refuses a name of four parts, so no table is walked.
+        "WITH RECURSIVE r(id) AS (SELECT 0 UNION ALL SELECT e.child FROM postgres.public.dag_edges.extra e JOIN r ON e.parent = r.id) SELECT id FROM r",
     ] {
         assert_eq!(duplicating(sql), Vec::<String>::new(), "{sql}");
     }
+}
+
+#[test]
+fn resolved_aliases_wildcards_and_catalog_names_report_walked_columns() {
+    for sql in [
+        "WITH RECURSIVE r(id) AS (SELECT 0 UNION ALL SELECT e.child FROM postgres.public.dag_edges e JOIN r ON e.parent = r.id) SELECT id FROM r",
+        "WITH RECURSIVE r(id, parent) AS (SELECT 0, 0 UNION ALL SELECT e.* FROM dag_edges e JOIN r ON e.parent = r.id) SELECT id FROM r",
+        "WITH RECURSIVE r(id) AS (SELECT 0 UNION ALL SELECT e.renamed AS next_id FROM dag_edges e(renamed, parent) JOIN r ON e.parent = r.id) SELECT id FROM r",
+        "WITH RECURSIVE r(id, parent) AS (SELECT 0, 0 UNION ALL SELECT e.* FROM dag_edges e(renamed) JOIN r ON e.parent = r.id) SELECT id FROM r",
+    ] {
+        assert_eq!(duplicating(sql).len(), 1, "{sql}");
+    }
+}
+
+#[test]
+fn aliases_and_wildcards_preserve_single_column_keys() {
+    for sql in [
+        "WITH RECURSIVE r(id) AS (SELECT 1 UNION ALL SELECT g.renamed FROM groups g(renamed) JOIN r ON g.parent_id = r.id) SELECT id FROM r",
+        "WITH RECURSIVE r(id, parent) AS (SELECT 1, 0 UNION ALL SELECT g.* FROM groups g JOIN r ON g.parent_id = r.id) SELECT id FROM r",
+        "WITH RECURSIVE r(id) AS (SELECT 6 UNION ALL SELECT g.parent_id FROM groups g(renamed) JOIN r ON g.renamed = r.id) SELECT id FROM r",
+    ] {
+        assert_eq!(duplicating(sql), Vec::<String>::new(), "{sql}");
+    }
+}
+
+#[test]
+fn a_keyed_tree_behind_a_derived_table_or_view_is_not_reported() {
+    let constrainer: GenericConstrainer<ParserDB> = DuplicatingRecursiveCte::default().into();
+    let database = ParserDB::parse::<PostgreSqlDialect>(&format!(
+        "{SCHEMA} CREATE VIEW group_view AS SELECT id, parent_id FROM groups;"
+    ))
+    .expect("schema parses");
+    for sql in [
+        "WITH RECURSIVE r(id) AS (SELECT 1 UNION ALL SELECT g.id FROM (SELECT id, parent_id FROM groups) g JOIN r ON g.parent_id = r.id) SELECT id FROM r",
+        "WITH RECURSIVE r(id) AS (SELECT 1 UNION ALL SELECT g.id FROM group_view g JOIN r ON g.parent_id = r.id) SELECT id FROM r",
+    ] {
+        assert_eq!(
+            statement_findings(&constrainer, &database, sql),
+            [],
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn a_projection_without_walked_columns_is_outside_the_rule_scope() {
+    for sql in [
+        "WITH RECURSIVE r(id, depth) AS (SELECT 0, 0 UNION ALL SELECT 1, r.depth + 1 FROM dag_edges e JOIN r ON e.parent = r.id WHERE r.depth < 20) SELECT id FROM r",
+        "WITH RECURSIVE r(id) AS (SELECT 0 UNION ALL SELECT r.* FROM dag_edges e JOIN r ON e.parent = r.id WHERE r.id < 0) SELECT id FROM r",
+        // A system column is no stored column of the table.
+        "WITH RECURSIVE r(id) AS (SELECT 0::oid UNION ALL SELECT e.tableoid FROM dag_edges e JOIN r ON e.parent::oid = r.id) SELECT id FROM r",
+    ] {
+        assert_eq!(duplicating(sql), Vec::<String>::new(), "{sql}");
+    }
+}
+
+#[test]
+fn the_first_schema_on_the_search_path_decides_the_walked_keys() {
+    let constrainer: GenericConstrainer<ParserDB> = DuplicatingRecursiveCte::default().into();
+    let found = findings(
+        &constrainer,
+        "duplicating_recursive_cte",
+        "CREATE SCHEMA tree;
+         CREATE SCHEMA graph;
+         CREATE TABLE tree.edges (child INT PRIMARY KEY, parent INT);
+         CREATE TABLE graph.edges (child INT, parent INT, PRIMARY KEY (child, parent));
+         CREATE FUNCTION tree_first() RETURNS SETOF INT LANGUAGE sql SET search_path = tree, graph AS $$
+           WITH RECURSIVE r(id) AS (SELECT 0 UNION ALL SELECT e.child FROM edges e JOIN r ON e.parent = r.id) SELECT id FROM r $$;
+         CREATE FUNCTION graph_first() RETURNS SETOF INT LANGUAGE sql SET search_path = graph, tree AS $$
+           WITH RECURSIVE r(id) AS (SELECT 0 UNION ALL SELECT e.child FROM edges e JOIN r ON e.parent = r.id) SELECT id FROM r $$;",
+    );
+    assert_eq!(
+        found
+            .iter()
+            .map(|(level, object, _)| (*level, object.as_str()))
+            .collect::<Vec<_>>(),
+        [(Level::Warn, "graph_first()")]
+    );
 }
 
 #[test]

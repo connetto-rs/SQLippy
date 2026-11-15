@@ -7,12 +7,13 @@ use std::{borrow::Cow, iter, marker::PhantomData, ops::ControlFlow, ptr};
 use sql_traits::{
     errors::LookupError,
     structs::{IdentifierCase, TargetName},
-    traits::{DatabaseLike, Relation},
+    traits::{ColumnLike, DatabaseLike, Relation, TableLike},
     utils::identifier_resolution::identifiers_match,
 };
 use sqlparser::ast::{
     BinaryOperator, Cte, Expr, Ident, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart,
-    Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier, TableFactor, Visit, Visitor,
+    Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier, TableAlias, TableFactor, Visit,
+    Visitor,
 };
 
 use crate::rules::{
@@ -313,10 +314,9 @@ impl<'q> RecursiveItem<'q> {
         self.term.projection.iter().map(output_expression).collect()
     }
 
-    /// The one relation the recursive term reads besides the working table,
-    /// with the name the term reads it by, or `None` when it reads none,
-    /// several, or one that is not a plain relation.
-    pub(crate) fn walked(&self) -> Option<(&'q ObjectName, &'q Ident)> {
+    /// The one plain relation besides the working table, its exposed name,
+    /// and its optional column aliases.
+    pub(crate) fn walked(&self) -> Option<(&'q ObjectName, &'q Ident, Option<&'q TableAlias>)> {
         let mut others = self
             .term
             .from
@@ -335,7 +335,11 @@ impl<'q> RecursiveItem<'q> {
                         Some(alias) => &alias.name,
                         None => name.0.last()?.as_ident()?,
                     };
-                    (!same_name(exposed, self.working)).then_some(Some((name, exposed)))
+                    (!same_name(exposed, self.working)).then_some(Some((
+                        name,
+                        exposed,
+                        alias.as_ref(),
+                    )))
                 }
                 _ => Some(None),
             });
@@ -386,17 +390,30 @@ impl<'q> RecursiveItem<'q> {
     }
 }
 
-/// The table `name` reads on `path`, or on the database's search path when
-/// `None`.
+/// The table `name` reads on `path`, treating a catalog qualifier as the
+/// current database, as required for a valid PostgreSQL relation reference.
 pub(crate) fn stored_table<'db, DB: DatabaseLike>(
     database: &'db DB,
     name: &ObjectName,
     path: Option<&[(Cow<'_, str>, bool)]>,
 ) -> Result<Option<&'db DB::Table>, LookupError> {
-    let rendered = name.to_string();
-    let Ok(target) = TargetName::parse(&rendered) else {
-        return Ok(None);
+    let (schema, relation) = match name.0.as_slice() {
+        [ObjectNamePart::Identifier(relation)] => (None, relation),
+        [
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Identifier(relation),
+        ]
+        | [
+            ObjectNamePart::Identifier(_),
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Identifier(relation),
+        ] => (Some(schema), relation),
+        _ => return Ok(None),
     };
+    let mut target = TargetName::new(&relation.value, relation.quote_style.is_some());
+    if let Some(schema) = schema {
+        target = target.with_schema(&schema.value, schema.quote_style.is_some());
+    }
     let relation = match path {
         Some(path) => {
             database.resolve_target_relation_on_path(target, path, IdentifierCase::AsWritten)?
@@ -409,9 +426,40 @@ pub(crate) fn stored_table<'db, DB: DatabaseLike>(
     })
 }
 
+/// The stored column of `table` that `column` names through the walked
+/// relation's `alias`, whose column list renames the stored columns by
+/// position.
+///
+/// # Errors
+///
+/// Returns an error when the table's columns cannot be read.
+pub(crate) fn stored_column<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    table: &'db DB::Table,
+    alias: Option<&TableAlias>,
+    column: &Ident,
+) -> Result<Option<&'db DB::Column>, LookupError> {
+    let aliases = alias.map_or(&[][..], |alias| alias.columns.as_slice());
+    let mut columns = table.columns(database)?;
+    if let Some(position) = aliases
+        .iter()
+        .position(|alias| same_name(&alias.name, column))
+    {
+        return Ok(columns.nth(position));
+    }
+    let rendered = column.to_string();
+    Ok(columns.skip(aliases.len()).find(|stored| {
+        IdentifierCase::AsWritten.names_stored(
+            stored.column_name(),
+            stored.column_name_is_quoted(),
+            &rendered,
+        )
+    }))
+}
+
 /// Calls `judge` with every item of a `WITH RECURSIVE` clause in `node`
 /// whose recursive term walks one relation no visible `WITH` item claims,
-/// with that relation's name and the name the term reads it by.
+/// with that relation's name, exposed name, and optional column aliases.
 ///
 /// # Errors
 ///
@@ -419,7 +467,7 @@ pub(crate) fn stored_table<'db, DB: DatabaseLike>(
 pub(crate) fn walks<V, E, F>(node: &V, judge: F) -> Result<(), E>
 where
     V: Visit + ?Sized,
-    F: FnMut(&Cte, &RecursiveItem<'_>, &ObjectName, &Ident) -> Result<(), E>,
+    F: FnMut(&Cte, &RecursiveItem<'_>, &ObjectName, &Ident, Option<&TableAlias>) -> Result<(), E>,
 {
     let mut walks = Walks {
         scopes: WithScopes::default(),
@@ -441,7 +489,7 @@ struct Walks<F, E> {
 
 impl<E, F> Visitor for Walks<F, E>
 where
-    F: FnMut(&Cte, &RecursiveItem<'_>, &ObjectName, &Ident) -> Result<(), E>,
+    F: FnMut(&Cte, &RecursiveItem<'_>, &ObjectName, &Ident, Option<&TableAlias>) -> Result<(), E>,
 {
     type Break = E;
 
@@ -454,7 +502,7 @@ where
             let Some(recursive) = RecursiveItem::split(item) else {
                 continue;
             };
-            let Some((name, exposed)) = recursive.walked() else {
+            let Some((name, exposed, alias)) = recursive.walked() else {
                 continue;
             };
             let claimed = match name.0.as_slice() {
@@ -468,7 +516,7 @@ where
             if claimed || self.scopes.binding(name).is_some() {
                 continue;
             }
-            if let Err(error) = (self.judge)(item, &recursive, name, exposed) {
+            if let Err(error) = (self.judge)(item, &recursive, name, exposed, alias) {
                 return ControlFlow::Break(error);
             }
         }

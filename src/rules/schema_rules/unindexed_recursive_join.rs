@@ -4,7 +4,6 @@ use std::borrow::Cow;
 
 use sql_traits::{
     errors::LookupError,
-    structs::IdentifierCase,
     traits::{ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, TableLike},
 };
 use sqlparser::ast::{Statement, Visit};
@@ -13,7 +12,7 @@ use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        cte_support::{stored_table, walks},
+        cte_support::{stored_column, stored_table, walks},
         expression_site_support::{ExpressionFinder, check_schema, check_statement},
         index_support::indexed,
     },
@@ -31,15 +30,13 @@ fn unindexed<DB: DatabaseLike, V: Visit + ?Sized>(
     path: Option<&[(Cow<'_, str>, bool)]>,
 ) -> Result<Vec<(String, String)>, LookupError> {
     let mut found = Vec::new();
-    walks(node, |item, recursive, name, exposed| {
+    walks(node, |item, recursive, name, exposed, alias| {
         let Some(table) = stored_table(database, name, path)? else {
             return Ok(());
         };
         let mut unindexed = None;
         for column in recursive.joined_columns(exposed) {
-            let Some(column) =
-                table.column(&column.to_string(), database, IdentifierCase::AsWritten)?
-            else {
+            let Some(column) = stored_column(database, table, alias, column)? else {
                 continue;
             };
             if indexed(database, table, column)? {
