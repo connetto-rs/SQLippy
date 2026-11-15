@@ -135,6 +135,7 @@ rule_icons! {
     "zero_precision_timestamp" => FaStopwatch,
     "autovacuum_disabled_table" => FaBroom,
     "correlated_policy_subquery" => FaRepeat,
+    "cte_shadows_relation" => FaMask,
     "expression_defeats_index" => FaSquareRootVariable,
     "json_type" => FaFileCode,
     "multiple_permissive_policies" => FaListUl,

@@ -47,6 +47,21 @@ pub(crate) trait ExpressionFinder {
         node: &V,
     ) -> Result<Vec<(String, String)>, LookupError>;
 
+    /// The findings of `node` in the body of `function`, for a finder whose
+    /// answer depends on the settings the function runs under.
+    ///
+    /// # Errors
+    ///
+    /// Returns the lookup error resolving a name of `node` raised.
+    fn find_in_body<DB: DatabaseLike, V: Visit + ?Sized>(
+        &self,
+        database: &DB,
+        _function: &DB::Function,
+        node: &V,
+    ) -> Result<Vec<(String, String)>, LookupError> {
+        self.find(database, node)
+    }
+
     /// Why a finding is a problem, continuing its sentence.
     fn problem(&self) -> &'static str;
 
@@ -127,10 +142,10 @@ pub(crate) fn check_schema<DB: DatabaseLike>(
     for function in functions {
         let mut found = Vec::new();
         for statement in body_statements(function) {
-            found.extend(finder.find(database, &statement)?);
+            found.extend(finder.find_in_body(database, function, &statement)?);
         }
         if let Ok(Some(body)) = function.body_expression(database) {
-            found.extend(finder.find(database, body.as_ref())?);
+            found.extend(finder.find_in_body(database, function, body.as_ref())?);
         }
         for (found, _) in found {
             reporter.function(
