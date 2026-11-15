@@ -68,3 +68,5 @@ pub use client_role_bypass::{
 };
 mod unused_cte;
 pub use unused_cte::UnusedCte;
+mod cte_shadows_relation;
+pub use cte_shadows_relation::CteShadowsRelation;

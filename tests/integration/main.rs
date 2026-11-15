@@ -16,6 +16,7 @@ mod constant_policy_clauses;
 mod correlated_policy_subqueries;
 mod credential_free_writes;
 mod credential_patterns;
+mod cte_shadows_relations;
 mod definer_acting_user;
 mod definer_creatable_schemas;
 mod definer_functions;
