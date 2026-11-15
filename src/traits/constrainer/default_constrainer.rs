@@ -48,7 +48,8 @@ use crate::{
         UnindexedForeignKey, UnindexedPolicyFilter, UnknownBinarySend, UnlinkedFromItem,
         UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
         UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
-        UnvalidatedConstraint, UuidStoredAsText, WildcardView, ZeroPrecisionTimestamp,
+        UnvalidatedConstraint, UuidStoredAsText, WildcardView, WritingNonVolatileFunction,
+        ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -132,8 +133,9 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
         register_schema_rules(&mut constrainer);
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 7] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 8] = [
             Box::new(ImpureImmutableFunction::default()),
+            Box::new(WritingNonVolatileFunction::default()),
             Box::new(DefinerWithoutSearchPath::default()),
             Box::new(InvokerWithoutSearchPath::default()),
             Box::new(DefinerTemporarySchemaNotLast::default()),

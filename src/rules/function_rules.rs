@@ -12,6 +12,8 @@ mod impure_immutable_function;
 pub use impure_immutable_function::ImpureImmutableFunction;
 mod invoker_without_search_path;
 pub use invoker_without_search_path::InvokerWithoutSearchPath;
+mod writing_non_volatile_function;
+pub use writing_non_volatile_function::WritingNonVolatileFunction;
 
 use sql_traits::{
     errors::LookupError,

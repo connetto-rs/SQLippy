@@ -81,6 +81,7 @@ rule_icons! {
     "grant_option_to_client_role" => FaShareNodes,
     "missing_primary_key" => FaKey,
     "impure_immutable_function" => FaFlask,
+    "writing_non_volatile_function" => FaFlask,
     "key_without_exact_equality" => FaNotEqual,
     "latent_policy_read_cycle" => FaRotateRight,
     "money_type" => FaMoneyBill,
