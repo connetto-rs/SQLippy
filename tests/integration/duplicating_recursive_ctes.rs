@@ -53,6 +53,8 @@ fn a_walk_that_reaches_each_row_once_passes() {
         "WITH RECURSIVE r(id) AS (SELECT 6 UNION ALL SELECT g.parent_id FROM groups AS g, r WHERE r.id = g.id) SELECT id FROM r",
         // 2 rows, the walked name reads the item body's own WITH.
         "WITH RECURSIVE r(id) AS (WITH dag_edges(child, parent) AS (VALUES (1, 0)) SELECT 0 UNION ALL SELECT e.child FROM dag_edges AS e JOIN r ON e.parent = r.id) SELECT id FROM r",
+        // PostgreSQL refuses a name of four parts, so no table is walked.
+        "WITH RECURSIVE r(id) AS (SELECT 0 UNION ALL SELECT e.child FROM postgres.public.dag_edges.extra e JOIN r ON e.parent = r.id) SELECT id FROM r",
     ] {
         assert_eq!(duplicating(sql), Vec::<String>::new(), "{sql}");
     }
@@ -102,8 +104,14 @@ fn a_keyed_tree_behind_a_derived_table_or_view_is_not_reported() {
 
 #[test]
 fn a_projection_without_walked_columns_is_outside_the_rule_scope() {
-    let sql = "WITH RECURSIVE r(id, depth) AS (SELECT 0, 0 UNION ALL SELECT 1, r.depth + 1 FROM dag_edges e JOIN r ON e.parent = r.id WHERE r.depth < 20) SELECT id FROM r";
-    assert_eq!(duplicating(sql), Vec::<String>::new());
+    for sql in [
+        "WITH RECURSIVE r(id, depth) AS (SELECT 0, 0 UNION ALL SELECT 1, r.depth + 1 FROM dag_edges e JOIN r ON e.parent = r.id WHERE r.depth < 20) SELECT id FROM r",
+        "WITH RECURSIVE r(id) AS (SELECT 0 UNION ALL SELECT r.* FROM dag_edges e JOIN r ON e.parent = r.id WHERE r.id < 0) SELECT id FROM r",
+        // A system column is no stored column of the table.
+        "WITH RECURSIVE r(id) AS (SELECT 0::oid UNION ALL SELECT e.tableoid FROM dag_edges e JOIN r ON e.parent::oid = r.id) SELECT id FROM r",
+    ] {
+        assert_eq!(duplicating(sql), Vec::<String>::new(), "{sql}");
+    }
 }
 
 #[test]
