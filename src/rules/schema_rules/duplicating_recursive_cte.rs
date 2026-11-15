@@ -4,16 +4,18 @@ use std::borrow::Cow;
 
 use sql_traits::{
     errors::LookupError,
-    structs::IdentifierCase,
-    traits::{DatabaseLike, FunctionLike, TableLike},
+    structs::TargetName,
+    traits::{ColumnLike, DatabaseLike, FunctionLike, TableLike},
 };
-use sqlparser::ast::{Ident, Statement, Visit};
+use sqlparser::ast::{
+    Ident, ObjectNamePart, SelectItem, SelectItemQualifiedWildcardKind, Statement, Visit,
+};
 
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        cte_support::{stored_table, walks},
+        cte_support::{same_name, stored_column, stored_table, walks},
         expression_site_support::{ExpressionFinder, check_schema, check_statement},
         key_support::equality_keys,
     },
@@ -31,19 +33,17 @@ fn duplicating<DB: DatabaseLike, V: Visit + ?Sized>(
     path: Option<&[(Cow<'_, str>, bool)]>,
 ) -> Result<Vec<(String, String)>, LookupError> {
     let mut found = Vec::new();
-    walks(node, |item, recursive, name, exposed| {
+    walks(node, |item, recursive, name, exposed, alias| {
         if !recursive.keeps_duplicates {
             return Ok(());
         }
-        let (Some(table), Some(outputs)) =
-            (stored_table(database, name, path)?, recursive.outputs())
-        else {
+        let Some(table) = stored_table(database, name, path)? else {
             return Ok(());
         };
+        let aliases = alias.map_or(&[][..], |alias| alias.columns.as_slice());
         let keys = equality_keys(database, table)?;
         let keyed = |column: &Ident| -> Result<Option<bool>, LookupError> {
-            Ok(table
-                .column(&column.to_string(), database, IdentifierCase::AsWritten)?
+            Ok(stored_column(database, table, alias, column)?
                 .map(|column| keys.iter().any(|key| key.as_slice() == [column])))
         };
         for column in recursive.joined_columns(exposed) {
@@ -52,14 +52,42 @@ fn duplicating<DB: DatabaseLike, V: Visit + ?Sized>(
             }
         }
         let mut projected = Vec::new();
-        for output in outputs {
-            let Some(column) = recursive.walked_column(exposed, output) else {
-                continue;
+        for output in &recursive.term.projection {
+            let expression = match output {
+                SelectItem::UnnamedExpr(expression)
+                | SelectItem::ExprWithAlias {
+                    expr: expression, ..
+                } => Some(expression),
+                SelectItem::QualifiedWildcard(
+                    SelectItemQualifiedWildcardKind::ObjectName(name),
+                    _,
+                ) if matches!(name.0.as_slice(), [ObjectNamePart::Identifier(written)] if same_name(written, exposed)) => {
+                    None
+                }
+                _ => continue,
             };
-            match keyed(column)? {
-                Some(true) => return Ok(()),
-                Some(false) => projected.push(format!("`{output}`")),
-                None => {}
+            if let Some(expression) = expression {
+                let Some(column) = recursive.walked_column(exposed, expression) else {
+                    continue;
+                };
+                match keyed(column)? {
+                    Some(true) => return Ok(()),
+                    Some(false) => projected.push(format!("`{expression}`")),
+                    None => {}
+                }
+            } else {
+                for (position, column) in table.columns(database)?.enumerate() {
+                    if keys.iter().any(|key| key.as_slice() == [column]) {
+                        return Ok(());
+                    }
+                    let name = aliases.get(position).map_or_else(
+                        || TargetName::new(column.column_name(), column.column_name_is_quoted()),
+                        |alias| {
+                            TargetName::new(&alias.name.value, alias.name.quote_style.is_some())
+                        },
+                    );
+                    projected.push(format!("`{exposed}.{name}`"));
+                }
             }
         }
         if !projected.is_empty() {
@@ -120,6 +148,9 @@ impl ExpressionFinder for DuplicatingItems {
 /// The rule reads views, materialized views, policies, SQL and PL/pgSQL
 /// function bodies, judging a body under the function's own `search_path`,
 /// and, as a query rule, statements.
+/// Findings require a projected column of a stored table, including columns
+/// expanded from its qualified wildcard. Constant-only projections and
+/// columns reached through derived tables or views are outside this scope.
 ///
 /// # Example
 ///
