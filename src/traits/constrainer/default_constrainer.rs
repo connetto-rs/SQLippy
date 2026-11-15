@@ -47,7 +47,7 @@ use crate::{
         UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
         UnindexedForeignKey, UnindexedPolicyFilter, UnknownBinarySend, UnlinkedFromItem,
         UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
-        UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
+        UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable, UnusedCte,
         UnvalidatedConstraint, UuidStoredAsText, WildcardView, WritingNonVolatileFunction,
         ZeroPrecisionTimestamp,
     },
@@ -210,12 +210,13 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 25] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 26] = [
         Box::new(NullableConcatenation::default()),
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
         Box::new(NotInNullList::default()),
         Box::new(NullComparison::default()),
+        Box::new(UnusedCte::default()),
         Box::new(RandomOrderLimit::default()),
         Box::new(OffsetPaging::default()),
         Box::new(UnfilteredWrite::default()),
@@ -244,7 +245,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 45] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 46] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -268,6 +269,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(NotInSubquery::default()),
         Box::new(NotInNullList::default()),
         Box::new(NullComparison::default()),
+        Box::new(UnusedCte::default()),
         Box::new(TimestampWithoutTimeZone::default()),
         Box::new(TimeWithTimeZone::default()),
         Box::new(ZeroPrecisionTimestamp::default()),

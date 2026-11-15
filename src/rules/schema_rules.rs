@@ -66,3 +66,5 @@ mod client_role_bypass;
 pub use client_role_bypass::{
     ClientRoleBypassesRowLevelSecurity, SettableMembershipInBypassingRole,
 };
+mod unused_cte;
+pub use unused_cte::UnusedCte;
