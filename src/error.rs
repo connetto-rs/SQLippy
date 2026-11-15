@@ -4,7 +4,7 @@ use std::fmt::{self, Display};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{IdentifierCase, TargetName},
+    structs::{IdentifierCase, RoleSetting, TargetName},
     traits::{DatabaseLike, PolicyLike, TableLike},
 };
 use sqlparser::ast::Statement;
@@ -35,6 +35,10 @@ pub enum Location<DB: DatabaseLike> {
     MaterializedView(Box<DB::MaterializedView>),
     /// A role.
     Role(Box<DB::Role>),
+    /// A membership of one role in another.
+    RoleMembership(Box<DB::RoleMembership>),
+    /// An `ALTER ROLE ... SET` entry.
+    RoleSetting(RoleSetting),
     /// A function.
     Function(Box<DB::Function>),
     /// A domain.

@@ -4,9 +4,10 @@ use std::{borrow::Cow, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
+    structs::RoleSetting,
     traits::{
         ColumnLike, DatabaseLike, DomainLike, ExtensionLike, ForeignKeyLike, FunctionLike,
-        IndexLike, PolicyLike, RoleLike, SequenceLike, TableLike, ViewLike,
+        IndexLike, PolicyLike, RoleLike, RoleMembershipLike, SequenceLike, TableLike, ViewLike,
     },
 };
 use sqlparser::ast::Statement;
@@ -377,6 +378,50 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         let object = role.name().to_owned();
         self.emit(
             Location::Role(Box::new(role.clone())),
+            object,
+            message,
+            resolution,
+        )
+    }
+
+    /// Reports a violation on a membership of one role in another, under
+    /// the name `role TO member`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn role_membership(
+        &mut self,
+        membership: &DB::RoleMembership,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        let object = format!("{} TO {}", membership.role_name(), membership.member_name());
+        self.emit(
+            Location::RoleMembership(Box::new(membership.clone())),
+            object,
+            message,
+            resolution,
+        )
+    }
+
+    /// Reports a violation on an `ALTER ROLE ... SET` entry, under the name
+    /// `role SET name`, with `ALL` for an entry of every role.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn role_setting(
+        &mut self,
+        setting: &RoleSetting,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        let object = format!("{} SET {}", setting.role().unwrap_or("ALL"), setting.name());
+        self.emit(
+            Location::RoleSetting(setting.clone()),
             object,
             message,
             resolution,
