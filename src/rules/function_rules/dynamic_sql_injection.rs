@@ -18,8 +18,11 @@ use crate::{
 const QUOTING: [&str; 3] = ["quote_ident", "quote_literal", "quote_nullable"];
 
 /// Struct defining a rule that reports a PL/pgSQL `EXECUTE`, `RETURN QUERY
-/// EXECUTE`, `OPEN ... FOR EXECUTE` or `FOR ... IN EXECUTE` whose command
-/// splices in a string value without quoting it.
+/// EXECUTE`, `OPEN ... FOR EXECUTE` or `FOR ... IN EXECUTE`, or a call of
+/// `pg_catalog`'s `query_to_xml`, `query_to_xmlschema`,
+/// `query_to_xml_and_xmlschema`, `ts_stat` or `ts_rewrite` in a SQL or
+/// PL/pgSQL body, whose SQL text splices in a string value without quoting
+/// it.
 ///
 /// A value spliced with `||`, `concat`, `concat_ws` or a `format` `%s`
 /// placeholder becomes SQL text, so a caller choosing the value can close
@@ -28,7 +31,9 @@ const QUOTING: [&str; 3] = ["quote_ident", "quote_literal", "quote_nullable"];
 /// `quote_literal` or `quote_nullable`, or filled into a `format` `%I` or
 /// `%L` placeholder are escaped. Values of a non-string type, or cast to
 /// one, cannot carry a quote and are not reported, and nor are values whose
-/// type is unknown.
+/// type is unknown. A field of `NEW` or `OLD` in a trigger function is a
+/// string when any table whose trigger runs the function gives that column
+/// a string type.
 ///
 /// # Example
 ///
@@ -80,7 +85,7 @@ impl<DB> Rule for DynamicSqlInjection<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(DynamicSqlInjection),
             group: LintGroup::Correctness,
-            rationale: "A string value spliced into the command of a PL/pgSQL EXECUTE becomes SQL text, so a caller choosing the value can end the literal or identifier it fills and run SQL of their own.",
+            rationale: "A string value spliced into the SQL text a PL/pgSQL EXECUTE or a catalog function such as query_to_xml runs becomes SQL, so a caller choosing the value can end the literal or identifier it fills and run SQL of their own.",
             source: Some(
                 "https://www.postgresql.org/docs/current/plpgsql-statements.html#PLPGSQL-QUOTE-LITERAL-EXAMPLE",
             ),
@@ -197,7 +202,10 @@ impl<DB: DatabaseLike> Splices<'_, '_, '_, DB> {
                 self.visit(left)?;
                 return self.visit(right);
             }
-            Expr::Value(_) | Expr::TypedString(_) => return Ok(()),
+            Expr::Value(value) if !matches!(value.value, Value::Placeholder(_)) => {
+                return Ok(());
+            }
+            Expr::TypedString(_) => return Ok(()),
             Expr::Cast { expr, .. } => {
                 let target = self.context.type_of(expression)?;
                 return if self.string(&target) {
@@ -225,7 +233,17 @@ impl<DB: DatabaseLike> Splices<'_, '_, '_, DB> {
                 _ => {}
             }
         }
-        if self.string(&self.context.type_of(expression)?) {
+        let operand = self.context.type_of(expression)?;
+        let string = if operand == OperandType::Unknown {
+            // A trigger row field the trigger tables type differently.
+            self.context
+                .row_field_types(expression)?
+                .iter()
+                .any(|(_, field)| self.string(field))
+        } else {
+            self.string(&operand)
+        };
+        if string {
             self.found.push(expression.to_string());
         }
         Ok(())
@@ -276,13 +294,7 @@ impl<DB: DatabaseLike> FunctionRule for DynamicSqlInjection<DB> {
             Err(error) => return Err(error.into()),
         };
         for site in &sites {
-            let scope = site.scope();
-            let context = ExpressionContext::for_expression(
-                site.command(),
-                &scope,
-                database,
-                IdentifierCase::Folded,
-            )?;
+            let context = site.context(IdentifierCase::Folded)?;
             let mut splices = Splices {
                 database,
                 context: &context,
@@ -299,12 +311,20 @@ impl<DB: DatabaseLike> FunctionRule for DynamicSqlInjection<DB> {
                 .map(|operand| format!("'{operand}'"))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let resolution = match site.function() {
+                None => {
+                    "Pass the values with USING, or quote them with format's %L or %I placeholders, quote_literal or quote_ident."
+                }
+                Some(_) => {
+                    "Quote the values with format's %L or %I placeholders, quote_literal or quote_ident."
+                }
+            };
             reporter.function(
                 function,
                 format!(
                     "Function '{signature}' builds the SQL it executes from {operands} without quoting, so a caller choosing that text can run SQL of their own."
                 ),
-                "Pass the values with USING, or quote them with format's %L or %I placeholders, quote_literal or quote_ident.".to_owned(),
+                resolution.to_owned(),
             )?;
         }
         Ok(())

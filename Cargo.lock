@@ -2219,7 +2219,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#1d59b5402c55a629ebd5e35300e572a358afeafb"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#befe9752f953a6578cb48bc9c5160f683dbce549"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -2282,7 +2282,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-plpgsql"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#eb7bfcf3c07cb0f5c6c20ee017190f7cde5629f3"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#9689d11e7d8a2a98826563c69531e061e77ffd4f"
 dependencies = [
  "sqlparser",
  "thiserror",
