@@ -20,9 +20,9 @@ use crate::{
         FlagNotBoolean, FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
         FunctionMediatedPolicyCycle, GrantOptionToClientRole, ImpureImmutableFunction,
         IncompatibleForeignKey, InvokerWithoutSearchPath, JsonStoredAsText, JsonType,
-        KeyWithoutExactEquality, LatentPolicyReadCycle, MissingPrimaryKey, MixedCaseColumnName,
-        MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText, MoneyType,
-        MultiplePermissivePolicies, NarrowIntegerKey, NarrowerReferencingColumn,
+        KeyWithoutExactEquality, LatentPolicyReadCycle, LeakproofUserFunction, MissingPrimaryKey,
+        MixedCaseColumnName, MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText,
+        MoneyType, MultiplePermissivePolicies, NarrowIntegerKey, NarrowerReferencingColumn,
         NestedPolicySubquery, NonSnakeCaseColumnName, NonSnakeCaseTableName, NotInNullList,
         NotInNullableSubquery, NotInSubquery, NullComparison, NullCredentialRead,
         NullableCompositeForeignKey, NullableConcatenation, NullableUniqueColumn, OffsetPaging,
@@ -132,12 +132,13 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
         register_schema_rules(&mut constrainer);
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 7] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 8] = [
             Box::new(ImpureImmutableFunction::default()),
             Box::new(DefinerWithoutSearchPath::default()),
             Box::new(InvokerWithoutSearchPath::default()),
             Box::new(DefinerTemporarySchemaNotLast::default()),
             Box::new(DefinerPathCreatableSchema::default()),
+            Box::new(LeakproofUserFunction::default()),
             Box::new(ExposedDefinerOverProtectedTable::default()),
             Box::new(GrantOptionToClientRole::default()),
         ];
