@@ -66,6 +66,35 @@ const ENGLISH_AVERAGE_TERMS: [&str; 4] = ["avg", "average", "mean", "median"];
 /// English terms closing the name of an identifier.
 const ENGLISH_IDENTIFIER_TERMS: [&str; 1] = ["id"];
 
+/// English terms closing the name of an email address.
+const ENGLISH_EMAIL_TERMS: [&str; 1] = ["email"];
+
+/// English past participles naming a one-way event that happens to a row.
+const ENGLISH_LIFECYCLE_TERMS: [&str; 22] = [
+    "revoked",
+    "archived",
+    "deleted",
+    "cancelled",
+    "canceled",
+    "disabled",
+    "deactivated",
+    "suspended",
+    "banned",
+    "blocked",
+    "expired",
+    "closed",
+    "completed",
+    "published",
+    "approved",
+    "rejected",
+    "verified",
+    "confirmed",
+    "accepted",
+    "resolved",
+    "locked",
+    "removed",
+];
+
 /// The vocabulary a deployment that selects none is matched against.
 static ENGLISH: LazyLock<Vocabulary> = LazyLock::new(Vocabulary::english);
 
@@ -102,6 +131,8 @@ pub(crate) enum Ending {
     Count,
     /// An identifier.
     Identifier,
+    /// An email address.
+    Email,
 }
 
 /// Words of one language that tell what a column holds.
@@ -109,8 +140,10 @@ pub(crate) enum Ending {
 /// A rule matches each term against the whole `snake_case` words of a column
 /// name, ignoring ASCII case, so `price` matches `total_price` and not
 /// `priceless`. A flag prefix must be the first word. A uuid, moment,
-/// address, JSON or count term must close the name, and a term of several
-/// words such as `ip_address` matches the name's last words. A deployment
+/// address, JSON, count or email term must close the name, and a term of
+/// several words such as `ip_address` matches the name's last words. A
+/// lifecycle term is the whole name, or the whole name after a flag prefix,
+/// so `revoked` and `is_revoked` match it. A deployment
 /// selects the vocabularies its schema uses with
 /// [`Deployment::with_vocabulary`](crate::deployment::Deployment::with_vocabulary),
 /// and English applies when it selects none.
@@ -144,6 +177,8 @@ pub struct Vocabulary {
     count_terms: Vec<Cow<'static, str>>,
     average_terms: Vec<Cow<'static, str>>,
     identifier_terms: Vec<Cow<'static, str>>,
+    email_terms: Vec<Cow<'static, str>>,
+    lifecycle_terms: Vec<Cow<'static, str>>,
 }
 
 impl Vocabulary {
@@ -162,6 +197,8 @@ impl Vocabulary {
             count_terms: words(&ENGLISH_COUNT_TERMS),
             average_terms: words(&ENGLISH_AVERAGE_TERMS),
             identifier_terms: words(&ENGLISH_IDENTIFIER_TERMS),
+            email_terms: words(&ENGLISH_EMAIL_TERMS),
+            lifecycle_terms: words(&ENGLISH_LIFECYCLE_TERMS),
         }
     }
 
@@ -244,6 +281,22 @@ impl Vocabulary {
         self
     }
 
+    /// Adds a term closing the name of an email address, such as `email`, so
+    /// `owner_email` and the setting `app.verified_email` name one.
+    #[must_use]
+    pub fn with_email_term(mut self, term: impl Into<Cow<'static, str>>) -> Self {
+        self.email_terms.push(term.into());
+        self
+    }
+
+    /// Adds a past participle naming a one-way event that happens to a row,
+    /// such as `revoked`, so `revoked` and `is_revoked` name one.
+    #[must_use]
+    pub fn with_lifecycle_term(mut self, term: impl Into<Cow<'static, str>>) -> Self {
+        self.lifecycle_terms.push(term.into());
+        self
+    }
+
     /// Returns whether `word` names an amount of money.
     pub(crate) fn is_money_term(&self, word: &str) -> bool {
         holds(&self.money_terms, word)
@@ -264,6 +317,11 @@ impl Vocabulary {
         holds(&self.average_terms, word)
     }
 
+    /// Returns whether `word` names a one-way event that happens to a row.
+    pub(crate) fn is_lifecycle_term(&self, word: &str) -> bool {
+        holds(&self.lifecycle_terms, word)
+    }
+
     /// Returns whether the last words of `name` are one of the terms of
     /// `ending`, as `owner_uuid` ends with `uuid` and `server_ip_address`
     /// with `ip_address`.
@@ -275,6 +333,7 @@ impl Vocabulary {
             Ending::Json => &self.json_terms,
             Ending::Count => &self.count_terms,
             Ending::Identifier => &self.identifier_terms,
+            Ending::Email => &self.email_terms,
         };
         terms.iter().any(|term| ends_with_words(name, term))
     }

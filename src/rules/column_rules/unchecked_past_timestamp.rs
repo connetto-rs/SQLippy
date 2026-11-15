@@ -2,17 +2,17 @@
 
 use std::time::Duration;
 
-use sql_traits::{
-    traits::{CheckConstraintLike, ColumnLike, DatabaseLike, TableLike},
-    utils::identifier_resolution::normalize_identifier,
-};
-use sqlparser::ast::{BinaryOperator, Expr, Ident};
+use sql_traits::traits::{CheckConstraintLike, ColumnLike, DatabaseLike, TableLike};
+use sqlparser::ast::{BinaryOperator, Expr};
 
 use super::{flag_not_boolean, moment_stored_as_text};
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::clock_support::{bound_clock, upper_bound},
+    rules::{
+        clock_support::{bound_clock, upper_bound},
+        closed_set_support::names_column,
+    },
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
 
@@ -91,19 +91,6 @@ fn interval_text(tolerance: Duration) -> Option<String> {
     };
     let plural = if count == 1 { "" } else { "s" };
     Some(format!("{count} {unit}{plural}"))
-}
-
-/// Whether the expression is a reference to the column with this stored
-/// name.
-fn names_column(expression: &Expr, column: &str) -> bool {
-    let is_column =
-        |ident: &Ident| normalize_identifier(&ident.value, ident.quote_style.is_some()) == column;
-    match expression {
-        Expr::Nested(inner) => names_column(inner, column),
-        Expr::Identifier(ident) => is_column(ident),
-        Expr::CompoundIdentifier(parts) => parts.last().is_some_and(is_column),
-        _ => false,
-    }
 }
 
 /// Whether a top-level `AND` conjunct of the check bounds the column from

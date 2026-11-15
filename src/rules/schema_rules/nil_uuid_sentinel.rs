@@ -5,7 +5,7 @@ use std::{convert::Infallible, ops::ControlFlow};
 use sql_traits::{errors::LookupError, traits::DatabaseLike};
 use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, InTarget,
-    Statement, Value, Visit, Visitor,
+    Statement, Visit, Visitor,
 };
 
 use crate::{
@@ -14,6 +14,7 @@ use crate::{
     rules::{
         expression_site_support::{ExpressionFinder, check_schema, check_statement},
         function_reach_support::split,
+        literal_support::string_value,
         policy_support::conjuncts,
         walk_support::walk,
     },
@@ -97,18 +98,6 @@ CREATE POLICY docs_installation ON docs USING (\n\
             },
         };
         &METADATA
-    }
-}
-
-/// The text of a string literal, in any quoting PostgreSQL accepts.
-fn string_value(value: &Value) -> Option<&str> {
-    match value {
-        Value::SingleQuotedString(text)
-        | Value::EscapedStringLiteral(text)
-        | Value::UnicodeStringLiteral(text)
-        | Value::NationalStringLiteral(text) => Some(text),
-        Value::DollarQuotedString(quoted) => Some(&quoted.value),
-        _ => None,
     }
 }
 
