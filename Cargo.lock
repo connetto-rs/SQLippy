@@ -1540,7 +1540,21 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "pg_diesel"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#669f1e9413bc6fa40c820ad60f91e8c3567e4a03"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#37a95e2c6b0bb9548dd0f86d655be31074b50689"
+dependencies = [
+ "diesel",
+ "pg_diesel_core",
+ "pg_diesel_pg14",
+ "pg_diesel_pg15",
+ "pg_diesel_pg16",
+ "pg_diesel_pg17",
+ "pg_diesel_pg18",
+]
+
+[[package]]
+name = "pg_diesel_core"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#37a95e2c6b0bb9548dd0f86d655be31074b50689"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1549,6 +1563,61 @@ dependencies = [
  "sql-traits",
  "sqlparser",
  "thiserror",
+]
+
+[[package]]
+name = "pg_diesel_pg14"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#37a95e2c6b0bb9548dd0f86d655be31074b50689"
+dependencies = [
+ "bigdecimal",
+ "diesel",
+ "pg_diesel_core",
+ "serde",
+]
+
+[[package]]
+name = "pg_diesel_pg15"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#37a95e2c6b0bb9548dd0f86d655be31074b50689"
+dependencies = [
+ "bigdecimal",
+ "diesel",
+ "pg_diesel_core",
+ "serde",
+]
+
+[[package]]
+name = "pg_diesel_pg16"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#37a95e2c6b0bb9548dd0f86d655be31074b50689"
+dependencies = [
+ "bigdecimal",
+ "diesel",
+ "pg_diesel_core",
+ "serde",
+]
+
+[[package]]
+name = "pg_diesel_pg17"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#37a95e2c6b0bb9548dd0f86d655be31074b50689"
+dependencies = [
+ "bigdecimal",
+ "diesel",
+ "pg_diesel_core",
+ "serde",
+]
+
+[[package]]
+name = "pg_diesel_pg18"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#37a95e2c6b0bb9548dd0f86d655be31074b50689"
+dependencies = [
+ "bigdecimal",
+ "diesel",
+ "pg_diesel_core",
+ "serde",
 ]
 
 [[package]]
@@ -2150,7 +2219,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#8026ed7c3d175b25010aa458804393ef164a8781"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#68e812488f6e87d353dfe18b597ca0fedef128f1"
 dependencies = [
  "geometric-traits",
  "once_cell",
