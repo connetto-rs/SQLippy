@@ -142,6 +142,34 @@ fn a_foreign_key_a_unique_key_inside_it_finds_is_not_reported() {
 }
 
 #[test]
+fn a_foreign_key_only_an_expression_leads_with_is_reported() {
+    let found = of(
+        "unindexed_foreign_key",
+        &format!(
+            "{PARENT}
+             CREATE TABLE q (a INT PRIMARY KEY);
+             CREATE TABLE single (a INT REFERENCES q (a));
+             CREATE INDEX ON single (abs(a));
+             CREATE TABLE first (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE INDEX ON first ((abs(a)), b);
+             CREATE TABLE second (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE INDEX ON second (b, (a + b));
+             CREATE TABLE trailing (a INT, b INT, c INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE INDEX ON trailing (b, a, abs(c));
+             CREATE TABLE parenthesised (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE INDEX ON parenthesised ((a), b);"
+        ),
+    );
+    assert_eq!(found.len(), 3, "{found:?}");
+    for table in ["single", "first", "second"] {
+        assert!(
+            found.iter().any(|object| object.contains(table)),
+            "{table}: {found:?}"
+        );
+    }
+}
+
+#[test]
 fn counters_and_narrow_keys_are_reported_per_table_kind() {
     let sql = "CREATE SEQUENCE s;
         CREATE TABLE logs (id SERIAL PRIMARY KEY, code SMALLINT GENERATED ALWAYS AS IDENTITY,
