@@ -6,7 +6,10 @@ use sqlparser::ast::Statement;
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::not_in_support::NotInCheck,
+    rules::{
+        expression_site_support::{check_schema, check_statement},
+        not_in_support::NotInCheck,
+    },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule},
 };
 
@@ -94,7 +97,7 @@ impl<DB: DatabaseLike> SchemaRule for NotInNullableSubquery<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        CHECK.check_schema(database, reporter)
+        check_schema(&CHECK, database, reporter)
     }
 }
 
@@ -107,6 +110,6 @@ impl<DB: DatabaseLike> QueryRule for NotInNullableSubquery<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        CHECK.check_statement(database, statement, reporter)
+        check_statement(&CHECK, database, statement, reporter)
     }
 }

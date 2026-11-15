@@ -1,24 +1,16 @@
-//! `NOT IN` over a subquery, found in views, policies, SQL function bodies
-//! and statements, shared by the rules reporting it.
+//! `NOT IN` over a subquery, shared by the rules reporting it.
 
 use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinition, ColumnScope, IdentifierCase},
-    traits::{ColumnLike, DatabaseLike, FunctionLike, PolicyLike, TableLike, ViewLike},
+    traits::{ColumnLike, DatabaseLike, TableLike},
 };
-use sqlparser::{
-    ast::{Expr, InTarget, Query, SelectItem, SetExpr, Statement, Visit, Visitor},
-    dialect::PostgreSqlDialect,
-    parser::Parser,
-};
+use sqlparser::ast::{Expr, InTarget, Query, SelectItem, SetExpr, Visit, Visitor};
 
-use crate::rules::walk_support::walk;
-use crate::{
-    error::{Interruption, PolicySite},
-    rules::policy_support::{conjuncts, walked_clauses},
-    traits::{Reporter, reporter::signature},
+use crate::rules::{
+    expression_site_support::ExpressionFinder, policy_support::conjuncts, walk_support::walk,
 };
 
 /// One `NOT IN` over a subquery.
@@ -112,10 +104,8 @@ pub(crate) struct NotInCheck {
     pub(crate) resolution: &'static str,
 }
 
-impl NotInCheck {
-    /// Descriptions of the reported `NOT IN` subqueries a node holds, with
-    /// their expressions.
-    fn found<DB: DatabaseLike, V: Visit + ?Sized>(
+impl ExpressionFinder for NotInCheck {
+    fn find<DB: DatabaseLike, V: Visit + ?Sized>(
         &self,
         database: &DB,
         node: &V,
@@ -128,107 +118,11 @@ impl NotInCheck {
             .collect())
     }
 
-    /// Reports the `NOT IN` subqueries of views, materialized views,
-    /// policies and SQL function bodies.
-    pub(crate) fn check_schema<DB: DatabaseLike>(
-        &self,
-        database: &DB,
-        reporter: &mut Reporter<'_, DB>,
-    ) -> Result<(), Interruption> {
-        let Self {
-            problem,
-            resolution,
-            ..
-        } = self;
-        for view in database.views() {
-            for (found, _) in self.found(database, view.definition())? {
-                reporter.view(
-                    view,
-                    format!("View '{}' uses {found}, {problem}.", view.view_name()),
-                    (*resolution).to_owned(),
-                )?;
-            }
-        }
-        for view in database.materialized_views() {
-            for (found, _) in self.found(database, view.definition())? {
-                reporter.materialized_view(
-                    view,
-                    format!(
-                        "Materialized view '{}' uses {found}, {problem}.",
-                        view.view_name()
-                    ),
-                    (*resolution).to_owned(),
-                )?;
-            }
-        }
-        for table in database.tables() {
-            for policy in table.policies(database)? {
-                for (clause, expression) in walked_clauses(database, policy)? {
-                    for (found, _) in expression.map_or(Ok(Vec::new()), |expression| {
-                        self.found(database, expression)
-                    })? {
-                        reporter.policies(
-                            vec![PolicySite {
-                                table: Box::new(table.clone()),
-                                policy: Box::new(policy.clone()),
-                                clause,
-                                expression: found.clone(),
-                            }],
-                            format!(
-                                "Policy '{}' on '{}' uses {found} in its {clause} clause, {problem}.",
-                                policy.name(),
-                                table.table_name()
-                            ),
-                            (*resolution).to_owned(),
-                        )?;
-                    }
-                }
-            }
-        }
-        let functions = database.functions().filter(|function| {
-            function.target_name().schema() != Some("pg_catalog")
-                && function
-                    .stored_language()
-                    .is_none_or(|language| language == "sql")
-        });
-        for function in functions {
-            let body = function
-                .body()
-                .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok())
-                .unwrap_or_default();
-            let mut found = self.found(database, &body)?;
-            if let Ok(Some(body)) = function.body_expression(database) {
-                found.extend(self.found(database, body.as_ref())?);
-            }
-            for (found, _) in found {
-                reporter.function(
-                    function,
-                    format!(
-                        "Function '{}' uses {found}, {problem}.",
-                        signature(function, database)
-                    ),
-                    (*resolution).to_owned(),
-                )?;
-            }
-        }
-        Ok(())
+    fn problem(&self) -> &'static str {
+        self.problem
     }
 
-    /// Reports the `NOT IN` subqueries of a statement.
-    pub(crate) fn check_statement<DB: DatabaseLike>(
-        &self,
-        database: &DB,
-        statement: &Statement,
-        reporter: &mut Reporter<'_, DB>,
-    ) -> Result<(), Interruption> {
-        for (found, expression) in self.found(database, statement)? {
-            reporter.statement(
-                statement,
-                expression,
-                format!("The statement uses {found}, {}.", self.problem),
-                self.resolution.to_owned(),
-            )?;
-        }
-        Ok(())
+    fn resolution(&self) -> &'static str {
+        self.resolution
     }
 }
