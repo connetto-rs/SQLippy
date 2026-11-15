@@ -124,6 +124,7 @@ fn strings_postgresql_reads_as_another_uuid_or_rejects_are_not_reported() {
     for array in [
         "'{11111111-1111-1111-1111-111111111111}'",
         "'{0000 0000-0000-0000-0000-000000000000}'",
+        "'[1:1]{00000000-0000-0000-0000-000000000000}'",
         "'{\"00000000-0000-0000-0000-000000000000 \"}'",
     ] {
         let sql = format!("SELECT id FROM docs WHERE installation_id = ANY ({array}::uuid[])");

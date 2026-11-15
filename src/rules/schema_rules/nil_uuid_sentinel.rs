@@ -227,9 +227,6 @@ fn holds_nil(mut expression: &Expr) -> bool {
             Expr::Value(literal) => {
                 return string_value(&literal.value).is_some_and(array_holds_nil);
             }
-            Expr::TypedString(typed) => {
-                return string_value(&typed.value.value).is_some_and(array_holds_nil);
-            }
             _ => return false,
         }
     }
