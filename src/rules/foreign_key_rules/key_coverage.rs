@@ -9,6 +9,7 @@ use sql_traits::{
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
+    rules::key_support::equality_keys,
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -115,10 +116,12 @@ fn leads<DB: DatabaseLike, I: IndexLike<DB = DB>>(
 }
 
 /// Struct defining a rule that reports a foreign key whose columns lead no
-/// index of their table.
+/// index of their table and hold no unique key of it.
 ///
 /// Deleting a referenced row or updating its key then scans the
-/// referencing table for the rows to check or change.
+/// referencing table for the rows to check or change. A unique key over
+/// some of the foreign key columns, such as a primary key on `id` under
+/// `FOREIGN KEY (id, kind)`, already narrows the check to at most one row.
 ///
 /// # Example
 ///
@@ -155,7 +158,7 @@ impl<DB> Rule for UnindexedForeignKey<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(UnindexedForeignKey),
             group: LintGroup::Perf,
-            rationale: "A delete of a referenced row or an update of its key checks the referencing table, which scans it when no index leads with the foreign key columns.",
+            rationale: "A delete of a referenced row or an update of its key checks the referencing table, which scans it when no index leads with the foreign key columns and no unique key over some of them finds the row.",
             source: Some("https://www.postgresql.org/docs/current/ddl-constraints.html"),
             basis: Basis::Declared,
             example: RuleExample {
@@ -188,6 +191,11 @@ impl<DB: DatabaseLike> ForeignKeyRule for UnindexedForeignKey<DB> {
         }
         for index in host.unique_indices(database)? {
             if leads(database, index, &columns)? {
+                return Ok(());
+            }
+        }
+        for key in equality_keys(database, host)? {
+            if key.iter().all(|column| columns.contains(column)) {
                 return Ok(());
             }
         }

@@ -1,5 +1,5 @@
 //! Unique keys, foreign keys and the equalities of a `SELECT`, shared by the
-//! query rules that ask whether a query's rows are pinned down.
+//! rules that ask whether an equality pins rows down.
 
 use std::{iter, ops::ControlFlow};
 

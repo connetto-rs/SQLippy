@@ -116,6 +116,32 @@ fn a_foreign_key_no_index_leads_with_is_reported() {
 }
 
 #[test]
+fn a_foreign_key_a_unique_key_inside_it_finds_is_not_reported() {
+    let found = of(
+        "unindexed_foreign_key",
+        &format!(
+            "{PARENT}
+             CREATE TABLE subtype (a INT PRIMARY KEY, b INT NOT NULL, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE TABLE constrained (a INT, b INT, UNIQUE (b), FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE TABLE indexed (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE UNIQUE INDEX ON indexed (b);
+             CREATE TABLE outside (a INT, b INT, c INT, UNIQUE (a, c), FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE TABLE partial (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE UNIQUE INDEX ON partial (a) WHERE b > 0;
+             CREATE TABLE computed (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE UNIQUE INDEX ON computed (abs(a));"
+        ),
+    );
+    assert_eq!(found.len(), 3, "{found:?}");
+    for table in ["outside", "partial", "computed"] {
+        assert!(
+            found.iter().any(|object| object.contains(table)),
+            "{table}: {found:?}"
+        );
+    }
+}
+
+#[test]
 fn counters_and_narrow_keys_are_reported_per_table_kind() {
     let sql = "CREATE SEQUENCE s;
         CREATE TABLE logs (id SERIAL PRIMARY KEY, code SMALLINT GENERATED ALWAYS AS IDENTITY,
