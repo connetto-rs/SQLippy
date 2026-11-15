@@ -1,42 +1,53 @@
 //! Submodule defining the `Reporter` through which rules raise violations.
 
-use std::ops::ControlFlow;
+use std::{borrow::Cow, ops::ControlFlow};
 
-use sql_traits::traits::{
-    ColumnLike, DatabaseLike, DomainLike, ExtensionLike, ForeignKeyLike, FunctionLike, PolicyLike,
-    RoleLike, SequenceLike, TableLike, ViewLike,
+use sql_traits::{
+    errors::LookupError,
+    traits::{
+        ColumnLike, DatabaseLike, DomainLike, ExtensionLike, ForeignKeyLike, FunctionLike,
+        IndexLike, PolicyLike, RoleLike, SequenceLike, TableLike, ViewLike,
+    },
 };
 use sqlparser::ast::Statement;
 
 use crate::{
     deployment::Deployment,
     error::{
-        Error, Interruption, Location, PolicySite, StatementAllowance, StatementSite, Violation,
+        AllowedObject, Error, Interruption, Location, PolicySite, StatementAllowance,
+        StatementSite, Violation,
     },
     lint::{Level, RuleMetadata},
 };
 
-/// A policy allowance whose table was resolved against the schema.
+/// A schema allowance whose table was resolved against the schema.
 pub(crate) struct ResolvedAllowance<'db, DB: DatabaseLike> {
     pub(crate) rule: &'db str,
     pub(crate) table: Option<&'db DB::Table>,
-    pub(crate) policy: &'db str,
+    pub(crate) object: &'db AllowedObject,
 }
 
-impl<DB: DatabaseLike> ResolvedAllowance<'_, DB> {
-    fn excuses(&self, rule: &RuleMetadata, site: &PolicySite<DB>) -> bool {
-        self.rule == rule.name
-            && self.table == Some(site.table.as_ref())
-            && self.policy == site.policy.name()
-    }
-}
-
-/// The allowances a reporter consults, and which policy allowances excused a
+/// The allowances a reporter consults, and which schema allowances excused a
 /// violation so far.
 pub(crate) struct Allowances<'run, DB: DatabaseLike> {
-    pub(crate) policies: &'run [ResolvedAllowance<'run, DB>],
+    pub(crate) schema: &'run [ResolvedAllowance<'run, DB>],
     pub(crate) used: &'run mut [bool],
     pub(crate) statements: &'run [StatementAllowance],
+}
+
+/// The name an index allowance matches: the index's constraint name, else
+/// the name written for it.
+///
+/// # Errors
+///
+/// Returns a [`LookupError`] when `database` does not hold the index's table.
+pub(crate) fn index_name<'db, I: IndexLike>(
+    index: &'db I,
+    database: &'db I::DB,
+) -> Result<Option<Cow<'db, str>>, LookupError> {
+    Ok(index
+        .constraint_name(database)?
+        .or_else(|| index.name().map(Cow::Borrowed)))
 }
 
 /// A function's name with its argument types as written, which tells overloads
@@ -95,14 +106,12 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         message: String,
         resolution: String,
     ) -> Result<(), Interruption> {
-        let mut excused = false;
-        let allowances = &mut self.allowances;
-        for (allowance, used) in allowances.policies.iter().zip(allowances.used.iter_mut()) {
-            if sites.iter().any(|site| allowance.excuses(self.rule, site)) {
-                *used = true;
-                excused = true;
-            }
-        }
+        let excused = self.excused(|allowance| {
+            sites.iter().any(|site| {
+                allowance.table == Some(site.table.as_ref())
+                    && matches!(allowance.object, AllowedObject::Policy(policy) if policy == site.policy.name())
+            })
+        });
         if excused {
             return Ok(());
         }
@@ -149,7 +158,8 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         )
     }
 
-    /// Reports a violation on a table.
+    /// Reports a violation on a table, unless an allowance for this rule
+    /// names the table.
     ///
     /// # Errors
     ///
@@ -161,6 +171,11 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         message: String,
         resolution: String,
     ) -> Result<(), Interruption> {
+        if self.excused(|allowance| {
+            allowance.table == Some(table) && *allowance.object == AllowedObject::Table
+        }) {
+            return Ok(());
+        }
         let object = table.table_name().to_owned();
         self.emit(
             Location::Table(Box::new(table.clone())),
@@ -195,11 +210,13 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         )
     }
 
-    /// Reports a violation on a foreign key.
+    /// Reports a violation on a foreign key, named by its constraint name,
+    /// unless an allowance for this rule names that constraint.
     ///
     /// # Errors
     ///
-    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// Returns [`Interruption::Lookup`] when the key's table is not in the
+    /// schema, and [`Interruption::Halted`] when the caller needs no further
     /// violations.
     pub fn foreign_key(
         &mut self,
@@ -207,8 +224,16 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         message: String,
         resolution: String,
     ) -> Result<(), Interruption> {
-        let host = foreign_key.host_table(self.database).table_name();
-        let object = match foreign_key.foreign_key_name() {
+        let host = foreign_key.host_table(self.database);
+        let name = foreign_key.constraint_name(self.database)?;
+        if self.excused(|allowance| {
+            allowance.table == Some(host)
+                && matches!(allowance.object, AllowedObject::ForeignKey(allowed) if Some(allowed.as_str()) == name.as_deref())
+        }) {
+            return Ok(());
+        }
+        let host = host.table_name();
+        let object = match name {
             Some(name) => format!("{host}.{name}"),
             None => format!("{host} (unnamed foreign key)"),
         };
@@ -218,6 +243,79 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
             message,
             resolution,
         )
+    }
+
+    /// Reports a violation on a unique constraint, unless an allowance for
+    /// this rule names it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Lookup`] when the constraint's table or
+    /// columns are not in the schema, and [`Interruption::Halted`] when the
+    /// caller needs no further violations.
+    pub fn unique_index(
+        &mut self,
+        index: &DB::UniqueIndex,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        self.indexed(
+            index,
+            |index| Location::UniqueIndex(Box::new(index.clone())),
+            message,
+            resolution,
+        )
+    }
+
+    /// Reports a violation on an index created with `CREATE INDEX`, unless an
+    /// allowance for this rule names it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Lookup`] when the index's table or columns are
+    /// not in the schema, and [`Interruption::Halted`] when the caller needs
+    /// no further violations.
+    pub fn index(
+        &mut self,
+        index: &DB::Index,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        self.indexed(
+            index,
+            |index| Location::Index(Box::new(index.clone())),
+            message,
+            resolution,
+        )
+    }
+
+    /// Reports a violation on `index`, named by [`index_name`] or else by its
+    /// columns, unless an allowance for this rule names it.
+    fn indexed<I: IndexLike<DB = DB>>(
+        &mut self,
+        index: &I,
+        location: impl FnOnce(&I) -> Location<DB>,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        let table = index.table(self.database);
+        let name = index_name(index, self.database)?;
+        if self.excused(|allowance| {
+            allowance.table == Some(table)
+                && matches!(allowance.object, AllowedObject::Index(allowed) if Some(allowed.as_str()) == name.as_deref())
+        }) {
+            return Ok(());
+        }
+        let object = if let Some(name) = name {
+            format!("{}.{name}", table.table_name())
+        } else {
+            let columns: Vec<&str> = index
+                .columns(self.database)?
+                .map(ColumnLike::column_name)
+                .collect();
+            format!("{} ({})", table.table_name(), columns.join(", "))
+        };
+        self.emit(location(index), object, message, resolution)
     }
 
     /// Reports a violation on a view.
@@ -388,6 +486,20 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
             message,
             resolution,
         )
+    }
+
+    /// Marks every schema allowance for this rule that `accepts` takes as
+    /// used, and returns whether there was one.
+    fn excused(&mut self, accepts: impl Fn(&ResolvedAllowance<'run, DB>) -> bool) -> bool {
+        let mut any = false;
+        let allowances = &mut self.allowances;
+        for (allowance, used) in allowances.schema.iter().zip(allowances.used.iter_mut()) {
+            if allowance.rule == self.rule.name && accepts(allowance) {
+                *used = true;
+                any = true;
+            }
+        }
+        any
     }
 
     fn emit(

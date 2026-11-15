@@ -60,7 +60,7 @@ fn unique_constraints_leaving_out_the_subject_are_reported() {
     assert_eq!(
         messages,
         [
-            "Unique constraint 'handle' on 'users' leaves out 'tenant_id', so a duplicate-key error reveals values in rows the caller's policies hide.",
+            "Unique constraint 'users_handle_key' on 'users' leaves out 'tenant_id', so a duplicate-key error reveals values in rows the caller's policies hide.",
             "Unique constraint 'users_email' on 'users' leaves out 'tenant_id', so a duplicate-key error reveals values in rows the caller's policies hide.",
         ]
     );

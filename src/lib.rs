@@ -14,8 +14,8 @@ pub mod prelude {
     pub use crate::{
         deployment::{Declaration, Deployment},
         error::{
-            Allowance, Error, InactiveRule, Interruption, Location, PolicyAllowance, PolicyClause,
-            PolicySite, StatementAllowance, StatementSite, Violation,
+            Allowance, AllowedObject, Error, InactiveRule, Interruption, Location, PolicyClause,
+            PolicySite, SchemaAllowance, StatementAllowance, StatementSite, Violation,
         },
         lint::{
             Basis, Level, LintGroup, RegisteredRule, Rule, RuleExample, RuleKind, RuleMetadata,
