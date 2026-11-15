@@ -3,19 +3,17 @@
 
 use sql_traits::{
     errors::LookupError,
-    structs::IdentifierCase,
     traits::{
         ColumnLike, DataTypeLike, DatabaseLike, ForeignKeyLike, IndexLike, TableLike,
         UniqueIndexLike,
     },
     utils::scalar_family::ScalarFamily,
 };
-use sqlparser::ast::Expr;
 
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::policy_support::unnested,
+    rules::index_support::entry_columns,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -98,34 +96,14 @@ impl<DB> Rule for KeyWithoutExactEquality<DB> {
 
 /// Columns an index names directly, leaving out those only inside an
 /// expression.
-fn named_columns<'db, I: IndexLike>(
+fn named_columns<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
     index: &'db I,
-    database: &'db I::DB,
-) -> Result<Vec<&'db <I::DB as DatabaseLike>::Column>, LookupError> {
-    let entries = match index.expression(database)? {
-        Expr::Tuple(entries) => entries.as_slice(),
-        entry => std::slice::from_ref(entry),
-    };
-    let names: Vec<_> = entries
-        .iter()
-        .filter_map(|entry| match unnested(entry) {
-            Expr::Identifier(ident) => Some(ident),
-            Expr::CompoundIdentifier(parts) => parts.last(),
-            _ => None,
-        })
-        .collect();
+    database: &'db DB,
+) -> Result<Vec<&'db DB::Column>, LookupError> {
+    let named = entry_columns(database, index)?;
     Ok(index
         .columns(database)?
-        .filter(|column| {
-            names.iter().any(|name| {
-                IdentifierCase::AsWritten.identifiers_match(
-                    column.column_name(),
-                    column.column_name_is_quoted(),
-                    &name.value,
-                    name.quote_style.is_some(),
-                )
-            })
-        })
+        .filter(|column| named.contains(&Some(column)))
         .collect())
 }
 

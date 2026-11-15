@@ -6,6 +6,7 @@ use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
+    structs::IdentifierCase,
     traits::{ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableLike},
 };
 use sqlparser::ast::{
@@ -13,7 +14,10 @@ use sqlparser::ast::{
     visit_expressions_mut,
 };
 
-use crate::rules::{policy_support::is_column_reference, statement_support::OwnLevel};
+use crate::rules::{
+    policy_support::{is_column_reference, unnested},
+    statement_support::OwnLevel,
+};
 
 /// Calls `visit` with each column side and other side a comparison an index
 /// can serve may have.
@@ -74,6 +78,38 @@ pub(crate) fn leading(expression: &Expr) -> &Expr {
     }
 }
 
+/// The column each entry of `index` names bare, in key order, and `None` for
+/// an entry over an expression. Parentheses keep a column bare, since
+/// PostgreSQL stores `((a))` as the key column `a`.
+pub(crate) fn entry_columns<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
+    database: &'db DB,
+    index: &'db I,
+) -> Result<Vec<Option<&'db DB::Column>>, LookupError> {
+    let entries: Vec<&Expr> = match index.expression(database)? {
+        Expr::Tuple(entries) => entries.iter().collect(),
+        entry => vec![entry],
+    };
+    let columns: Vec<&DB::Column> = index.columns(database)?.collect();
+    Ok(entries
+        .into_iter()
+        .map(|entry| {
+            let name = match unnested(entry) {
+                Expr::Identifier(name) => name,
+                Expr::CompoundIdentifier(parts) => parts.last()?,
+                _ => return None,
+            };
+            columns.iter().copied().find(|column| {
+                IdentifierCase::AsWritten.identifiers_match(
+                    column.column_name(),
+                    column.column_name_is_quoted(),
+                    &name.value,
+                    name.quote_style.is_some(),
+                )
+            })
+        })
+        .collect())
+}
+
 /// Whether an index without a predicate leads with `column`.
 fn leads<DB: DatabaseLike, I: IndexLike<DB = DB>>(
     database: &DB,
@@ -81,8 +117,7 @@ fn leads<DB: DatabaseLike, I: IndexLike<DB = DB>>(
     column: &DB::Column,
 ) -> Result<bool, LookupError> {
     Ok(index.predicate().is_none()
-        && is_column_reference(leading(index.expression(database)?))
-        && index.columns(database)?.next() == Some(column))
+        && entry_columns(database, index)?.first() == Some(&Some(column)))
 }
 
 /// Whether an index without a predicate, a unique constraint or the primary

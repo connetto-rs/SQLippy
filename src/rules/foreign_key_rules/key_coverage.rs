@@ -9,7 +9,7 @@ use sql_traits::{
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::key_support::equality_keys,
+    rules::{index_support::entry_columns, key_support::equality_keys},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -99,7 +99,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for NullableCompositeForeignKey<DB> {
 }
 
 /// Whether an index without a predicate leads with exactly `columns`, in
-/// any order.
+/// any order, each a bare column rather than an expression over it.
 fn leads<DB: DatabaseLike, I: IndexLike<DB = DB>>(
     database: &DB,
     index: &I,
@@ -108,11 +108,12 @@ fn leads<DB: DatabaseLike, I: IndexLike<DB = DB>>(
     if index.predicate().is_some() {
         return Ok(false);
     }
-    let indexed: Vec<&DB::Column> = index.columns(database)?.collect();
-    Ok(indexed.len() >= columns.len()
-        && indexed[..columns.len()]
+    let entries = entry_columns(database, index)?;
+    Ok(entries.get(..columns.len()).is_some_and(|leading| {
+        leading
             .iter()
-            .all(|column| columns.contains(column)))
+            .all(|entry| entry.is_some_and(|column| columns.contains(&column)))
+    }))
 }
 
 /// Struct defining a rule that reports a foreign key whose columns lead no
