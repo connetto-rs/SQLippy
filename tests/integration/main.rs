@@ -45,6 +45,7 @@ mod policy_without_row_reference;
 mod raising_setting_reads;
 mod restrictive_without_permissive;
 mod role_memberships;
+mod schema_allowances;
 mod self_asserted_claims;
 mod self_granting_writes;
 mod statement_bindings;

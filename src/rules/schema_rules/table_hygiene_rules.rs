@@ -65,7 +65,7 @@ impl<DB: DatabaseLike> SchemaRule for RowLevelSecurityWithoutPolicies<DB> {
             reporter.table(
                 table,
                 format!("Table '{name}' has row-level security enabled and no policy, so every role but its owner sees and changes no row."),
-                format!("Create the policies '{name}' needs, or allow this finding if the table is meant to be closed to every role."),
+                format!("Create the policies '{name}' needs, or allow it with `allow_table` if the table is meant to be closed to every role."),
             )?;
         }
         Ok(())
@@ -182,7 +182,7 @@ impl<DB: DatabaseLike> SchemaRule for MultiplePermissivePolicies<DB> {
                             table.table_name(),
                             format!("{command:?}").to_uppercase()
                         ),
-                        "Merge them into one policy whose condition ORs theirs, or keep them apart deliberately with an allowance.".to_owned(),
+                        "Merge them into one policy whose condition ORs theirs, or keep them apart deliberately and allow one of them with `allow_policy`.".to_owned(),
                     )?;
                 }
             }

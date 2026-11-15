@@ -10,7 +10,10 @@ use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 
 use crate::{
     deployment::Deployment,
-    error::{Allowance, Error, InactiveRule, Interruption, PolicyAllowance, StatementAllowance},
+    error::{
+        Allowance, AllowedObject, Error, InactiveRule, Interruption, SchemaAllowance,
+        StatementAllowance,
+    },
     lint::{Level, LintGroup, RegisteredRule, Rule, RuleKind, RuleMetadata},
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, QueryRule, Reporter, SchemaRule,
@@ -59,7 +62,7 @@ pub struct GenericConstrainer<DB: DatabaseLike> {
     functions: Vec<Registered<dyn FunctionRule<Database = DB>>>,
     queries: Vec<Registered<dyn QueryRule<Database = DB>>>,
     levels: Levels,
-    allowances: Vec<PolicyAllowance>,
+    allowances: Vec<SchemaAllowance>,
     statement_allowances: Vec<StatementAllowance>,
     deployment: Deployment,
 }
@@ -120,7 +123,7 @@ impl<'run, DB: DatabaseLike> Run<'run, DB> {
             rule,
             level,
             Allowances {
-                policies: &self.allowances,
+                schema: &self.allowances,
                 used: &mut self.used,
                 statements: self.statements,
             },
@@ -266,11 +269,11 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         self.refresh();
     }
 
-    pub(crate) fn allow_policy(&mut self, rule: &str, table: TargetName<'_>, policy: &str) {
-        self.allowances.push(PolicyAllowance {
+    pub(crate) fn allow(&mut self, rule: &str, table: TargetName<'_>, object: AllowedObject) {
+        self.allowances.push(SchemaAllowance {
             rule: rule.to_owned(),
             table: table.into_owned(),
-            policy: policy.to_owned(),
+            object,
         });
     }
 
@@ -337,7 +340,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
                         .table_by_target(allowance.table.clone(), IdentifierCase::Folded)
                         .ok()
                         .flatten(),
-                    policy: &allowance.policy,
+                    object: &allowance.object,
                 })
                 .collect(),
             used: vec![false; self.allowances.len()],
@@ -396,7 +399,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         }
         for (allowance, used) in self.allowances.iter().zip(&run.used) {
             if !used {
-                sink(Error::UnusedAllowance(Allowance::Policy(allowance.clone())))?;
+                sink(Error::UnusedAllowance(Allowance::Schema(allowance.clone())))?;
             }
         }
         for allowance in stale {

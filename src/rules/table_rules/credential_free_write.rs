@@ -198,7 +198,7 @@ impl<DB: DatabaseLike> TableRule for CredentialFreeWrite<DB> {
                     table.table_name()
                 ),
                 format!(
-                    "Make every arm of '{name}' compare a column to a credential, or add a restrictive policy requiring one. A deliberate anonymous write takes an allowance."
+                    "Make every arm of '{name}' compare a column to a credential, or add a restrictive policy requiring one. Allow a deliberate anonymous write with `allow_policy`."
                 ),
             )?;
         }

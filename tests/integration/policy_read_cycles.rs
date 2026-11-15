@@ -476,14 +476,17 @@ fn an_allowance_left_after_the_policy_is_fixed_fails_validation() {
         TargetName::new("memberships", false),
         "memberships_admin",
     );
-    let Err(Error::UnusedAllowance(Allowance::Policy(allowance))) =
+    let Err(Error::UnusedAllowance(Allowance::Schema(allowance))) =
         constrainer.validate_schema(&database)
     else {
         panic!("an allowance excusing nothing must fail validation");
     };
     assert_eq!(
-        (allowance.rule(), allowance.policy()),
-        ("policy_read_cycle", "memberships_admin")
+        (allowance.rule(), allowance.object()),
+        (
+            "policy_read_cycle",
+            &AllowedObject::Policy("memberships_admin".to_owned())
+        )
     );
 }
 
@@ -680,7 +683,7 @@ fn an_unused_allowance_names_its_table() {
     let Err(error) = constrainer.validate_schema(&database) else {
         panic!("the allowance excuses nothing");
     };
-    let Error::UnusedAllowance(Allowance::Policy(allowance)) = &error else {
+    let Error::UnusedAllowance(Allowance::Schema(allowance)) = &error else {
         panic!("unexpected failure: {error}");
     };
     assert_eq!(allowance.table().name(), "memberships");

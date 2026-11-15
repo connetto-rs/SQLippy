@@ -8,7 +8,7 @@ use sqlparser::ast::Statement;
 
 use crate::{
     deployment::Deployment,
-    error::{Error, InactiveRule},
+    error::{AllowedObject, Error, InactiveRule},
     lint::{Level, LintGroup, RegisteredRule},
     traits::{ColumnRule, ForeignKeyRule, FunctionRule, QueryRule, SchemaRule, TableRule},
 };
@@ -74,13 +74,94 @@ pub trait Constrainer: Default {
             .register_query_rule_with_floor(rule, Level::Warn);
     }
 
+    /// Excuses the violations of a rule reported on the given table itself.
+    ///
+    /// An allowance that excuses nothing, because the finding was fixed, the
+    /// names do not match or the rule is at [`Level::Allow`], is reported as
+    /// [`Error::UnusedAllowance`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlippy::prelude::*;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    ///
+    /// let database = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE grantees (id INT); ALTER TABLE grantees ENABLE ROW LEVEL SECURITY;",
+    /// )
+    /// .unwrap();
+    /// let mut constrainer: GenericConstrainer<ParserDB> =
+    ///     RowLevelSecurityWithoutPolicies::default().into();
+    /// constrainer.allow_table(
+    ///     "row_level_security_without_policies",
+    ///     TargetName::new("grantees", false),
+    /// );
+    /// assert!(constrainer.validate_schema(&database).is_ok());
+    /// ```
+    fn allow_table(&mut self, rule: &str, table: TargetName<'_>) {
+        self.constrainer_mut()
+            .allow(rule, table, AllowedObject::Table);
+    }
+
+    /// Excuses the violations of a rule reported on one foreign key of a
+    /// table, named by its constraint name as PostgreSQL stores it. A key
+    /// declared without a name goes by the one PostgreSQL generates, such as
+    /// `posts_author_id_fkey`, which the violation's object shows.
+    ///
+    /// An allowance that excuses nothing is reported as
+    /// [`Error::UnusedAllowance`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlippy::prelude::*;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    ///
+    /// let database = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE users (id INT PRIMARY KEY);
+    ///      CREATE TABLE posts (author_id INT REFERENCES users (id) ON DELETE CASCADE);
+    ///      ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
+    ///      CREATE POLICY posts_delete ON posts FOR DELETE USING (false);",
+    /// )
+    /// .unwrap();
+    /// let mut constrainer: GenericConstrainer<ParserDB> =
+    ///     CascadeIntoRowLevelSecurityTable::default().into();
+    /// constrainer.allow_foreign_key(
+    ///     "cascade_into_row_level_security_table",
+    ///     TargetName::new("posts", false),
+    ///     "posts_author_id_fkey",
+    /// );
+    /// assert!(constrainer.validate_schema(&database).is_ok());
+    /// ```
+    fn allow_foreign_key(&mut self, rule: &str, table: TargetName<'_>, foreign_key: &str) {
+        self.constrainer_mut().allow(
+            rule,
+            table,
+            AllowedObject::ForeignKey(foreign_key.to_owned()),
+        );
+    }
+
+    /// Excuses the violations of a rule reported on one index of a table, or
+    /// on the unique constraint that owns it, named as PostgreSQL stores it.
+    /// A constraint declared without a name goes by the one PostgreSQL
+    /// generates, such as `users_email_key`, which the violation's object
+    /// shows.
+    ///
+    /// An allowance that excuses nothing is reported as
+    /// [`Error::UnusedAllowance`].
+    fn allow_index(&mut self, rule: &str, table: TargetName<'_>, index: &str) {
+        self.constrainer_mut()
+            .allow(rule, table, AllowedObject::Index(index.to_owned()));
+    }
+
     /// Excuses the violations of a rule that list the given policy.
     ///
     /// An allowance that excuses nothing, because the policy was fixed, the
     /// names do not match or the rule is at [`Level::Allow`], is reported as
     /// [`Error::UnusedAllowance`].
     fn allow_policy(&mut self, rule: &str, table: TargetName<'_>, policy: &str) {
-        self.constrainer_mut().allow_policy(rule, table, policy);
+        self.constrainer_mut()
+            .allow(rule, table, AllowedObject::Policy(policy.to_owned()));
     }
 
     /// Excuses the violations of a rule in one statement, matched in the form

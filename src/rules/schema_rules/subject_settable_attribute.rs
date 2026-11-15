@@ -236,7 +236,7 @@ fn withheld<DB: DatabaseLike>(
 /// proves it with a `REVOKE` of the table-wide privilege that names no
 /// grantor or names the table's owner and no grant of the column, and a
 /// catalog proves it with its access list. A guarding trigger is not
-/// recognised and takes an allowance.
+/// recognised and takes [`Constrainer::allow_policy`].
 ///
 /// # Example
 ///

@@ -94,7 +94,7 @@ fn a_cascading_delete_into_a_table_with_a_delete_policy_is_reported() {
             [finding(
                 "cascade_into_row_level_security_table",
                 Level::Warn,
-                "kids (unnamed foreign key)"
+                "kids.kids_parent_id_fkey"
             )],
             "{policy}"
         );
@@ -124,7 +124,7 @@ fn every_referential_action_that_rewrites_rows_past_their_policies_is_reported()
             [finding(
                 "cascade_into_row_level_security_table",
                 Level::Warn,
-                "kids (unnamed foreign key)"
+                "kids.kids_parent_id_fkey"
             )],
             "{action}"
         );

@@ -23,6 +23,10 @@ pub enum Location<DB: DatabaseLike> {
     Column(Box<DB::Column>),
     /// A foreign key.
     ForeignKey(Box<DB::ForeignKey>),
+    /// A unique constraint.
+    UniqueIndex(Box<DB::UniqueIndex>),
+    /// An index created with `CREATE INDEX`.
+    Index(Box<DB::Index>),
     /// Policy clauses, in the order the finding traverses them.
     Policies(Vec<PolicySite<DB>>),
     /// A view.
@@ -134,43 +138,72 @@ impl StatementSite {
     }
 }
 
-/// A reviewed exception excusing one rule's violations that list a policy.
-#[derive(Debug, Clone)]
-pub struct PolicyAllowance {
-    pub(crate) rule: String,
-    pub(crate) table: TargetName<'static>,
-    pub(crate) policy: String,
+/// The schema object a [`SchemaAllowance`] names on its table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllowedObject {
+    /// The table itself.
+    Table,
+    /// A foreign key of the table, by its constraint name.
+    ForeignKey(String),
+    /// An index of the table, or the unique constraint that owns one, by its
+    /// name.
+    Index(String),
+    /// A policy on the table, by its name.
+    Policy(String),
 }
 
-impl PolicyAllowance {
+impl Display for AllowedObject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Table => formatter.write_str("the table"),
+            Self::ForeignKey(name) => write!(formatter, "foreign key '{name}'"),
+            Self::Index(name) => write!(formatter, "index '{name}'"),
+            Self::Policy(name) => write!(formatter, "policy '{name}'"),
+        }
+    }
+}
+
+/// A reviewed exception excusing one rule's violations on one schema object.
+#[derive(Debug, Clone)]
+pub struct SchemaAllowance {
+    pub(crate) rule: String,
+    pub(crate) table: TargetName<'static>,
+    pub(crate) object: AllowedObject,
+}
+
+impl SchemaAllowance {
     /// Returns the type name of the excused rule.
     #[must_use]
     pub fn rule(&self) -> &str {
         &self.rule
     }
 
-    /// Returns the table the excused policy is defined on.
+    /// Returns the table the excused object belongs to.
     #[must_use]
     pub fn table(&self) -> &TargetName<'static> {
         &self.table
     }
 
-    /// Returns the name of the excused policy.
+    /// Returns the excused object.
     #[must_use]
-    pub fn policy(&self) -> &str {
-        &self.policy
+    pub fn object(&self) -> &AllowedObject {
+        &self.object
     }
 }
 
-impl Display for PolicyAllowance {
+impl Display for SchemaAllowance {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "the allowance for {} on policy '{}' of table '{}' excuses no violation",
-            self.rule,
-            self.policy,
-            self.table.name()
-        )
+        let (rule, table) = (&self.rule, self.table.name());
+        if self.object == AllowedObject::Table {
+            write!(formatter, "the allowance for {rule} on table '{table}'")?;
+        } else {
+            let object = &self.object;
+            write!(
+                formatter,
+                "the allowance for {rule} on {object} of table '{table}'"
+            )?;
+        }
+        formatter.write_str(" excuses no violation")
     }
 }
 
@@ -216,8 +249,8 @@ impl Display for StatementAllowance {
 /// A reviewed exception excusing a rule's violations.
 #[derive(Debug, Clone)]
 pub enum Allowance {
-    /// An allowance naming a policy.
-    Policy(PolicyAllowance),
+    /// An allowance naming a table or an object on it.
+    Schema(SchemaAllowance),
     /// An allowance naming a statement.
     Statement(StatementAllowance),
 }
@@ -225,7 +258,7 @@ pub enum Allowance {
 impl Display for Allowance {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Policy(allowance) => allowance.fmt(formatter),
+            Self::Schema(allowance) => allowance.fmt(formatter),
             Self::Statement(allowance) => allowance.fmt(formatter),
         }
     }

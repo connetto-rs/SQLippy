@@ -11,7 +11,7 @@ use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::authority_support::{TableColumn, authority_columns},
-    traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
+    traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::index_name},
 };
 
 /// Whether an index's columns include one of `subjects`, the subject columns
@@ -24,6 +24,22 @@ fn scoped<DB: DatabaseLike, I: IndexLike<DB = DB>>(
     Ok(index
         .columns(database)?
         .any(|column| subjects.contains(&column.stored_column_name().as_ref())))
+}
+
+/// The name an index goes by in a finding: the one an allowance takes, else
+/// its columns.
+fn label<DB: DatabaseLike, I: IndexLike<DB = DB>>(
+    database: &DB,
+    index: &I,
+) -> Result<String, LookupError> {
+    Ok(match index_name(index, database)? {
+        Some(name) => name.into_owned(),
+        None => index
+            .columns(database)?
+            .map(ColumnLike::column_name)
+            .collect::<Vec<_>>()
+            .join(", "),
+    })
 }
 
 /// Struct defining a rule that reports a unique constraint or unique index on
@@ -123,32 +139,28 @@ impl<DB: DatabaseLike> SchemaRule for UnscopedUniqueConstraintOnRowLevelSecurity
             if own.is_empty() || !table.has_row_level_security(database)? {
                 continue;
             }
-            let mut unscoped = Vec::new();
+            let (name, subject) = (table.table_name(), own.join("', '"));
+            let message = |index: &str| {
+                format!(
+                    "Unique constraint '{index}' on '{name}' leaves out '{subject}', so a duplicate-key error reveals values in rows the caller's policies hide."
+                )
+            };
+            let resolution = |index: &str| {
+                format!(
+                    "Include '{subject}' in '{index}' so uniqueness holds per subject, or allow it with `allow_index` if the value is meant to be unique across all of them."
+                )
+            };
             for index in table.unique_indices(database)? {
                 if !index.is_primary_key(database)? && !scoped(database, index, &own)? {
-                    let columns: Vec<&str> = index
-                        .columns(database)?
-                        .map(ColumnLike::column_name)
-                        .collect();
-                    unscoped.push(
-                        index
-                            .name()
-                            .map_or_else(|| columns.join(", "), str::to_owned),
-                    );
+                    let label = label(database, index)?;
+                    reporter.unique_index(index, message(&label), resolution(&label))?;
                 }
             }
             for index in table.indices(database)? {
-                if index.is_unique() && !scoped(database, index, &own)? {
-                    unscoped.extend(index.name().map(str::to_owned));
+                if index.is_unique() && index.name().is_some() && !scoped(database, index, &own)? {
+                    let label = label(database, index)?;
+                    reporter.index(index, message(&label), resolution(&label))?;
                 }
-            }
-            let (name, subject) = (table.table_name(), own.join("', '"));
-            for index in unscoped {
-                reporter.table(
-                    table,
-                    format!("Unique constraint '{index}' on '{name}' leaves out '{subject}', so a duplicate-key error reveals values in rows the caller's policies hide."),
-                    format!("Include '{subject}' in '{index}' so uniqueness holds per subject, or allow it if the value is meant to be unique across all of them."),
-                )?;
             }
         }
         Ok(())

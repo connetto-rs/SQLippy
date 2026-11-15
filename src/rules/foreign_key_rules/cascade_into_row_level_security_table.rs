@@ -126,7 +126,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for CascadeIntoRowLevelSecurityTable<DB> {
                 "A foreign key of '{name}' rewrites its rows without row-level security: {}.",
                 bypassed.join(", ")
             ),
-            format!("Use RESTRICT or NO ACTION and change rows of '{name}' through its policies, or allow this foreign key if the action is intended."),
+            format!("Use RESTRICT or NO ACTION and change rows of '{name}' through its policies, or allow it with `allow_foreign_key` if the action is intended."),
         )?;
         Ok(())
     }
