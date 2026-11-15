@@ -117,6 +117,20 @@ fn a_with_item_reading_only_the_caller_and_its_own_relations_is_not_correlated()
 }
 
 #[test]
+fn ordering_local_with_outputs_does_not_correlate_a_policy() {
+    for policy in [
+        "CREATE POLICY p ON test_table USING (team_id IN (
+           WITH members AS (SELECT team_id FROM team_user WHERE user_id = current_user)
+           SELECT team_id FROM members ORDER BY team_id));",
+        "CREATE POLICY p ON test_table USING (team_id IN (
+           WITH members AS (SELECT team_id FROM team_user WHERE user_id = current_user ORDER BY team_id)
+           SELECT team_id FROM members));",
+    ] {
+        assert_eq!(correlated(policy), [], "{policy}");
+    }
+}
+
+#[test]
 fn every_correlated_subquery_of_every_clause_is_reported() {
     let found = correlated(
         "CREATE POLICY team_rows ON test_table FOR ALL

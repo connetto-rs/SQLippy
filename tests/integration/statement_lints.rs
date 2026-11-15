@@ -141,6 +141,51 @@ fn not_in_over_a_with_item_reads_the_filters_the_output_passes_through() {
 }
 
 #[test]
+fn not_in_with_projection_shapes_preserves_nullable_sources() {
+    let constrainer = not_in_rules();
+    for (sql, expected) in [
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH t AS (SELECT b.a_id FROM b WHERE b.a_id IS NOT NULL) SELECT a_id FROM t)",
+            "not_in_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH t AS (SELECT 1, b.a_id FROM b WHERE b.a_id IS NOT NULL) SELECT a_id FROM t)",
+            "not_in_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH t AS (SELECT * FROM b) SELECT a_id FROM t)",
+            "not_in_nullable_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH t(a_id, team) AS (SELECT * FROM b) SELECT a_id FROM t)",
+            "not_in_nullable_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM (SELECT a_id FROM b) AS nested)",
+            "not_in_nullable_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM public.b)",
+            "not_in_nullable_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH t AS ((SELECT a_id FROM b)) SELECT a_id FROM t)",
+            "not_in_nullable_subquery",
+        ),
+        (
+            "SELECT id FROM a WHERE id NOT IN (WITH RECURSIVE t AS (SELECT a_id FROM b WHERE a_id IS NOT NULL) SELECT a_id FROM t)",
+            "not_in_subquery",
+        ),
+    ] {
+        let found: Vec<_> = statement_findings(&constrainer, sql)
+            .into_iter()
+            .map(|(rule, _, _)| rule)
+            .collect();
+        assert_eq!(found, [expected], "{sql}");
+    }
+}
+
+#[test]
 fn not_in_with_a_self_named_item_terminates() {
     let sql =
         "SELECT id FROM a WHERE id NOT IN (WITH b AS (SELECT a_id FROM b) SELECT a_id FROM b)";

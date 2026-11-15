@@ -10,7 +10,7 @@ use sql_traits::{
     utils::identifier_resolution::identifiers_match,
 };
 use sqlparser::ast::{
-    BinaryOperator, Cte, Expr, Ident, InTarget, ObjectNamePart, Query, SelectItem, SetExpr,
+    BinaryOperator, Cte, Expr, Ident, InTarget, ObjectNamePart, Query, Select, SelectItem, SetExpr,
     TableFactor, Visit, Visitor, With,
 };
 
@@ -69,7 +69,7 @@ fn nullable_output<DB: DatabaseLike>(
         return Ok(None);
     };
     Ok(
-        (!excludes_null(&scope, query, output)? && column.is_nullable(database)?)
+        (!excludes_null(&scope, query, select, output)? && column.is_nullable(database)?)
             .then(|| format!("{}.{}", table.table_name(), column.column_name())),
     )
 }
@@ -79,11 +79,12 @@ fn nullable_output<DB: DatabaseLike>(
 fn excludes_null<DB: DatabaseLike>(
     scope: &ColumnScope<'_, '_, DB>,
     query: &Query,
+    select: &Select,
     output: &Expr,
 ) -> Result<bool, LookupError> {
     let mut visible = Vec::new();
     let mut visited: Vec<(&Query, &Expr)> = Vec::new();
-    let (mut query, mut output) = (query, output);
+    let (mut query, mut select, mut output) = (query, select, output);
     loop {
         if visited.iter().any(|(previous_query, previous_output)| {
             std::ptr::eq(*previous_query, query) && std::ptr::eq(*previous_output, output)
@@ -91,9 +92,6 @@ fn excludes_null<DB: DatabaseLike>(
             return Ok(false);
         }
         visited.push((query, output));
-        let SetExpr::Select(select) = query.body.as_ref() else {
-            return Ok(false);
-        };
         let rendered = output.to_string();
         if select.selection.iter().flat_map(conjuncts).any(
             |filter| matches!(filter, Expr::IsNotNull(tested) if tested.to_string() == rendered),
@@ -113,13 +111,13 @@ fn excludes_null<DB: DatabaseLike>(
         else {
             return Ok(false);
         };
-        let Some(next) = binding
+        let Some((next_select, next)) = binding
             .exposed()
             .and_then(|(name, quoted)| item_output(item, name, quoted))
         else {
             return Ok(false);
         };
-        (query, output) = (&item.query, next);
+        (query, select, output) = (&item.query, next_select, next);
     }
 }
 
@@ -159,8 +157,13 @@ fn read_item<'query>(
     Some(&with.cte_tables[item_position])
 }
 
-/// The expression a `WITH` item's `SELECT` projects as its column `name`.
-fn item_output<'query>(item: &'query Cte, name: &str, quoted: bool) -> Option<&'query Expr> {
+/// A `WITH` item's `SELECT` and the expression it projects as its column
+/// `name`.
+fn item_output<'query>(
+    item: &'query Cte,
+    name: &str,
+    quoted: bool,
+) -> Option<(&'query Select, &'query Expr)> {
     let SetExpr::Select(select) = item.query.body.as_ref() else {
         return None;
     };
@@ -168,7 +171,7 @@ fn item_output<'query>(item: &'query Cte, name: &str, quoted: bool) -> Option<&'
         SelectItem::UnnamedExpr(expression)
         | SelectItem::ExprWithAlias {
             expr: expression, ..
-        } => Some(expression),
+        } => Some((select.as_ref(), expression)),
         _ => None,
     };
     if !item.alias.columns.is_empty() {
