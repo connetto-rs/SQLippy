@@ -225,6 +225,45 @@ const NOT_IN_OUTPUTS: &[(&str, bool)] = &[
     ),
     ("VALUES (1, 2)", false),
     ("TABLE pairs", false),
+    (
+        "WITH item AS (SELECT a_id FROM b WHERE a_id IS NOT NULL UNION SELECT a_id FROM b WHERE a_id IS NOT NULL) SELECT a_id FROM item",
+        false,
+    ),
+    (
+        "WITH item AS (SELECT a_id FROM b WHERE a_id IS NOT NULL INTERSECT SELECT a_id FROM b) SELECT a_id FROM item",
+        false,
+    ),
+    ("SELECT ((a_id = 1) OR true)::int FROM b", false),
+    (
+        "SELECT second FROM ((SELECT 1 AS first, NULL::int AS second)) AS item",
+        true,
+    ),
+    (
+        "SELECT (SELECT (SELECT 1) + count(*) FROM b WHERE false)",
+        false,
+    ),
+    (
+        "SELECT a_id FROM b EXCEPT SELECT NULL::int FROM c WHERE false",
+        true,
+    ),
+    (
+        "SELECT a_id FROM b EXCEPT SELECT NULL::int WHERE false",
+        true,
+    ),
+    (
+        "SELECT a_id FROM b EXCEPT SELECT NULL::int HAVING false",
+        true,
+    ),
+    ("SELECT c.id FROM a RIGHT JOIN c ON false", false),
+    (
+        "SELECT b.a_id FROM a RIGHT JOIN (b JOIN c ON b.a_id = c.id) ON true",
+        false,
+    ),
+    ("SELECT other.id FROM a LEFT JOIN c AS other ON false", true),
+    (
+        "WITH item(value) AS (SELECT (a_id IS NULL)::int FROM b UNION SELECT a_id FROM b WHERE a_id IS NOT NULL) SELECT value FROM item",
+        false,
+    ),
 ];
 
 #[test]
@@ -246,9 +285,22 @@ fn not_in_measured_output_nullability() {
         } else {
             "not_in_subquery"
         };
-        let found: Vec<_> = crate::rule_findings::statement_findings(&constrainer, &database, &sql)
+        let found: Vec<_> = constrainer
+            .statement_diagnostics(&database, &statement(&sql))
             .into_iter()
-            .map(|(rule, _, _)| rule)
+            .map(|error| match error {
+                Error::Violation(violation) => {
+                    if subquery == "SELECT other.id FROM a LEFT JOIN c AS other ON false" {
+                        assert!(
+                            violation.message().contains("c.id"),
+                            "{}",
+                            violation.message()
+                        );
+                    }
+                    violation.rule().name
+                }
+                other => panic!("unexpected failure: {other}"),
+            })
             .collect();
         if found != [expected] {
             failures.push(format!("{subquery} expected {expected}, found {found:?}"));

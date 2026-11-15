@@ -164,7 +164,6 @@ impl<'scope, 'query: 'scope, 'database: 'scope, DB: DatabaseLike>
             (Some(column), None) if column.is_nullable(self.database)? => Ok(
                 Nullability::Nullable(Culprit::Column(table.table_name(), column.column_name())),
             ),
-            (Some(_), None) => Ok(Nullability::NotNull),
             _ => Ok(Nullability::Unknown),
         }
     }
@@ -491,7 +490,6 @@ impl<'scope, 'query: 'scope, 'database: 'scope, DB: DatabaseLike>
                     SetOperator::Except | SetOperator::Minus => left,
                 })
             }
-            _ if ordinal == 0 => self.body(body),
             _ => Ok(Nullability::Unknown),
         }
     }
@@ -692,7 +690,6 @@ fn rejects_null<DB: DatabaseLike>(
     entry: RangeTableEntry<'_>,
 ) -> Result<bool, LookupError> {
     Ok(match filter {
-        Expr::Nested(inner) => rejects_null(scope, inner, entry)?,
         Expr::IsNotNull(inner) => null_when(scope, inner, entry)?,
         Expr::UnaryOp {
             op: UnaryOperator::Not,
