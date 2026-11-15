@@ -28,7 +28,8 @@ const CHECK: NotInCheck = NotInCheck {
 ///
 /// `x NOT IN (SELECT c ...)` is never true once any `c` is `NULL`, so it
 /// silently returns no row. The rule reads views, materialized views,
-/// policies, SQL function bodies and, as a query rule, statements.
+/// policies, SQL and PL/pgSQL function bodies and, as a query rule,
+/// statements.
 ///
 /// The judgment follows set operations, values, expressions, outer joins and
 /// `WITH` or derived-table outputs, accepting null-excluding `WHERE` and inner

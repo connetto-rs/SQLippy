@@ -27,7 +27,8 @@ const CHECK: NotInCheck = NotInCheck {
 /// `x NOT IN (1, NULL)` is `NULL` for every `x` other than `1` and false for
 /// `1`, so it is never true. The `NULL` may stand under casts or
 /// parentheses. The rule reads views, materialized views, policies, table
-/// check constraints, SQL function bodies and, as a query rule, statements.
+/// check constraints, SQL and PL/pgSQL function bodies and, as a query rule,
+/// statements.
 /// `NOT IN` over a subquery is left to
 /// [`NotInNullableSubquery`](crate::rules::NotInNullableSubquery).
 ///

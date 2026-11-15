@@ -1,6 +1,6 @@
-//! Views, materialized views, policies, check constraints, SQL function
-//! bodies and statements, walked for one kind of expression and reported by
-//! the rules finding it.
+//! Views, materialized views, policies, check constraints, SQL and PL/pgSQL
+//! function bodies and statements, walked for one kind of expression and
+//! reported by the rules finding it.
 
 use sql_traits::{
     errors::LookupError,
@@ -10,6 +10,10 @@ use sqlparser::{
     ast::{Expr, Statement, Value, Visit},
     dialect::PostgreSqlDialect,
     parser::Parser,
+};
+use sqlparser_plpgsql::{
+    embedded::{Block, DeclarationKind, Dynamic, LoopControl, Node},
+    embedded_sql,
 };
 
 use crate::{
@@ -51,7 +55,7 @@ pub(crate) trait ExpressionFinder {
 }
 
 /// Reports the findings of views, materialized views, policies, table check
-/// constraints and SQL function bodies.
+/// constraints and SQL and PL/pgSQL function bodies.
 pub(crate) fn check_schema<DB: DatabaseLike>(
     finder: &impl ExpressionFinder,
     database: &DB,
@@ -117,18 +121,14 @@ pub(crate) fn check_schema<DB: DatabaseLike>(
             }
         }
     }
-    let functions = database.functions().filter(|function| {
-        function.target_name().schema() != Some("pg_catalog")
-            && function
-                .stored_language()
-                .is_none_or(|language| language == "sql")
-    });
+    let functions = database
+        .functions()
+        .filter(|function| function.target_name().schema() != Some("pg_catalog"));
     for function in functions {
-        let body = function
-            .body()
-            .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok())
-            .unwrap_or_default();
-        let mut found = finder.find(database, &body)?;
+        let mut found = Vec::new();
+        for statement in body_statements(function) {
+            found.extend(finder.find(database, &statement)?);
+        }
         if let Ok(Some(body)) = function.body_expression(database) {
             found.extend(finder.find(database, body.as_ref())?);
         }
@@ -162,4 +162,99 @@ pub(crate) fn check_statement<DB: DatabaseLike>(
         )?;
     }
     Ok(())
+}
+
+/// The statements a SQL or PL/pgSQL function body runs, none for a body that
+/// does not parse or is written in another language.
+pub(crate) fn body_statements<F: FunctionLike>(function: &F) -> Vec<Statement> {
+    let Some(body) = function.body() else {
+        return Vec::new();
+    };
+    match function.stored_language().as_deref() {
+        None | Some("sql") => Parser::parse_sql(&PostgreSqlDialect {}, body).unwrap_or_default(),
+        Some("plpgsql") => embedded_sql(body).map_or_default(|block| {
+            let mut statements = Vec::new();
+            block_statements(block, &mut statements);
+            statements
+        }),
+        Some(_) => Vec::new(),
+    }
+}
+
+/// Appends every statement a PL/pgSQL block runs, its declaration defaults,
+/// conditions, loop controls and run-time command strings included.
+fn block_statements(block: Block, statements: &mut Vec<Statement>) {
+    for declaration in block.declarations {
+        if let DeclarationKind::Variable(variable) = declaration.kind {
+            statements.extend(variable.default.map(Statement::Query));
+        }
+    }
+    nodes_statements(block.statements, statements);
+    for handler in block.handlers {
+        nodes_statements(handler, statements);
+    }
+}
+
+/// Appends the command and `USING` arguments of a dynamic execution.
+fn dynamic_statements(dynamic: Dynamic, statements: &mut Vec<Statement>) {
+    statements.push(Statement::Query(dynamic.command));
+    statements.extend(
+        dynamic
+            .arguments
+            .into_iter()
+            .map(|argument| Statement::Query(Box::new(argument))),
+    );
+}
+
+/// Appends every statement the PL/pgSQL `nodes` run.
+fn nodes_statements(nodes: Vec<Node>, statements: &mut Vec<Statement>) {
+    for node in nodes {
+        match node {
+            Node::Statement(statement) => statements.push(*statement),
+            Node::Dynamic(dynamic) => dynamic_statements(dynamic, statements),
+            Node::Block(block) => block_statements(block, statements),
+            Node::If(conditional) => {
+                for branch in conditional.branches {
+                    statements.push(Statement::Query(branch.condition));
+                    nodes_statements(branch.statements, statements);
+                }
+                nodes_statements(conditional.otherwise, statements);
+            }
+            Node::Case(case) => {
+                statements.extend(case.subject.map(Statement::Query));
+                for branch in case.branches {
+                    statements.push(Statement::Query(branch.condition));
+                    nodes_statements(branch.statements, statements);
+                }
+                nodes_statements(case.otherwise, statements);
+            }
+            Node::Loop(repeated) => {
+                match repeated.control {
+                    LoopControl::Unconditional => {}
+                    LoopControl::While(query) | LoopControl::Array(query) => {
+                        statements.push(Statement::Query(query));
+                    }
+                    LoopControl::Query(statement) => statements.push(*statement),
+                    LoopControl::Range {
+                        lower, upper, step, ..
+                    } => {
+                        statements.extend([Statement::Query(lower), Statement::Query(upper)]);
+                        statements.extend(step.map(Statement::Query));
+                    }
+                    LoopControl::Cursor {
+                        arguments, query, ..
+                    } => {
+                        statements.extend(
+                            arguments
+                                .into_iter()
+                                .map(|argument| Statement::Query(Box::new(argument))),
+                        );
+                        statements.push(*query);
+                    }
+                    LoopControl::Dynamic(dynamic) => dynamic_statements(dynamic, statements),
+                }
+                nodes_statements(repeated.statements, statements);
+            }
+        }
+    }
 }

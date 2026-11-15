@@ -108,6 +108,15 @@ fn nullable_concatenation_reports_sql_function_bodies() {
 }
 
 #[test]
+fn nullable_concatenation_reports_plpgsql_function_bodies() {
+    let sql = format!(
+        "{SCHEMA} CREATE FUNCTION label() RETURNS SETOF TEXT LANGUAGE plpgsql
+           AS $$ BEGIN RETURN QUERY SELECT first || mid FROM people; END $$;"
+    );
+    assert_eq!(findings(&rule(), "nullable_concatenation", &sql).len(), 1);
+}
+
+#[test]
 fn nullable_concatenation_ignores_policies_checks_and_view_filters() {
     let sql = format!(
         "{SCHEMA}
