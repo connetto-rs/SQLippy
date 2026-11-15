@@ -142,6 +142,47 @@ fn a_foreign_key_a_unique_key_inside_it_finds_is_not_reported() {
 }
 
 #[test]
+fn a_foreign_key_an_index_on_a_referenced_unique_key_finds_is_not_reported() {
+    let found = of(
+        "unindexed_foreign_key",
+        "CREATE TABLE parents (id INT PRIMARY KEY, kind INT NOT NULL, UNIQUE (id, kind));
+         CREATE TABLE prefixed (parent_id INT NOT NULL, parent_kind INT NOT NULL,
+           FOREIGN KEY (parent_id, parent_kind) REFERENCES parents (id, kind));
+         CREATE INDEX ON prefixed (parent_id);
+         CREATE TABLE trailed (parent_id INT NOT NULL, parent_kind INT NOT NULL, at INT,
+           FOREIGN KEY (parent_id, parent_kind) REFERENCES parents (id, kind));
+         CREATE INDEX ON trailed (parent_id, at);
+         CREATE TABLE keyed (parent_id INT NOT NULL, parent_kind INT NOT NULL, other INT,
+           PRIMARY KEY (parent_id, other),
+           FOREIGN KEY (parent_kind, parent_id) REFERENCES parents (kind, id));
+         CREATE TABLE by_kind (parent_id INT NOT NULL, parent_kind INT NOT NULL,
+           FOREIGN KEY (parent_id, parent_kind) REFERENCES parents (id, kind));
+         CREATE INDEX ON by_kind (parent_kind);
+         CREATE TABLE behind (parent_id INT NOT NULL, parent_kind INT NOT NULL, at INT,
+           FOREIGN KEY (parent_id, parent_kind) REFERENCES parents (id, kind));
+         CREATE INDEX ON behind (at, parent_id);
+         CREATE TABLE partial (parent_id INT NOT NULL, parent_kind INT NOT NULL,
+           FOREIGN KEY (parent_id, parent_kind) REFERENCES parents (id, kind));
+         CREATE INDEX ON partial (parent_id) WHERE parent_kind > 0;
+         CREATE TABLE computed (parent_id INT NOT NULL, parent_kind INT NOT NULL,
+           FOREIGN KEY (parent_id, parent_kind) REFERENCES parents (id, kind));
+         CREATE INDEX ON computed (abs(parent_id));
+         CREATE TABLE loose (id INT, kind INT, UNIQUE (id, kind));
+         CREATE UNIQUE INDEX ON loose (id) WHERE kind > 0;
+         CREATE TABLE loosely (loose_id INT NOT NULL, loose_kind INT NOT NULL,
+           FOREIGN KEY (loose_id, loose_kind) REFERENCES loose (id, kind));
+         CREATE INDEX ON loosely (loose_id);",
+    );
+    assert_eq!(found.len(), 5, "{found:?}");
+    for table in ["by_kind", "behind", "partial", "computed", "loosely"] {
+        assert!(
+            found.iter().any(|object| object.contains(table)),
+            "{table}: {found:?}"
+        );
+    }
+}
+
+#[test]
 fn a_foreign_key_only_an_expression_leads_with_is_reported() {
     let found = of(
         "unindexed_foreign_key",
