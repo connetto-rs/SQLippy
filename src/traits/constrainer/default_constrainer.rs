@@ -23,19 +23,19 @@ use crate::{
         KeyWithoutExactEquality, LatentPolicyReadCycle, LeakproofUserFunction, MissingPrimaryKey,
         MixedCaseColumnName, MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText,
         MoneyType, MultiplePermissivePolicies, NarrowIntegerKey, NarrowerReferencingColumn,
-        NestedPolicySubquery, NonSnakeCaseColumnName, NonSnakeCaseTableName, NotInNullList,
-        NotInNullableSubquery, NotInSubquery, NullComparison, NullCredentialRead,
-        NullableCompositeForeignKey, NullableConcatenation, NullableUniqueColumn, OffsetPaging,
-        OuterColumnCapture, OwnerRightsView, PluralColumnName, PolicyExpressionDefeatsIndex,
-        PolicyReadCycle, PolicyReadsUnprotectedTable, PolicyTargetsBypassRole,
-        PolicyToCreatingRole, PolicyWithoutRowLevelSecurity, PolicyWithoutRowReference,
-        PrefixRedundantIndex, PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule,
-        RaisingSettingRead, RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView,
-        ReachableSequence, ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge,
-        ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole, RegColumnType,
-        RepeatedIndexColumn, ReservedKeywordIdentifier, RestrictiveWithoutPermissive,
-        RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
-        RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
+        NestedPolicySubquery, NonSnakeCaseColumnName, NonSnakeCaseTableName,
+        NonterminatingRecursiveCte, NotInNullList, NotInNullableSubquery, NotInSubquery,
+        NullComparison, NullCredentialRead, NullableCompositeForeignKey, NullableConcatenation,
+        NullableUniqueColumn, OffsetPaging, OuterColumnCapture, OwnerRightsView, PluralColumnName,
+        PolicyExpressionDefeatsIndex, PolicyReadCycle, PolicyReadsUnprotectedTable,
+        PolicyTargetsBypassRole, PolicyToCreatingRole, PolicyWithoutRowLevelSecurity,
+        PolicyWithoutRowReference, PrefixRedundantIndex, PrimaryKeyNotNamedId, PublicSchemaCreate,
+        QueryRewriteRule, RaisingSettingRead, RandomOrderLimit, ReachableForeignTable,
+        ReachableMaterializedView, ReachableSequence, ReachableTableWithoutRowLevelSecurity,
+        RedundantExtensionEdge, ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole,
+        RegColumnType, RepeatedIndexColumn, ReservedKeywordIdentifier,
+        RestrictiveWithoutPermissive, RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies,
+        RustKeywordColumnName, RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
         SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
         SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SerialColumn,
         SessionTimeZoneDependence, SettableMembershipInBypassingRole, SingularTableName,
@@ -210,7 +210,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 27] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 28] = [
         Box::new(NullableConcatenation::default()),
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
@@ -218,6 +218,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(NullComparison::default()),
         Box::new(UnusedCte::default()),
         Box::new(CteShadowsRelation::default()),
+        Box::new(NonterminatingRecursiveCte::default()),
         Box::new(RandomOrderLimit::default()),
         Box::new(OffsetPaging::default()),
         Box::new(UnfilteredWrite::default()),
@@ -246,7 +247,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 47] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 48] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -272,6 +273,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(NullComparison::default()),
         Box::new(UnusedCte::default()),
         Box::new(CteShadowsRelation::default()),
+        Box::new(NonterminatingRecursiveCte::default()),
         Box::new(TimestampWithoutTimeZone::default()),
         Box::new(TimeWithTimeZone::default()),
         Box::new(ZeroPrecisionTimestamp::default()),

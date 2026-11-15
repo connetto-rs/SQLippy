@@ -70,3 +70,5 @@ mod unused_cte;
 pub use unused_cte::UnusedCte;
 mod cte_shadows_relation;
 pub use cte_shadows_relation::CteShadowsRelation;
+mod nonterminating_recursive_cte;
+pub use nonterminating_recursive_cte::NonterminatingRecursiveCte;
