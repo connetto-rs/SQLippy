@@ -12,7 +12,9 @@ use sqlparser::{
     parser::Parser,
 };
 use sqlparser_plpgsql::{
-    embedded::{Block, DeclarationKind, Dynamic, LoopControl, Node},
+    embedded::{
+        Block, BoundCursor, DeclarationKind, Dynamic, Indirection, LoopControl, Node, Open,
+    },
     embedded_sql,
 };
 
@@ -239,8 +241,27 @@ fn dynamic_statements(dynamic: Dynamic, statements: &mut Vec<Statement>) {
 fn nodes_statements(nodes: Vec<Node>, statements: &mut Vec<Statement>) {
     for node in nodes {
         match node {
-            Node::Statement(statement) => statements.push(*statement),
-            Node::Dynamic(dynamic) => dynamic_statements(dynamic, statements),
+            Node::Statement {
+                statement: query, ..
+            }
+            | Node::Open(Open::Query { query, .. }) => statements.push(*query),
+            Node::Dynamic { dynamic, .. } | Node::Open(Open::Dynamic { dynamic, .. }) => {
+                dynamic_statements(dynamic, statements);
+            }
+            Node::Assignment(assignment) => {
+                for indirection in assignment.target.indirection {
+                    match indirection {
+                        Indirection::Field(_) => {}
+                        Indirection::Index(index) => statements.push(Statement::Query(index)),
+                        Indirection::Slice { lower, upper } => {
+                            statements.extend(lower.into_iter().chain(upper).map(Statement::Query));
+                        }
+                    }
+                }
+                statements.push(Statement::Query(assignment.value));
+            }
+            Node::Open(Open::Bound(cursor)) => bound_cursor_statements(cursor, statements),
+            Node::Fetch(_) | Node::Diagnostics(_) => {}
             Node::Block(block) => block_statements(block, statements),
             Node::If(conditional) => {
                 for branch in conditional.branches {
@@ -260,30 +281,34 @@ fn nodes_statements(nodes: Vec<Node>, statements: &mut Vec<Statement>) {
             Node::Loop(repeated) => {
                 match repeated.control {
                     LoopControl::Unconditional => {}
-                    LoopControl::While(query) | LoopControl::Array(query) => {
+                    LoopControl::While(query) | LoopControl::Array { array: query, .. } => {
                         statements.push(Statement::Query(query));
                     }
-                    LoopControl::Query(statement) => statements.push(*statement),
+                    LoopControl::Query { query, .. } => statements.push(*query),
                     LoopControl::Range {
                         lower, upper, step, ..
                     } => {
                         statements.extend([Statement::Query(lower), Statement::Query(upper)]);
                         statements.extend(step.map(Statement::Query));
                     }
-                    LoopControl::Cursor {
-                        arguments, query, ..
-                    } => {
-                        statements.extend(
-                            arguments
-                                .into_iter()
-                                .map(|argument| Statement::Query(Box::new(argument))),
-                        );
-                        statements.push(*query);
+                    LoopControl::Cursor { cursor, .. } => {
+                        bound_cursor_statements(cursor, statements);
                     }
-                    LoopControl::Dynamic(dynamic) => dynamic_statements(dynamic, statements),
+                    LoopControl::Dynamic { dynamic, .. } => dynamic_statements(dynamic, statements),
                 }
                 nodes_statements(repeated.statements, statements);
             }
         }
     }
+}
+
+/// Appends the arguments of a bound cursor and the query it opens.
+fn bound_cursor_statements(cursor: BoundCursor, statements: &mut Vec<Statement>) {
+    statements.extend(
+        cursor
+            .arguments
+            .into_iter()
+            .map(|argument| Statement::Query(Box::new(argument))),
+    );
+    statements.push(*cursor.query);
 }

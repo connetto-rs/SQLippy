@@ -20,10 +20,10 @@ use dioxus_free_icons::icons::fa_solid_icons::{
     FaPeopleGroup, FaPersonCircleXmark, FaPlug, FaPlugCircleExclamation, FaPlugCircleXmark,
     FaPuzzlePiece, FaQuoteLeft, FaRegistered, FaRepeat, FaRotateRight, FaRuler, FaScissors,
     FaShareNodes, FaShield, FaShieldHalved, FaShuffle, FaSignsPost, FaSitemap, FaSkull, FaSliders,
-    FaSnowflake, FaSort, FaSpellCheck, FaSquareMinus, FaSquareRootVariable, FaStopwatch, FaTable,
-    FaTableList, FaTag, FaTags, FaTextHeight, FaTextWidth, FaTrashCan, FaTriangleExclamation,
-    FaUnderline, FaUserCheck, FaUserGear, FaUserNinja, FaUserPen, FaUserSlash, FaUserTag,
-    FaWandMagicSparkles, FaWater, FaWaterLadder,
+    FaSnowflake, FaSort, FaSpellCheck, FaSquareMinus, FaSquareRootVariable, FaStopwatch, FaSyringe,
+    FaTable, FaTableList, FaTag, FaTags, FaTextHeight, FaTextWidth, FaTrashCan,
+    FaTriangleExclamation, FaUnderline, FaUserCheck, FaUserGear, FaUserNinja, FaUserPen,
+    FaUserSlash, FaUserTag, FaWandMagicSparkles, FaWater, FaWaterLadder,
 };
 
 /// Defines `RuleIcon`, rendering the icon each listed rule name maps to, and
@@ -55,6 +55,7 @@ rule_icons! {
     "invoker_without_search_path" => FaSignsPost,
     "definer_path_creatable_schema" => FaSignsPost,
     "leakproof_user_function" => FaFaucetDrip,
+    "dynamic_sql_injection" => FaSyringe,
     "unsatisfiable_check" => FaCircleXmark,
     "surrogate_primary_key_in_extension" => FaPuzzlePiece,
     "tautological_check" => FaEquals,

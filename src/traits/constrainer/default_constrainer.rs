@@ -15,8 +15,8 @@ use crate::{
         DefinerPathCreatableSchema, DefinerTakesActingUser, DefinerTemporarySchemaNotLast,
         DefinerWithoutSearchPath, DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck,
         DuplicateColumnAssignment, DuplicateColumnNameInExtensionGraph, DuplicateForeignKey,
-        DuplicatePolicy, DuplicateUniqueIndex, DuplicatingRecursiveCte, EmptyTextAllowed,
-        ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
+        DuplicatePolicy, DuplicateUniqueIndex, DuplicatingRecursiveCte, DynamicSqlInjection,
+        EmptyTextAllowed, ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FlagNotBoolean,
         FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
         FunctionMediatedPolicyCycle, GrantOptionToClientRole, ImpureImmutableFunction,
@@ -134,7 +134,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
         register_schema_rules(&mut constrainer);
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 9] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 10] = [
             Box::new(ImpureImmutableFunction::default()),
             Box::new(WritingNonVolatileFunction::default()),
             Box::new(DefinerWithoutSearchPath::default()),
@@ -144,6 +144,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(LeakproofUserFunction::default()),
             Box::new(ExposedDefinerOverProtectedTable::default()),
             Box::new(GrantOptionToClientRole::default()),
+            Box::new(DynamicSqlInjection::default()),
         ];
         for rule in function_rules {
             constrainer.register_function_rule_with_floor(rule, Level::Allow);
