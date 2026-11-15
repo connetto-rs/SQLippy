@@ -24,7 +24,7 @@ use crate::{
         KeyWithoutExactEquality, LatentPolicyReadCycle, LeakproofUserFunction, MissingPrimaryKey,
         MixedCaseColumnName, MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText,
         MoneyType, MultiplePermissivePolicies, NarrowIntegerKey, NarrowerReferencingColumn,
-        NestedPolicySubquery, NonSnakeCaseColumnName, NonSnakeCaseTableName,
+        NestedPolicySubquery, NilUuidSentinel, NonSnakeCaseColumnName, NonSnakeCaseTableName,
         NonterminatingRecursiveCte, NotInNullList, NotInNullableSubquery, NotInSubquery,
         NullComparison, NullCredentialRead, NullableCompositeForeignKey, NullableConcatenation,
         NullableUniqueColumn, OffsetPaging, OuterColumnCapture, OwnerRightsView, PluralColumnName,
@@ -211,12 +211,13 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 30] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 31] = [
         Box::new(NullableConcatenation::default()),
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
         Box::new(NotInNullList::default()),
         Box::new(NullComparison::default()),
+        Box::new(NilUuidSentinel::default()),
         Box::new(UnusedCte::default()),
         Box::new(CteShadowsRelation::default()),
         Box::new(NonterminatingRecursiveCte::default()),
@@ -250,7 +251,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 50] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 51] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -274,6 +275,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(NotInSubquery::default()),
         Box::new(NotInNullList::default()),
         Box::new(NullComparison::default()),
+        Box::new(NilUuidSentinel::default()),
         Box::new(UnusedCte::default()),
         Box::new(CteShadowsRelation::default()),
         Box::new(NonterminatingRecursiveCte::default()),
