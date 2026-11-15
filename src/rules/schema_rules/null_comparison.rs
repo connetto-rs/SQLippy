@@ -24,7 +24,8 @@ use crate::{
 /// `x` holds, so a filter written with one keeps no row and a `CHECK`
 /// written with one rejects no row. A cast or parentheses around the `NULL`
 /// change nothing. The rule reads views, materialized views, policies, table
-/// check constraints, SQL function bodies and, as a query rule, statements.
+/// check constraints, SQL and PL/pgSQL function bodies and, as a query rule,
+/// statements.
 /// `IS NULL`, `IS NOT NULL` and `IS DISTINCT FROM` are the forms that test
 /// for `NULL`.
 ///

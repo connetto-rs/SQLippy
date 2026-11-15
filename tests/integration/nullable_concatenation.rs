@@ -108,6 +108,86 @@ fn nullable_concatenation_reports_sql_function_bodies() {
 }
 
 #[test]
+fn nullable_concatenation_reports_plpgsql_function_bodies() {
+    let sql = format!(
+        "{SCHEMA} CREATE FUNCTION label() RETURNS SETOF TEXT LANGUAGE plpgsql
+           AS $$ BEGIN RETURN QUERY SELECT first || mid FROM people; END $$;"
+    );
+    assert_eq!(findings(&rule(), "nullable_concatenation", &sql).len(), 1);
+}
+
+#[test]
+fn nullable_concatenation_does_not_parse_foreign_function_bodies_as_sql() {
+    let sql = format!(
+        "{SCHEMA} CREATE FUNCTION label() RETURNS TEXT LANGUAGE plperl
+         AS $$ SELECT first || mid FROM people $$;"
+    );
+    assert_eq!(
+        findings(&rule(), "nullable_concatenation", &sql),
+        Vec::<(Level, String, String)>::new()
+    );
+}
+
+#[test]
+fn nullable_concatenation_reports_plpgsql_expression_sites() {
+    for body in [
+        "DECLARE label TEXT := (SELECT first || mid FROM people);
+         BEGIN RETURN; END",
+        "BEGIN BEGIN PERFORM first || mid FROM people; END; END",
+        "BEGIN PERFORM 1;
+         EXCEPTION WHEN division_by_zero THEN PERFORM first || mid FROM people; END",
+        "BEGIN EXECUTE (SELECT first || mid FROM people); END",
+        "BEGIN EXECUTE 'SELECT $1' USING (SELECT first || mid FROM people); END",
+        "BEGIN IF (SELECT first || mid FROM people) IS NULL THEN RETURN; END IF; END",
+        "BEGIN IF FALSE THEN RETURN;
+         ELSIF (SELECT first || mid FROM people) IS NULL THEN RETURN; END IF; END",
+        "BEGIN IF TRUE THEN PERFORM first || mid FROM people; END IF; END",
+        "BEGIN IF FALSE THEN RETURN; ELSE PERFORM first || mid FROM people; END IF; END",
+        "BEGIN CASE (SELECT first || mid FROM people)
+         WHEN 'label' THEN RETURN; ELSE RETURN; END CASE; END",
+        "BEGIN CASE WHEN (SELECT first || mid FROM people) IS NULL
+         THEN RETURN; ELSE RETURN; END CASE; END",
+        "BEGIN CASE WHEN TRUE THEN PERFORM first || mid FROM people;
+         ELSE RETURN; END CASE; END",
+        "BEGIN CASE WHEN FALSE THEN RETURN;
+         ELSE PERFORM first || mid FROM people; END CASE; END",
+        "BEGIN LOOP PERFORM first || mid FROM people; EXIT; END LOOP; END",
+        "BEGIN WHILE (SELECT first || mid FROM people) IS NULL LOOP EXIT; END LOOP; END",
+        "DECLARE label TEXT;
+         BEGIN FOR label IN SELECT first || mid FROM people LOOP NULL; END LOOP; END",
+        "DECLARE label TEXT;
+         BEGIN FOREACH label IN ARRAY ARRAY[(SELECT first || mid FROM people)]
+         LOOP NULL; END LOOP; END",
+        "BEGIN FOR counter IN length((SELECT first || mid FROM people))..10
+         LOOP NULL; END LOOP; END",
+        "BEGIN FOR counter IN 1..length((SELECT first || mid FROM people))
+         LOOP NULL; END LOOP; END",
+        "BEGIN FOR counter IN 1..10 BY length((SELECT first || mid FROM people))
+         LOOP NULL; END LOOP; END",
+        "DECLARE labels CURSOR FOR SELECT first || mid FROM people;
+         BEGIN FOR label IN labels LOOP NULL; END LOOP; END",
+        "DECLARE labels CURSOR (label TEXT) FOR SELECT label;
+         BEGIN FOR item IN labels((SELECT first || mid FROM people))
+         LOOP NULL; END LOOP; END",
+        "DECLARE label TEXT;
+         BEGIN FOR label IN EXECUTE (SELECT first || mid FROM people)
+         LOOP NULL; END LOOP; END",
+        "DECLARE label TEXT;
+         BEGIN FOR label IN EXECUTE 'SELECT $1' USING (SELECT first || mid FROM people)
+         LOOP NULL; END LOOP; END",
+    ] {
+        let sql = format!(
+            "{SCHEMA} CREATE FUNCTION label() RETURNS VOID LANGUAGE plpgsql AS $$ {body} $$;"
+        );
+        assert_eq!(
+            findings(&rule(), "nullable_concatenation", &sql).len(),
+            1,
+            "{body}"
+        );
+    }
+}
+
+#[test]
 fn nullable_concatenation_ignores_policies_checks_and_view_filters() {
     let sql = format!(
         "{SCHEMA}

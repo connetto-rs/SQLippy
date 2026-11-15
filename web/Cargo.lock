@@ -3048,6 +3048,7 @@ dependencies = [
  "inflection-rs",
  "sql-traits",
  "sqlparser",
+ "sqlparser-plpgsql",
  "thiserror 2.0.21",
 ]
 

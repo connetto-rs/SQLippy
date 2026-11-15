@@ -14,6 +14,8 @@ mod invoker_without_search_path;
 pub use invoker_without_search_path::InvokerWithoutSearchPath;
 mod leakproof_user_function;
 pub use leakproof_user_function::LeakproofUserFunction;
+mod writing_non_volatile_function;
+pub use writing_non_volatile_function::WritingNonVolatileFunction;
 
 use sql_traits::{
     errors::LookupError,
