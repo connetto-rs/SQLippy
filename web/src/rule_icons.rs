@@ -147,6 +147,7 @@ rule_icons! {
     "unused_cte" => FaEraser,
     "nonterminating_recursive_cte" => FaArrowsSpin,
     "duplicating_recursive_cte" => FaCopy,
+    "unindexed_recursive_join" => FaMagnifyingGlass,
     "prefix_redundant_index" => FaTags,
     "repeated_index_column" => FaClone,
     "uncached_policy_call" => FaBolt,

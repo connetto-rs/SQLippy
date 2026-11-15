@@ -46,11 +46,11 @@ use crate::{
         TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
         TruncatingIntegerDivision, UnboundedTextColumn, UncachedPolicyCall, UncheckedPastTimestamp,
         UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
-        UnindexedForeignKey, UnindexedPolicyFilter, UnknownBinarySend, UnlinkedFromItem,
-        UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
-        UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable, UnusedCte,
-        UnvalidatedConstraint, UuidStoredAsText, WildcardView, WritingNonVolatileFunction,
-        ZeroPrecisionTimestamp,
+        UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin, UnknownBinarySend,
+        UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin,
+        UnsatisfiableCheck, UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
+        UnusedCte, UnvalidatedConstraint, UuidStoredAsText, WildcardView,
+        WritingNonVolatileFunction, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -211,7 +211,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 29] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 30] = [
         Box::new(NullableConcatenation::default()),
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
@@ -221,6 +221,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(CteShadowsRelation::default()),
         Box::new(NonterminatingRecursiveCte::default()),
         Box::new(DuplicatingRecursiveCte::default()),
+        Box::new(UnindexedRecursiveJoin::default()),
         Box::new(RandomOrderLimit::default()),
         Box::new(OffsetPaging::default()),
         Box::new(UnfilteredWrite::default()),
@@ -249,7 +250,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 49] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 50] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -277,6 +278,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(CteShadowsRelation::default()),
         Box::new(NonterminatingRecursiveCte::default()),
         Box::new(DuplicatingRecursiveCte::default()),
+        Box::new(UnindexedRecursiveJoin::default()),
         Box::new(TimestampWithoutTimeZone::default()),
         Box::new(TimeWithTimeZone::default()),
         Box::new(ZeroPrecisionTimestamp::default()),
