@@ -8,16 +8,14 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         expression_site_support::{check_schema, check_statement},
-        not_in_support::NotInCheck,
+        not_in_support::{NotInCheck, NotInOperand},
     },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule},
 };
 
 const CHECK: NotInCheck = NotInCheck {
     describe: |not_in| {
-        not_in
-            .nullable
-            .is_none()
+        matches!(not_in.operand, NotInOperand::Subquery(None))
             .then(|| format!("`{}`", not_in.expression))
     },
     problem: "which PostgreSQL never plans as an anti-join, so it runs the subquery as a subplan that is re-scanned per outer row once it outgrows work_mem",

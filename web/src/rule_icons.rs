@@ -138,6 +138,7 @@ rule_icons! {
     "nested_policy_subquery" => FaBoxesStacked,
     "null_credential_read" => FaEyeSlash,
     "not_in_subquery" => FaSquareMinus,
+    "not_in_null_list" => FaGhost,
     "null_comparison" => FaEquals,
     "prefix_redundant_index" => FaTags,
     "repeated_index_column" => FaClone,

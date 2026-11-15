@@ -1,4 +1,5 @@
-//! `NOT IN` over a subquery, shared by the rules reporting it.
+//! `NOT IN` over a subquery or a list holding a `NULL`, shared by the rules
+//! reporting it.
 
 use std::ops::ControlFlow;
 
@@ -7,18 +8,40 @@ use sql_traits::{
     structs::{ColumnDefinition, ColumnScope, IdentifierCase},
     traits::{ColumnLike, DatabaseLike, TableLike},
 };
-use sqlparser::ast::{Expr, InTarget, Query, SelectItem, SetExpr, Visit, Visitor};
+use sqlparser::ast::{BinaryOperator, Expr, InTarget, Query, SelectItem, SetExpr, Visit, Visitor};
 
 use crate::rules::{
-    expression_site_support::ExpressionFinder, policy_support::conjuncts, walk_support::walk,
+    expression_site_support::{ExpressionFinder, is_null_literal},
+    policy_support::conjuncts,
+    walk_support::walk,
 };
 
-/// One `NOT IN` over a subquery.
+/// One `NOT IN`, or `<> ALL` over an array.
 pub(crate) struct NotIn {
-    /// The `NOT IN` expression rendered as SQL.
+    /// The expression rendered as SQL.
     pub(crate) expression: String,
-    /// The nullable column the subquery returns, as `table.column`.
-    pub(crate) nullable: Option<String>,
+    /// What the values are compared against.
+    pub(crate) operand: NotInOperand,
+}
+
+/// What a `NOT IN` compares against.
+pub(crate) enum NotInOperand {
+    /// A subquery, with the nullable column it returns as `table.column`.
+    Subquery(Option<String>),
+    /// A list or array literal holding a `NULL`.
+    NullList,
+}
+
+/// Whether `expression`, under casts and parentheses, is an array literal
+/// holding a `NULL`.
+fn is_null_array(mut expression: &Expr) -> bool {
+    loop {
+        match expression {
+            Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => expression = inner,
+            Expr::Array(array) => return array.elem.iter().any(is_null_literal),
+            _ => return false,
+        }
+    }
 }
 
 /// The nullable column a `NOT IN` subquery returns, unless its `WHERE`
@@ -53,7 +76,7 @@ fn nullable_output<DB: DatabaseLike>(
         .then(|| format!("{}.{}", table.table_name(), column.column_name())))
 }
 
-/// Collects the `NOT IN` subqueries of a node.
+/// Collects the `NOT IN` subqueries and `NULL` lists of a node.
 struct NotIns<'db, DB: DatabaseLike> {
     database: &'db DB,
     found: Vec<NotIn>,
@@ -63,25 +86,36 @@ impl<DB: DatabaseLike> Visitor for NotIns<'_, DB> {
     type Break = LookupError;
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<LookupError> {
-        let Expr::In {
-            target: InTarget::Subquery(query),
-            negated: true,
-            ..
-        } = expression
-        else {
-            return ControlFlow::Continue(());
+        let operand = match expression {
+            Expr::In {
+                target: InTarget::Subquery(query),
+                negated: true,
+                ..
+            } => match nullable_output(self.database, query) {
+                Ok(nullable) => NotInOperand::Subquery(nullable),
+                Err(error) => return ControlFlow::Break(error),
+            },
+            Expr::In {
+                target: InTarget::List(list),
+                negated: true,
+                ..
+            } if list.iter().any(is_null_literal) => NotInOperand::NullList,
+            Expr::AllOp {
+                compare_op: BinaryOperator::NotEq,
+                right,
+                ..
+            } if is_null_array(right) => NotInOperand::NullList,
+            _ => return ControlFlow::Continue(()),
         };
-        nullable_output(self.database, query).map_or_else(ControlFlow::Break, |nullable| {
-            self.found.push(NotIn {
-                expression: expression.to_string(),
-                nullable,
-            });
-            ControlFlow::Continue(())
-        })
+        self.found.push(NotIn {
+            expression: expression.to_string(),
+            operand,
+        });
+        ControlFlow::Continue(())
     }
 }
 
-/// The `NOT IN` subqueries a node holds.
+/// The `NOT IN` subqueries and `NULL` lists a node holds.
 fn not_ins<DB: DatabaseLike, V: Visit + ?Sized>(
     database: &DB,
     node: &V,
