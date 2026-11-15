@@ -34,6 +34,8 @@ fn a_join_on_a_column_no_index_leads_with_is_reported() {
         "WITH RECURSIVE r(id) AS (SELECT 1 UNION SELECT groups.id FROM groups JOIN r ON parent_id = r.id) SELECT id FROM r",
         // A partial index and an expression index serve neither join.
         "WITH RECURSIVE r(id) AS (SELECT 1 UNION SELECT u.id FROM units AS u JOIN r ON u.parent_id = r.id) SELECT id FROM r",
+        // A column alias list renames the stored columns by position.
+        "WITH RECURSIVE r(id) AS (SELECT 1 UNION SELECT g.gid FROM groups AS g(gid, up) JOIN r ON g.up = r.id) SELECT id FROM r",
     ] {
         assert_eq!(unindexed(sql).len(), 1, "{sql}");
     }
@@ -43,6 +45,7 @@ fn a_join_on_a_column_no_index_leads_with_is_reported() {
 fn a_join_an_index_serves_passes() {
     for sql in [
         "WITH RECURSIVE r(id) AS (SELECT 1 UNION SELECT t.id FROM teams AS t JOIN r ON t.parent_id = r.id) SELECT id FROM r",
+        "WITH RECURSIVE r(id) AS (SELECT 1 UNION SELECT t.tid FROM teams AS t(tid, up) JOIN r ON t.up = r.id) SELECT id FROM r",
         // Walking up joins on the primary key.
         "WITH RECURSIVE r(id, parent_id) AS (SELECT id, parent_id FROM groups WHERE id = 3 UNION SELECT g.id, g.parent_id FROM groups AS g JOIN r ON g.id = r.parent_id) SELECT id FROM r",
         // Without RECURSIVE nothing is walked.
