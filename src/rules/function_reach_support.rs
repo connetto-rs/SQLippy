@@ -1,9 +1,14 @@
 //! Whether a statement or an expression reaches something a rule looks for,
 //! directly or through the SQL and PL/pgSQL bodies of the functions it calls.
 
-use std::{borrow::Cow, collections::HashMap, ops::ControlFlow};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    ops::ControlFlow,
+};
 
 use sql_traits::{
+    errors::LookupError,
     structs::FunctionBody,
     traits::{DatabaseLike, FunctionLike},
     utils::identifier_resolution::normalize_identifier,
@@ -21,6 +26,33 @@ use crate::{
     rules::{grant_support::schema_of, walk_support::walk},
     traits::reporter::signature,
 };
+
+/// Whether a bound root reaches `target` through its callees.
+pub(crate) fn reaches_function<DB: DatabaseLike>(
+    database: &DB,
+    root: &DB::Function,
+    target: &DB::Function,
+) -> Result<bool, LookupError> {
+    if root == target {
+        return Ok(true);
+    }
+    let mut pending = vec![root];
+    let mut visited = HashSet::new();
+    while let Some(function) = pending.pop() {
+        if function == target {
+            return Ok(true);
+        }
+        if !visited.insert(function) || function.target_name().schema() == Some("pg_catalog") {
+            continue;
+        }
+        match function.referenced_functions(database) {
+            Ok(called) => pending.extend(called),
+            Err(error) if super::function_rules::unreadable_body(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
 
 /// The last part of a name and the schema before it, if any.
 pub(crate) fn split(name: &ObjectName) -> Option<(Option<&str>, &str)> {

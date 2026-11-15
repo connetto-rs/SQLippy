@@ -23,6 +23,7 @@ mod duplicate_column_assignments;
 mod duplicate_policies;
 mod expressions_and_functions;
 mod generated_keys;
+mod invoker_search_path;
 mod key_equality;
 mod keys_and_indexes;
 mod lint_candidates;
