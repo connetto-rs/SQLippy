@@ -29,8 +29,8 @@ const CHECK: NotInCheck = NotInCheck {
 /// PostgreSQL never turns `x NOT IN (SELECT c ...)` into an anti-join, even
 /// when `c` is `NOT NULL`. Measured on PostgreSQL 17.11 and 18.6 with
 /// `work_mem` at 64kB, it took 146 ms for 600 rows where `NOT EXISTS` took
-/// 0.25 ms. The rule reads views, materialized views, policies, SQL function
-/// bodies and, as a query rule, statements.
+/// 0.25 ms. The rule reads views, materialized views, policies, SQL and
+/// PL/pgSQL function bodies and, as a query rule, statements.
 ///
 /// # Example
 ///

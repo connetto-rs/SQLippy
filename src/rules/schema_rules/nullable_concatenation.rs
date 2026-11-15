@@ -7,16 +7,15 @@ use sql_traits::{
     structs::{ColumnDefinition, ExpressionContext, ExpressionScope, IdentifierCase, OperandType},
     traits::{ColumnLike, DataTypeLike, DatabaseLike, FunctionLike, TableLike, ViewLike},
 };
-use sqlparser::{
-    ast::{BinaryOperator, Expr, Query, Statement, Visit, Visitor},
-    dialect::PostgreSqlDialect,
-    parser::Parser,
-};
+use sqlparser::ast::{BinaryOperator, Expr, Query, Statement, Visit, Visitor};
 
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::{policy_support::unnested, statement_support::selects, walk_support::walk},
+    rules::{
+        expression_site_support::body_statements, policy_support::unnested,
+        statement_support::selects, walk_support::walk,
+    },
     traits::{
         Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule, reporter::signature,
     },
@@ -27,7 +26,7 @@ const RESOLUTION: &str = "Use concat or concat_ws to skip NULL, or COALESCE the 
 /// Reports scalar `||` chains with a declared nullable column operand.
 ///
 /// Views are checked in their projections, and statements, generated columns
-/// and SQL function bodies are checked throughout.
+/// and SQL and PL/pgSQL function bodies are checked throughout.
 /// Domain columns and chains with unknown operand types are not judged.
 /// Outer-join null extension, policies and check constraints are excluded.
 pub struct NullableConcatenation<DB>(std::marker::PhantomData<DB>);
@@ -309,19 +308,12 @@ impl<DB: DatabaseLike> SchemaRule for NullableConcatenation<DB> {
             !matches!(
                 function.target_name().schema(),
                 Some("pg_catalog" | "information_schema")
-            ) && function
-                .stored_language()
-                .is_none_or(|language| language == "sql")
+            )
         }) {
             let scope = ExpressionScope::FunctionBody(function);
             let mut findings = Vec::new();
-            if let Some(body) = function
-                .body()
-                .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok())
-            {
-                for statement in &body {
-                    findings.extend(statement_findings(database, statement, &scope)?);
-                }
+            for statement in &body_statements(function) {
+                findings.extend(statement_findings(database, statement, &scope)?);
             }
             if let Some(statements) = function.atomic_statements(database)? {
                 for statement in statements.iter() {

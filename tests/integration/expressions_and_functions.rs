@@ -37,10 +37,12 @@ fn not_in_over_a_nullable_column_is_reported_wherever_it_is_written() {
              CREATE FUNCTION f() RETURNS SETOF INT LANGUAGE sql
                AS $$ SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b) $$;
              CREATE FUNCTION g(x INT) RETURNS BOOLEAN LANGUAGE sql
-               RETURN x NOT IN (SELECT a_id FROM b);"
+               RETURN x NOT IN (SELECT a_id FROM b);
+             CREATE FUNCTION h() RETURNS SETOF INT LANGUAGE plpgsql AS $$
+               BEGIN IF true THEN RETURN QUERY SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b); END IF; END $$;"
         ),
     );
-    assert_eq!(found, ["v", "mv", "a.p", "f()", "g(INT)"]);
+    assert_eq!(found, ["v", "mv", "a.p", "f()", "g(INT)", "h()"]);
 }
 
 #[test]

@@ -29,8 +29,9 @@ const CHECK: NotInCheck = NotInCheck {
 ///
 /// `x NOT IN (SELECT c ...)` is never true once any `c` is `NULL`, so it
 /// silently returns no row. The rule reads views, materialized views,
-/// policies, SQL function bodies and, as a query rule, statements, and
-/// accepts a subquery whose `WHERE` requires the column `IS NOT NULL`.
+/// policies, SQL and PL/pgSQL function bodies and, as a query rule,
+/// statements, and accepts a subquery whose `WHERE` requires the column `IS
+/// NOT NULL`.
 ///
 /// # Example
 ///
