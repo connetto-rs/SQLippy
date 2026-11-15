@@ -62,6 +62,20 @@ pub(crate) trait ExpressionFinder {
         self.find(database, node)
     }
 
+    /// The findings of the check constraint `expression`, for a finder that
+    /// reads a check differently from the other sites.
+    ///
+    /// # Errors
+    ///
+    /// Returns the lookup error resolving a name of `expression` raised.
+    fn find_in_check<DB: DatabaseLike>(
+        &self,
+        database: &DB,
+        expression: &Expr,
+    ) -> Result<Vec<(String, String)>, LookupError> {
+        self.find(database, expression)
+    }
+
     /// Why a finding is a problem, continuing its sentence.
     fn problem(&self) -> &'static str;
 
@@ -123,7 +137,7 @@ pub(crate) fn check_schema<DB: DatabaseLike>(
             }
         }
         for check in table.check_constraints(database)? {
-            for (found, _) in finder.find(database, check.expression(database))? {
+            for (found, _) in finder.find_in_check(database, check.expression(database))? {
                 reporter.table(
                     table,
                     format!(

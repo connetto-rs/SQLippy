@@ -33,6 +33,7 @@ mod lint_candidates;
 mod lint_levels;
 mod name_type_hints;
 mod nested_policy_subqueries;
+mod nil_uuid_sentinels;
 mod nonterminating_recursive_ctes;
 mod not_in_null_lists;
 mod null_comparisons;

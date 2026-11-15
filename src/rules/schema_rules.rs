@@ -20,6 +20,7 @@ mod reachable_foreign_table;
 pub use reachable_foreign_table::ReachableForeignTable;
 mod catalogue_rules;
 mod exposure_rules;
+mod nil_uuid_sentinel;
 mod not_in_null_list;
 mod not_in_nullable_subquery;
 mod not_in_subquery;
@@ -38,6 +39,7 @@ pub use catalogue_rules::{
     PublicSchemaCreate, QueryRewriteRule, ReservedKeywordIdentifier, TableInheritance,
     TruncatedIdentifier, UnloggedTable, UnvalidatedConstraint, WildcardView,
 };
+pub use nil_uuid_sentinel::NilUuidSentinel;
 pub use not_in_null_list::NotInNullList;
 pub use not_in_nullable_subquery::NotInNullableSubquery;
 pub use not_in_subquery::NotInSubquery;
