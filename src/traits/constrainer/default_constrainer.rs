@@ -11,9 +11,9 @@ use crate::{
         CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
         ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
         CorrelatedPolicySubquery, CredentialFreeWrite, CredentialPatternPolicy,
-        CredentialSettingWrite, DeadPermissivePolicy, DefinerTakesActingUser,
-        DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
-        DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnAssignment,
+        CredentialSettingWrite, DeadPermissivePolicy, DefinerPathCreatableSchema,
+        DefinerTakesActingUser, DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath,
+        DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnAssignment,
         DuplicateColumnNameInExtensionGraph, DuplicateForeignKey, DuplicatePolicy,
         DuplicateUniqueIndex, EmptyTextAllowed, ExposedDefinerOverProtectedTable,
         ExpressionDefeatsIndex, ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema,
@@ -131,10 +131,11 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
         register_schema_rules(&mut constrainer);
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 5] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 6] = [
             Box::new(ImpureImmutableFunction::default()),
             Box::new(DefinerWithoutSearchPath::default()),
             Box::new(DefinerTemporarySchemaNotLast::default()),
+            Box::new(DefinerPathCreatableSchema::default()),
             Box::new(ExposedDefinerOverProtectedTable::default()),
             Box::new(GrantOptionToClientRole::default()),
         ];
