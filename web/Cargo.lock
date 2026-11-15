@@ -3017,7 +3017,7 @@ checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#68e812488f6e87d353dfe18b597ca0fedef128f1"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#1d59b5402c55a629ebd5e35300e572a358afeafb"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -3078,8 +3078,9 @@ dependencies = [
 [[package]]
 name = "sqlparser-canonicalize"
 version = "0.2.1"
-source = "git+https://github.com/connetto-rs/sqlparser-canonicalize?branch=main#1fde5fd1d49cd1188fe92047fef6d67a6e3b12bd"
+source = "git+https://github.com/connetto-rs/sqlparser-canonicalize?branch=main#07e59506f43915ac188a99ce0afa677f14ed82f4"
 dependencies = [
+ "recursive",
  "seahash",
  "sqlparser",
  "thiserror 2.0.21",
@@ -3088,7 +3089,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-plpgsql"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#131423cdac80ceadb72f6a72c9f9faad291fc5d3"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#eb7bfcf3c07cb0f5c6c20ee017190f7cde5629f3"
 dependencies = [
  "sqlparser",
  "thiserror 2.0.21",

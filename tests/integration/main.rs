@@ -26,6 +26,7 @@ mod generated_keys;
 mod invoker_search_path;
 mod key_equality;
 mod keys_and_indexes;
+mod leakproof_functions;
 mod lint_candidates;
 mod lint_levels;
 mod name_type_hints;

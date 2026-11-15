@@ -12,6 +12,8 @@ mod impure_immutable_function;
 pub use impure_immutable_function::ImpureImmutableFunction;
 mod invoker_without_search_path;
 pub use invoker_without_search_path::InvokerWithoutSearchPath;
+mod leakproof_user_function;
+pub use leakproof_user_function::LeakproofUserFunction;
 
 use sql_traits::{
     errors::LookupError,
