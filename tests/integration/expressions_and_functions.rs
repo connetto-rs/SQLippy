@@ -50,8 +50,6 @@ fn not_in_over_non_null_or_filtered_columns_and_other_forms_pass() {
         "SELECT id FROM a WHERE team NOT IN (SELECT team FROM b)",
         "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b WHERE (a_id IS NOT NULL AND team > 0))",
         "SELECT id FROM a WHERE id IN (SELECT a_id FROM b)",
-        "SELECT id FROM a WHERE id NOT IN (SELECT a_id + 1 FROM b)",
-        "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b UNION SELECT team FROM b)",
         "SELECT id FROM a WHERE id NOT IN (SELECT a_id, team FROM b)",
         "SELECT id FROM a WHERE id NOT IN (1, 2)",
         "SELECT id FROM a WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.a_id = a.id)",
@@ -63,6 +61,25 @@ fn not_in_over_non_null_or_filtered_columns_and_other_forms_pass() {
                 &format!("{PAIRS} CREATE VIEW v AS {view};")
             ),
             Vec::<String>::new(),
+            "{view}"
+        );
+    }
+}
+
+#[test]
+fn not_in_nullable_expressions_and_union_outputs_are_reported() {
+    let constrainer: GenericConstrainer<ParserDB> = NotInNullableSubquery::default().into();
+    for view in [
+        "SELECT id FROM a WHERE id NOT IN (SELECT a_id + 1 FROM b)",
+        "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b UNION SELECT team FROM b)",
+    ] {
+        assert_eq!(
+            objects(
+                &constrainer,
+                "not_in_nullable_subquery",
+                &format!("{PAIRS} CREATE VIEW v AS {view};")
+            ),
+            ["v"],
             "{view}"
         );
     }

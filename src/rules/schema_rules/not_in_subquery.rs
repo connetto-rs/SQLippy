@@ -22,9 +22,9 @@ const CHECK: NotInCheck = NotInCheck {
     resolution: "Use NOT EXISTS, which PostgreSQL plans as an anti-join.",
 };
 
-/// Struct defining a rule that reports `NOT IN` over a subquery that
-/// [`NotInNullableSubquery`](crate::rules::NotInNullableSubquery) leaves
-/// alone.
+/// Struct defining a rule that reports `NOT IN` over a subquery whose output
+/// is non-null or remains unjudged by
+/// [`NotInNullableSubquery`](crate::rules::NotInNullableSubquery).
 ///
 /// PostgreSQL never turns `x NOT IN (SELECT c ...)` into an anti-join, even
 /// when `c` is `NOT NULL`. Measured on PostgreSQL 17.11 and 18.6 with

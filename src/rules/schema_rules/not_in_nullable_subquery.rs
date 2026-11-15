@@ -24,14 +24,18 @@ const CHECK: NotInCheck = NotInCheck {
     resolution: "Use NOT EXISTS, declare the column NOT NULL, or filter it with IS NOT NULL in the subquery.",
 };
 
-/// Struct defining a rule that reports `NOT IN` over a subquery whose column
-/// is nullable.
+/// Struct defining a rule that reports `NOT IN` over a nullable subquery output.
 ///
 /// `x NOT IN (SELECT c ...)` is never true once any `c` is `NULL`, so it
 /// silently returns no row. The rule reads views, materialized views,
-/// policies, SQL function bodies and, as a query rule, statements, and
-/// accepts a subquery whose `WHERE`, or that of a `WITH` item the column is
-/// read from, requires the column `IS NOT NULL`.
+/// policies, SQL function bodies and, as a query rule, statements.
+///
+/// The judgment follows set operations, values, expressions, outer joins and
+/// `WITH` or derived-table outputs, accepting null-excluding `WHERE` and inner
+/// join predicates by column binding, including `IS NOT NULL`, strict
+/// comparisons, `LIKE`, `BETWEEN` and `IN`.
+///
+/// Unrecognized function outputs remain unjudged.
 ///
 /// # Example
 ///

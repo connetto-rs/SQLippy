@@ -29,6 +29,234 @@ fn not_in_rules() -> GenericConstrainer<ParserDB> {
     constrainer
 }
 
+const NOT_IN_OUTPUTS: &[(&str, bool)] = &[
+    ("SELECT id FROM c UNION SELECT a_id FROM b", true),
+    ("SELECT id FROM c UNION ALL SELECT a_id FROM b", true),
+    ("SELECT a_id FROM b EXCEPT SELECT id FROM c", true),
+    ("SELECT a_id FROM b INTERSECT SELECT a_id FROM b", true),
+    ("VALUES (1), (NULL::int)", true),
+    ("(SELECT a_id FROM b)", true),
+    ("TABLE b", true),
+    ("TABLE public.b", true),
+    ("TABLE non_null", false),
+    ("TABLE undeclared", false),
+    ("SELECT c.id FROM b LEFT JOIN c ON c.id = b.a_id + 10", true),
+    ("SELECT a_id + 0 FROM b", true),
+    ("SELECT CASE WHEN id > 5 THEN id END FROM c", true),
+    ("SELECT nullif(id, 1) FROM c", true),
+    ("SELECT max(id) FROM c WHERE id > 5", true),
+    ("SELECT NULL::int", true),
+    ("SELECT (SELECT c.id FROM c WHERE c.id > 5)", true),
+    ("SELECT (SELECT count(*) FROM c)", false),
+    ("SELECT (SELECT max(id) FROM c)", true),
+    ("SELECT (SELECT count(*) FROM c WHERE id > 5)", false),
+    ("SELECT (SELECT max(id) FROM c WHERE id > 5)", true),
+    ("SELECT (SELECT count(*) FROM c GROUP BY id)", true),
+    ("SELECT (SELECT count(*) FROM c HAVING false)", true),
+    ("SELECT (SELECT count(*) FROM c LIMIT 0)", true),
+    ("SELECT (SELECT count(*) FROM c OFFSET 1)", true),
+    ("SELECT (SELECT count(*) OVER () FROM c)", true),
+    ("SELECT (SELECT count(*) + 1 FROM c)", false),
+    (
+        "SELECT (SELECT (SELECT count(*) FROM c) FROM b WHERE false)",
+        true,
+    ),
+    ("SELECT a_id FROM b WHERE b.a_id IS NOT NULL", false),
+    ("SELECT a_id FROM b WHERE a_id > 0", false),
+    ("SELECT a_id FROM b WHERE NOT (a_id IS NULL)", false),
+    ("SELECT b.a_id FROM b JOIN c ON c.a_id = b.a_id", false),
+    ("SELECT a_id FROM b", true),
+    ("SELECT id FROM c", false),
+    ("SELECT coalesce(a_id, 0) FROM b", false),
+    ("SELECT a_id FROM b EXCEPT SELECT NULL::int", false),
+    ("SELECT a_id FROM b INTERSECT SELECT id FROM c", false),
+    ("SELECT id FROM c UNION SELECT NULL::int", true),
+    ("SELECT a_id FROM b WHERE a_id BETWEEN 1 AND 5", false),
+    ("VALUES (NULL::int + 1)", true),
+    ("VALUES (coalesce(NULL::int, 1))", false),
+    (
+        "SELECT CASE WHEN team > 0 THEN a_id ELSE 1 END FROM pairs",
+        true,
+    ),
+    (
+        "SELECT CASE WHEN team > 0 THEN 1 ELSE 2 END FROM pairs",
+        false,
+    ),
+    ("SELECT -a_id FROM b", true),
+    ("SELECT +team FROM pairs", false),
+    ("SELECT count(*) FROM b", false),
+    ("SELECT max(team) FROM pairs GROUP BY team", false),
+    ("SELECT max(a_id) FROM pairs GROUP BY team", true),
+    (
+        "SELECT max(team) FILTER (WHERE team > 5) FROM pairs GROUP BY team",
+        true,
+    ),
+    ("SELECT coalesce(a_id, NULL) FROM b", true),
+    ("SELECT (SELECT 1)", false),
+    ("SELECT (SELECT NULL::int)", true),
+    ("SELECT (a_id IS NULL)::int FROM b", false),
+    (
+        "SELECT (a_id IS NOT DISTINCT FROM team)::int FROM pairs",
+        false,
+    ),
+    ("SELECT (EXISTS (SELECT 1 FROM b))::int", false),
+    (
+        "SELECT a_id FROM b WHERE CAST(a_id AS TEXT) LIKE '1%'",
+        false,
+    ),
+    (
+        "SELECT a_id FROM b WHERE CAST(a_id AS TEXT) ILIKE '1%'",
+        false,
+    ),
+    (
+        "SELECT a_id FROM b WHERE CAST(a_id AS TEXT) SIMILAR TO '1%'",
+        false,
+    ),
+    ("SELECT a_id FROM b WHERE a_id IN (1, 2)", false),
+    ("SELECT a_id FROM b WHERE a_id = ANY(ARRAY[1, 2])", false),
+    ("SELECT a_id FROM b WHERE a_id + 1 > 0", false),
+    ("SELECT a_id FROM pairs WHERE a_id > 0 OR team > 0", true),
+    (
+        "SELECT first.a_id FROM pairs AS first JOIN pairs AS second ON second.a_id = first.team",
+        true,
+    ),
+    (
+        "SELECT pairs.team FROM a LEFT JOIN pairs ON pairs.a_id = a.id",
+        true,
+    ),
+    ("SELECT a.id FROM a RIGHT JOIN b ON b.a_id = a.id", true),
+    (
+        "SELECT pairs.team FROM a FULL JOIN pairs ON pairs.a_id = a.id",
+        true,
+    ),
+    (
+        "SELECT pairs.team FROM a LEFT JOIN (pairs JOIN a AS other ON pairs.team = other.id) ON pairs.a_id = a.id",
+        true,
+    ),
+    (
+        "SELECT a_id FROM (SELECT a_id FROM b WHERE a_id > 0) AS nested",
+        false,
+    ),
+    (
+        "SELECT value FROM (WITH item AS (SELECT a_id FROM b WHERE a_id > 0) SELECT a_id AS value FROM item) AS nested",
+        false,
+    ),
+    (
+        "WITH item(first, second) AS (SELECT 1, NULL::int UNION SELECT 2, a_id FROM b) SELECT second FROM item",
+        true,
+    ),
+    (
+        "SELECT second FROM (SELECT 1 AS first, NULL::int AS second UNION SELECT 2, a_id FROM b) AS nested",
+        true,
+    ),
+    ("SELECT a_id FROM b EXCEPT SELECT a_id FROM b", true),
+    ("SELECT a_id FROM b EXCEPT (SELECT NULL::int LIMIT 0)", true),
+    (
+        "VALUES (NULL::int), (NULL::int) EXCEPT ALL SELECT NULL::int",
+        true,
+    ),
+    (
+        "WITH item AS (SELECT a_id FROM b EXCEPT SELECT NULL::int) SELECT a_id FROM item",
+        false,
+    ),
+    (
+        "SELECT c.id FROM a JOIN c ON a.id = c.id RIGHT JOIN b ON c.id = b.a_id + 10",
+        true,
+    ),
+    (
+        "SELECT c.id FROM a JOIN c ON a.id = c.id FULL JOIN b ON c.id = b.a_id + 10",
+        true,
+    ),
+    (
+        "SELECT b.a_id FROM a JOIN b ON a.id = b.a_id RIGHT JOIN c ON c.id = b.a_id + 10",
+        true,
+    ),
+    ("SELECT b.a_id FROM (b JOIN c ON b.a_id = c.id)", false),
+    (
+        "SELECT b.a_id FROM a JOIN (b JOIN c ON b.a_id = c.id) ON a.id = c.id",
+        false,
+    ),
+    ("SELECT a_id FROM b WHERE ((a_id > 0))", false),
+    ("SELECT a_id FROM b WHERE NOT (a_id = 5)", false),
+    (
+        "SELECT a_id FROM (SELECT a_id FROM b INTERSECT SELECT a_id FROM b) AS item",
+        true,
+    ),
+    (
+        "SELECT a_id FROM (SELECT a_id FROM b EXCEPT SELECT id FROM c) AS item",
+        true,
+    ),
+    (
+        "WITH item AS (SELECT a_id FROM b INTERSECT SELECT a_id FROM b) SELECT a_id FROM item",
+        true,
+    ),
+    (
+        "WITH item AS (SELECT a_id FROM b EXCEPT SELECT id FROM c) SELECT a_id FROM item",
+        true,
+    ),
+    ("SELECT a_id FROM b EXCEPT (SELECT NULL::int)", false),
+    ("SELECT a_id FROM b EXCEPT VALUES (NULL::int)", false),
+    (
+        "SELECT derived.value FROM a LEFT JOIN (SELECT 1 AS value) AS derived ON true",
+        true,
+    ),
+    (
+        "WITH RECURSIVE item(value) AS (SELECT 1 UNION ALL SELECT value FROM item WHERE false) SELECT value FROM item",
+        false,
+    ),
+    (
+        "SELECT value FROM generate_series(1, 2) AS item(value)",
+        false,
+    ),
+    ("SELECT 1 UNION SELECT abs(-1)", false),
+    ("SELECT NULL::int INTERSECT SELECT abs(-1)", false),
+    ("SELECT pg_catalog.abs(-1)", false),
+    (
+        "WITH item AS (SELECT * FROM (SELECT a_id FROM b UNION SELECT a_id FROM b) AS combined) SELECT a_id FROM item",
+        true,
+    ),
+    (
+        "WITH item AS (SELECT * FROM (SELECT a_id FROM b INTERSECT SELECT a_id FROM b) AS combined) SELECT a_id FROM item",
+        true,
+    ),
+    (
+        "WITH item AS (SELECT * FROM (SELECT a_id FROM b EXCEPT SELECT id FROM c) AS combined) SELECT a_id FROM item",
+        true,
+    ),
+    ("VALUES (1, 2)", false),
+    ("TABLE pairs", false),
+];
+
+#[test]
+fn not_in_measured_output_nullability() {
+    let database = ParserDB::parse::<PostgreSqlDialect>(
+        "CREATE TABLE a (id INT PRIMARY KEY);
+         CREATE TABLE b (a_id INT);
+         CREATE TABLE c (id INT PRIMARY KEY, a_id INT NOT NULL);
+         CREATE TABLE pairs (a_id INT, team INT NOT NULL);
+         CREATE TABLE non_null (value INT NOT NULL);",
+    )
+    .expect("schema parses");
+    let constrainer = not_in_rules();
+    let mut failures = Vec::new();
+    for &(subquery, nullable) in NOT_IN_OUTPUTS {
+        let sql = format!("SELECT id FROM a WHERE id NOT IN ({subquery})");
+        let expected = if nullable {
+            "not_in_nullable_subquery"
+        } else {
+            "not_in_subquery"
+        };
+        let found: Vec<_> = crate::rule_findings::statement_findings(&constrainer, &database, &sql)
+            .into_iter()
+            .map(|(rule, _, _)| rule)
+            .collect();
+        if found != [expected] {
+            failures.push(format!("{subquery} expected {expected}, found {found:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn not_in_over_a_nullable_column_is_reported_in_every_statement_kind() {
     let constrainer: GenericConstrainer<ParserDB> = NotInNullableSubquery::default().into();

@@ -443,7 +443,7 @@ fn single_select(query: &Query) -> Option<&Select> {
 }
 
 /// Operators that yield `NULL` when an operand is `NULL`.
-fn is_strict_operator(operator: &BinaryOperator) -> bool {
+pub(crate) fn is_strict_operator(operator: &BinaryOperator) -> bool {
     matches!(
         operator,
         BinaryOperator::Eq
