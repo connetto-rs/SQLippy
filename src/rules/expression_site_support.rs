@@ -198,17 +198,21 @@ pub(crate) fn check_statement<DB: DatabaseLike>(
 /// The statements a SQL or PL/pgSQL function body runs, none for a body that
 /// does not parse or is written in another language.
 pub(crate) fn body_statements<F: FunctionLike>(function: &F) -> Vec<Statement> {
-    let Some(body) = function.body() else {
-        return Vec::new();
-    };
+    parsed_body_statements(function).unwrap_or_default()
+}
+
+/// The statements a SQL or PL/pgSQL function body runs, or `None` for a body
+/// that is absent, does not parse or is written in another language.
+pub(crate) fn parsed_body_statements<F: FunctionLike>(function: &F) -> Option<Vec<Statement>> {
+    let body = function.body()?;
     match function.stored_language().as_deref() {
-        None | Some("sql") => Parser::parse_sql(&PostgreSqlDialect {}, body).unwrap_or_default(),
-        Some("plpgsql") => embedded_sql(body).map_or_default(|block| {
+        None | Some("sql") => Parser::parse_sql(&PostgreSqlDialect {}, body).ok(),
+        Some("plpgsql") => embedded_sql(body).ok().map(|block| {
             let mut statements = Vec::new();
             block_statements(block, &mut statements);
             statements
         }),
-        Some(_) => Vec::new(),
+        Some(_) => None,
     }
 }
 

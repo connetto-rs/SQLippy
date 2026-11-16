@@ -153,9 +153,9 @@ dependencies = [
 
 [[package]]
 name = "barnes-hut-tree"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dff3e0b77b50cc89e6bf56d36f73c7a6a145831967155a36ff08062a5c78af1e"
+checksum = "14fc8ba8ae4ccda4bdd818ea58b2c203a422bc1ae784ae49ab40f47030c8d180"
 dependencies = [
  "num-traits",
  "rayon",
@@ -462,7 +462,7 @@ checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
 [[package]]
 name = "diesel"
 version = "2.4.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#4706e5f4a5112db3abb7491d5a675641dcee41f8"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#62ea313806766e1363be954b8e35e4d545e19a03"
 dependencies = [
  "bigdecimal",
  "bitflags",
@@ -487,7 +487,7 @@ dependencies = [
 [[package]]
 name = "diesel_attribute_parser"
 version = "0.1.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#4706e5f4a5112db3abb7491d5a675641dcee41f8"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#62ea313806766e1363be954b8e35e4d545e19a03"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -497,7 +497,7 @@ dependencies = [
 [[package]]
 name = "diesel_derives"
 version = "2.4.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#4706e5f4a5112db3abb7491d5a675641dcee41f8"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#62ea313806766e1363be954b8e35e4d545e19a03"
 dependencies = [
  "diesel_attribute_parser",
  "diesel_table_macro_syntax",
@@ -510,7 +510,7 @@ dependencies = [
 [[package]]
 name = "diesel_table_macro_syntax"
 version = "0.4.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#4706e5f4a5112db3abb7491d5a675641dcee41f8"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#62ea313806766e1363be954b8e35e4d545e19a03"
 dependencies = [
  "syn 3.0.10",
 ]
@@ -556,7 +556,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 [[package]]
 name = "dsl_auto_type"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#4706e5f4a5112db3abb7491d5a675641dcee41f8"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#62ea313806766e1363be954b8e35e4d545e19a03"
 dependencies = [
  "darling",
  "either",
@@ -591,7 +591,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1188,9 +1188,9 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jiff"
-version = "0.2.43"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
+checksum = "175dc66334db3b9ab9985bf8b61cfed50dc16d20964bb47f9e479adcae984a7f"
 dependencies = [
  "jiff-core",
  "jiff-static",
@@ -1205,18 +1205,18 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "0.1.5"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffe6854081f5ac0a3046a9b223729ccd7a20b1e0e8277e44dc0660eedf67dfe2"
+checksum = "e599b80292e597019b8b3e392de3f4bea2959ddfb8c7dff60e035e9e311a2c1b"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "jiff-static"
-version = "0.2.43"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b4ff49b2887190c760b86207b55cdcaabbdecaf7a0660d68aa2ed6f652abf0a"
+checksum = "c7b1af7547d47354bc438d797e3854601bde8f8d185780c5ba4ab27afa54f1ba"
 dependencies = [
  "jiff-core",
  "proc-macro2",
@@ -1226,9 +1226,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-tzdb"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa8377070c6bae868759445e5a77f66d84f0b72f3a054bfb00e6d038b8282da7"
+checksum = "0980fca2cc272465bd60e82397607ba9f33add9e48defd77923301bbd03808f2"
 
 [[package]]
 name = "jiff-tzdb-platform"
@@ -1540,7 +1540,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "pg_diesel"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#6658545c55f144a7b3a306874269afd8b500029d"
 dependencies = [
  "diesel",
  "pg_diesel_core",
@@ -1554,7 +1554,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_core"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#6658545c55f144a7b3a306874269afd8b500029d"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1568,7 +1568,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg14"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#6658545c55f144a7b3a306874269afd8b500029d"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1579,7 +1579,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg15"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#6658545c55f144a7b3a306874269afd8b500029d"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1590,7 +1590,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg16"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#6658545c55f144a7b3a306874269afd8b500029d"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1601,7 +1601,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg17"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#6658545c55f144a7b3a306874269afd8b500029d"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1612,7 +1612,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg18"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8168fc9c532034854a6495f46c249d6276708111"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#6658545c55f144a7b3a306874269afd8b500029d"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1772,9 +1772,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.3"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
+checksum = "8f6fa277c67e6ea590466f04c3fe82cb509f0864fe470643e5570de9514a9b11"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
@@ -1930,7 +1930,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2219,7 +2219,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#5c5c77bd3d74984f012da376ad238cd8b4b3fb7e"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#6692afca03009765ba02c630230a388c97d656f5"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -2301,7 +2301,7 @@ dependencies = [
 [[package]]
 name = "sqlstate"
 version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#4706e5f4a5112db3abb7491d5a675641dcee41f8"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#62ea313806766e1363be954b8e35e4d545e19a03"
 
 [[package]]
 name = "stable_deref_trait"

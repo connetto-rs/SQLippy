@@ -92,3 +92,5 @@ mod repeated_index_column;
 pub use repeated_index_column::RepeatedIndexColumn;
 mod time_dependent_check;
 pub use time_dependent_check::TimeDependentCheck;
+mod superkey_primary_key;
+pub use superkey_primary_key::SuperkeyPrimaryKey;
