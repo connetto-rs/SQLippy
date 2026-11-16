@@ -12,8 +12,9 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, FunctionLike, TableLike},
 };
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, DoUpdate, FunctionSecurity, Ident, Insert, ObjectName,
-    OnConflict, OnConflictAction, OnInsert, Statement, TableFactor, TableObject, Update, Visitor,
+    Assignment, AssignmentTarget, DoUpdate, FunctionSecurity, Ident, Insert, Merge, MergeAction,
+    MergeUpdateExpr, MergeUpdateKind, ObjectName, OnConflict, OnConflictAction, OnInsert,
+    Statement, TableFactor, TableObject, Update, Visitor,
 };
 
 use crate::{
@@ -70,8 +71,8 @@ impl<DB: DatabaseLike> Maintained<'_, '_, DB> {
         Ok(())
     }
 
-    /// Reads the assignments of updates and of upserts that update the
-    /// conflicting row, while the columns an insert lists only create a row.
+    /// Reads the assignments that rewrite an existing row, from updates,
+    /// upserts and merges, while the columns an insert lists only create a row.
     fn statement(&mut self, statement: &Statement) -> Result<(), LookupError> {
         match statement {
             Statement::Insert(Insert {
@@ -89,6 +90,17 @@ impl<DB: DatabaseLike> Maintained<'_, '_, DB> {
                 TableFactor::Table { name, .. } => self.assignments(name, assignments),
                 _ => Ok(()),
             },
+            Statement::Merge(Merge {
+                table: TableFactor::Table { name, .. },
+                clauses,
+                ..
+            }) => clauses.iter().try_for_each(|clause| match &clause.action {
+                MergeAction::Update(MergeUpdateExpr {
+                    kind: MergeUpdateKind::Set(assignments),
+                    ..
+                }) => self.assignments(name, assignments),
+                _ => Ok(()),
+            }),
             _ => Ok(()),
         }
     }
