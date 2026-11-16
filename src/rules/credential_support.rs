@@ -328,7 +328,10 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
             .borrow()
             .iter()
             .any(|reading| std::ptr::eq(*reading, function));
-        let Some(query) = sql_set_body(function).filter(|_| !reading) else {
+        if reading {
+            return Ok(false);
+        }
+        let Some(query) = sql_set_body(self.database, function)? else {
             return Ok(false);
         };
         self.reading.borrow_mut().push(function);

@@ -1,15 +1,7 @@
 //! Binary replication findings from a live PostgreSQL catalog.
 
-use std::time::Duration;
-
-use diesel::{Connection, PgConnection, connection::SimpleConnection};
-use pg_diesel::{PgDieselDatabase, database::PgDieselDatabaseBuilder};
+use pg_diesel::PgDieselDatabase;
 use sqlippy::prelude::*;
-use testcontainers::{
-    Container, GenericImage, ImageExt,
-    core::{IntoContainerPort, WaitFor},
-    runners::SyncRunner,
-};
 
 const FAILING_COLUMNS: [(&str, &str, &str); 6] = [
     ("c_acl_arr", "aclitem[]", "aclitem"),
@@ -81,41 +73,9 @@ CREATE TABLE other (
 );
 ";
 
-fn catalog() -> (Container<GenericImage>, PgDieselDatabase) {
-    let container = GenericImage::new("postgres", "18-alpine")
-        .with_exposed_port(5432.tcp())
-        .with_wait_for(WaitFor::message_on_stderr(
-            "database system is ready to accept connections",
-        ))
-        .with_env_var("POSTGRES_USER", "user")
-        .with_env_var("POSTGRES_PASSWORD", "password")
-        .with_env_var("POSTGRES_DB", "binrep")
-        .with_startup_timeout(Duration::from_secs(120))
-        .start()
-        .expect("PostgreSQL starts");
-    let host = container.get_host().expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .expect("published PostgreSQL port");
-    let mut connection = PgConnection::establish(&format!(
-        "host={host} port={port} user=user password=password dbname=binrep connect_timeout=10 options='-c statement_timeout=30000'"
-    )).expect("PostgreSQL connection");
-    connection
-        .batch_execute(FIXTURE_SQL)
-        .expect("fixture applies");
-    let database = PgDieselDatabase::try_from(
-        PgDieselDatabaseBuilder::default()
-            .connection(&mut connection)
-            .catalog("binrep")
-            .schema("binrep"),
-    )
-    .expect("live catalog loads");
-    (container, database)
-}
-
 #[test]
 fn selected_live_columns_report_nested_failures_and_accept_text_fallback() {
-    let (_container, database) = catalog();
+    let (_container, database) = crate::live_catalog::catalog("binrep", FIXTURE_SQL);
     let mut constrainer: GenericConstrainer<PgDieselDatabase> = BinarySendFailure::default().into();
     constrainer.register_column_rule(Box::new(UnknownBinarySend::default()));
     constrainer.set_rule_level("binary_send_failure", Level::Deny);

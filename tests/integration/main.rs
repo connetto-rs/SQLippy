@@ -4,6 +4,7 @@
 mod binary_send;
 mod binary_send_postgres;
 mod common;
+mod live_catalog;
 mod rule_examples;
 mod rule_findings;
 

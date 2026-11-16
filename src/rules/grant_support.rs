@@ -10,7 +10,52 @@ use sql_traits::{
 };
 use sqlparser::ast::{Action, Grantee, GranteeName};
 
-use crate::{deployment::Deployment, rules::policy_support::held_by_name};
+use crate::{
+    deployment::Deployment,
+    rules::policy_support::{Command, held_by_name, policy_roles},
+};
+
+/// Whether the schema proves that every role writing through `policy` lacks
+/// `command`'s privilege on `attribute` of `table`, for an `INSERT` or an
+/// `UPDATE`.
+///
+/// The writers are the policy's roles, or the declared client roles for a
+/// policy applying to `PUBLIC`. A writer the schema never creates may hold
+/// the privilege from outside it.
+pub(crate) fn withheld<DB: DatabaseLike>(
+    database: &DB,
+    deployment: &Deployment,
+    table: &DB::Table,
+    policy: &DB::Policy,
+    command: Command,
+    attribute: &DB::Column,
+) -> Result<bool, LookupError> {
+    let writers = policy_roles(database, policy).unwrap_or_else(|| {
+        deployment
+            .app_roles()
+            .chain(deployment.anonymous_roles())
+            .map(str::to_owned)
+            .collect()
+    });
+    if writers.is_empty() {
+        return Ok(false);
+    }
+    for writer in writers {
+        let Some(role) = database.role(&writer) else {
+            return Ok(false);
+        };
+        let possible = table.possible_privileges(role, database)?;
+        let privilege = if command == Command::Insert {
+            &possible.insert
+        } else {
+            &possible.update
+        };
+        if privilege.on_column(attribute) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 
 /// Roles whose privileges the declared client roles hold, by kind.
 pub(crate) struct ClientRoles {

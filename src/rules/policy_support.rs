@@ -1,6 +1,6 @@
 //! Facts about row-level security policies shared by the policy rules.
 
-use std::{collections::BTreeSet, ops::ControlFlow};
+use std::{borrow::Cow, collections::BTreeSet, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
@@ -210,21 +210,49 @@ pub(crate) fn covers<DB: DatabaseLike>(
     }
 }
 
-/// The query a set-returning `LANGUAGE sql` function runs, when its body is
-/// one query.
-pub(crate) fn sql_set_body<F: FunctionLike>(function: &F) -> Option<Query> {
-    if !function.returns_set()
-        || function
-            .stored_language()
-            .is_some_and(|language| language != "sql")
-    {
-        return None;
-    }
-    let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, function.body()?).ok()?;
+/// The query of a body of statements, when it is one query.
+fn single_query(mut statements: Vec<Statement>) -> Option<Query> {
     match (statements.pop(), statements.is_empty()) {
         (Some(Statement::Query(query)), true) => Some(*query),
         _ => None,
     }
+}
+
+/// The query a `LANGUAGE sql` function runs, when its body is one query
+/// written as a string or as a `BEGIN ATOMIC` block.
+pub(crate) fn sql_query_body<'f, F: FunctionLike>(
+    database: &F::DB,
+    function: &'f F,
+) -> Result<Option<Cow<'f, Query>>, LookupError> {
+    if function
+        .stored_language()
+        .is_some_and(|language| language != "sql")
+    {
+        return Ok(None);
+    }
+    if let Some(body) = function.body() {
+        return Ok(Parser::parse_sql(&PostgreSqlDialect {}, body)
+            .ok()
+            .and_then(single_query)
+            .map(Cow::Owned));
+    }
+    Ok(match function.atomic_statements(database)? {
+        Some(Cow::Borrowed([Statement::Query(query)])) => Some(Cow::Borrowed(query.as_ref())),
+        Some(Cow::Owned(statements)) => single_query(statements).map(Cow::Owned),
+        _ => None,
+    })
+}
+
+/// The query a set-returning `LANGUAGE sql` function runs, when its body is
+/// one query.
+pub(crate) fn sql_set_body<'f, F: FunctionLike>(
+    database: &F::DB,
+    function: &'f F,
+) -> Result<Option<Cow<'f, Query>>, LookupError> {
+    if !function.returns_set() {
+        return Ok(None);
+    }
+    sql_query_body(database, function)
 }
 
 /// Whether the expression holds a sublink or a call with arguments.

@@ -6,7 +6,7 @@ use std::ops::ControlFlow;
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinition, ColumnDefinitionScope, ColumnScope, IdentifierCase},
-    traits::{ColumnLike, DatabaseLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, FunctionLike, TableLike},
 };
 use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArguments, InTarget, JoinConstraint, JoinOperator,
@@ -16,7 +16,7 @@ use sqlparser::ast::{
 use crate::rules::walk_support::walk;
 use crate::{
     deployment::Deployment,
-    rules::policy_support::{conjuncts, is_column_reference, sql_set_body, walked_clauses},
+    rules::policy_support::{conjuncts, is_column_reference, sql_query_body, walked_clauses},
 };
 
 /// A column, as its table's position and its stored name.
@@ -36,7 +36,7 @@ pub(crate) struct AuthorityColumns {
 
 /// Whether the expression is a declared credential, parenthesised, cast or
 /// selected alone.
-fn is_credential_value(deployment: &Deployment, expression: &Expr) -> bool {
+pub(crate) fn is_credential_value(deployment: &Deployment, expression: &Expr) -> bool {
     match expression {
         Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => {
             is_credential_value(deployment, inner)
@@ -60,23 +60,23 @@ pub(crate) fn is_literal(expression: &Expr) -> bool {
     }
 }
 
-/// The column operands a filter compares with a literal or tests as a
-/// boolean, through `AND`, `OR` and `NOT`.
-fn tested_columns(filter: &Expr) -> Vec<&Expr> {
+/// The operands a filter compares with a literal or tests as a boolean,
+/// through `AND`, `OR` and `NOT`.
+fn tested_operands(filter: &Expr) -> Vec<&Expr> {
     match filter {
         Expr::Nested(inner)
         | Expr::UnaryOp {
             op: UnaryOperator::Not,
             expr: inner,
-        } => tested_columns(inner),
+        } => tested_operands(inner),
         Expr::BinaryOp {
             left,
             op: BinaryOperator::And | BinaryOperator::Or,
             right,
         } => {
-            let mut columns = tested_columns(left);
-            columns.extend(tested_columns(right));
-            columns
+            let mut operands = tested_operands(left);
+            operands.extend(tested_operands(right));
+            operands
         }
         Expr::BinaryOp {
             left,
@@ -90,8 +90,8 @@ fn tested_columns(filter: &Expr) -> Vec<&Expr> {
             right,
         } => [(left, right), (right, left)]
             .into_iter()
-            .filter(|(column, other)| is_column_reference(column) && is_literal(other))
-            .map(|(column, _)| column.as_ref())
+            .filter(|(operand, other)| !is_literal(operand) && is_literal(other))
+            .map(|(operand, _)| operand.as_ref())
             .collect(),
         Expr::In {
             expr,
@@ -110,13 +110,19 @@ fn tested_columns(filter: &Expr) -> Vec<&Expr> {
         | Expr::IsNotFalse(inner) => vec![inner.as_ref()],
         _ => vec![filter],
     }
-    .into_iter()
-    .filter(|column| is_column_reference(column))
-    .collect()
+}
+
+/// The column operands a filter compares with a literal or tests as a
+/// boolean, through `AND`, `OR` and `NOT`.
+pub(crate) fn tested_columns(filter: &Expr) -> Vec<&Expr> {
+    tested_operands(filter)
+        .into_iter()
+        .filter(|column| is_column_reference(column))
+        .collect()
 }
 
 /// The `SELECT`s a query body combines.
-fn selects(body: &SetExpr) -> Vec<&Select> {
+pub(crate) fn selects(body: &SetExpr) -> Vec<&Select> {
     match body {
         SetExpr::Select(select) => vec![select],
         SetExpr::Query(query) => selects(&query.body),
@@ -150,7 +156,7 @@ fn array_subquery(expression: &Expr) -> Option<&Query> {
 
 /// The subquery whose rows an expression compares with an operand, written
 /// `x IN (SELECT ...)` or `x = ANY (ARRAY(SELECT ...))`.
-fn compared_set(expression: &Expr) -> Option<&Query> {
+pub(crate) fn compared_set(expression: &Expr) -> Option<&Query> {
     match expression {
         Expr::In {
             target: InTarget::Subquery(query),
@@ -166,48 +172,171 @@ fn compared_set(expression: &Expr) -> Option<&Query> {
     }
 }
 
+/// How a caller uses what a query or a helper selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    /// Compared with a column of the caller's row, so the selected columns
+    /// are scopes.
+    Fed,
+    /// Tested as a boolean or compared with a literal, so the selected
+    /// columns are attributes.
+    Tested,
+    /// Used otherwise.
+    Plain,
+}
+
+/// The sublinks and calls whose result a walked expression compares with a
+/// column or tests.
+#[derive(Default)]
+struct Uses {
+    queries: Vec<(*const Query, Reading)>,
+    calls: Vec<(*const Expr, Reading)>,
+}
+
+impl Uses {
+    /// Records that the caller uses `operand`, a sublink or a call, as
+    /// `reading` says.
+    fn note(&mut self, operand: &Expr, reading: Reading) {
+        match operand {
+            Expr::Nested(inner) => self.note(inner, reading),
+            Expr::Subquery(query) => self.queries.push((std::ptr::from_ref(query), reading)),
+            Expr::Function(_) => self.calls.push((std::ptr::from_ref(operand), reading)),
+            _ => {}
+        }
+    }
+
+    /// Records the operands `filter` tests.
+    fn tested(&mut self, filter: &Expr) {
+        for operand in tested_operands(filter) {
+            self.note(operand, Reading::Tested);
+        }
+    }
+
+    /// Records the operands `expression` compares with a column.
+    fn compared(&mut self, expression: &Expr) {
+        if let Some(query) = compared_set(expression) {
+            self.queries.push((std::ptr::from_ref(query), Reading::Fed));
+        }
+        if let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } = expression
+        {
+            for (column, other) in [(left, right), (right, left)] {
+                if is_column_reference(column) {
+                    self.note(other, Reading::Fed);
+                }
+            }
+        }
+    }
+
+    /// Records `root`, an expression its caller uses as `reading` says.
+    fn root(&mut self, root: &Expr, reading: Reading) {
+        match reading {
+            Reading::Tested => self.tested(root),
+            Reading::Fed => self.note(root, Reading::Fed),
+            Reading::Plain => {}
+        }
+    }
+
+    /// How the caller uses a sublink.
+    fn query(&self, query: &Query) -> Reading {
+        let pointer = std::ptr::from_ref(query);
+        self.queries
+            .iter()
+            .find(|(used, _)| *used == pointer)
+            .map_or(Reading::Plain, |(_, reading)| *reading)
+    }
+
+    /// How the caller uses a call, an [`Expr::Function`].
+    fn call(&self, call: &Expr) -> Reading {
+        let pointer = std::ptr::from_ref(call);
+        self.calls
+            .iter()
+            .find(|(used, _)| *used == pointer)
+            .map_or(Reading::Plain, |(_, reading)| *reading)
+    }
+}
+
 /// Collects the scope columns of the authority tables policies read.
 struct Authority<'a, 'db, DB: DatabaseLike> {
     database: &'db DB,
     deployment: &'a Deployment,
-    read: Vec<&'db DB::Function>,
+    read: Vec<(&'db DB::Function, Reading)>,
     columns: AuthorityColumns,
 }
 
 impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
-    /// The functions a call may reach.
-    fn reached(&self, call: &Function) -> Result<Vec<&'db DB::Function>, LookupError> {
+    /// The functions a call may reach, with how the caller uses each: the
+    /// rows of a set-returning one feed a compared set, and the value of a
+    /// scalar one is used as `uses` records.
+    fn reached(
+        &self,
+        uses: &Uses,
+        expression: &Expr,
+    ) -> Result<Vec<(&'db DB::Function, Reading)>, LookupError> {
+        let Expr::Function(call) = expression else {
+            return Ok(Vec::new());
+        };
         if matches!(call.args, FunctionArguments::None) {
             return Ok(Vec::new());
         }
         Ok(self
             .database
             .functions_reached_by(call, IdentifierCase::Folded)?
+            .map(|helper| {
+                let reading = if helper.returns_set() {
+                    Reading::Fed
+                } else {
+                    uses.call(expression)
+                };
+                (helper, reading)
+            })
             .collect())
     }
 
-    /// Reads the bodies of the helpers not read yet.
-    fn read_helpers(&mut self, helpers: Vec<&'db DB::Function>) -> Result<(), LookupError> {
-        for helper in helpers {
-            if self.read.iter().any(|read| std::ptr::eq(*read, helper)) {
+    /// Reads the bodies of the helpers not read yet for the same use, a
+    /// query or a `RETURN` expression.
+    fn read_helpers(
+        &mut self,
+        helpers: Vec<(&'db DB::Function, Reading)>,
+    ) -> Result<(), LookupError> {
+        for (helper, reading) in helpers {
+            if self
+                .read
+                .iter()
+                .any(|(read, as_read)| std::ptr::eq(*read, helper) && *as_read == reading)
+            {
                 continue;
             }
-            self.read.push(helper);
-            if let Some(body) = sql_set_body(helper) {
-                self.query(&body, true)?;
+            self.read.push((helper, reading));
+            if let Some(body) = sql_query_body(self.database, helper)? {
+                self.query(&body, reading)?;
+            } else if let Some(body) = helper.body_expression(self.database)? {
+                self.expression(None, &body, reading)?;
             }
         }
         Ok(())
     }
 
-    /// Reads a policy expression on `table`: its comparisons with a
-    /// credential, its sublinks and the helpers it calls.
-    fn expression(&mut self, table: &'db DB::Table, expression: &Expr) -> Result<(), LookupError> {
+    /// Reads a policy expression on `table`, or a helper's `RETURN`
+    /// expression on no table, which its caller uses as `reading` says: its
+    /// comparisons with a credential, its sublinks and the helpers it calls.
+    fn expression(
+        &mut self,
+        table: Option<&'db DB::Table>,
+        expression: &Expr,
+        reading: Reading,
+    ) -> Result<(), LookupError> {
+        let mut uses = Uses::default();
+        uses.root(expression, reading);
         let mut policy = PolicyWalk {
-            table: ColumnScope::for_table(table, self.database, IdentifierCase::Folded),
+            table: table
+                .map(|table| ColumnScope::for_table(table, self.database, IdentifierCase::Folded)),
             authority: self,
             depth: 0,
-            fed: Vec::new(),
+            uses,
             helpers: Vec::new(),
         };
         walk(expression, &mut policy)
@@ -217,16 +346,16 @@ impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
         self.read_helpers(helpers)
     }
 
-    /// Reads every `SELECT` of a query, whose rows feed a compared set when
-    /// `fed`.
-    fn query(&mut self, query: &Query, fed: bool) -> Result<(), LookupError> {
+    /// Reads every `SELECT` of a query, whose caller uses what it selects as
+    /// `reading` says.
+    fn query(&mut self, query: &Query, reading: Reading) -> Result<(), LookupError> {
         let root = ColumnScope::from_query(query, self.database, IdentifierCase::Folded)?;
         let mut reads = QueryWalk {
             authority: &*self,
             root: &root,
             top: std::ptr::from_ref(query),
-            top_fed: fed,
-            fed: Vec::new(),
+            top_reading: reading,
+            uses: Uses::default(),
             found: AuthorityColumns {
                 scopes: Vec::new(),
                 subjects: Vec::new(),
@@ -243,13 +372,14 @@ impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
     }
 }
 
-/// Walks a policy expression, reading each top-level sublink.
+/// Walks a policy expression, or a helper's `RETURN` expression, reading each
+/// top-level sublink.
 struct PolicyWalk<'w, 'a, 'db, DB: DatabaseLike> {
     authority: &'w mut Authority<'a, 'db, DB>,
-    table: ColumnScope<'db, 'db, DB>,
+    table: Option<ColumnScope<'db, 'db, DB>>,
     depth: usize,
-    fed: Vec<*const Query>,
-    helpers: Vec<&'db DB::Function>,
+    uses: Uses,
+    helpers: Vec<(&'db DB::Function, Reading)>,
 }
 
 impl<DB: DatabaseLike> Visitor for PolicyWalk<'_, '_, '_, DB> {
@@ -260,9 +390,9 @@ impl<DB: DatabaseLike> Visitor for PolicyWalk<'_, '_, '_, DB> {
         if self.depth > 1 {
             return ControlFlow::Continue(());
         }
-        let fed = self.fed.contains(&std::ptr::from_ref(query));
+        let reading = self.uses.query(query);
         self.authority
-            .query(query, fed)
+            .query(query, reading)
             .map_or_else(ControlFlow::Break, ControlFlow::Continue)
     }
 
@@ -275,13 +405,9 @@ impl<DB: DatabaseLike> Visitor for PolicyWalk<'_, '_, '_, DB> {
         if self.depth > 0 {
             return ControlFlow::Continue(());
         }
-        self.fed
-            .extend(compared_set(expression).map(std::ptr::from_ref));
+        self.uses.compared(expression);
         let compared = self.credential_comparison(expression);
-        let reached = match expression {
-            Expr::Function(call) => self.authority.reached(call),
-            _ => Ok(Vec::new()),
-        };
+        let reached = self.authority.reached(&self.uses, expression);
         compared
             .and(reached)
             .map_or_else(ControlFlow::Break, |helpers| {
@@ -295,10 +421,13 @@ impl<DB: DatabaseLike> PolicyWalk<'_, '_, '_, DB> {
     /// Records a column of the policy's table the expression compares with a
     /// credential.
     fn credential_comparison(&mut self, expression: &Expr) -> Result<(), LookupError> {
+        let Some(table) = &self.table else {
+            return Ok(());
+        };
         let compared = credential_compared(
             self.authority.database,
             self.authority.deployment,
-            &self.table,
+            table,
             expression,
         )?;
         self.authority.columns.subjects.extend(compared);
@@ -342,10 +471,33 @@ struct QueryWalk<'w, 'a, 'db, 'g, 'q, DB: DatabaseLike> {
     authority: &'w Authority<'a, 'db, DB>,
     root: &'g ColumnScope<'q, 'db, DB>,
     top: *const Query,
-    top_fed: bool,
-    fed: Vec<*const Query>,
+    top_reading: Reading,
+    uses: Uses,
     found: AuthorityColumns,
-    helpers: Vec<&'db DB::Function>,
+    helpers: Vec<(&'db DB::Function, Reading)>,
+}
+
+/// The conjuncts of a `SELECT`'s `WHERE` and of the `ON` of its inner joins.
+pub(crate) fn filters(select: &Select) -> Vec<&Expr> {
+    let mut filters: Vec<&Expr> = select.selection.iter().flat_map(conjuncts).collect();
+    for from in &select.from {
+        for join in &from.joins {
+            if let JoinOperator::Join(JoinConstraint::On(condition))
+            | JoinOperator::Inner(JoinConstraint::On(condition)) = &join.join_operator
+            {
+                filters.extend(conjuncts(condition));
+            }
+        }
+    }
+    filters
+}
+
+/// The expressions a `SELECT` returns.
+fn projected(select: &Select) -> impl Iterator<Item = &Expr> {
+    select.projection.iter().filter_map(|item| match item {
+        SelectItem::UnnamedExpr(item) | SelectItem::ExprWithAlias { expr: item, .. } => Some(item),
+        _ => None,
+    })
 }
 
 impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
@@ -369,12 +521,23 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
         })
     }
 
-    /// Records the scope and attribute columns of one `SELECT` that compares
-    /// a column of an authority table with a credential.
-    fn select(&mut self, select: &Select, fed: bool) -> Result<(), LookupError> {
+    /// Records the operands one `SELECT` tests, and the scope and attribute
+    /// columns it reads when it compares a column of an authority table with
+    /// a credential, its caller using what it selects as `reading` says.
+    fn select(&mut self, select: &Select, reading: Reading) -> Result<(), LookupError> {
+        let filters = filters(select);
+        for filter in &filters {
+            self.uses.tested(filter);
+        }
+        if reading == Reading::Tested {
+            for item in projected(select) {
+                self.uses.tested(item);
+            }
+        }
         let root = self.root;
-        root.scope_for_select(select)
-            .map_or(Ok(()), |scope| self.scoped_select(&scope, select, fed))
+        root.scope_for_select(select).map_or(Ok(()), |scope| {
+            self.scoped_select(&scope, select, &filters, reading)
+        })
     }
 
     /// Records the scope and attribute columns of `select`, resolved through
@@ -383,21 +546,12 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
         &mut self,
         scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
         select: &Select,
-        fed: bool,
+        filters: &[&Expr],
+        reading: Reading,
     ) -> Result<(), LookupError> {
-        let mut filters: Vec<&Expr> = select.selection.iter().flat_map(conjuncts).collect();
-        for from in &select.from {
-            for join in &from.joins {
-                if let JoinOperator::Join(JoinConstraint::On(condition))
-                | JoinOperator::Inner(JoinConstraint::On(condition)) = &join.join_operator
-                {
-                    filters.extend(conjuncts(condition));
-                }
-            }
-        }
         let mut subjects: Vec<TableColumn> = Vec::new();
         let mut pairs = Vec::new();
-        for filter in &filters {
+        for filter in filters {
             if let Expr::BinaryOp {
                 left,
                 op: BinaryOperator::Eq,
@@ -427,18 +581,21 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
                 self.found.scopes.push((table, name));
             }
         }
-        if fed {
-            for item in &select.projection {
-                if let SelectItem::UnnamedExpr(item) | SelectItem::ExprWithAlias { expr: item, .. } =
-                    item
-                    && let Some((table, name)) = self.base(scope, item)?
-                    && subjects.iter().any(|(subject, _)| *subject == table)
-                {
-                    self.found.scopes.push((table, name));
+        let tested: Vec<&Expr> = match reading {
+            Reading::Fed => {
+                for item in projected(select) {
+                    if let Some((table, name)) = self.base(scope, item)?
+                        && subjects.iter().any(|(subject, _)| *subject == table)
+                    {
+                        self.found.scopes.push((table, name));
+                    }
                 }
+                filters.to_vec()
             }
-        }
-        for filter in &filters {
+            Reading::Tested => filters.iter().copied().chain(projected(select)).collect(),
+            Reading::Plain => filters.to_vec(),
+        };
+        for filter in tested {
             for column in tested_columns(filter) {
                 if let Some((table, name)) = self.base(scope, column)?
                     && subjects.iter().any(|(subject, _)| *subject == table)
@@ -456,22 +613,21 @@ impl<DB: DatabaseLike> Visitor for QueryWalk<'_, '_, '_, '_, '_, DB> {
     type Break = LookupError;
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<LookupError> {
-        let pointer = std::ptr::from_ref(query);
-        let fed = (pointer == self.top && self.top_fed) || self.fed.contains(&pointer);
+        let reading = if std::ptr::from_ref(query) == self.top {
+            self.top_reading
+        } else {
+            self.uses.query(query)
+        };
         selects(&query.body)
             .into_iter()
-            .try_for_each(|select| self.select(select, fed))
+            .try_for_each(|select| self.select(select, reading))
             .map_or_else(ControlFlow::Break, ControlFlow::Continue)
     }
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<LookupError> {
-        self.fed
-            .extend(compared_set(expression).map(std::ptr::from_ref));
-        let Expr::Function(call) = expression else {
-            return ControlFlow::Continue(());
-        };
+        self.uses.compared(expression);
         self.authority
-            .reached(call)
+            .reached(&self.uses, expression)
             .map_or_else(ControlFlow::Break, |helpers| {
                 self.helpers.extend(helpers);
                 ControlFlow::Continue(())
@@ -480,8 +636,8 @@ impl<DB: DatabaseLike> Visitor for QueryWalk<'_, '_, '_, '_, '_, DB> {
 }
 
 /// The columns of the authority tables the schema's policies read, through
-/// their own comparisons, their sublinks and the set-returning
-/// `LANGUAGE sql` helpers they call.
+/// their own comparisons, their sublinks and the `LANGUAGE sql` helpers they
+/// call.
 pub(crate) fn authority_columns<DB: DatabaseLike>(
     database: &DB,
     deployment: &Deployment,
@@ -500,7 +656,7 @@ pub(crate) fn authority_columns<DB: DatabaseLike>(
         for policy in table.policies(database)? {
             for (_, expression) in walked_clauses(database, policy)? {
                 if let Some(expression) = expression {
-                    authority.expression(table, expression)?;
+                    authority.expression(Some(table), expression, Reading::Tested)?;
                 }
             }
         }

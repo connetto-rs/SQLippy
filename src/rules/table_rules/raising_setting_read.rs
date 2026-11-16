@@ -10,7 +10,7 @@ use sqlparser::{
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::function_reach_support::{Reach, Sought, literal_key, split},
+    rules::function_reach_support::{Reach, Sought, builtin_schema, literal_key, split},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -27,14 +27,6 @@ enum Read {
 /// dot is a built-in parameter, which every session holds.
 fn is_custom(key: &str) -> bool {
     key.contains('.')
-}
-
-/// Whether a call qualified by `schema` reaches PostgreSQL's
-/// `current_setting`: unqualified, since `pg_catalog` comes first on every
-/// search path that does not name it later, or qualified by `pg_catalog`.
-/// Any other schema holds a function of the user's.
-fn builtin_schema(schema: Option<&str>) -> bool {
-    schema.is_none_or(|schema| schema.eq_ignore_ascii_case("pg_catalog"))
 }
 
 /// Whether a `current_setting` call may raise when its setting is missing:
