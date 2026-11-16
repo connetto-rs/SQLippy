@@ -97,6 +97,8 @@ fn plpgsql_cursor_counts_handlers_and_raise_options_are_walked() {
                OPEN c;
                FETCH ABSOLUTE (SELECT count(*) FROM t WHERE x = NULL) FROM c INTO n;
                MOVE BACKWARD (SELECT count(*) FROM t WHERE x <> NULL) IN c;
+               FETCH FIRST FROM c INTO n;
+               CLOSE c;
                RAISE 'paged' USING DETAIL = (SELECT count(*) FROM t WHERE x < NULL);
              EXCEPTION WHEN others THEN
                PERFORM id FROM t WHERE x > NULL;
