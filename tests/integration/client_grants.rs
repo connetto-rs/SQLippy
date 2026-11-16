@@ -373,6 +373,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             "self_asserted_claim_policy",
             "self_granting_write",
             "subject_settable_attribute",
+            "authority_attribute_writable_below_threshold",
             "cross_tenant_cap",
             "definer_maintained_column_client_writable",
             "monotonic_flag_reset",
@@ -395,6 +396,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             "self_asserted_claim_policy",
             "self_granting_write",
             "subject_settable_attribute",
+            "authority_attribute_writable_below_threshold",
             "cross_tenant_cap",
             "monotonic_flag_reset",
             "credential_setting_write"

@@ -4,7 +4,7 @@ use std::fmt::{self, Display};
 
 use sql_traits::{
     errors::LookupError,
-    structs::TargetName,
+    structs::{IdentifierCase, TargetName},
     traits::{DatabaseLike, PolicyLike, TableLike},
 };
 use sqlparser::ast::Statement;
@@ -207,6 +207,54 @@ impl Display for SchemaAllowance {
     }
 }
 
+/// A reviewed exception for a function's stored schema and name, including its overloads.
+#[derive(Debug, Clone)]
+pub struct FunctionAllowance {
+    pub(crate) rule: String,
+    pub(crate) function: TargetName<'static>,
+}
+
+impl FunctionAllowance {
+    /// Returns the type name of the excused rule.
+    #[must_use]
+    pub fn rule(&self) -> &str {
+        &self.rule
+    }
+
+    /// Returns the excused function's schema and name.
+    #[must_use]
+    pub fn function(&self) -> &TargetName<'static> {
+        &self.function
+    }
+
+    /// Whether the allowance names this function under the schema allowance's identifier rules.
+    pub(crate) fn excuses(&self, rule: &RuleMetadata, function: &TargetName<'_>) -> bool {
+        self.rule == rule.name
+            && IdentifierCase::Folded.identifiers_match(
+                self.function.name(),
+                self.function.name_is_quoted(),
+                function.name(),
+                function.name_is_quoted(),
+            )
+            && IdentifierCase::Folded.identifiers_match(
+                self.function.schema().unwrap_or("public"),
+                self.function.schema_is_quoted(),
+                function.schema().unwrap_or("public"),
+                function.schema_is_quoted(),
+            )
+    }
+}
+
+impl Display for FunctionAllowance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the allowance for {} on function '{}' excuses no violation",
+            self.rule, self.function
+        )
+    }
+}
+
 /// A reviewed exception excusing one rule's violations in one statement.
 #[derive(Debug, Clone)]
 pub struct StatementAllowance {
@@ -253,6 +301,8 @@ pub enum Allowance {
     Schema(SchemaAllowance),
     /// An allowance naming a statement.
     Statement(StatementAllowance),
+    /// An allowance naming a function's schema and name.
+    Function(FunctionAllowance),
 }
 
 impl Display for Allowance {
@@ -260,6 +310,7 @@ impl Display for Allowance {
         match self {
             Self::Schema(allowance) => allowance.fmt(formatter),
             Self::Statement(allowance) => allowance.fmt(formatter),
+            Self::Function(allowance) => allowance.fmt(formatter),
         }
     }
 }
