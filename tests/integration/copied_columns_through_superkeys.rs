@@ -37,11 +37,29 @@ fn a_cascaded_copy_the_host_keys_on_nowhere_is_reported() {
         "CREATE TABLE notes (id INT PRIMARY KEY, account_id INT NOT NULL, label TEXT NOT NULL,
            FOREIGN KEY (account_id, label) REFERENCES accounts (id, label) ON UPDATE CASCADE);
          CREATE INDEX notes_account_label ON notes (account_id, label);",
+        // A unique index without the copy is no key on it.
+        "CREATE TABLE notes (id INT PRIMARY KEY, account_id INT NOT NULL, label TEXT NOT NULL,
+           FOREIGN KEY (account_id, label) REFERENCES accounts (id, label) ON UPDATE CASCADE);
+         CREATE UNIQUE INDEX notes_account ON notes (account_id, id);",
     ] {
         let messages = reported(notes);
         assert_eq!(messages.len(), 1, "{notes}");
         assert!(messages[0].contains("'label'"), "{}", messages[0]);
     }
+}
+
+#[test]
+fn a_check_repeating_a_qualified_or_quoted_parent_check_is_reported() {
+    let messages = reported(
+        r#"CREATE TABLE kinds (id INT PRIMARY KEY, "Kind" TEXT NOT NULL,
+             code TEXT NOT NULL CHECK (code <> ''), CHECK (kinds."Kind" IN ('a', 'b')),
+             CHECK ("Kind" <> code), UNIQUE (id, "Kind"));
+           CREATE TABLE notes (id INT PRIMARY KEY, kind_id INT NOT NULL,
+             "Kind" TEXT NOT NULL CHECK ("Kind" IN ('a', 'b')),
+             FOREIGN KEY (kind_id, "Kind") REFERENCES kinds (id, "Kind") ON UPDATE CASCADE);"#,
+    );
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("'Kind'"), "{}", messages[0]);
 }
 
 #[test]
@@ -59,6 +77,10 @@ fn a_copy_the_host_also_keys_on_passes() {
         "CREATE TABLE notes (id INT PRIMARY KEY, account_id INT NOT NULL, label TEXT NOT NULL,
            UNIQUE (label, id),
            FOREIGN KEY (account_id, label) REFERENCES accounts (id, label) ON UPDATE CASCADE);",
+        // A unique index of the host.
+        "CREATE TABLE notes (id INT PRIMARY KEY, account_id INT NOT NULL, label TEXT NOT NULL,
+           FOREIGN KEY (account_id, label) REFERENCES accounts (id, label) ON UPDATE CASCADE);
+         CREATE UNIQUE INDEX notes_id_label ON notes (id, label);",
         // An index leading with the column.
         "CREATE TABLE notes (id INT PRIMARY KEY, account_id INT NOT NULL, label TEXT NOT NULL,
            FOREIGN KEY (account_id, label) REFERENCES accounts (id, label) ON UPDATE CASCADE);
