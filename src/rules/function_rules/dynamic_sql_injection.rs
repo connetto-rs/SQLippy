@@ -2,7 +2,11 @@
 
 use sql_traits::{
     errors::LookupError,
-    structs::{CallResolution, ExpressionContext, IdentifierCase, OperandType, TypeCategory},
+    structs::{
+        CallResolution, ColumnDefinition, Definition, DefinitionId, DefinitionSource,
+        ExpressionContext, ExpressionScope, IdentifierCase, OperandType, Reaching, TypeCategory,
+        VariableKind, VariableRead,
+    },
     traits::{DatabaseLike, FunctionLike},
 };
 use sqlparser::ast::{BinaryOperator, Expr, Value};
@@ -34,6 +38,12 @@ const QUOTING: [&str; 3] = ["quote_ident", "quote_literal", "quote_nullable"];
 /// type is unknown. A field of `NEW` or `OLD` in a trigger function is a
 /// string when any table whose trigger runs the function gives that column
 /// a string type.
+///
+/// A string variable of a PL/pgSQL body stands for every value that may
+/// reach the site through branches and loops, so `s := 'SELECT ' || p;
+/// EXECUTE s` is reported, and a variable only ever assigned constant or
+/// quoted text is not. A variable an argument, a query or a command fills
+/// is reported as the value it splices in.
 ///
 /// # Example
 ///
@@ -172,14 +182,25 @@ fn plain_positions(mut pattern: &str) -> Vec<usize> {
     plain
 }
 
+/// The SQL a [`Splices`] walk is in: the command of a site, or the value a
+/// definition reaching one of its variables assigns.
+struct Frame<'f, 'scope, 'r, 'db, DB: DatabaseLike> {
+    /// The context typing the SQL.
+    context: &'f ExpressionContext<'scope, 'db, DB>,
+    /// The variables the SQL reads, with the definitions reaching it.
+    reads: &'f [VariableRead<'r, 'db, DB>],
+}
+
 /// Collects the string operands a command splices in without quoting.
-struct Splices<'c, 'scope, 'db, DB: DatabaseLike> {
+struct Splices<'db, DB: DatabaseLike> {
     database: &'db DB,
-    context: &'c ExpressionContext<'scope, 'db, DB>,
+    /// The definitions already followed, so a variable a loop builds from
+    /// itself is read once.
+    followed: Vec<DefinitionId>,
     found: Vec<String>,
 }
 
-impl<DB: DatabaseLike> Splices<'_, '_, '_, DB> {
+impl<'db, DB: DatabaseLike> Splices<'db, DB> {
     /// Whether a value of type `operand` can carry a quote into SQL text.
     fn string(&self, operand: &OperandType<'_>) -> bool {
         let OperandType::Known { type_name, .. } = operand else {
@@ -191,7 +212,11 @@ impl<DB: DatabaseLike> Splices<'_, '_, '_, DB> {
     }
 
     /// Visits what `expression` contributes to the command text.
-    fn visit(&mut self, expression: &Expr) -> Result<(), LookupError> {
+    fn visit(
+        &mut self,
+        expression: &Expr,
+        frame: &Frame<'_, '_, '_, 'db, DB>,
+    ) -> Result<(), LookupError> {
         let expression = unnested(expression);
         match expression {
             Expr::BinaryOp {
@@ -199,76 +224,168 @@ impl<DB: DatabaseLike> Splices<'_, '_, '_, DB> {
                 op: BinaryOperator::StringConcat,
                 right,
             } => {
-                self.visit(left)?;
-                return self.visit(right);
+                self.visit(left, frame)?;
+                return self.visit(right, frame);
             }
             Expr::Value(value) if !matches!(value.value, Value::Placeholder(_)) => {
                 return Ok(());
             }
             Expr::TypedString(_) => return Ok(()),
             Expr::Cast { expr, .. } => {
-                let target = self.context.type_of(expression)?;
+                let target = frame.context.type_of(expression)?;
                 return if self.string(&target) {
-                    self.visit(expr)
+                    self.visit(expr, frame)
                 } else {
                     Ok(())
                 };
             }
             _ => {}
         }
-        if let Some(call) = self.context.call(expression)?
+        if let Some(call) = frame.context.call(expression)?
             && let CallResolution::Selected(selected) = call.resolution()
             && selected.function().target_name().schema() == Some("pg_catalog")
         {
             let arguments = call.arguments();
             match selected.function().name() {
                 name if QUOTING.contains(&name) => return Ok(()),
-                "format" => return self.formatted(arguments),
+                "format" => return self.formatted(arguments, frame),
                 "concat" | "concat_ws" => {
                     for argument in arguments {
-                        self.visit(argument)?;
+                        self.visit(argument, frame)?;
                     }
                     return Ok(());
                 }
                 _ => {}
             }
         }
-        let operand = self.context.type_of(expression)?;
+        let operand = frame.context.type_of(expression)?;
         let string = if operand == OperandType::Unknown {
             // A trigger row field the trigger tables type differently.
-            self.context
+            frame
+                .context
                 .row_field_types(expression)?
                 .iter()
                 .any(|(_, field)| self.string(field))
         } else {
             self.string(&operand)
         };
-        if string {
-            self.found.push(expression.to_string());
+        if !string {
+            return Ok(());
         }
-        Ok(())
+        match read(expression, frame)?.map(VariableRead::reaching) {
+            Some(Reaching::Unreachable) => Ok(()),
+            Some(Reaching::Definitions(definitions)) => {
+                for definition in definitions {
+                    self.follow(definition, expression)?;
+                }
+                Ok(())
+            }
+            None => {
+                self.spliced(expression);
+                Ok(())
+            }
+        }
+    }
+
+    /// Visits the value `definition` assigns to the variable `operand`
+    /// reads whole, or records `operand` when the definition leaves a value
+    /// the body does not spell out, such as an argument or a query's output.
+    fn follow(
+        &mut self,
+        definition: &Definition<'_, 'db, DB>,
+        operand: &Expr,
+    ) -> Result<(), LookupError> {
+        if self.followed.contains(&definition.id()) {
+            return Ok(());
+        }
+        self.followed.push(definition.id());
+        match definition.source() {
+            DefinitionSource::Null => Ok(()),
+            DefinitionSource::Value(value)
+                if definition.part().is_empty()
+                    && let Some(scope) = definition.scope() =>
+            {
+                let scope = ExpressionScope::PlPgSql(&scope);
+                let context = ExpressionContext::for_expression(
+                    value,
+                    &scope,
+                    self.database,
+                    IdentifierCase::Folded,
+                )?;
+                let reads = definition.reads(IdentifierCase::Folded)?;
+                self.visit(
+                    value,
+                    &Frame {
+                        context: &context,
+                        reads: &reads,
+                    },
+                )
+            }
+            _ => {
+                self.spliced(operand);
+                Ok(())
+            }
+        }
+    }
+
+    /// Records `operand` as spliced in without quoting.
+    fn spliced(&mut self, operand: &Expr) {
+        let operand = operand.to_string();
+        if !self.found.contains(&operand) {
+            self.found.push(operand);
+        }
     }
 
     /// Visits the values a `format` call fills into `%s` placeholders, and
     /// every value and the pattern itself when the pattern is not a constant.
-    fn formatted(&mut self, arguments: &[&Expr]) -> Result<(), LookupError> {
+    fn formatted(
+        &mut self,
+        arguments: &[&Expr],
+        frame: &Frame<'_, '_, '_, 'db, DB>,
+    ) -> Result<(), LookupError> {
         let Some((pattern, values)) = arguments.split_first() else {
             return Ok(());
         };
         let Some(text) = string_constant(pattern) else {
-            self.visit(pattern)?;
+            self.visit(pattern, frame)?;
             for value in values {
-                self.visit(value)?;
+                self.visit(value, frame)?;
             }
             return Ok(());
         };
         for position in plain_positions(text) {
             if let Some(value) = values.get(position) {
-                self.visit(value)?;
+                self.visit(value, frame)?;
             }
         }
         Ok(())
     }
+}
+
+/// The read of the PL/pgSQL variable `expression` names whole, by name or
+/// as `$n`, among the reads of `frame`.
+fn read<'f, 'r, 'db, DB: DatabaseLike>(
+    expression: &Expr,
+    frame: &Frame<'f, '_, 'r, 'db, DB>,
+) -> Result<Option<&'f VariableRead<'r, 'db, DB>>, LookupError> {
+    if let Expr::Value(value) = expression
+        && let Value::Placeholder(placeholder) = &value.value
+    {
+        let position = placeholder
+            .strip_prefix('$')
+            .and_then(|digits| digits.parse::<usize>().ok());
+        return Ok(frame.reads.iter().find(|read| {
+            matches!(read.variable().kind(), VariableKind::Parameter { position: parameter, .. } if Some(*parameter) == position)
+        }));
+    }
+    let Some((ColumnDefinition::Variable(variable), _)) = frame.context.reference(expression)?
+    else {
+        return Ok(None);
+    };
+    Ok(frame
+        .reads
+        .iter()
+        .find(|read| read.variable().id() == variable.id()))
 }
 
 impl<DB: DatabaseLike> FunctionRule for DynamicSqlInjection<DB> {
@@ -295,12 +412,19 @@ impl<DB: DatabaseLike> FunctionRule for DynamicSqlInjection<DB> {
         };
         for site in &sites {
             let context = site.context(IdentifierCase::Folded)?;
+            let reads = site.reads(IdentifierCase::Folded)?;
             let mut splices = Splices {
                 database,
-                context: &context,
+                followed: Vec::new(),
                 found: Vec::new(),
             };
-            splices.visit(site.command())?;
+            splices.visit(
+                site.command(),
+                &Frame {
+                    context: &context,
+                    reads: &reads,
+                },
+            )?;
             if splices.found.is_empty() {
                 continue;
             }

@@ -281,3 +281,36 @@ fn cursor_loop_fields_and_scalar_subqueries_take_their_query_types() {
         assert_eq!(reported(&function("", body)), expected, "{body}");
     }
 }
+
+#[test]
+fn a_variable_holding_a_spliced_string_is_reported() {
+    for body in [
+        "DECLARE s TEXT; r BIGINT; BEGIN s := 'SELECT count(*) FROM items WHERE name = ''' || p || ''''; EXECUTE s INTO r; RETURN r; END",
+        "DECLARE s TEXT := 'SELECT 1'; r BIGINT; BEGIN IF p IS NOT NULL THEN s := 'SELECT count(*) FROM ' || p; END IF; EXECUTE s INTO r; RETURN r; END",
+        "DECLARE a TEXT; s TEXT; r BIGINT; BEGIN a := p; s := 'SELECT count(*) FROM ' || a; EXECUTE s INTO r; RETURN r; END",
+        "DECLARE s TEXT := 'SELECT 1'; r BIGINT; BEGIN FOR i IN 1..3 LOOP s := s || ' UNION SELECT count(*) FROM ' || p; END LOOP; EXECUTE s INTO r; RETURN r; END",
+        "DECLARE s TEXT; r BIGINT; BEGIN SELECT name INTO s FROM items LIMIT 1; EXECUTE 'SELECT count(*) FROM ' || s INTO r; RETURN r; END",
+        "DECLARE s TEXT; r BIGINT; BEGIN s := format('SELECT count(*) FROM %s', p); EXECUTE s INTO r; RETURN r; END",
+    ] {
+        assert_eq!(reported(&function("p TEXT", body)), ["f(TEXT)"], "{body}");
+    }
+}
+
+#[test]
+fn a_variable_holding_constant_or_quoted_text_is_not_reported() {
+    for body in [
+        "DECLARE s TEXT := 'SELECT count(*) FROM items'; r BIGINT; BEGIN EXECUTE s INTO r; RETURN r; END",
+        "DECLARE s TEXT; r BIGINT; BEGIN s := 'SELECT count(*) FROM items WHERE name = ' || quote_literal(p); EXECUTE s INTO r; RETURN r; END",
+        "DECLARE s TEXT; r BIGINT; BEGIN s := format('SELECT count(*) FROM %I', p); EXECUTE s INTO r; RETURN r; END",
+        "DECLARE s TEXT := 'SELECT count(*)'; r BIGINT; BEGIN EXECUTE s || ' FROM items' INTO r; RETURN r; END",
+        "DECLARE s TEXT; r BIGINT; BEGIN s := 'SELECT count(*) FROM ' || p; s := 'SELECT 1'; EXECUTE s INTO r; RETURN r; END",
+        "DECLARE s TEXT := 'SELECT 1'; r BIGINT; BEGIN FOR i IN 1..3 LOOP s := s || ' UNION SELECT ' || quote_literal(p); END LOOP; EXECUTE s INTO r; RETURN r; END",
+        "DECLARE r BIGINT; BEGIN RETURN 0; EXECUTE 'SELECT count(*) FROM ' || p INTO r; END",
+    ] {
+        assert_eq!(
+            reported(&function("p TEXT", body)),
+            Vec::<String>::new(),
+            "{body}"
+        );
+    }
+}
