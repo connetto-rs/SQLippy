@@ -106,6 +106,13 @@ pub(crate) struct ClusterBootstrap {
 }
 
 impl ClusterBootstrap {
+    /// The bootstrap of an undeclared cluster, provisioning nothing.
+    pub(crate) const EMPTY: Self = Self {
+        roles: Vec::new(),
+        memberships: Vec::new(),
+        settings: Vec::new(),
+    };
+
     /// Records what `cluster`, a database built from the bootstrap alone,
     /// holds.
     pub(crate) fn of<DB: DatabaseLike>(cluster: &DB) -> Self {

@@ -247,9 +247,11 @@ impl Deployment {
         self
     }
 
-    /// Returns what the declared cluster bootstrap provisions.
-    pub(crate) fn cluster_bootstrap(&self) -> Option<&ClusterBootstrap> {
-        self.cluster_bootstrap.as_ref()
+    /// Returns what the declared cluster bootstrap provisions, nothing when
+    /// none is declared.
+    pub(crate) fn cluster_bootstrap(&self) -> &ClusterBootstrap {
+        static UNDECLARED: ClusterBootstrap = ClusterBootstrap::EMPTY;
+        self.cluster_bootstrap.as_ref().unwrap_or(&UNDECLARED)
     }
 
     /// Selects a vocabulary the rules reading column names match against,

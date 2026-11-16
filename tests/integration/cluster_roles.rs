@@ -19,19 +19,27 @@ fn parse(sql: &str) -> ParserDB {
         .expect("schema parses")
 }
 
-/// Objects `RoleDefinedInSchema` reports on `schema` under a deployment
+/// Violations `RoleDefinedInSchema` raises on `schema` under a deployment
 /// declaring [`BOOTSTRAP`], failing on anything else.
-fn reported(schema: &str) -> Vec<String> {
+fn violations(schema: &str) -> Vec<Violation<ParserDB>> {
     let mut constrainer: GenericConstrainer<ParserDB> = RoleDefinedInSchema::default().into();
     constrainer.set_rule_level("role_defined_in_schema", Level::Warn);
     constrainer.set_deployment(Deployment::default().with_cluster_bootstrap(&parse(BOOTSTRAP)));
-    let mut objects: Vec<String> = constrainer
+    constrainer
         .diagnostics(&parse(schema))
         .into_iter()
         .map(|error| match error {
-            Error::Violation(violation) => violation.object().to_owned(),
+            Error::Violation(violation) => *violation,
             other => panic!("unexpected failure: {other}"),
         })
+        .collect()
+}
+
+/// Objects `RoleDefinedInSchema` reports on `schema`, sorted.
+fn reported(schema: &str) -> Vec<String> {
+    let mut objects: Vec<String> = violations(schema)
+        .iter()
+        .map(|violation| violation.object().to_owned())
         .collect();
     objects.sort();
     objects
@@ -112,12 +120,29 @@ fn undoing_or_changing_what_the_bootstrap_set_is_reported() {
 }
 
 #[test]
+fn the_resolution_spells_the_alter_role_moving_attribute_changes_to_the_bootstrap() {
+    let resolutions: Vec<String> = violations(&format!(
+        "{BOOTSTRAP}
+         ALTER ROLE anon NOINHERIT CONNECTION LIMIT 3;"
+    ))
+    .iter()
+    .map(|violation| violation.resolution().to_owned())
+    .collect();
+    assert_eq!(
+        resolutions,
+        ["Move ALTER ROLE anon NOINHERIT CONNECTION LIMIT 3 to the cluster bootstrap."]
+    );
+}
+
+#[test]
 fn the_rule_is_inactive_until_a_cluster_bootstrap_is_declared() {
     let mut constrainer: GenericConstrainer<ParserDB> = RoleDefinedInSchema::default().into();
     constrainer.set_rule_level("role_defined_in_schema", Level::Warn);
     let inactive = constrainer.inactive_rules();
     assert_eq!(inactive.len(), 1);
     assert_eq!(inactive[0].missing(), Declaration::ClusterBootstrap);
+    let shown = inactive[0].to_string();
+    assert!(shown.contains("its cluster bootstrap"), "{shown}");
     assert!(
         constrainer
             .validate_schema(&parse("CREATE ROLE reporting;"))

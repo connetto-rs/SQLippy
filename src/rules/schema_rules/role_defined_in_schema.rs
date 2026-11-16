@@ -98,9 +98,7 @@ impl<DB: DatabaseLike> SchemaRule for RoleDefinedInSchema<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let Some(bootstrap) = reporter.deployment().cluster_bootstrap() else {
-            return Ok(());
-        };
+        let bootstrap = reporter.deployment().cluster_bootstrap();
         report_roles(database, bootstrap, reporter)?;
         report_memberships(database, bootstrap, reporter)?;
         report_settings(database, bootstrap, reporter)
