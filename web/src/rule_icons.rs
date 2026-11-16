@@ -19,11 +19,11 @@ use dioxus_free_icons::icons::fa_solid_icons::{
     FaMoneyBill, FaNotEqual, FaObjectGroup, FaPaperclip, FaPenToSquare, FaPeopleArrowsLeftRight,
     FaPeopleGroup, FaPersonCircleXmark, FaPlug, FaPlugCircleExclamation, FaPlugCircleXmark,
     FaPuzzlePiece, FaQuoteLeft, FaRegistered, FaRepeat, FaRotateRight, FaRuler, FaScissors,
-    FaShareNodes, FaShield, FaShieldHalved, FaShuffle, FaSignsPost, FaSitemap, FaSkull, FaSliders,
-    FaSnowflake, FaSort, FaSpellCheck, FaSquareMinus, FaSquareRootVariable, FaStopwatch, FaSyringe,
-    FaTable, FaTableList, FaTag, FaTags, FaTextHeight, FaTextWidth, FaTrashCan,
+    FaServer, FaShareNodes, FaShield, FaShieldHalved, FaShuffle, FaSignsPost, FaSitemap, FaSkull,
+    FaSliders, FaSnowflake, FaSort, FaSpellCheck, FaSquareMinus, FaSquareRootVariable, FaStopwatch,
+    FaSyringe, FaTable, FaTableList, FaTag, FaTags, FaTextHeight, FaTextWidth, FaTrashCan,
     FaTriangleExclamation, FaUnderline, FaUserCheck, FaUserGear, FaUserNinja, FaUserPen,
-    FaUserSlash, FaUserTag, FaWandMagicSparkles, FaWater, FaWaterLadder,
+    FaUserSlash, FaUserTag, FaUsers, FaWandMagicSparkles, FaWater, FaWaterLadder,
 };
 
 /// Defines `RuleIcon`, rendering the icon each listed rule name maps to, and
@@ -54,6 +54,7 @@ rule_icons! {
     "definer_without_search_path" => FaSignsPost,
     "invoker_without_search_path" => FaSignsPost,
     "definer_path_creatable_schema" => FaSignsPost,
+    "definer_schema_without_default_revoke" => FaUsers,
     "leakproof_user_function" => FaFaucetDrip,
     "dynamic_sql_injection" => FaSyringe,
     "unsatisfiable_check" => FaCircleXmark,
@@ -105,6 +106,7 @@ rule_icons! {
     "security_definer_function_exposed" => FaMask,
     "self_comparison" => FaArrowRightArrowLeft,
     "self_granting_write" => FaUserGear,
+    "role_defined_in_schema" => FaServer,
     "session_time_zone_dependence" => FaEarthEurope,
     "settable_membership_in_bypassing_role" => FaPeopleArrowsLeftRight,
     "subject_settable_attribute" => FaSliders,
