@@ -7,13 +7,14 @@ use sql_traits::{
     traits::{CheckConstraintLike, DatabaseLike, FunctionLike, PolicyLike, TableLike, ViewLike},
 };
 use sqlparser::{
-    ast::{Expr, Statement, Value, Visit},
+    ast::{Expr, Query, Statement, Value, Visit},
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
 use sqlparser_plpgsql::{
     embedded::{
-        Block, BoundCursor, DeclarationKind, Dynamic, Indirection, LoopControl, Node, Open,
+        Block, BoundCursor, DeclarationKind, Dynamic, Fetch, FetchCount, FetchDirection,
+        FetchPosition, Indirection, LoopControl, Node, Open,
     },
     embedded_sql,
 };
@@ -226,7 +227,7 @@ fn block_statements(block: Block, statements: &mut Vec<Statement>) {
     }
     nodes_statements(block.statements, statements);
     for handler in block.handlers {
-        nodes_statements(handler, statements);
+        nodes_statements(handler.statements, statements);
     }
 }
 
@@ -265,14 +266,20 @@ fn nodes_statements(nodes: Vec<Node>, statements: &mut Vec<Statement>) {
                 statements.push(Statement::Query(assignment.value));
             }
             Node::Open(Open::Bound(cursor)) => bound_cursor_statements(cursor, statements),
-            Node::Fetch(_) | Node::Diagnostics(_) => {}
+            Node::Fetch(Fetch { direction, .. }) | Node::Move { direction, .. } => {
+                statements.extend(direction_query(direction).map(Statement::Query));
+            }
+            Node::Diagnostics(_)
+            | Node::Close { .. }
+            | Node::Commit { .. }
+            | Node::Rollback { .. } => {}
             Node::Exit(exit) => statements.extend(exit.condition.map(Statement::Query)),
             Node::Return { value } => statements.extend(value.map(Statement::Query)),
             Node::Raise(raise) => statements.extend(
                 raise
                     .arguments
                     .into_iter()
-                    .chain(raise.options)
+                    .chain(raise.options.into_iter().map(|option| option.value))
                     .map(|argument| Statement::Query(Box::new(argument))),
             ),
             Node::Assert(assert) => {
@@ -328,4 +335,18 @@ fn bound_cursor_statements(cursor: BoundCursor, statements: &mut Vec<Statement>)
             .map(|argument| Statement::Query(Box::new(argument))),
     );
     statements.push(*cursor.query);
+}
+
+/// The `SELECT` that evaluates the count, position or offset of a `FETCH` or
+/// `MOVE`, when one is written.
+fn direction_query(direction: FetchDirection) -> Option<Box<Query>> {
+    match direction {
+        FetchDirection::Forward(FetchCount::Rows(query))
+        | FetchDirection::Backward(FetchCount::Rows(query))
+        | FetchDirection::Absolute(FetchPosition::Row(query))
+        | FetchDirection::Relative(query) => Some(query),
+        FetchDirection::Forward(FetchCount::One | FetchCount::All)
+        | FetchDirection::Backward(FetchCount::One | FetchCount::All)
+        | FetchDirection::Absolute(FetchPosition::First | FetchPosition::Last) => None,
+    }
 }

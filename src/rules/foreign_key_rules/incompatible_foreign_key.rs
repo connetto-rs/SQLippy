@@ -1,8 +1,7 @@
 //! Submodule providing the `IncompatibleForeignKey` constraint, which enforces
 //! that foreign key columns are compatible with the referenced columns, i.e.
-//! have the same data type and are part of the same extension hierarchy.
-
-use std::borrow::Borrow;
+//! have the same data type, and that the references of each column name one
+//! extension hierarchy.
 
 use sql_traits::{
     errors::LookupError,
@@ -16,8 +15,13 @@ use crate::{
 };
 
 /// Struct defining a constraint that enforces that foreign key columns are
-/// compatible with the referenced columns, i.e. have the same data type and
-/// are part of the same extension hierarchy.
+/// compatible with the referenced columns, i.e. have the same data type, and
+/// that the foreign keys of each column reference one extension hierarchy.
+///
+/// A column takes the extension hierarchy of every column it references,
+/// through keys of any width, so a column of a composite key is the entity its
+/// referenced column is. A column whose keys reference unrelated hierarchies is
+/// reported once, on the first of those keys.
 ///
 /// # Example
 ///
@@ -55,7 +59,7 @@ use crate::{
 ///             .contains("`child.id` and referenced column `parent.id` both generate their own values")
 /// ));
 ///
-/// // `d.x` references `a`, while the unique `b.code` references nothing
+/// // `d.x` must be an `a` and a `b`, which the unique `b.code` identifies
 /// let host_in_other_hierarchy = ParserDB::parse::<GenericDialect>(
 ///     "
 /// CREATE TABLE a (id INT PRIMARY KEY);
@@ -70,11 +74,11 @@ use crate::{
 ///     Error::Violation(violation)
 ///         if violation
 ///             .message()
-///             .contains("`d.x` references [a], while `b.code` references [none]")
+///             .contains("`d.x` references unrelated extension hierarchies, [a] through `a (id)` and [b] through `b (code)`")
 /// ));
 ///
-/// // `d.b_a_id` references nothing, while the unique `b.a_id` references `a`
-/// let referenced_in_other_hierarchy = ParserDB::parse::<GenericDialect>(
+/// // The unique `b.a_id` references `a`, so its values are rows of `a` and `b`
+/// let unique_key_in_hierarchy = ParserDB::parse::<GenericDialect>(
 ///     "
 /// CREATE TABLE a (id INT PRIMARY KEY);
 /// CREATE TABLE b (id INT PRIMARY KEY, a_id INT UNIQUE REFERENCES a (id));
@@ -82,14 +86,7 @@ use crate::{
 /// ",
 /// )
 /// .unwrap();
-/// let error = constrainer.validate_schema(&referenced_in_other_hierarchy).unwrap_err();
-/// assert!(matches!(
-///     error,
-///     Error::Violation(violation)
-///         if violation
-///             .message()
-///             .contains("`d.b_a_id` references [none], while `b.a_id` references [a]")
-/// ));
+/// assert!(constrainer.validate_schema(&unique_key_in_hierarchy).is_ok());
 ///
 /// let extension_dag = ParserDB::parse::<GenericDialect>(
 ///     "
@@ -140,7 +137,7 @@ impl<C> Rule for IncompatibleForeignKey<C> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(IncompatibleForeignKey),
             group: LintGroup::Suspicious,
-            rationale: "A foreign key whose columns differ in type from the referenced columns, or that links tables outside one extension hierarchy, usually points at the wrong column.",
+            rationale: "A foreign key whose columns differ in type from the referenced columns, or whose column another foreign key ties to an unrelated entity, usually points at the wrong column.",
             source: None,
             basis: Basis::Declared,
             example: RuleExample {
@@ -155,15 +152,20 @@ CREATE TABLE children (parent_id INT REFERENCES parents (id));",
 }
 
 impl<DB: DatabaseLike> IncompatibleForeignKey<DB> {
-    fn get_incompatibility_details(
+    /// Message and resolution for a host column whose type or generated values
+    /// rule out the column it references, or `None` when the pair is
+    /// compatible.
+    fn pair_incompatibility(
         database: &DB,
         host_table: &<DB as DatabaseLike>::Table,
         referenced_table: &<DB as DatabaseLike>::Table,
         host_column: &<DB as DatabaseLike>::Column,
         referenced_column: &<DB as DatabaseLike>::Column,
-    ) -> Result<(String, String), LookupError> {
-        if host_column.is_generated(database) && referenced_column.is_generated(database) {
-            Ok((
+    ) -> Option<(String, String)> {
+        if host_column.is_compatible_with(database, referenced_column) {
+            None
+        } else if host_column.is_generated(database) && referenced_column.is_generated(database) {
+            Some((
                 format!(
                     "Foreign key column `{}.{}` and referenced column `{}.{}` both generate their own values, so they match the referenced row only by coincidence.",
                     host_table.table_name(),
@@ -177,12 +179,8 @@ impl<DB: DatabaseLike> IncompatibleForeignKey<DB> {
                     host_column.column_name(),
                 ),
             ))
-        } else if host_column.data_type(database).normalized_name(database)
-            != referenced_column
-                .data_type(database)
-                .normalized_name(database)
-        {
-            Ok((
+        } else {
+            Some((
                 format!(
                     "Foreign key column `{}.{}` has data type '{}', which differs from referenced column `{}.{}` with data type '{}'.",
                     host_table.table_name(),
@@ -203,51 +201,53 @@ impl<DB: DatabaseLike> IncompatibleForeignKey<DB> {
                         .normalized_name(database),
                 ),
             ))
-        } else {
-            // The columns reference incompatible table hierarchies
-            let host_referenced_tables =
-                host_table.referenced_tables_via_column(database, host_column.borrow())?;
-            let other_referenced_tables = referenced_table
-                .referenced_tables_via_column(database, referenced_column.borrow())?;
-
-            let describe = |tables: &[&<DB as DatabaseLike>::Table]| {
-                if tables.is_empty() {
-                    "none".to_owned()
-                } else {
-                    tables
-                        .iter()
-                        .copied()
-                        .map(TableLike::table_name)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-            };
-            let host_refs = describe(&host_referenced_tables);
-            let other_refs = describe(&other_referenced_tables);
-
-            Ok((
-                format!(
-                    "Foreign key column `{}.{}` and referenced column `{}.{}` belong to unrelated extension hierarchies, since `{}.{}` references [{}], while `{}.{}` references [{}].",
-                    host_table.table_name(),
-                    host_column.column_name(),
-                    referenced_table.table_name(),
-                    referenced_column.column_name(),
-                    host_table.table_name(),
-                    host_column.column_name(),
-                    host_refs,
-                    referenced_table.table_name(),
-                    referenced_column.column_name(),
-                    other_refs,
-                ),
-                format!(
-                    "Ensure that `{}.{}` and `{}.{}` are part of the same table extension hierarchy, or reconsider the foreign key relationship.",
-                    host_table.table_name(),
-                    host_column.column_name(),
-                    referenced_table.table_name(),
-                    referenced_column.column_name(),
-                ),
-            ))
         }
+    }
+
+    /// Message and resolution for a host column whose foreign keys reference
+    /// unrelated extension hierarchies, given each conflicting key with the
+    /// hierarchy it contributes.
+    fn hierarchy_conflict(
+        database: &DB,
+        host_table: &<DB as DatabaseLike>::Table,
+        host_column: &<DB as DatabaseLike>::Column,
+        conflicts: &[(
+            &<DB as DatabaseLike>::ForeignKey,
+            Vec<&<DB as DatabaseLike>::Table>,
+        )],
+    ) -> Result<(String, String), LookupError> {
+        let mut references = Vec::with_capacity(conflicts.len());
+        for (foreign_key, hierarchy) in conflicts {
+            let referenced_columns = foreign_key
+                .referenced_columns(database)?
+                .map(ColumnLike::column_name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let hierarchy = hierarchy
+                .iter()
+                .copied()
+                .map(TableLike::table_name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            references.push(format!(
+                "[{hierarchy}] through `{} ({referenced_columns})`",
+                foreign_key.referenced_table(database)?.table_name(),
+            ));
+        }
+        let last = references.pop().unwrap_or_default();
+        Ok((
+            format!(
+                "Foreign key column `{}.{}` references unrelated extension hierarchies, {} and {last}, so every value would have to be a row of unrelated tables.",
+                host_table.table_name(),
+                host_column.column_name(),
+                references.join(", "),
+            ),
+            format!(
+                "Keep only the foreign keys of `{}.{}` whose referenced columns share an extension hierarchy, or reconsider which column each key references.",
+                host_table.table_name(),
+                host_column.column_name(),
+            ),
+        ))
     }
 }
 
@@ -266,15 +266,24 @@ impl<DB: DatabaseLike> ForeignKeyRule for IncompatibleForeignKey<DB> {
             .host_columns(database)?
             .zip(foreign_key.referenced_columns(database)?)
         {
-            if !host_column.is_compatible_with(database, referenced_column)? {
-                // Determine the specific reason for incompatibility
-                let (message, resolution) = Self::get_incompatibility_details(
-                    database,
-                    host_table,
-                    referenced_table,
-                    host_column,
-                    referenced_column,
-                )?;
+            if let Some((message, resolution)) = Self::pair_incompatibility(
+                database,
+                host_table,
+                referenced_table,
+                host_column,
+                referenced_column,
+            ) {
+                reporter.foreign_key(foreign_key, message, resolution)?;
+            }
+            // The conflict belongs to the column, so only its first
+            // conflicting key reports it.
+            let conflicts = host_column.conflicting_references(database)?;
+            if conflicts
+                .first()
+                .is_some_and(|(first, _)| *first == foreign_key)
+            {
+                let (message, resolution) =
+                    Self::hierarchy_conflict(database, host_table, host_column, &conflicts)?;
                 reporter.foreign_key(foreign_key, message, resolution)?;
             }
         }
