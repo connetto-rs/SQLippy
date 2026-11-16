@@ -9,6 +9,7 @@ mod rule_examples;
 mod rule_findings;
 
 mod assignment_conjunctions;
+mod authority_attribute_write_thresholds;
 mod catalog_checks;
 mod catalogue_objects;
 mod client_grants;
@@ -78,5 +79,6 @@ mod uncached_policy_calls;
 mod undeletable_references;
 mod unindexed_recursive_joins;
 mod unprotected_policy_reads;
+mod unseeded_policy_sets;
 mod unused_ctes;
 mod writing_non_volatile_functions;

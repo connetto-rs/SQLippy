@@ -164,6 +164,32 @@ pub trait Constrainer: Default {
             .allow(rule, table, AllowedObject::Policy(policy.to_owned()));
     }
 
+    /// Excuses a rule's function findings for the given schema and name, including all overloads.
+    ///
+    /// An allowance that excuses nothing is reported as [`Error::UnusedAllowance`].
+    ///
+    /// ```
+    /// use sqlippy::prelude::*;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    /// let database = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE memberships (id INT, parent_id INT);
+    ///      CREATE TABLE resources (id INT);
+    ///      CREATE FUNCTION global_ids() RETURNS SETOF INT LANGUAGE sql AS $$
+    ///        WITH RECURSIVE reachable(id) AS (SELECT id FROM memberships UNION
+    ///        SELECT memberships.id FROM memberships JOIN reachable ON memberships.parent_id = reachable.id)
+    ///        SELECT id FROM reachable $$;
+    ///      ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+    ///      CREATE POLICY resources_read ON resources USING (id IN (SELECT global_ids()));",
+    /// ).unwrap();
+    /// let mut constrainer: GenericConstrainer<ParserDB> = UnseededPolicySet::default().into();
+    /// constrainer.set_deployment(Deployment::example());
+    /// constrainer.allow_function("unseeded_policy_set", TargetName::new("global_ids", false));
+    /// assert!(constrainer.validate_schema(&database).is_ok());
+    /// ```
+    fn allow_function(&mut self, rule: &str, function: TargetName<'_>) {
+        self.constrainer_mut().allow_function(rule, function);
+    }
+
     /// Excuses the violations of a rule in one statement, matched in the form
     /// sqlparser renders it, so spacing and keyword case do not matter.
     ///

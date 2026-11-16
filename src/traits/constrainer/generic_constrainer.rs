@@ -11,8 +11,8 @@ use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 use crate::{
     deployment::Deployment,
     error::{
-        Allowance, AllowedObject, Error, InactiveRule, Interruption, SchemaAllowance,
-        StatementAllowance,
+        Allowance, AllowedObject, Error, FunctionAllowance, InactiveRule, Interruption,
+        SchemaAllowance, StatementAllowance,
     },
     lint::{Level, LintGroup, RegisteredRule, Rule, RuleKind, RuleMetadata},
     traits::{
@@ -64,6 +64,7 @@ pub struct GenericConstrainer<DB: DatabaseLike> {
     levels: Levels,
     allowances: Vec<SchemaAllowance>,
     statement_allowances: Vec<StatementAllowance>,
+    function_allowances: Vec<FunctionAllowance>,
     deployment: Deployment,
 }
 
@@ -79,6 +80,7 @@ impl<DB: DatabaseLike> Default for GenericConstrainer<DB> {
             levels: Levels::default(),
             allowances: Vec::new(),
             statement_allowances: Vec::new(),
+            function_allowances: Vec::new(),
             deployment: Deployment::default(),
         }
     }
@@ -91,6 +93,8 @@ struct Run<'run, DB: DatabaseLike> {
     allowances: Vec<ResolvedAllowance<'run, DB>>,
     used: Vec<bool>,
     statements: &'run [StatementAllowance],
+    functions: &'run [FunctionAllowance],
+    functions_used: Vec<bool>,
 }
 
 impl<'run, DB: DatabaseLike> Run<'run, DB> {
@@ -106,6 +110,8 @@ impl<'run, DB: DatabaseLike> Run<'run, DB> {
             allowances: Vec::new(),
             used: Vec::new(),
             statements,
+            functions: &[],
+            functions_used: Vec::new(),
         }
     }
 
@@ -126,6 +132,8 @@ impl<'run, DB: DatabaseLike> Run<'run, DB> {
                 schema: &self.allowances,
                 used: &mut self.used,
                 statements: self.statements,
+                functions: self.functions,
+                functions_used: &mut self.functions_used,
             },
             sink,
         ));
@@ -277,6 +285,14 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         });
     }
 
+    /// Records a reviewed exception for a function's schema and name.
+    pub(crate) fn allow_function(&mut self, rule: &str, function: TargetName<'_>) {
+        self.function_allowances.push(FunctionAllowance {
+            rule: rule.to_owned(),
+            function: function.into_owned(),
+        });
+    }
+
     pub(crate) fn allow_statement(&mut self, rule: &str, statement: &str) {
         let parsed = single_statement(statement);
         self.statement_allowances.push(StatementAllowance {
@@ -345,6 +361,8 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
                 .collect(),
             used: vec![false; self.allowances.len()],
             statements: &[],
+            functions: &self.function_allowances,
+            functions_used: vec![false; self.function_allowances.len()],
         };
         for table in database.tables() {
             for entry in enabled(&self.tables, deployment) {
@@ -400,6 +418,13 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         for (allowance, used) in self.allowances.iter().zip(&run.used) {
             if !used {
                 sink(Error::UnusedAllowance(Allowance::Schema(allowance.clone())))?;
+            }
+        }
+        for (allowance, used) in self.function_allowances.iter().zip(&run.functions_used) {
+            if !used {
+                sink(Error::UnusedAllowance(Allowance::Function(
+                    allowance.clone(),
+                )))?;
             }
         }
         for allowance in stale {

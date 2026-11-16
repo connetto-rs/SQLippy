@@ -14,8 +14,8 @@ use sqlparser::ast::Statement;
 use crate::{
     deployment::Deployment,
     error::{
-        AllowedObject, Error, Interruption, Location, PolicySite, StatementAllowance,
-        StatementSite, Violation,
+        AllowedObject, Error, FunctionAllowance, Interruption, Location, PolicySite,
+        StatementAllowance, StatementSite, Violation,
     },
     lint::{Level, RuleMetadata},
 };
@@ -33,6 +33,8 @@ pub(crate) struct Allowances<'run, DB: DatabaseLike> {
     pub(crate) schema: &'run [ResolvedAllowance<'run, DB>],
     pub(crate) used: &'run mut [bool],
     pub(crate) statements: &'run [StatementAllowance],
+    pub(crate) functions: &'run [FunctionAllowance],
+    pub(crate) functions_used: &'run mut [bool],
 }
 
 /// The name an index allowance matches: the index's constraint name, else
@@ -479,6 +481,21 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         message: String,
         resolution: String,
     ) -> Result<(), Interruption> {
+        let mut excused = false;
+        for (allowance, used) in self
+            .allowances
+            .functions
+            .iter()
+            .zip(self.allowances.functions_used.iter_mut())
+        {
+            if allowance.excuses(self.rule, &function.target_name()) {
+                *used = true;
+                excused = true;
+            }
+        }
+        if excused {
+            return Ok(());
+        }
         let object = signature(function, self.database);
         self.emit(
             Location::Function(Box::new(function.clone())),

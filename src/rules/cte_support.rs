@@ -173,6 +173,8 @@ pub(crate) fn table_commands(body: &SetExpr, read: &mut dyn FnMut(&Ident)) {
 pub(crate) struct RecursiveItem<'q> {
     /// Whether `UNION ALL` combines the terms, so no repeated row is dropped.
     pub(crate) keeps_duplicates: bool,
+    /// The non-recursive term.
+    pub(crate) seed: &'q SetExpr,
     /// The recursive term.
     pub(crate) term: &'q Select,
     /// The name the recursive term reads the working table by.
@@ -237,6 +239,7 @@ impl<'q> RecursiveItem<'q> {
         };
         Some(Self {
             keeps_duplicates,
+            seed: left,
             term,
             working,
             columns,

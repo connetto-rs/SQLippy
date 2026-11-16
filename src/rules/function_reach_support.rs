@@ -10,7 +10,7 @@ use std::{
 use sql_traits::{
     errors::LookupError,
     structs::FunctionBody,
-    traits::{DatabaseLike, FunctionLike},
+    traits::{DatabaseLike, FunctionLike, PolicyLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::{
@@ -60,6 +60,58 @@ fn visit_reachable<'database, DB: DatabaseLike>(
         }
     }
     Ok(false)
+}
+
+/// The user functions reachable from the schema's policies.
+pub(crate) fn policy_functions<DB: DatabaseLike>(
+    database: &DB,
+) -> Result<Vec<&DB::Function>, LookupError> {
+    let mut pending = Vec::new();
+    for table in database.tables() {
+        for policy in table.policies(database)? {
+            let mut calls = PolicyCalls {
+                database,
+                policy,
+                pending: &mut pending,
+            };
+            for (_, expression) in super::policy_support::walked_clauses(database, policy)? {
+                if let Some(expression) = expression {
+                    walk(expression, &mut calls)
+                        .break_value()
+                        .map_or(Ok(()), Err)?;
+                }
+            }
+        }
+    }
+    let mut functions = Vec::new();
+    visit_reachable(database, pending, |function| {
+        if function.target_name().schema() != Some("pg_catalog") {
+            functions.push(function);
+        }
+        false
+    })?;
+    Ok(functions)
+}
+
+/// Collects the functions directly called by a policy.
+struct PolicyCalls<'database, 'pending, DB: DatabaseLike> {
+    database: &'database DB,
+    policy: &'database DB::Policy,
+    pending: &'pending mut Vec<&'database DB::Function>,
+}
+
+impl<DB: DatabaseLike> Visitor for PolicyCalls<'_, '_, DB> {
+    type Break = LookupError;
+
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
+        if let Expr::Function(call) = expression {
+            match self.policy.functions_reached_by(call, self.database) {
+                Ok(functions) => self.pending.extend(functions),
+                Err(error) => return ControlFlow::Break(error),
+            }
+        }
+        ControlFlow::Continue(())
+    }
 }
 
 /// Whether a call is unqualified or belongs to `pg_catalog`.

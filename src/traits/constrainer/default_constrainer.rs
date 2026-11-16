@@ -7,8 +7,8 @@ use crate::{
     lint::Level,
     rules::{
         AddressStoredAsText, AliasShadowedByColumn, ArrayMembershipPolicy, AssignmentConjunction,
-        AutovacuumDisabledTable, BinarySendFailure, BlankPaddedCharacter,
-        CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
+        AuthorityAttributeWritableBelowThreshold, AutovacuumDisabledTable, BinarySendFailure,
+        BlankPaddedCharacter, CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
         ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
         CopiedColumnThroughSuperkey, CorrelatedPolicySubquery, CredentialFreeWrite,
         CredentialPatternPolicy, CredentialSettingWrite, CrossTenantCap, CteShadowsRelation,
@@ -52,7 +52,7 @@ use crate::{
         UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin, UnknownBinarySend,
         UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin,
         UnsatisfiableCheck, UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
-        UnusedCte, UnvalidatedConstraint, UuidStoredAsText, WildcardView,
+        UnseededPolicySet, UnusedCte, UnvalidatedConstraint, UuidStoredAsText, WildcardView,
         WritingNonVolatileFunction, ZeroPrecisionTimestamp,
     },
     traits::{
@@ -260,7 +260,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 58] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 60] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -314,6 +314,8 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(DefinerTakesActingUser::default()),
         Box::new(SubjectSettableAttribute::default()),
         Box::new(ParallelTables::default()),
+        Box::new(AuthorityAttributeWritableBelowThreshold::default()),
+        Box::new(UnseededPolicySet::default()),
         Box::new(CrossTenantCap::default()),
         Box::new(DefinerMaintainedColumnClientWritable::default()),
         Box::new(UnauditedAuthorityTable::default()),
