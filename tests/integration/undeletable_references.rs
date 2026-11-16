@@ -88,6 +88,17 @@ fn a_reference_the_role_cannot_clear_is_reported() {
          REVOKE DELETE ON notes FROM app;
          GRANT DELETE ON tenant_accounts TO app;"
             .to_owned(),
+        // A definer function that only rewrites other columns clears nothing.
+        "CREATE TABLE notes (account_id INT REFERENCES accounts (id), archived BOOLEAN, body TEXT, tag TEXT);
+         REVOKE DELETE, UPDATE ON notes FROM app;
+         CREATE FUNCTION archive(a INT) RETURNS VOID LANGUAGE sql SECURITY DEFINER
+           AS $$ UPDATE notes SET archived = true, body = NULL, (tag) = (SELECT 'gone') WHERE account_id = a $$;"
+            .to_owned(),
+        // A definer function whose body is a single RETURN expression clears nothing.
+        format!(
+            "{NOTES} CREATE FUNCTION count_notes() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER
+               RETURN (SELECT count(*) FROM notes);"
+        ),
     ] {
         let messages = reported(&sql);
         assert_eq!(messages.len(), 1, "{sql}");
@@ -112,6 +123,22 @@ fn delete_inherited_through_a_role_is_counted() {
 }
 
 #[test]
+fn public_deleting_the_parent_is_reported() {
+    let sql = format!(
+        "GRANT DELETE ON accounts TO PUBLIC; {NOTES} REVOKE DELETE ON notes FROM PUBLIC;
+         CREATE FUNCTION purge(a INT) RETURNS VOID LANGUAGE sql
+           AS $$ DELETE FROM notes WHERE account_id = a $$;"
+    );
+    assert_eq!(
+        reported(&sql),
+        [
+            "'app', PUBLIC may delete from 'accounts' but cannot clear the rows of 'notes' \
+          referencing it with NO ACTION, so one such row refuses the deletion."
+        ]
+    );
+}
+
+#[test]
 fn a_reference_with_a_cleanup_path_passes() {
     for sql in [
         // Referential actions that clear or deliberately keep the rows.
@@ -130,8 +157,9 @@ fn a_reference_with_a_cleanup_path_passes() {
         "CREATE TABLE notes (account_id INT REFERENCES accounts (id));
          REVOKE DELETE ON notes FROM app;"
             .to_owned(),
-        // A deferred check runs after the cascades of a chain.
-        "CREATE TABLE projects (id INT PRIMARY KEY, account_id INT NOT NULL REFERENCES accounts (id) ON DELETE CASCADE);
+        // A deferred check runs after the cascades of a chain, however many keys lead into it.
+        "CREATE TABLE projects (id INT PRIMARY KEY, account_id INT NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
+           owner_id INT NOT NULL REFERENCES accounts (id) ON DELETE CASCADE);
          CREATE TABLE notes (account_id INT NOT NULL REFERENCES accounts (id) DEFERRABLE INITIALLY DEFERRED,
            project_id INT NOT NULL REFERENCES projects (id) ON DELETE CASCADE);
          REVOKE DELETE ON notes FROM app;
@@ -181,6 +209,22 @@ fn a_reference_with_a_cleanup_path_passes() {
         format!(
             "{NOTES} CREATE FUNCTION run(command TEXT) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER
                AS $$ BEGIN EXECUTE command; END $$;"
+        ),
+        // A definer function detaching the rows through a row assignment.
+        "CREATE TABLE notes (account_id INT REFERENCES accounts (id), body TEXT);
+         REVOKE DELETE, UPDATE ON notes FROM app;
+         CREATE FUNCTION detach(a INT) RETURNS VOID LANGUAGE sql SECURITY DEFINER
+           AS $$ UPDATE notes SET (body, account_id) = ('detached', NULL) WHERE account_id = a $$;"
+            .to_owned(),
+        // A definer body that does not parse may delete anything.
+        format!(
+            "{NOTES} CREATE FUNCTION purge(a INT) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER
+               AS $$ BEGIN DELETE notes everywhere; END $$;"
+        ),
+        // A definer body in a language the source cannot read may delete anything.
+        format!(
+            "{NOTES} CREATE FUNCTION purge(a INT) RETURNS VOID LANGUAGE c SECURITY DEFINER
+               AS 'purge_library', 'purge';"
         ),
         // A BEFORE DELETE trigger clearing the rows as its owner.
         format!(

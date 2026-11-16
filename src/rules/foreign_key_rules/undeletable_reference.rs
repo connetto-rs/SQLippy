@@ -8,7 +8,7 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, TableLike, TriggerLike},
 };
 use sqlparser::ast::{
-    AssignmentTarget, FromTable, FunctionSecurity, ObjectName, ReferentialAction, Statement,
+    AssignmentTarget, Expr, FromTable, FunctionSecurity, ObjectName, ReferentialAction, Statement,
     TableFactor, TableWithJoins, TriggerEvent, TriggerPeriod, Visitor,
 };
 
@@ -208,15 +208,19 @@ impl<DB: DatabaseLike> Clearing<'_, DB> {
             }
             Statement::Update(update) if self.names_child(&update.table)? => {
                 for assignment in &update.assignments {
-                    if !is_null_literal(&assignment.value) {
-                        continue;
-                    }
-                    let columns = match &assignment.target {
-                        AssignmentTarget::ColumnName(column) => std::slice::from_ref(column),
-                        AssignmentTarget::Tuple(columns) => columns.as_slice(),
+                    let (columns, values) = match (&assignment.target, &assignment.value) {
+                        (AssignmentTarget::Tuple(columns), Expr::Tuple(values)) => {
+                            (columns.as_slice(), values.as_slice())
+                        }
+                        (AssignmentTarget::Tuple(columns), value) => {
+                            (columns.as_slice(), std::slice::from_ref(value))
+                        }
+                        (AssignmentTarget::ColumnName(column), value) => {
+                            (std::slice::from_ref(column), std::slice::from_ref(value))
+                        }
                     };
-                    for column in columns {
-                        if self.names_key_column(column)? {
+                    for (column, value) in columns.iter().zip(values) {
+                        if is_null_literal(value) && self.names_key_column(column)? {
                             return Ok(true);
                         }
                     }
@@ -257,6 +261,11 @@ fn body_clears<DB: DatabaseLike>(
         Ok(false) => return Ok(true),
         Err(error) if unreadable_body(&error) => return Ok(true),
         Err(error) => return Err(error),
+    }
+    // A data-modifying statement may stand only at the top level, so a
+    // `RETURN` expression body never deletes or updates rows.
+    if function.body_expression(database)?.is_some() {
+        return Ok(false);
     }
     let (statements, path): (Cow<'_, [Statement]>, _) =
         match function.atomic_statements(database)? {
@@ -303,11 +312,8 @@ fn clears<DB: DatabaseLike>(
         if body_clears(database, function, child, foreign_key)? {
             return Ok(true);
         }
-        match function.referenced_functions(database) {
-            Ok(called) => pending.extend(called),
-            Err(error) if unreadable_body(&error) => return Ok(true),
-            Err(error) => return Err(error),
-        }
+        // `body_clears` already counted a body it cannot read as clearing.
+        pending.extend(function.referenced_functions(database)?);
     }
     Ok(false)
 }

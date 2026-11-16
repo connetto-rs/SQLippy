@@ -124,11 +124,7 @@ fn renamed_to_host<DB: DatabaseLike>(
     let _ = visit_expressions_mut(&mut expression, |node| {
         match node {
             Expr::Identifier(ident) => rename(ident),
-            Expr::CompoundIdentifier(parts) => {
-                if let Some(last) = parts.last_mut() {
-                    rename(last);
-                }
-            }
+            Expr::CompoundIdentifier(parts) => parts.last_mut().into_iter().for_each(&rename),
             _ => {}
         }
         ControlFlow::<()>::Continue(())
