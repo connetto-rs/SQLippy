@@ -38,6 +38,14 @@ fn definer_maintained_columns_reject_client_grants() {
             ),
             "{grants}"
         );
+        assert!(
+            reported(
+                "MERGE INTO folders USING (SELECT 1 AS id) AS source ON folders.id = source.id WHEN MATCHED THEN UPDATE SET depth = 1",
+                grants,
+                "DEFINER"
+            ),
+            "{grants}"
+        );
     }
 }
 
@@ -90,6 +98,7 @@ fn definer_maintained_columns_ignore_created_rows() {
         "INSERT INTO folders (id, depth) VALUES (1, 1)",
         "INSERT INTO folders (id, depth) VALUES (1, 1) ON CONFLICT DO NOTHING",
         "INSERT INTO folders (id, depth) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET label = 'root'",
+        "MERGE INTO folders USING (SELECT 1 AS id) AS source ON folders.id = source.id WHEN NOT MATCHED THEN INSERT (id, depth) VALUES (source.id, 1) WHEN MATCHED THEN UPDATE SET label = 'root'",
     ] {
         assert!(
             !reported(
