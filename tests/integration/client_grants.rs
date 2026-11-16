@@ -373,6 +373,8 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             "self_asserted_claim_policy",
             "self_granting_write",
             "subject_settable_attribute",
+            "cross_tenant_cap",
+            "definer_maintained_column_client_writable",
             "credential_setting_write",
         ]
     );
@@ -392,6 +394,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             "self_asserted_claim_policy",
             "self_granting_write",
             "subject_settable_attribute",
+            "cross_tenant_cap",
             "credential_setting_write"
         ]
     );

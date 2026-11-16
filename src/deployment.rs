@@ -38,11 +38,13 @@ pub struct Deployment {
     app_roles: Vec<String>,
     exposed_schemas: Vec<String>,
     credentials: Vec<Expr>,
+    request_settings: Vec<Expr>,
     client_written_tables: Vec<(String, String)>,
     binary_replication_tables: Vec<(String, String)>,
     binary_replication_all_tables: bool,
     self_asserted_claims: Vec<Expr>,
     self_asserted_columns: Vec<StoredColumn>,
+    tenant_keys: Vec<StoredColumn>,
     pooled: Option<bool>,
     clock_tolerance: Option<Duration>,
     vocabularies: Vec<Vocabulary>,
@@ -85,6 +87,10 @@ impl Deployment {
     /// `current_setting('app.user_metadata', true)` claim, and taking the
     /// rows of `public.drafts` from clients that author them offline, and
     /// streaming `public.events` over binary logical replication.
+    /// It selects the acting installation with
+    /// `current_setting('app.installation_id', true)`.
+    /// Its tenants are keyed by `organization_id` in
+    /// `public.resources` and `public.caps`.
     ///
     /// # Panics
     ///
@@ -99,6 +105,7 @@ impl Deployment {
     /// assert!(deployment.is_pooled());
     /// assert!(deployment.is_client_written("public", "drafts"));
     /// assert!(deployment.is_binary_replicated("public", "events"));
+    /// assert_eq!(deployment.tenant_key("public", "caps"), Some("organization_id"));
     /// ```
     #[must_use]
     pub fn example() -> Self {
@@ -109,7 +116,12 @@ impl Deployment {
             .with_pooled(true)
             .with_client_written_table("public", "drafts")
             .with_binary_replication_table("public", "events")
+            .with_tenant_key("public", "resources", "organization_id")
+            .with_tenant_key("public", "caps", "organization_id")
             .with_credential("current_setting('app.user_id', true)")
+            .and_then(|deployment| {
+                deployment.with_request_setting("current_setting('app.installation_id', true)")
+            })
             .and_then(|deployment| {
                 deployment.with_self_asserted_claim("current_setting('app.user_metadata', true)")
             })
@@ -323,6 +335,55 @@ impl Deployment {
         self.self_asserted_columns.iter().map(StoredColumn::names)
     }
 
+    /// Declares an expression reading a setting that selects what a request
+    /// acts on without identifying the caller, such as
+    /// `current_setting('app.installation_id', true)` naming the acting
+    /// installation.
+    ///
+    /// The expression is matched as written, like a credential, and the
+    /// rules reading credentials do not take it for one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parser error when `expression` is not one PostgreSQL SQL
+    /// expression.
+    pub fn with_request_setting(mut self, expression: &str) -> Result<Self, ParserError> {
+        self.request_settings.push(parse_expression(expression)?);
+        Ok(self)
+    }
+
+    /// Returns whether `expression` is a declared request setting, as
+    /// written.
+    #[must_use]
+    pub fn is_request_setting(&self, expression: &Expr) -> bool {
+        self.request_settings.contains(expression)
+    }
+
+    /// Declares the column holding the tenant a table's rows belong to, by
+    /// the stored names of its schema, table and column. Rows of two tables
+    /// belong to the same tenant when their tenant keys are equal.
+    #[must_use]
+    pub fn with_tenant_key(
+        mut self,
+        schema: impl Into<String>,
+        table: impl Into<String>,
+        column: impl Into<String>,
+    ) -> Self {
+        self.tenant_keys
+            .push(StoredColumn::new(schema, table, column));
+        self
+    }
+
+    /// Returns the stored name of the declared tenant key of the table with
+    /// these stored schema and table names.
+    #[must_use]
+    pub fn tenant_key(&self, schema: &str, table: &str) -> Option<&str> {
+        self.tenant_keys
+            .iter()
+            .find(|key| key.schema == schema && key.table == table)
+            .map(|key| key.column.as_str())
+    }
+
     /// Returns whether `expression` is a declared credential, as written.
     #[must_use]
     pub fn is_credential(&self, expression: &Expr) -> bool {
@@ -346,6 +407,7 @@ impl Deployment {
             Declaration::SelfAssertedSources => {
                 !self.self_asserted_claims.is_empty() || !self.self_asserted_columns.is_empty()
             }
+            Declaration::TenantKeys => !self.tenant_keys.is_empty(),
             Declaration::Pooled => self.pooled.is_some(),
         }
     }
@@ -362,6 +424,8 @@ pub enum Declaration {
     Credentials,
     /// At least one self-asserted claim or column.
     SelfAssertedSources,
+    /// At least one tenant key.
+    TenantKeys,
     /// Whether the deployment is pooled.
     Pooled,
 }
@@ -373,6 +437,7 @@ impl Display for Declaration {
             Self::ClientRoles => "anonymous or app roles",
             Self::Credentials => "credential expressions",
             Self::SelfAssertedSources => "self-asserted claims or columns",
+            Self::TenantKeys => "tenant keys",
             Self::Pooled => "whether it is pooled",
         })
     }

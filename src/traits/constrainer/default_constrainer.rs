@@ -11,12 +11,13 @@ use crate::{
         CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
         ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
         CopiedColumnThroughSuperkey, CorrelatedPolicySubquery, CredentialFreeWrite,
-        CredentialPatternPolicy, CredentialSettingWrite, CteShadowsRelation, DeadPermissivePolicy,
-        DefinerPathCreatableSchema, DefinerTakesActingUser, DefinerTemporarySchemaNotLast,
-        DefinerWithoutSearchPath, DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck,
-        DuplicateColumnAssignment, DuplicateColumnNameInExtensionGraph, DuplicateForeignKey,
-        DuplicatePolicy, DuplicateUniqueIndex, DuplicatingRecursiveCte, DynamicSqlInjection,
-        EmptyTextAllowed, ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
+        CredentialPatternPolicy, CredentialSettingWrite, CrossTenantCap, CteShadowsRelation,
+        DeadPermissivePolicy, DefinerMaintainedColumnClientWritable, DefinerPathCreatableSchema,
+        DefinerTakesActingUser, DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath,
+        DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnAssignment,
+        DuplicateColumnNameInExtensionGraph, DuplicateForeignKey, DuplicatePolicy,
+        DuplicateUniqueIndex, DuplicatingRecursiveCte, DynamicSqlInjection, EmptyTextAllowed,
+        ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FlagNotBoolean,
         FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
         FunctionMediatedPolicyCycle, GrantOptionToClientRole, ImpureImmutableFunction,
@@ -258,7 +259,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 54] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 56] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -312,6 +313,8 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(DefinerTakesActingUser::default()),
         Box::new(SubjectSettableAttribute::default()),
         Box::new(ParallelTables::default()),
+        Box::new(CrossTenantCap::default()),
+        Box::new(DefinerMaintainedColumnClientWritable::default()),
         Box::new(RepeatedSettingRead::default()),
     ];
     for rule in schema_rules {

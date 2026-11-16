@@ -108,6 +108,8 @@ rule_icons! {
     "session_time_zone_dependence" => FaEarthEurope,
     "settable_membership_in_bypassing_role" => FaPeopleArrowsLeftRight,
     "subject_settable_attribute" => FaSliders,
+    "cross_tenant_cap" => FaSliders,
+    "definer_maintained_column_client_writable" => FaSliders,
     "repeated_setting_read" => FaSliders,
     "table_inheritance" => FaCodeBranch,
     "tautological_with_check" => FaCheckDouble,
