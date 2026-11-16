@@ -497,6 +497,15 @@ where
     })
 }
 
+/// Visits recursive items without restricting their joined relations.
+pub(crate) fn recursive_items<V, E, F>(node: &V, mut judge: F) -> Result<(), E>
+where
+    V: Visit + ?Sized,
+    F: FnMut(&Cte, &RecursiveItem<'_>) -> Result<(), E>,
+{
+    visit_items(node, |item, recursive, _| judge(item, recursive))
+}
+
 /// Runs the shared scoped traversal of recursive items.
 fn visit_items<V, E, F>(node: &V, judge: F) -> Result<(), E>
 where

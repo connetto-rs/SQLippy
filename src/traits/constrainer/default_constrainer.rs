@@ -33,25 +33,25 @@ use crate::{
         PolicyWithoutRowLevelSecurity, PolicyWithoutRowReference, PrefixRedundantIndex,
         PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
         RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
-        ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge, ReferenceWithoutIdSuffix,
-        ReferencesGrantedToClientRole, RegColumnType, RepeatedIndexColumn,
-        ReservedKeywordIdentifier, RestrictiveWithoutPermissive, RoleKeyedPolicyWhenPooled,
-        RowLevelSecurityWithoutPolicies, RustKeywordColumnName, RustKeywordForeignKeyName,
-        RustKeywordTableName, ScaledNumeric, SecurityBarrierMissingOnFilteringView,
-        SecurityDefinerFunctionExposed, SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite,
-        SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
-        SingularTableName, SubjectSettableAttribute, SuperkeyPrimaryKey,
-        SurrogatePrimaryKeyInExtension, TableInheritance, TautologicalCheck, TautologicalPolicy,
-        TautologicalWithCheck, TimeDependentCheck, TimeWithTimeZone, TimestampBetween,
-        TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
-        TruncatedIdentifier, TruncatingIntegerDivision, UnboundedTextColumn, UncachedPolicyCall,
-        UncheckedPastTimestamp, UndeletableReference, UnfilteredWrite, UnforcedRowLevelSecurity,
-        UnindexedCorrelatedSelect, UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter,
-        UnindexedRecursiveJoin, UnknownBinarySend, UnlinkedFromItem, UnloggedTable,
-        UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
-        UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable, UnusedCte,
-        UnvalidatedConstraint, UuidStoredAsText, WildcardView, WritingNonVolatileFunction,
-        ZeroPrecisionTimestamp,
+        ReachableTableWithoutRowLevelSecurity, RecursiveStepOverUnion, RedundantExtensionEdge,
+        ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole, RegColumnType,
+        RepeatedIndexColumn, RepeatedPolicyCall, RepeatedSettingRead, ReservedKeywordIdentifier,
+        RestrictiveWithoutPermissive, RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies,
+        RustKeywordColumnName, RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
+        SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
+        SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SerialColumn,
+        SessionTimeZoneDependence, SettableMembershipInBypassingRole, SingularTableName,
+        SubjectSettableAttribute, SuperkeyPrimaryKey, SurrogatePrimaryKeyInExtension,
+        TableInheritance, TautologicalCheck, TautologicalPolicy, TautologicalWithCheck,
+        TimeDependentCheck, TimeWithTimeZone, TimestampBetween, TimestampWithoutTimeZone,
+        TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
+        TruncatingIntegerDivision, UnboundedTextColumn, UncachedPolicyCall, UncheckedPastTimestamp,
+        UndeletableReference, UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect,
+        UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin,
+        UnknownBinarySend, UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn, UnorderedLimit,
+        UnreadOuterJoin, UnsatisfiableCheck, UnsatisfiablePolicy,
+        UnscopedUniqueConstraintOnRowLevelSecurityTable, UnusedCte, UnvalidatedConstraint,
+        UuidStoredAsText, WildcardView, WritingNonVolatileFunction, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -159,7 +159,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 48] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 49] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(RepeatedIndexColumn::default()),
@@ -190,6 +190,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(CorrelatedPolicySubquery::default()),
         Box::new(NestedPolicySubquery::default()),
         Box::new(UncachedPolicyCall::default()),
+        Box::new(RepeatedPolicyCall::default()),
         Box::new(RaisingSettingRead::default()),
         Box::new(UnindexedPolicyFilter::default()),
         Box::new(PolicyExpressionDefeatsIndex::default()),
@@ -216,7 +217,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 31] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 32] = [
         Box::new(NullableConcatenation::default()),
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
@@ -228,6 +229,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(NonterminatingRecursiveCte::default()),
         Box::new(DuplicatingRecursiveCte::default()),
         Box::new(UnindexedRecursiveJoin::default()),
+        Box::new(RecursiveStepOverUnion::default()),
         Box::new(RandomOrderLimit::default()),
         Box::new(OffsetPaging::default()),
         Box::new(UnfilteredWrite::default()),
@@ -256,7 +258,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 52] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 54] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -286,6 +288,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(NonterminatingRecursiveCte::default()),
         Box::new(DuplicatingRecursiveCte::default()),
         Box::new(UnindexedRecursiveJoin::default()),
+        Box::new(RecursiveStepOverUnion::default()),
         Box::new(TimestampWithoutTimeZone::default()),
         Box::new(TimeWithTimeZone::default()),
         Box::new(ZeroPrecisionTimestamp::default()),
@@ -309,6 +312,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(DefinerTakesActingUser::default()),
         Box::new(SubjectSettableAttribute::default()),
         Box::new(ParallelTables::default()),
+        Box::new(RepeatedSettingRead::default()),
     ];
     for rule in schema_rules {
         constrainer.register_schema_rule_with_floor(rule, Level::Allow);
