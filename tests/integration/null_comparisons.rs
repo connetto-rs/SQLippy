@@ -88,6 +88,32 @@ fn a_statement_reports_each_comparison() {
 }
 
 #[test]
+fn plpgsql_cursor_counts_handlers_and_raise_options_are_walked() {
+    assert_eq!(
+        schema_messages(
+            "CREATE FUNCTION paged() RETURNS void LANGUAGE plpgsql AS $$
+             DECLARE c SCROLL CURSOR FOR SELECT id FROM t; n int;
+             BEGIN
+               OPEN c;
+               FETCH ABSOLUTE (SELECT count(*) FROM t WHERE x = NULL) FROM c INTO n;
+               MOVE BACKWARD (SELECT count(*) FROM t WHERE x <> NULL) IN c;
+               FETCH FIRST FROM c INTO n;
+               CLOSE c;
+               RAISE 'paged' USING DETAIL = (SELECT count(*) FROM t WHERE x < NULL);
+             EXCEPTION WHEN others THEN
+               PERFORM id FROM t WHERE x > NULL;
+             END $$;"
+        ),
+        [
+            format!("Function 'paged()' uses `x = NULL`, {PROBLEM}."),
+            format!("Function 'paged()' uses `x <> NULL`, {PROBLEM}."),
+            format!("Function 'paged()' uses `x < NULL`, {PROBLEM}."),
+            format!("Function 'paged()' uses `x > NULL`, {PROBLEM}."),
+        ]
+    );
+}
+
+#[test]
 fn null_tests_and_assignments_are_not_reported() {
     for sql in [
         "SELECT id FROM t WHERE x IS NULL",
