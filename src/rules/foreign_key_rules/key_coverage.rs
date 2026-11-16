@@ -98,31 +98,41 @@ impl<DB: DatabaseLike> ForeignKeyRule for NullableCompositeForeignKey<DB> {
     }
 }
 
-/// Whether an index without a predicate leads with exactly `columns`, in
-/// any order, each a bare column rather than an expression over it.
-fn leads<DB: DatabaseLike, I: IndexLike<DB = DB>>(
-    database: &DB,
-    index: &I,
+/// The distinct `columns` an index leads with, in any order, each a bare
+/// column rather than an expression over it, up to its first entry that is
+/// none of them. An index with a predicate leads with none.
+fn leading<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
+    database: &'db DB,
+    index: &'db I,
     columns: &[&DB::Column],
-) -> Result<bool, LookupError> {
+) -> Result<Vec<&'db DB::Column>, LookupError> {
+    let mut run = Vec::new();
     if index.predicate().is_some() {
-        return Ok(false);
+        return Ok(run);
     }
-    let entries = entry_columns(database, index)?;
-    Ok(entries.get(..columns.len()).is_some_and(|leading| {
-        leading
-            .iter()
-            .all(|entry| entry.is_some_and(|column| columns.contains(&column)))
-    }))
+    for entry in entry_columns(database, index)? {
+        match entry {
+            Some(column) if columns.contains(&column) => {
+                if !run.contains(&column) {
+                    run.push(column);
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(run)
 }
 
-/// Struct defining a rule that reports a foreign key whose columns lead no
-/// index of their table and hold no unique key of it.
+/// Struct defining a rule that reports a foreign key whose referencing rows
+/// no index of its table finds.
 ///
 /// Deleting a referenced row or updating its key then scans the
-/// referencing table for the rows to check or change. A unique key over
-/// some of the foreign key columns, such as a primary key on `id` under
-/// `FOREIGN KEY (id, kind)`, already narrows the check to at most one row.
+/// referencing table for the rows to check or change. An index leading
+/// with the columns that reference a unique key, such as `parent_id` under
+/// `FOREIGN KEY (parent_id, parent_kind) REFERENCES parents (id, kind)` with
+/// `parents.id` unique, already finds the rows of one referenced row. So
+/// does a unique key over some of the foreign key columns, such as a
+/// primary key on `id` under `FOREIGN KEY (id, kind)`.
 ///
 /// # Example
 ///
@@ -159,7 +169,7 @@ impl<DB> Rule for UnindexedForeignKey<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(UnindexedForeignKey),
             group: LintGroup::Perf,
-            rationale: "A delete of a referenced row or an update of its key checks the referencing table, which scans it when no index leads with the foreign key columns and no unique key over some of them finds the row.",
+            rationale: "A delete of a referenced row or an update of its key checks the referencing table, which scans it when no index leads with the foreign key columns or with those referencing a unique key, and no unique key over some of them finds the row.",
             source: Some("https://www.postgresql.org/docs/current/ddl-constraints.html"),
             basis: Basis::Declared,
             example: RuleExample {
@@ -184,14 +194,29 @@ impl<DB: DatabaseLike> ForeignKeyRule for UnindexedForeignKey<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         let host = foreign_key.host_table(database);
-        let columns: Vec<&DB::Column> = foreign_key.host_columns(database)?.collect();
+        let pairs: Vec<(&DB::Column, &DB::Column)> = foreign_key
+            .host_columns(database)?
+            .zip(foreign_key.referenced_columns(database)?)
+            .collect();
+        let columns: Vec<&DB::Column> = pairs.iter().map(|(column, _)| *column).collect();
+        let referenced_keys = equality_keys(database, foreign_key.referenced_table(database)?)?;
+        let serves = |run: &[&DB::Column]| {
+            columns.iter().all(|column| run.contains(column))
+                || referenced_keys.iter().any(|key| {
+                    key.iter().all(|key_column| {
+                        pairs.iter().any(|(column, referenced)| {
+                            referenced == key_column && run.contains(column)
+                        })
+                    })
+                })
+        };
         for index in host.indices(database)? {
-            if leads(database, index, &columns)? {
+            if serves(&leading(database, index, &columns)?) {
                 return Ok(());
             }
         }
         for index in host.unique_indices(database)? {
-            if leads(database, index, &columns)? {
+            if serves(&leading(database, index, &columns)?) {
                 return Ok(());
             }
         }
