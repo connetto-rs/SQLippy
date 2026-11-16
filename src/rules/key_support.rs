@@ -473,6 +473,45 @@ pub(crate) type KeyPairs<'db, DB> = Vec<(
     &'db <DB as DatabaseLike>::Column,
 )>;
 
+/// The `(child column, parent column)` pairs of `foreign_key`.
+pub(crate) fn key_pairs<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    foreign_key: &'db DB::ForeignKey,
+) -> Result<KeyPairs<'db, DB>, LookupError> {
+    Ok(foreign_key
+        .host_columns(database)?
+        .zip(foreign_key.referenced_columns(database)?)
+        .collect())
+}
+
+/// Whether `wider` checks every row `narrower` holds against the same
+/// referenced columns: its column pairs contain those of `narrower`, and
+/// `MATCH SIMPLE` on a `NULL` extra column does not let a row escape it.
+pub(crate) fn checks_every_row_of<DB: DatabaseLike>(
+    database: &DB,
+    wider: &DB::ForeignKey,
+    narrower: &DB::ForeignKey,
+) -> Result<bool, LookupError> {
+    let wider_pairs = key_pairs(database, wider)?;
+    let narrower_pairs = key_pairs(database, narrower)?;
+    if !narrower_pairs.iter().all(|pair| wider_pairs.contains(pair)) {
+        return Ok(false);
+    }
+    if wider.match_full(database) {
+        return Ok(true);
+    }
+    for (host_column, _) in &wider_pairs {
+        if !narrower_pairs
+            .iter()
+            .any(|(narrower_host, _)| narrower_host == host_column)
+            && host_column.is_nullable(database)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// The column pairs of each foreign key of `child` that references
 /// `parent`.
 pub(crate) fn references<'db, DB: DatabaseLike>(
@@ -483,12 +522,7 @@ pub(crate) fn references<'db, DB: DatabaseLike>(
     let mut found = Vec::new();
     for foreign_key in child.foreign_keys(database)? {
         if foreign_key.referenced_table(database)? == parent {
-            found.push(
-                foreign_key
-                    .host_columns(database)?
-                    .zip(foreign_key.referenced_columns(database)?)
-                    .collect(),
-            );
+            found.push(key_pairs(database, foreign_key)?);
         }
     }
     Ok(found)

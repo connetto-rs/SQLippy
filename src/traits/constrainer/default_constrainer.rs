@@ -10,8 +10,8 @@ use crate::{
         AutovacuumDisabledTable, BinarySendFailure, BlankPaddedCharacter,
         CascadeIntoRowLevelSecurityTable, ChildWithoutRowLevelSecurity,
         ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
-        CorrelatedPolicySubquery, CredentialFreeWrite, CredentialPatternPolicy,
-        CredentialSettingWrite, CteShadowsRelation, DeadPermissivePolicy,
+        CopiedColumnThroughSuperkey, CorrelatedPolicySubquery, CredentialFreeWrite,
+        CredentialPatternPolicy, CredentialSettingWrite, CteShadowsRelation, DeadPermissivePolicy,
         DefinerPathCreatableSchema, DefinerTakesActingUser, DefinerTemporarySchemaNotLast,
         DefinerWithoutSearchPath, DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck,
         DuplicateColumnAssignment, DuplicateColumnNameInExtensionGraph, DuplicateForeignKey,
@@ -27,30 +27,31 @@ use crate::{
         NestedPolicySubquery, NilUuidSentinel, NonSnakeCaseColumnName, NonSnakeCaseTableName,
         NonterminatingRecursiveCte, NotInNullList, NotInNullableSubquery, NotInSubquery,
         NullComparison, NullCredentialRead, NullableCompositeForeignKey, NullableConcatenation,
-        NullableUniqueColumn, OffsetPaging, OuterColumnCapture, OwnerRightsView, PluralColumnName,
-        PolicyExpressionDefeatsIndex, PolicyReadCycle, PolicyReadsUnprotectedTable,
-        PolicyTargetsBypassRole, PolicyToCreatingRole, PolicyWithoutRowLevelSecurity,
-        PolicyWithoutRowReference, PrefixRedundantIndex, PrimaryKeyNotNamedId, PublicSchemaCreate,
-        QueryRewriteRule, RaisingSettingRead, RandomOrderLimit, ReachableForeignTable,
-        ReachableMaterializedView, ReachableSequence, ReachableTableWithoutRowLevelSecurity,
-        RedundantExtensionEdge, ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole,
-        RegColumnType, RepeatedIndexColumn, ReservedKeywordIdentifier,
-        RestrictiveWithoutPermissive, RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies,
-        RustKeywordColumnName, RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
-        SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
-        SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SerialColumn,
-        SessionTimeZoneDependence, SettableMembershipInBypassingRole, SingularTableName,
-        SubjectSettableAttribute, SurrogatePrimaryKeyInExtension, TableInheritance,
-        TautologicalCheck, TautologicalPolicy, TautologicalWithCheck, TimeDependentCheck,
-        TimeWithTimeZone, TimestampBetween, TimestampWithoutTimeZone,
-        TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
-        TruncatingIntegerDivision, UnboundedTextColumn, UncachedPolicyCall, UncheckedPastTimestamp,
-        UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
-        UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin, UnknownBinarySend,
-        UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin,
-        UnsatisfiableCheck, UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
-        UnusedCte, UnvalidatedConstraint, UuidStoredAsText, WildcardView,
-        WritingNonVolatileFunction, ZeroPrecisionTimestamp,
+        NullableUniqueColumn, OffsetPaging, OuterColumnCapture, OwnerRightsView, ParallelTables,
+        PluralColumnName, PolicyExpressionDefeatsIndex, PolicyReadCycle,
+        PolicyReadsUnprotectedTable, PolicyTargetsBypassRole, PolicyToCreatingRole,
+        PolicyWithoutRowLevelSecurity, PolicyWithoutRowReference, PrefixRedundantIndex,
+        PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
+        RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
+        ReachableTableWithoutRowLevelSecurity, RedundantExtensionEdge, ReferenceWithoutIdSuffix,
+        ReferencesGrantedToClientRole, RegColumnType, RepeatedIndexColumn,
+        ReservedKeywordIdentifier, RestrictiveWithoutPermissive, RoleKeyedPolicyWhenPooled,
+        RowLevelSecurityWithoutPolicies, RustKeywordColumnName, RustKeywordForeignKeyName,
+        RustKeywordTableName, ScaledNumeric, SecurityBarrierMissingOnFilteringView,
+        SecurityDefinerFunctionExposed, SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite,
+        SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
+        SingularTableName, SubjectSettableAttribute, SuperkeyPrimaryKey,
+        SurrogatePrimaryKeyInExtension, TableInheritance, TautologicalCheck, TautologicalPolicy,
+        TautologicalWithCheck, TimeDependentCheck, TimeWithTimeZone, TimestampBetween,
+        TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
+        TruncatedIdentifier, TruncatingIntegerDivision, UnboundedTextColumn, UncachedPolicyCall,
+        UncheckedPastTimestamp, UndeletableReference, UnfilteredWrite, UnforcedRowLevelSecurity,
+        UnindexedCorrelatedSelect, UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter,
+        UnindexedRecursiveJoin, UnknownBinarySend, UnlinkedFromItem, UnloggedTable,
+        UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
+        UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable, UnusedCte,
+        UnvalidatedConstraint, UuidStoredAsText, WildcardView, WritingNonVolatileFunction,
+        ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -119,7 +120,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             .register_column_rule_with_floor(Box::new(BinarySendFailure::default()), Level::Deny);
         constrainer
             .register_column_rule_with_floor(Box::new(UnknownBinarySend::default()), Level::Warn);
-        let foreign_key_rules: [Box<dyn ForeignKeyRule<Database = DB>>; 9] = [
+        let foreign_key_rules: [Box<dyn ForeignKeyRule<Database = DB>>; 11] = [
             Box::new(NullableCompositeForeignKey::default()),
             Box::new(UnindexedForeignKey::default()),
             Box::new(IncompatibleForeignKey::default()),
@@ -129,6 +130,8 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(ExtensionForeignKeyOnDeleteCascade::default()),
             Box::new(RustKeywordForeignKeyName::default()),
             Box::new(CascadeIntoRowLevelSecurityTable::default()),
+            Box::new(CopiedColumnThroughSuperkey::default()),
+            Box::new(UndeletableReference::default()),
         ];
         for rule in foreign_key_rules {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
@@ -156,7 +159,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 47] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 48] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(RepeatedIndexColumn::default()),
@@ -203,6 +206,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(PolicyTargetsBypassRole::default()),
         Box::new(RoleKeyedPolicyWhenPooled::default()),
         Box::new(CredentialFreeWrite::default()),
+        Box::new(SuperkeyPrimaryKey::default()),
         Box::new(NullCredentialRead::default()),
     ];
     for rule in table_rules {
@@ -252,7 +256,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 51] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 52] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -304,6 +308,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(SelfGrantingWrite::default()),
         Box::new(DefinerTakesActingUser::default()),
         Box::new(SubjectSettableAttribute::default()),
+        Box::new(ParallelTables::default()),
     ];
     for rule in schema_rules {
         constrainer.register_schema_rule_with_floor(rule, Level::Allow);

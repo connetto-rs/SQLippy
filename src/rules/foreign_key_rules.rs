@@ -16,3 +16,7 @@ mod key_coverage;
 pub use key_coverage::{NullableCompositeForeignKey, UnindexedForeignKey};
 mod cascade_into_row_level_security_table;
 pub use cascade_into_row_level_security_table::CascadeIntoRowLevelSecurityTable;
+mod copied_column_through_superkey;
+pub use copied_column_through_superkey::CopiedColumnThroughSuperkey;
+mod undeletable_reference;
+pub use undeletable_reference::UndeletableReference;

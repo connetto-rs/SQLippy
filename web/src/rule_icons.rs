@@ -201,6 +201,10 @@ rule_icons! {
     "rust_keyword_table_name" => FaRust,
     "binary_send_failure" => FaPlugCircleXmark,
     "unknown_binary_send" => FaPlugCircleExclamation,
+    "superkey_primary_key" => FaKey,
+    "copied_column_through_superkey" => FaCopy,
+    "parallel_tables" => FaTableList,
+    "undeletable_reference" => FaLinkSlash,
 }
 #[cfg(test)]
 mod tests {
