@@ -88,6 +88,25 @@ use crate::{
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&unique_key_in_hierarchy).is_ok());
 ///
+/// // `grants.organization_id` is the organization of the referenced resource
+/// let composite_key = ParserDB::parse::<GenericDialect>(
+///     "
+/// CREATE TABLE organizations (id INT PRIMARY KEY);
+/// CREATE TABLE resources (
+///     id INT PRIMARY KEY,
+///     organization_id INT NOT NULL REFERENCES organizations (id),
+///     UNIQUE (organization_id, id)
+/// );
+/// CREATE TABLE grants (
+///     resource_id INT PRIMARY KEY,
+///     organization_id INT NOT NULL,
+///     FOREIGN KEY (organization_id, resource_id) REFERENCES resources (organization_id, id)
+/// );
+/// ",
+/// )
+/// .unwrap();
+/// assert!(constrainer.validate_schema(&composite_key).is_ok());
+///
 /// let extension_dag = ParserDB::parse::<GenericDialect>(
 ///     "
 /// CREATE TABLE root (id SERIAL PRIMARY KEY);
