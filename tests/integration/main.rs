@@ -24,6 +24,7 @@ mod cross_tenant_caps;
 mod cte_shadows_relations;
 mod definer_acting_user;
 mod definer_creatable_schemas;
+mod definer_default_privileges;
 mod definer_functions;
 mod definer_maintained_columns;
 mod duplicate_column_assignments;

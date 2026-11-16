@@ -30,8 +30,8 @@ pub use nullable_concatenation::NullableConcatenation;
 mod nullable_unique;
 mod owner_rights_view;
 pub use exposure_rules::{
-    ExtensionInExposedSchema, ReachableSequence, SecurityBarrierMissingOnFilteringView,
-    SecurityDefinerFunctionExposed,
+    DefinerSchemaWithoutDefaultRevoke, ExtensionInExposedSchema, ReachableSequence,
+    SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
 };
 pub use nullable_unique::NullableUniqueColumn;
 mod table_hygiene_rules;

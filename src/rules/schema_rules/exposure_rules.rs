@@ -130,6 +130,92 @@ impl<DB: DatabaseLike> SchemaRule for SecurityDefinerFunctionExposed<DB> {
 }
 
 schema_rule!(
+    /// Struct defining a rule that reports a schema holding `SECURITY
+    /// DEFINER` functions whose owner's default privileges still give
+    /// `PUBLIC` `EXECUTE` on the next function it creates there.
+    ///
+    /// The defaults read are the ones the schema leaves in place once it has
+    /// run. Only the owner's default without `IN SCHEMA` takes away the
+    /// built-in grant, since a default limited to a schema can only add to
+    /// it. One violation is raised per schema and owner, on its first
+    /// definer function.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sqlippy::prelude::*;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    ///
+    /// let constrainer: GenericConstrainer<ParserDB> =
+    ///     DefinerSchemaWithoutDefaultRevoke::default().into();
+    /// let schema = "CREATE SCHEMA private;
+    ///     CREATE FUNCTION private.answer() RETURNS INT LANGUAGE sql SECURITY DEFINER
+    ///     SET search_path = '' AS 'SELECT 42';
+    ///     REVOKE EXECUTE ON FUNCTION private.answer() FROM PUBLIC;";
+    /// let revoked_once = ParserDB::parse::<PostgreSqlDialect>(schema).unwrap();
+    /// assert!(constrainer.validate_schema(&revoked_once).is_err());
+    /// let revoked_by_default = ParserDB::parse::<PostgreSqlDialect>(&format!(
+    ///     "ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC; {schema}"
+    /// ))
+    /// .unwrap();
+    /// assert!(constrainer.validate_schema(&revoked_by_default).is_ok());
+    /// ```
+    DefinerSchemaWithoutDefaultRevoke,
+    LintGroup::Suspicious,
+    "PostgreSQL grants EXECUTE to PUBLIC on every new function unless its creator's default privileges take it away, so revoking each SECURITY DEFINER function one by one leaves the next one callable by every role.",
+    Some("https://www.postgresql.org/docs/current/sql-alterdefaultprivileges.html"),
+    RuleExample {
+        bad: "CREATE SCHEMA private;\n\
+CREATE FUNCTION private.answer() RETURNS integer LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT 42 $$;\n\
+REVOKE EXECUTE ON FUNCTION private.answer() FROM PUBLIC;",
+        good: "ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;\n\
+CREATE SCHEMA private;\n\
+CREATE FUNCTION private.answer() RETURNS integer LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT 42 $$;\n\
+REVOKE EXECUTE ON FUNCTION private.answer() FROM PUBLIC;",
+    }
+);
+
+impl<DB: DatabaseLike> SchemaRule for DefinerSchemaWithoutDefaultRevoke<DB> {
+    type Database = DB;
+
+    fn check_schema(
+        &self,
+        database: &Self::Database,
+        reporter: &mut Reporter<'_, Self::Database>,
+    ) -> Result<(), Interruption> {
+        let mut checked: Vec<(String, Option<&str>)> = Vec::new();
+        let definers = database.functions().filter(|function| {
+            function.security_mode() == FunctionSecurity::Definer
+                && function.target_name().schema() != Some("pg_catalog")
+        });
+        for function in definers {
+            let target = function.target_name();
+            let schema = schema_of(database, target.schema().map(Cow::Borrowed)).into_owned();
+            let owner = function.owner(database)?;
+            if checked
+                .iter()
+                .any(|(seen, seen_owner)| *seen == schema && *seen_owner == owner)
+            {
+                continue;
+            }
+            if database.new_function_executable_by_public(owner, &schema) == Some(true) {
+                let (creator, for_role) = owner.map_or_else(
+                    || ("the role the schema runs as".to_owned(), String::new()),
+                    |owner| (format!("role '{owner}'"), format!(" FOR ROLE {owner}")),
+                );
+                reporter.function(
+                    function,
+                    format!("SECURITY DEFINER functions in schema '{schema}' are created by {creator}, whose default privileges still grant EXECUTE on the next function to PUBLIC."),
+                    format!("ALTER DEFAULT PRIVILEGES{for_role} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC; before creating functions, and grant EXECUTE to the intended callers."),
+                )?;
+            }
+            checked.push((schema, owner));
+        }
+        Ok(())
+    }
+}
+
+schema_rule!(
     /// Struct defining a rule that reports an extension installed in an
     /// exposed schema. `plpgsql` is not reported.
     ///

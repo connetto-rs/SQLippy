@@ -13,11 +13,11 @@ use crate::{
         CopiedColumnThroughSuperkey, CorrelatedPolicySubquery, CredentialFreeWrite,
         CredentialPatternPolicy, CredentialSettingWrite, CrossTenantCap, CteShadowsRelation,
         DeadPermissivePolicy, DefinerMaintainedColumnClientWritable, DefinerPathCreatableSchema,
-        DefinerTakesActingUser, DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath,
-        DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnAssignment,
-        DuplicateColumnNameInExtensionGraph, DuplicateForeignKey, DuplicatePolicy,
-        DuplicateUniqueIndex, DuplicatingRecursiveCte, DynamicSqlInjection, EmptyTextAllowed,
-        ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
+        DefinerSchemaWithoutDefaultRevoke, DefinerTakesActingUser, DefinerTemporarySchemaNotLast,
+        DefinerWithoutSearchPath, DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck,
+        DuplicateColumnAssignment, DuplicateColumnNameInExtensionGraph, DuplicateForeignKey,
+        DuplicatePolicy, DuplicateUniqueIndex, DuplicatingRecursiveCte, DynamicSqlInjection,
+        EmptyTextAllowed, ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FlagNotBoolean,
         FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
         FunctionMediatedPolicyCycle, GrantOptionToClientRole, ImpureImmutableFunction,
@@ -261,11 +261,12 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 61] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 62] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
         Box::new(SecurityDefinerFunctionExposed::default()),
+        Box::new(DefinerSchemaWithoutDefaultRevoke::default()),
         Box::new(ExtensionInExposedSchema::default()),
         Box::new(ReachableSequence::default()),
         Box::new(SecurityBarrierMissingOnFilteringView::default()),
