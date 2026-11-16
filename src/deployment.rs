@@ -45,6 +45,8 @@ pub struct Deployment {
     self_asserted_claims: Vec<Expr>,
     self_asserted_columns: Vec<StoredColumn>,
     tenant_keys: Vec<StoredColumn>,
+    irreversible_columns: Vec<StoredColumn>,
+    audit_functions: Vec<AuditFunction>,
     pooled: Option<bool>,
     clock_tolerance: Option<Duration>,
     vocabularies: Vec<Vocabulary>,
@@ -72,6 +74,26 @@ impl StoredColumn {
     }
 }
 
+/// A trigger function that records the writes to the tables it is attached
+/// to, by stored names.
+#[derive(Debug, Clone)]
+struct AuditFunction {
+    schema: String,
+    function: String,
+    events: Vec<WriteEvent>,
+}
+
+/// A command that writes rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WriteEvent {
+    /// `INSERT`.
+    Insert,
+    /// `UPDATE`.
+    Update,
+    /// `DELETE`.
+    Delete,
+}
+
 /// Parses one PostgreSQL expression.
 fn parse_expression(expression: &str) -> Result<Expr, ParserError> {
     Parser::new(&PostgreSqlDialect {})
@@ -83,14 +105,14 @@ impl Deployment {
     /// The deployment every [`RuleExample`](crate::lint::RuleExample) is
     /// written for, a pooled API serving the `public` schema to the
     /// anonymous role `anon` and the app role `authenticated`, naming the
-    /// caller with `current_setting('app.user_id', true)`, trusting no
-    /// `current_setting('app.user_metadata', true)` claim, and taking the
-    /// rows of `public.drafts` from clients that author them offline, and
-    /// streaming `public.events` over binary logical replication.
-    /// It selects the acting installation with
-    /// `current_setting('app.installation_id', true)`.
-    /// Its tenants are keyed by `organization_id` in
-    /// `public.resources` and `public.caps`.
+    /// caller with `current_setting('app.user_id', true)`, selecting the
+    /// acting installation with `current_setting('app.installation_id',
+    /// true)`, trusting no `current_setting('app.user_metadata', true)`
+    /// claim, and taking the rows of `public.drafts` from clients that author
+    /// them offline, and streaming `public.events` over binary logical
+    /// replication. Its tenants are keyed by `organization_id` in
+    /// `public.resources` and `public.caps`, a token's `public.tokens.revoked_at`
+    /// is never cleared, and `public.record_authority` audits every write.
     ///
     /// # Panics
     ///
@@ -118,6 +140,12 @@ impl Deployment {
             .with_binary_replication_table("public", "events")
             .with_tenant_key("public", "resources", "organization_id")
             .with_tenant_key("public", "caps", "organization_id")
+            .with_irreversible_column("public", "tokens", "revoked_at")
+            .with_audit_function(
+                "public",
+                "record_authority",
+                [WriteEvent::Insert, WriteEvent::Update, WriteEvent::Delete],
+            )
             .with_credential("current_setting('app.user_id', true)")
             .and_then(|deployment| {
                 deployment.with_request_setting("current_setting('app.installation_id', true)")
@@ -384,6 +412,56 @@ impl Deployment {
             .map(|key| key.column.as_str())
     }
 
+    /// Declares a column whose value, once set, is never cleared back to
+    /// `NULL`, such as the `revoked_at` of a revocation that is permanent, by
+    /// the stored names of its schema, table and column.
+    #[must_use]
+    pub fn with_irreversible_column(
+        mut self,
+        schema: impl Into<String>,
+        table: impl Into<String>,
+        column: impl Into<String>,
+    ) -> Self {
+        self.irreversible_columns
+            .push(StoredColumn::new(schema, table, column));
+        self
+    }
+
+    /// Returns the declared irreversible columns as stored schema, table and
+    /// column names.
+    pub fn irreversible_columns(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.irreversible_columns.iter().map(StoredColumn::names)
+    }
+
+    /// Declares a trigger function that records the `events` written to the
+    /// tables carrying it, by the stored names of its schema and function.
+    #[must_use]
+    pub fn with_audit_function(
+        mut self,
+        schema: impl Into<String>,
+        function: impl Into<String>,
+        events: impl IntoIterator<Item = WriteEvent>,
+    ) -> Self {
+        self.audit_functions.push(AuditFunction {
+            schema: schema.into(),
+            function: function.into(),
+            events: events.into_iter().collect(),
+        });
+        self
+    }
+
+    /// Returns the declared audit functions as stored schema and function
+    /// names with the events each records.
+    pub fn audit_functions(&self) -> impl Iterator<Item = (&str, &str, &[WriteEvent])> {
+        self.audit_functions.iter().map(|audit| {
+            (
+                audit.schema.as_str(),
+                audit.function.as_str(),
+                audit.events.as_slice(),
+            )
+        })
+    }
+
     /// Returns whether `expression` is a declared credential, as written.
     #[must_use]
     pub fn is_credential(&self, expression: &Expr) -> bool {
@@ -408,6 +486,8 @@ impl Deployment {
                 !self.self_asserted_claims.is_empty() || !self.self_asserted_columns.is_empty()
             }
             Declaration::TenantKeys => !self.tenant_keys.is_empty(),
+            Declaration::IrreversibleColumns => !self.irreversible_columns.is_empty(),
+            Declaration::AuditFunctions => !self.audit_functions.is_empty(),
             Declaration::Pooled => self.pooled.is_some(),
         }
     }
@@ -426,6 +506,10 @@ pub enum Declaration {
     SelfAssertedSources,
     /// At least one tenant key.
     TenantKeys,
+    /// At least one irreversible column.
+    IrreversibleColumns,
+    /// At least one audit function.
+    AuditFunctions,
     /// Whether the deployment is pooled.
     Pooled,
 }
@@ -438,6 +522,8 @@ impl Display for Declaration {
             Self::Credentials => "credential expressions",
             Self::SelfAssertedSources => "self-asserted claims or columns",
             Self::TenantKeys => "tenant keys",
+            Self::IrreversibleColumns => "irreversible columns",
+            Self::AuditFunctions => "audit functions",
             Self::Pooled => "whether it is pooled",
         })
     }

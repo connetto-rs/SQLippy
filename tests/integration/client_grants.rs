@@ -375,6 +375,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             "subject_settable_attribute",
             "cross_tenant_cap",
             "definer_maintained_column_client_writable",
+            "monotonic_flag_reset",
             "credential_setting_write",
         ]
     );
@@ -395,6 +396,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
             "self_granting_write",
             "subject_settable_attribute",
             "cross_tenant_cap",
+            "monotonic_flag_reset",
             "credential_setting_write"
         ]
     );

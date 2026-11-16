@@ -110,6 +110,8 @@ rule_icons! {
     "subject_settable_attribute" => FaSliders,
     "cross_tenant_cap" => FaSliders,
     "definer_maintained_column_client_writable" => FaSliders,
+    "unaudited_authority_table" => FaShield,
+    "monotonic_flag_reset" => FaShieldHalved,
     "repeated_setting_read" => FaSliders,
     "table_inheritance" => FaCodeBranch,
     "tautological_with_check" => FaCheckDouble,

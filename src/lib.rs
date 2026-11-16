@@ -12,7 +12,7 @@ pub mod prelude {
     pub use sql_traits::prelude::*;
 
     pub use crate::{
-        deployment::{Declaration, Deployment},
+        deployment::{Declaration, Deployment, WriteEvent},
         error::{
             Allowance, AllowedObject, Error, InactiveRule, Interruption, Location, PolicyClause,
             PolicySite, SchemaAllowance, StatementAllowance, StatementSite, Violation,
