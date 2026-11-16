@@ -32,7 +32,7 @@ fn definer_maintained_columns_reject_client_grants() {
         );
         assert!(
             reported(
-                "INSERT INTO folders (id, depth) VALUES (1, 1)",
+                "INSERT INTO folders (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET depth = 1",
                 grants,
                 "DEFINER"
             ),
@@ -81,6 +81,25 @@ fn definer_maintained_columns_ignore_reads() {
         "GRANT UPDATE (depth) ON folders TO authenticated;",
         "DEFINER"
     ));
+}
+
+/// A definer creating a row keeps none of the values it inserts.
+#[test]
+fn definer_maintained_columns_ignore_created_rows() {
+    for body in [
+        "INSERT INTO folders (id, depth) VALUES (1, 1)",
+        "INSERT INTO folders (id, depth) VALUES (1, 1) ON CONFLICT DO NOTHING",
+        "INSERT INTO folders (id, depth) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET label = 'root'",
+    ] {
+        assert!(
+            !reported(
+                body,
+                "GRANT INSERT (id, depth), UPDATE (id, depth) ON folders TO authenticated;",
+                "DEFINER"
+            ),
+            "{body}"
+        );
+    }
 }
 
 /// Intentional mixed writers use the table allowance.
