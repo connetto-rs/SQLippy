@@ -48,6 +48,34 @@ fn unique_constraints_over_nullable_columns_are_reported() {
 }
 
 #[test]
+fn a_unique_optional_reference_is_not_reported() {
+    let found = findings(
+        &GenericConstrainer::from(NullableUniqueColumn::default()),
+        "CREATE TABLE tenants (id UUID PRIMARY KEY);
+         CREATE TABLE invitations (id UUID PRIMARY KEY,
+           tenant_id UUID NOT NULL REFERENCES tenants (id), UNIQUE (tenant_id, id));
+         CREATE TABLE members (tenant_id UUID NOT NULL REFERENCES tenants (id),
+           user_id UUID NOT NULL, invitation_id UUID UNIQUE,
+           PRIMARY KEY (tenant_id, user_id), UNIQUE (tenant_id, invitation_id),
+           FOREIGN KEY (tenant_id, invitation_id) REFERENCES invitations (tenant_id, id));
+         CREATE TABLE plain_members (user_id UUID PRIMARY KEY,
+           invitation_id UUID UNIQUE REFERENCES invitations (id));
+         CREATE TABLE notes (invitation_id UUID REFERENCES invitations (id), note TEXT,
+           UNIQUE (invitation_id, note));
+         CREATE TABLE loose (tenant_id UUID, invitation_id UUID UNIQUE,
+           FOREIGN KEY (tenant_id, invitation_id) REFERENCES invitations (tenant_id, id));",
+    );
+    let messages: Vec<&str> = found.iter().map(|(_, message)| message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "Unique constraint unique ('invitation_id') on 'loose' covers nullable 'invitation_id' and treats NULLs as distinct, so rows with a NULL there can repeat the rest.",
+            "Unique constraint unique ('note') on 'notes' covers nullable 'note' and treats NULLs as distinct, so rows with a NULL there can repeat the rest.",
+        ]
+    );
+}
+
+#[test]
 fn the_rule_is_pedantic() {
     let sql = "CREATE TABLE t (email TEXT UNIQUE);";
     let mut constrainer = DefaultConstrainer::<ParserDB>::default();
