@@ -42,18 +42,32 @@ pub struct Deployment {
     binary_replication_tables: Vec<(String, String)>,
     binary_replication_all_tables: bool,
     self_asserted_claims: Vec<Expr>,
-    self_asserted_columns: Vec<SelfAssertedColumn>,
+    self_asserted_columns: Vec<StoredColumn>,
     pooled: Option<bool>,
     clock_tolerance: Option<Duration>,
     vocabularies: Vec<Vocabulary>,
 }
 
-/// A column whose value its row's subject sets, by stored names.
+/// A column, by the stored names of its schema, table and column.
 #[derive(Debug, Clone)]
-struct SelfAssertedColumn {
+struct StoredColumn {
     schema: String,
     table: String,
     column: String,
+}
+
+impl StoredColumn {
+    fn new(schema: impl Into<String>, table: impl Into<String>, column: impl Into<String>) -> Self {
+        Self {
+            schema: schema.into(),
+            table: table.into(),
+            column: column.into(),
+        }
+    }
+
+    fn names(&self) -> (&str, &str, &str) {
+        (&self.schema, &self.table, &self.column)
+    }
 }
 
 /// Parses one PostgreSQL expression.
@@ -298,24 +312,15 @@ impl Deployment {
         table: impl Into<String>,
         column: impl Into<String>,
     ) -> Self {
-        self.self_asserted_columns.push(SelfAssertedColumn {
-            schema: schema.into(),
-            table: table.into(),
-            column: column.into(),
-        });
+        self.self_asserted_columns
+            .push(StoredColumn::new(schema, table, column));
         self
     }
 
     /// Returns the declared self-asserted columns as stored schema, table and
     /// column names.
     pub fn self_asserted_columns(&self) -> impl Iterator<Item = (&str, &str, &str)> {
-        self.self_asserted_columns.iter().map(|column| {
-            (
-                column.schema.as_str(),
-                column.table.as_str(),
-                column.column.as_str(),
-            )
-        })
+        self.self_asserted_columns.iter().map(StoredColumn::names)
     }
 
     /// Returns whether `expression` is a declared credential, as written.

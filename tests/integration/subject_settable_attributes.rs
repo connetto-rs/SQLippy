@@ -223,6 +223,147 @@ fn an_attribute_tested_in_a_helper_body_is_read() {
     );
 }
 
+#[test]
+fn a_scalar_return_used_in_arithmetic_does_not_make_its_projection_an_attribute() {
+    for (expression, expected) in [
+        ("authz.subject_level() + 1 > 0", Vec::<String>::new()),
+        (
+            "authz.subject_level() > 0",
+            vec!["Warn profiles.w".to_owned()],
+        ),
+    ] {
+        assert_eq!(
+            reported(&format!(
+                "CREATE SCHEMA authz;
+                 CREATE FUNCTION authz.subject_level() RETURNS INT LANGUAGE sql STABLE
+                   RETURN (SELECT level FROM profiles WHERE id = CRED);
+                 CREATE POLICY docs_read ON docs FOR SELECT USING ({expression});
+                 {OPEN_UPDATE}"
+            )),
+            expected,
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn an_attribute_tested_in_a_scalar_helper_body_is_read() {
+    for (helper, call) in [
+        (
+            "CREATE FUNCTION authz.can_share(target TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE
+               SECURITY DEFINER SET search_path = public, pg_temp
+               AS $$ SELECT EXISTS (SELECT 1 FROM public.profiles WHERE id = target
+               AND id = current_setting('app.user_id', true) AND is_admin) $$;",
+            "authz.can_share(id::TEXT)",
+        ),
+        (
+            "CREATE FUNCTION authz.can_share(target TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE
+               SECURITY DEFINER SET search_path = public, pg_temp
+               AS $$ SELECT is_admin FROM profiles WHERE id = target
+               AND id = current_setting('app.user_id', true) $$;",
+            "authz.can_share(id::TEXT)",
+        ),
+        (
+            "CREATE FUNCTION authz.can_share(target TEXT) RETURNS INT LANGUAGE sql STABLE
+               AS $$ SELECT 1 FROM profiles WHERE id = target
+               AND current_setting('app.user_id', true) = id AND role = 'admin' $$;",
+            "authz.can_share(id::TEXT) IS NOT NULL",
+        ),
+        (
+            "CREATE FUNCTION authz.role_of() RETURNS TEXT LANGUAGE sql STABLE
+               AS $$ SELECT role FROM profiles WHERE id = current_setting('app.user_id', true) $$;",
+            "authz.role_of() = 'admin'",
+        ),
+        (
+            "CREATE FUNCTION authz.can_share(target TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE
+               RETURN EXISTS (SELECT 1 FROM profiles WHERE id = target
+               AND id = current_setting('app.user_id', true) AND is_admin);",
+            "authz.can_share(id::TEXT)",
+        ),
+        (
+            "CREATE FUNCTION authz.can_share(target TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE
+               BEGIN ATOMIC SELECT is_admin FROM profiles WHERE id = target
+               AND id = current_setting('app.user_id', true); END;",
+            "NOT authz.can_share(id::TEXT) IS FALSE",
+        ),
+    ] {
+        assert_eq!(
+            reported(&format!(
+                "CREATE SCHEMA authz; {helper}
+                 CREATE POLICY docs_read ON docs FOR SELECT USING ({call});
+                 {OPEN_UPDATE}"
+            )),
+            ["Warn profiles.w"],
+            "{helper}"
+        );
+    }
+}
+
+#[test]
+fn a_value_a_scalar_helper_returns_without_a_test_is_no_attribute() {
+    assert_eq!(
+        reported(&format!(
+            "CREATE SCHEMA authz;
+             CREATE FUNCTION authz.role_of() RETURNS TEXT LANGUAGE sql STABLE
+               AS $$ SELECT role FROM profiles WHERE id = current_setting('app.user_id', true) $$;
+             CREATE POLICY docs_read ON docs FOR SELECT USING (authz.role_of() IS NOT NULL);
+             {OPEN_UPDATE}"
+        )),
+        Vec::<String>::new()
+    );
+}
+
+/// The membership whose `writers_can_share` a scalar definer helper tests,
+/// with the subject's update granted the flag.
+const SHARING: &str = "
+    CREATE ROLE authz_writer;
+    CREATE TABLE memberships (id INT PRIMARY KEY, actor_id UUID NOT NULL,
+      writers_can_share BOOLEAN NOT NULL DEFAULT false);
+    CREATE TABLE documents (id INT PRIMARY KEY, membership_id INT NOT NULL REFERENCES memberships (id));
+    ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+    CREATE FUNCTION can_share(target_id INT) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+      SET search_path = public, pg_temp AS $$ SELECT EXISTS (SELECT 1 FROM public.memberships
+      WHERE id = target_id AND actor_id = NULLIF(current_setting('app.user_id', true), '')::uuid
+      AND writers_can_share) $$;
+    CREATE POLICY sharing ON documents FOR SELECT TO app USING (can_share(membership_id));
+    CREATE POLICY own_read ON memberships FOR SELECT TO app
+      USING (actor_id = NULLIF(current_setting('app.user_id', true), '')::uuid);
+    CREATE POLICY own_write ON memberships FOR UPDATE TO app
+      USING (actor_id = NULLIF(current_setting('app.user_id', true), '')::uuid)
+      WITH CHECK (actor_id = NULLIF(current_setting('app.user_id', true), '')::uuid);
+    REVOKE ALL ON memberships FROM app;
+    GRANT SELECT ON memberships TO app;";
+
+#[test]
+fn a_flag_a_scalar_definer_helper_tests_is_withheld_only_by_revoking_it() {
+    let mut constrainer: GenericConstrainer<ParserDB> = SubjectSettableAttribute::default().into();
+    constrainer.set_deployment(
+        Deployment::default()
+            .with_app_role("app")
+            .with_credential("NULLIF(current_setting('app.user_id', true), '')")
+            .expect("credential parses"),
+    );
+    assert_eq!(
+        findings(
+            &constrainer,
+            &format!("{SHARING} GRANT UPDATE (writers_can_share) ON memberships TO app;")
+        ),
+        ["Warn memberships.own_write"]
+    );
+    assert_eq!(
+        findings(
+            &constrainer,
+            &format!(
+                "{SHARING} GRANT UPDATE (writers_can_share) ON memberships TO authz_writer;
+                 CREATE POLICY trusted_write ON memberships FOR UPDATE TO authz_writer
+                   USING (true) WITH CHECK (true);"
+            )
+        ),
+        Vec::<String>::new()
+    );
+}
+
 /// Takes table-wide `UPDATE` from `app` and grants it the display name.
 const WITHHELD: &str = "REVOKE UPDATE ON profiles FROM app;
     GRANT UPDATE (display_name) ON profiles TO app;";
@@ -372,4 +513,61 @@ fn the_rule_needs_declared_credentials() {
             .collect::<Vec<_>>(),
         ["subject_settable_attribute"]
     );
+}
+
+#[test]
+fn scalar_helper_scope_values_are_not_authority_attributes() {
+    for (body, predicate, result_type) in [
+        (
+            "RETURN (SELECT level FROM profiles WHERE id = current_setting('app.user_id', true))",
+            "id = own_role()",
+            "INT",
+        ),
+        (
+            "AS $$ SELECT * FROM (SELECT role FROM profiles WHERE id = current_setting('app.user_id', true)) selected $$",
+            "own_role() = 'admin'",
+            "TEXT",
+        ),
+    ] {
+        assert_eq!(
+            reported(&format!(
+                "CREATE FUNCTION own_role() RETURNS {result_type} LANGUAGE sql STABLE {body};
+                 CREATE POLICY docs_read ON docs USING ({predicate});
+                 {OPEN_UPDATE}"
+            )),
+            Vec::<String>::new(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn catalog_atomic_helper_preserves_authority_attributes() {
+    use pg_diesel::PgDieselDatabase;
+
+    let (_container, database) = crate::live_catalog::catalog(
+        "public",
+        &format!(
+            "{SCHEMA}
+         CREATE FUNCTION own_role() RETURNS TEXT LANGUAGE sql STABLE
+         BEGIN ATOMIC SELECT role FROM profiles WHERE id = {CREDENTIAL}; END;
+         CREATE POLICY docs_read ON docs USING (own_role() = 'admin');
+         CREATE POLICY w ON profiles FOR UPDATE USING (id = {CREDENTIAL});
+         GRANT SELECT, UPDATE ON profiles TO app;"
+        ),
+    );
+    let mut constrainer: GenericConstrainer<PgDieselDatabase> =
+        SubjectSettableAttribute::default().into();
+    constrainer.set_deployment(
+        Deployment::default()
+            .with_app_role("app")
+            .with_credential("current_setting('app.user_id'::text, true)")
+            .unwrap(),
+    );
+    let diagnostics = constrainer.diagnostics(&database);
+    let [Error::Violation(violation)] = diagnostics.as_slice() else {
+        panic!("{diagnostics:?}");
+    };
+    assert_eq!(violation.rule().name, "subject_settable_attribute");
+    assert_eq!(violation.object().to_string(), "profiles.w");
 }

@@ -464,10 +464,44 @@ pub(crate) fn stored_column<'db, DB: DatabaseLike>(
 /// # Errors
 ///
 /// Returns the first error `judge` returns.
-pub(crate) fn walks<V, E, F>(node: &V, judge: F) -> Result<(), E>
+pub(crate) fn walks<V, E, F>(node: &V, mut judge: F) -> Result<(), E>
 where
     V: Visit + ?Sized,
     F: FnMut(&Cte, &RecursiveItem<'_>, &ObjectName, &Ident, Option<&TableAlias>) -> Result<(), E>,
+{
+    visit_items(node, |item, recursive, scopes| {
+        let Some((name, exposed, alias)) = recursive.walked() else {
+            return Ok(());
+        };
+        let claimed = match name.0.as_slice() {
+            [ObjectNamePart::Identifier(written)] => item
+                .query
+                .with
+                .iter()
+                .flat_map(|inner| &inner.cte_tables)
+                .map(|claimant| &claimant.alias.name)
+                .chain(
+                    scopes
+                        .frames
+                        .last()
+                        .into_iter()
+                        .flat_map(|frame| &frame.names),
+                )
+                .any(|claimant| same_name(written, claimant)),
+            _ => false,
+        };
+        if claimed || scopes.binding(name).is_some() {
+            return Ok(());
+        }
+        judge(item, recursive, name, exposed, alias)
+    })
+}
+
+/// Runs the shared scoped traversal of recursive items.
+fn visit_items<V, E, F>(node: &V, judge: F) -> Result<(), E>
+where
+    V: Visit + ?Sized,
+    F: FnMut(&Cte, &RecursiveItem<'_>, &WithScopes) -> Result<(), E>,
 {
     let mut walks = Walks {
         scopes: WithScopes::default(),
@@ -489,7 +523,7 @@ struct Walks<F, E> {
 
 impl<E, F> Visitor for Walks<F, E>
 where
-    F: FnMut(&Cte, &RecursiveItem<'_>, &ObjectName, &Ident, Option<&TableAlias>) -> Result<(), E>,
+    F: FnMut(&Cte, &RecursiveItem<'_>, &WithScopes) -> Result<(), E>,
 {
     type Break = E;
 
@@ -502,21 +536,7 @@ where
             let Some(recursive) = RecursiveItem::split(item) else {
                 continue;
             };
-            let Some((name, exposed, alias)) = recursive.walked() else {
-                continue;
-            };
-            let claimed = match name.0.as_slice() {
-                [ObjectNamePart::Identifier(written)] => with
-                    .cte_tables
-                    .iter()
-                    .chain(item.query.with.iter().flat_map(|inner| &inner.cte_tables))
-                    .any(|claimant| same_name(written, &claimant.alias.name)),
-                _ => false,
-            };
-            if claimed || self.scopes.binding(name).is_some() {
-                continue;
-            }
-            if let Err(error) = (self.judge)(item, &recursive, name, exposed, alias) {
+            if let Err(error) = (self.judge)(item, &recursive, &self.scopes) {
                 return ControlFlow::Break(error);
             }
         }

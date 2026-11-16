@@ -18,6 +18,7 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         authority_support::{TableColumn, authority_columns, credential_compared, is_literal},
+        grant_support::withheld,
         policy_support::{
             Command, Stage, applied, conjuncts, covers, is_column_reference, policy_roles,
         },
@@ -173,61 +174,19 @@ fn guarded<DB: DatabaseLike>(
     Ok(false)
 }
 
-/// Whether the schema proves that every role writing through `policy` lacks
-/// `command`'s privilege on `attribute` of `table`, for an `INSERT` or an
-/// `UPDATE`.
-///
-/// The writers are the policy's roles, or the declared client roles for a
-/// policy applying to `PUBLIC`. A writer the schema never creates may hold
-/// the privilege from outside it.
-fn withheld<DB: DatabaseLike>(
-    database: &DB,
-    deployment: &Deployment,
-    table: &DB::Table,
-    policy: &DB::Policy,
-    command: Command,
-    attribute: &DB::Column,
-) -> Result<bool, LookupError> {
-    let writers = policy_roles(database, policy).unwrap_or_else(|| {
-        deployment
-            .app_roles()
-            .chain(deployment.anonymous_roles())
-            .map(str::to_owned)
-            .collect()
-    });
-    if writers.is_empty() {
-        return Ok(false);
-    }
-    for writer in writers {
-        let Some(role) = database.role(&writer) else {
-            return Ok(false);
-        };
-        let possible = table.possible_privileges(role, database)?;
-        let privilege = if command == Command::Insert {
-            &possible.insert
-        } else {
-            &possible.update
-        };
-        if privilege.on_column(attribute) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 /// Struct defining a rule that reports a write policy on an authority table
 /// letting the row's own subject set an attribute column other policies test
 /// to grant access.
 ///
 /// An authority table is one a policy reads, in a sublink or in a
-/// set-returning `LANGUAGE sql` helper it calls, by comparing a column with a
-/// declared credential. Its attribute columns are the ones that read compares
-/// with a literal or tests as a boolean, such as `profiles.is_admin`. A
-/// permissive `INSERT` or `UPDATE` policy whose new-row clause compares a
-/// column of the row with a credential admits the row's subject, and when no
-/// top-level conjunct pins an attribute column to literals other than `true`
-/// or tests it false, the subject can set it and grant themselves what the
-/// reading policies grant.
+/// `LANGUAGE sql` helper it calls, set-returning or scalar, by comparing a
+/// column with a declared credential. Its attribute columns are the ones that
+/// read compares with a literal or tests as a boolean, such as
+/// `profiles.is_admin`. A permissive `INSERT` or `UPDATE` policy whose
+/// new-row clause compares a column of the row with a credential admits the
+/// row's subject, and when no top-level conjunct pins an attribute column to
+/// literals other than `true` or tests it false, the subject can set it and
+/// grant themselves what the reading policies grant.
 ///
 /// A restrictive policy for the same command covering the policy's roles
 /// closes the gap when it fixes the column. So does the source proving that

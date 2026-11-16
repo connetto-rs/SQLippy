@@ -13,8 +13,10 @@ use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        expression_site_support::body_statements, policy_support::unnested,
-        statement_support::selects, walk_support::walk,
+        function_body_support::{BodyNode, function_body},
+        policy_support::unnested,
+        statement_support::selects,
+        walk_support::walk,
     },
     traits::{
         Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule, reporter::signature,
@@ -312,23 +314,23 @@ impl<DB: DatabaseLike> SchemaRule for NullableConcatenation<DB> {
         }) {
             let scope = ExpressionScope::FunctionBody(function);
             let mut findings = Vec::new();
-            for statement in &body_statements(function) {
-                findings.extend(statement_findings(database, statement, &scope)?);
-            }
-            if let Some(statements) = function.atomic_statements(database)? {
-                for statement in statements.iter() {
-                    findings.extend(statement_findings(database, statement, &scope)?);
+            function_body(database, function, |node| -> Result<(), LookupError> {
+                match node {
+                    BodyNode::Statement(statement) => {
+                        findings.extend(statement_findings(database, statement, &scope)?);
+                    }
+                    BodyNode::Expression(expression) => {
+                        let context = ExpressionContext::for_expression(
+                            expression,
+                            &scope,
+                            database,
+                            IdentifierCase::Folded,
+                        )?;
+                        findings.extend(found(database, &context, expression, false)?);
+                    }
                 }
-            }
-            if let Some(body) = function.body_expression(database)? {
-                let context = ExpressionContext::for_expression(
-                    &body,
-                    &scope,
-                    database,
-                    IdentifierCase::Folded,
-                )?;
-                findings.extend(found(database, &context, body.as_ref(), false)?);
-            }
+                Ok(())
+            })?;
             for finding in findings {
                 reporter.function(
                     function,

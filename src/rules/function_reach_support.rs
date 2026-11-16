@@ -33,16 +33,24 @@ pub(crate) fn reaches_function<DB: DatabaseLike>(
     root: &DB::Function,
     target: &DB::Function,
 ) -> Result<bool, LookupError> {
-    if root == target {
-        return Ok(true);
-    }
-    let mut pending = vec![root];
+    visit_reachable(database, vec![root], |function| function == target)
+}
+
+/// Visits each reachable function once, stopping when the visitor returns `true`.
+fn visit_reachable<'database, DB: DatabaseLike>(
+    database: &'database DB,
+    mut pending: Vec<&'database DB::Function>,
+    mut visit: impl FnMut(&'database DB::Function) -> bool,
+) -> Result<bool, LookupError> {
     let mut visited = HashSet::new();
     while let Some(function) = pending.pop() {
-        if function == target {
+        if !visited.insert(function) {
+            continue;
+        }
+        if visit(function) {
             return Ok(true);
         }
-        if !visited.insert(function) || function.target_name().schema() == Some("pg_catalog") {
+        if function.target_name().schema() == Some("pg_catalog") {
             continue;
         }
         match function.referenced_functions(database) {
@@ -52,6 +60,11 @@ pub(crate) fn reaches_function<DB: DatabaseLike>(
         }
     }
     Ok(false)
+}
+
+/// Whether a call is unqualified or belongs to `pg_catalog`.
+pub(crate) fn builtin_schema(schema: Option<&str>) -> bool {
+    schema.is_none_or(|schema| schema.eq_ignore_ascii_case("pg_catalog"))
 }
 
 /// The last part of a name and the schema before it, if any.
