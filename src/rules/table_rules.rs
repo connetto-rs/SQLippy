@@ -72,6 +72,8 @@ mod key_without_exact_equality;
 pub use key_without_exact_equality::KeyWithoutExactEquality;
 mod uncached_policy_call;
 pub use uncached_policy_call::UncachedPolicyCall;
+mod repeated_policy_call;
+pub use repeated_policy_call::RepeatedPolicyCall;
 mod raising_setting_read;
 pub use raising_setting_read::RaisingSettingRead;
 mod nested_policy_subquery;

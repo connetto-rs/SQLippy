@@ -1,12 +1,14 @@
 //! Traversal and parameter references in function bodies.
 
+use std::ops::ControlFlow;
+
 use sql_traits::{
     errors::LookupError,
     traits::{DatabaseLike, FunctionLike},
 };
-use sqlparser::ast::{Expr, Statement};
+use sqlparser::ast::{Expr, Statement, Visitor};
 
-use super::expression_site_support::body_statements;
+use super::{expression_site_support::body_statements, walk_support::walk};
 
 /// A parsed function body node.
 pub(crate) enum BodyNode<'body> {
@@ -14,6 +16,16 @@ pub(crate) enum BodyNode<'body> {
     Statement(&'body Statement),
     /// A SQL return expression.
     Expression(&'body Expr),
+}
+
+impl BodyNode<'_> {
+    /// Walks the node with the rule's visitor.
+    pub(crate) fn walk<V: Visitor>(&self, visitor: &mut V) -> ControlFlow<V::Break> {
+        match self {
+            Self::Statement(statement) => walk(*statement, visitor),
+            Self::Expression(expression) => walk(*expression, visitor),
+        }
+    }
 }
 
 /// Visits each parsed statement or expression of a function body.
