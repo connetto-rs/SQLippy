@@ -84,3 +84,7 @@ mod parallel_tables;
 pub use parallel_tables::ParallelTables;
 mod recursive_step_over_union;
 pub use recursive_step_over_union::RecursiveStepOverUnion;
+mod cross_tenant_cap;
+pub use cross_tenant_cap::CrossTenantCap;
+mod definer_maintained_column_client_writable;
+pub use definer_maintained_column_client_writable::DefinerMaintainedColumnClientWritable;
