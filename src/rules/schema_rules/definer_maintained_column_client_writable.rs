@@ -12,8 +12,8 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, FunctionLike, TableLike},
 };
 use sqlparser::ast::{
-    AssignmentTarget, FunctionSecurity, Ident, Insert, ObjectName, Statement, TableFactor,
-    TableObject, Update, Visitor,
+    Assignment, AssignmentTarget, DoUpdate, FunctionSecurity, Ident, Insert, ObjectName,
+    OnConflict, OnConflictAction, OnInsert, Statement, TableFactor, TableObject, Update, Visitor,
 };
 
 use crate::{
@@ -49,43 +49,48 @@ impl<DB: DatabaseLike> Maintained<'_, '_, DB> {
         Ok(())
     }
 
-    /// Reads explicit insert lists and update assignments.
+    /// Records every column an assignment list targets.
+    fn assignments(
+        &mut self,
+        table: &ObjectName,
+        assignments: &[Assignment],
+    ) -> Result<(), LookupError> {
+        for assignment in assignments {
+            let columns = match &assignment.target {
+                AssignmentTarget::ColumnName(column) => std::slice::from_ref(column),
+                AssignmentTarget::Tuple(columns) => columns.as_slice(),
+            };
+            for column in columns
+                .iter()
+                .filter_map(|column| column.0.first()?.as_ident())
+            {
+                self.record(table, column)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads the assignments of updates and of upserts that update the
+    /// conflicting row, while the columns an insert lists only create a row.
     fn statement(&mut self, statement: &Statement) -> Result<(), LookupError> {
         match statement {
             Statement::Insert(Insert {
                 table: TableObject::TableName(table),
-                columns,
+                on:
+                    Some(OnInsert::OnConflict(OnConflict {
+                        action: OnConflictAction::DoUpdate(DoUpdate { assignments, .. }),
+                        ..
+                    })),
                 ..
-            }) => {
-                for column in columns
-                    .iter()
-                    .filter_map(|column| column.0.first()?.as_ident())
-                {
-                    self.record(table, column)?;
-                }
-            }
+            }) => self.assignments(table, assignments),
             Statement::Update(Update {
                 table, assignments, ..
-            }) => {
-                let TableFactor::Table { name: table, .. } = &table.relation else {
-                    return Ok(());
-                };
-                for assignment in assignments {
-                    let columns = match &assignment.target {
-                        AssignmentTarget::ColumnName(column) => std::slice::from_ref(column),
-                        AssignmentTarget::Tuple(columns) => columns.as_slice(),
-                    };
-                    for column in columns
-                        .iter()
-                        .filter_map(|column| column.0.first()?.as_ident())
-                    {
-                        self.record(table, column)?;
-                    }
-                }
-            }
-            _ => {}
+            }) => match &table.relation {
+                TableFactor::Table { name, .. } => self.assignments(name, assignments),
+                _ => Ok(()),
+            },
+            _ => Ok(()),
         }
-        Ok(())
     }
 }
 
