@@ -12,9 +12,9 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, FunctionLike, TableLike},
 };
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, DoUpdate, FunctionSecurity, Ident, Insert, Merge, MergeAction,
-    MergeUpdateExpr, MergeUpdateKind, ObjectName, OnConflict, OnConflictAction, OnInsert,
-    Statement, TableFactor, TableObject, Update, Visitor,
+    Assignment, AssignmentTarget, DoUpdate, Expr, FunctionSecurity, Ident, Insert, Merge,
+    MergeAction, MergeUpdateExpr, MergeUpdateKind, ObjectName, OnConflict, OnConflictAction,
+    OnInsert, Statement, TableFactor, TableObject, Update, Visitor,
 };
 
 use crate::{
@@ -22,11 +22,52 @@ use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        cte_support::{stored_column, stored_table},
+        cte_support::{same_name, stored_column, stored_table},
         function_body_support::function_body,
+        policy_support::unnested,
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
+
+/// The table an assignment list rewrites, with the alias its rows are read
+/// through.
+struct Target<'statement> {
+    name: &'statement ObjectName,
+    alias: Option<&'statement Ident>,
+}
+
+impl Target<'_> {
+    /// Whether `value` reads the target row's own `column`, written bare or
+    /// under the alias, or under a trailing part of the table name when the
+    /// table has no alias.
+    fn keeps(&self, column: &Ident, value: &Expr) -> bool {
+        match unnested(value) {
+            Expr::Identifier(read) => same_name(read, column),
+            Expr::CompoundIdentifier(parts) => {
+                parts.split_last().is_some_and(|(read, qualifier)| {
+                    same_name(read, column) && self.exposed_as(qualifier)
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `qualifier` names the target relation.
+    fn exposed_as(&self, qualifier: &[Ident]) -> bool {
+        match self.alias {
+            Some(alias) => matches!(qualifier, [written] if same_name(written, alias)),
+            None => {
+                !qualifier.is_empty()
+                    && qualifier.len() <= self.name.0.len()
+                    && self.name.0.iter().rev().zip(qualifier.iter().rev()).all(
+                        |(part, written)| {
+                            part.as_ident().is_some_and(|part| same_name(part, written))
+                        },
+                    )
+            }
+        }
+    }
+}
 
 /// Collects columns explicitly assigned by definer statements.
 struct Maintained<'database, 'path, DB: DatabaseLike> {
@@ -50,22 +91,35 @@ impl<DB: DatabaseLike> Maintained<'_, '_, DB> {
         Ok(())
     }
 
-    /// Records every column an assignment list targets.
+    /// Records every column an assignment list sets to a value other than
+    /// its own, since a self-assignment only takes a new row version.
     fn assignments(
         &mut self,
-        table: &ObjectName,
+        target: &Target<'_>,
         assignments: &[Assignment],
     ) -> Result<(), LookupError> {
         for assignment in assignments {
-            let columns = match &assignment.target {
-                AssignmentTarget::ColumnName(column) => std::slice::from_ref(column),
-                AssignmentTarget::Tuple(columns) => columns.as_slice(),
+            let (columns, values) = match (&assignment.target, unnested(&assignment.value)) {
+                (AssignmentTarget::ColumnName(column), _) => (
+                    std::slice::from_ref(column),
+                    std::slice::from_ref(&assignment.value),
+                ),
+                (AssignmentTarget::Tuple(columns), Expr::Tuple(values)) => {
+                    (columns.as_slice(), values.as_slice())
+                }
+                (AssignmentTarget::Tuple(columns), _) => (columns.as_slice(), &[][..]),
             };
-            for column in columns
-                .iter()
-                .filter_map(|column| column.0.first()?.as_ident())
-            {
-                self.record(table, column)?;
+            for (position, column) in columns.iter().enumerate() {
+                let Some(name) = column.0.first().and_then(|part| part.as_ident()) else {
+                    continue;
+                };
+                let kept = column.0.len() == 1
+                    && values
+                        .get(position)
+                        .is_some_and(|value| target.keeps(name, value));
+                if !kept {
+                    self.record(target.name, name)?;
+                }
             }
         }
         Ok(())
@@ -76,31 +130,50 @@ impl<DB: DatabaseLike> Maintained<'_, '_, DB> {
     fn statement(&mut self, statement: &Statement) -> Result<(), LookupError> {
         match statement {
             Statement::Insert(Insert {
-                table: TableObject::TableName(table),
+                table: TableObject::TableName(name),
+                table_alias,
                 on:
                     Some(OnInsert::OnConflict(OnConflict {
                         action: OnConflictAction::DoUpdate(DoUpdate { assignments, .. }),
                         ..
                     })),
                 ..
-            }) => self.assignments(table, assignments),
+            }) => self.assignments(
+                &Target {
+                    name,
+                    alias: table_alias.as_ref().map(|alias| &alias.alias),
+                },
+                assignments,
+            ),
             Statement::Update(Update {
                 table, assignments, ..
             }) => match &table.relation {
-                TableFactor::Table { name, .. } => self.assignments(name, assignments),
+                TableFactor::Table { name, alias, .. } => self.assignments(
+                    &Target {
+                        name,
+                        alias: alias.as_ref().map(|alias| &alias.name),
+                    },
+                    assignments,
+                ),
                 _ => Ok(()),
             },
             Statement::Merge(Merge {
-                table: TableFactor::Table { name, .. },
+                table: TableFactor::Table { name, alias, .. },
                 clauses,
                 ..
-            }) => clauses.iter().try_for_each(|clause| match &clause.action {
-                MergeAction::Update(MergeUpdateExpr {
-                    kind: MergeUpdateKind::Set(assignments),
-                    ..
-                }) => self.assignments(name, assignments),
-                _ => Ok(()),
-            }),
+            }) => {
+                let target = Target {
+                    name,
+                    alias: alias.as_ref().map(|alias| &alias.name),
+                };
+                clauses.iter().try_for_each(|clause| match &clause.action {
+                    MergeAction::Update(MergeUpdateExpr {
+                        kind: MergeUpdateKind::Set(assignments),
+                        ..
+                    }) => self.assignments(&target, assignments),
+                    _ => Ok(()),
+                })
+            }
             _ => Ok(()),
         }
     }
