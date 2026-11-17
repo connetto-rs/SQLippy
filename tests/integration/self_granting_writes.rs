@@ -285,6 +285,92 @@ fn a_helper_reading_with_items_that_return_rows_without_a_credential_is_reported
     }
 }
 
+/// Seats scoped by squad and organization, each bound through a composite
+/// key to a pass or a squad, under the given `MATCH` of the pass key.
+fn keyed(pass_match: &str) -> String {
+    format!(
+        "CREATE TABLE orgs (id INT PRIMARY KEY);
+         CREATE TABLE admins (org_id INT NOT NULL REFERENCES orgs (id), person TEXT NOT NULL,
+           PRIMARY KEY (org_id, person));
+         CREATE TABLE squads (id INT PRIMARY KEY, org_id INT NOT NULL REFERENCES orgs (id),
+           UNIQUE (org_id, id));
+         CREATE TABLE passes (id INT PRIMARY KEY, squad_id INT NOT NULL REFERENCES squads (id),
+           invitee TEXT NOT NULL, UNIQUE (squad_id, id));
+         CREATE TABLE seats (org_id INT NOT NULL, squad_id INT NOT NULL, person TEXT NOT NULL,
+           pass_id INT, PRIMARY KEY (squad_id, person),
+           FOREIGN KEY (org_id, squad_id) REFERENCES squads (org_id, id),
+           FOREIGN KEY (squad_id, pass_id) REFERENCES passes (squad_id, id) {pass_match});
+         ALTER TABLE seats ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY docs_squad ON docs FOR SELECT USING (
+           team_id IN (SELECT squad_id FROM seats WHERE person = CRED));
+         CREATE POLICY docs_org ON docs FOR SELECT USING (
+           id IN (SELECT org_id FROM seats WHERE person = CRED));"
+    )
+}
+
+/// Seats a caller may take with a pass addressed to them.
+const BY_PASS: &str = "pass_id IN (SELECT id FROM passes WHERE invitee = CRED)";
+
+/// Seats an organization admin may hand out.
+const BY_ADMIN: &str = "org_id IN (SELECT org_id FROM admins WHERE person = CRED)";
+
+/// Seats on a squad the caller holds a pass for.
+const BY_SQUAD_PASS: &str = "squad_id IN (SELECT squad_id FROM passes WHERE invitee = CRED)";
+
+#[test]
+fn a_composite_key_binds_its_columns_to_a_constrained_one() {
+    for check in [
+        format!("person = CRED AND {BY_PASS}"),
+        BY_ADMIN.to_owned(),
+        format!("({BY_ADMIN}) OR ({BY_SQUAD_PASS})"),
+        format!("({BY_ADMIN} AND pass_id IS NULL) OR (person = CRED AND {BY_PASS})"),
+        "person = CRED AND pass_id = ANY (ARRAY(SELECT id FROM passes WHERE invitee = CRED))"
+            .to_owned(),
+        "(squad_id, pass_id) IN (SELECT squad_id, id FROM passes WHERE invitee = CRED)".to_owned(),
+    ] {
+        let sql = format!(
+            "{} CREATE POLICY w ON seats FOR INSERT WITH CHECK ({check});",
+            keyed("")
+        );
+        assert_eq!(reported(&sql), Vec::<String>::new(), "{check}");
+    }
+    let guarded = format!(
+        "{} CREATE POLICY w ON seats FOR INSERT WITH CHECK (person = CRED);
+         CREATE POLICY g ON seats AS RESTRICTIVE FOR INSERT WITH CHECK ({BY_PASS});",
+        keyed("")
+    );
+    assert_eq!(reported(&guarded), Vec::<String>::new());
+}
+
+#[test]
+fn a_composite_key_binds_nothing_without_a_constrained_checked_column() {
+    let nullable_pass =
+        "person = CRED AND coalesce(pass_id, 0) IN (SELECT id FROM passes WHERE invitee = CRED)";
+    for check in [
+        "person = CRED".to_owned(),
+        nullable_pass.to_owned(),
+        format!("person = CRED OR {BY_PASS}"),
+    ] {
+        let sql = format!(
+            "{} CREATE POLICY w ON seats FOR INSERT WITH CHECK ({check});",
+            keyed("")
+        );
+        assert_eq!(reported(&sql), ["Warn seats.w"], "{check}");
+    }
+    let full = format!(
+        "{} CREATE POLICY w ON seats FOR INSERT WITH CHECK ({nullable_pass});",
+        keyed("MATCH FULL")
+    );
+    assert_eq!(reported(&full), Vec::<String>::new());
+    let filtered = format!(
+        "{} CREATE POLICY w ON seats FOR UPDATE USING (person = CRED) WITH CHECK (person = CRED);
+         CREATE POLICY g ON seats AS RESTRICTIVE FOR UPDATE USING ({BY_PASS})
+           WITH CHECK (person = CRED);",
+        keyed("")
+    );
+    assert_eq!(reported(&filtered), ["Warn seats.w"]);
+}
+
 #[test]
 fn the_rule_waits_for_a_credential_and_warns_by_default() {
     let sql = format!(
