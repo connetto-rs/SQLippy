@@ -33,6 +33,7 @@ mod duplicate_policies;
 mod duplicating_recursive_ctes;
 mod dynamic_sql;
 mod expressions_and_functions;
+mod extension_column_names;
 mod foreign_key_hierarchies;
 mod generated_keys;
 mod implied_foreign_keys;
