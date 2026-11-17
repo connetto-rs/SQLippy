@@ -156,6 +156,11 @@ fn scopes_found_through_correlation_joins_and_helpers_are_reported() {
         "CREATE POLICY docs_read ON docs FOR SELECT USING (team_id IN (
            SELECT t.id FROM teams t WHERE t.id IN (
              SELECT team_id FROM members WHERE (member = CRED))));",
+        "CREATE TABLE people (id TEXT PRIMARY KEY, active BOOL);
+         CREATE FUNCTION in_team(t INT) RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
+           SELECT EXISTS (SELECT 1 FROM members m JOIN people p ON p.id = m.member
+             WHERE m.team_id = t AND m.member = current_setting('app.user_id', true) AND p.active) $$;
+         CREATE POLICY docs_read ON docs FOR SELECT USING (in_team(team_id));",
         "CREATE FUNCTION my_teams() RETURNS SETOF INT LANGUAGE sql STABLE
            AS $$ (SELECT team_id FROM public.members WHERE member = (current_setting('app.user_id', true)))
                  UNION (SELECT id FROM public.teams WHERE owner = current_setting('app.user_id', true)) $$;
@@ -168,6 +173,32 @@ fn scopes_found_through_correlation_joins_and_helpers_are_reported() {
                 "{read} CREATE POLICY w ON members FOR INSERT WITH CHECK (member = CRED);"
             )),
             ["Warn members.w"],
+            "{read}"
+        );
+    }
+}
+
+#[test]
+fn a_join_partner_inside_the_read_is_not_the_outer_row() {
+    for read in [
+        "CREATE POLICY w ON members FOR INSERT WITH CHECK (team_id IN (
+           SELECT m.team_id FROM members m JOIN people p ON p.id = m.member
+           WHERE m.member = CRED AND m.role = 'admin' AND p.active));",
+        "CREATE POLICY w ON members FOR INSERT WITH CHECK (team_id IN (
+           SELECT m.team_id FROM (members m CROSS JOIN people p)
+           WHERE p.id = m.member AND m.member = CRED AND m.role = 'admin' AND p.active));",
+        "CREATE FUNCTION administered() RETURNS SETOF INT LANGUAGE sql STABLE AS $$
+           SELECT m.team_id FROM members m JOIN people p ON p.id = m.member
+           WHERE m.member = current_setting('app.user_id', true) AND m.role = 'admin' AND p.active $$;
+         CREATE POLICY w ON members FOR INSERT WITH CHECK (team_id IN (SELECT administered()));",
+    ] {
+        assert_eq!(
+            reported(&format!(
+                "CREATE TABLE people (id TEXT PRIMARY KEY, active BOOL);
+                 ALTER TABLE members ADD FOREIGN KEY (member) REFERENCES people (id);
+                 {READ_BY_SUBLINK} {read}"
+            )),
+            Vec::<String>::new(),
             "{read}"
         );
     }
