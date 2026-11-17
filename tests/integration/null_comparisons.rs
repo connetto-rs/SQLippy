@@ -114,6 +114,25 @@ fn plpgsql_cursor_counts_handlers_and_raise_options_are_walked() {
 }
 
 #[test]
+fn plpgsql_return_query_and_return_next_are_walked() {
+    assert_eq!(
+        schema_messages(
+            "CREATE FUNCTION listed() RETURNS SETOF int LANGUAGE plpgsql AS $$
+             BEGIN
+               RETURN QUERY SELECT id FROM t WHERE x = NULL;
+               RETURN QUERY EXECUTE 'SELECT id FROM t WHERE x = $1' USING (SELECT count(*) FROM t WHERE x <> NULL);
+               RETURN NEXT (SELECT count(*) FROM t WHERE x < NULL);
+             END $$;"
+        ),
+        [
+            format!("Function 'listed()' uses `x = NULL`, {PROBLEM}."),
+            format!("Function 'listed()' uses `x <> NULL`, {PROBLEM}."),
+            format!("Function 'listed()' uses `x < NULL`, {PROBLEM}."),
+        ]
+    );
+}
+
+#[test]
 fn null_tests_and_assignments_are_not_reported() {
     for sql in [
         "SELECT id FROM t WHERE x IS NULL",

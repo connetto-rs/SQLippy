@@ -14,7 +14,7 @@ use sqlparser::{
 use sqlparser_plpgsql::{
     embedded::{
         Block, BoundCursor, DeclarationKind, Dynamic, Fetch, FetchCount, FetchDirection,
-        FetchPosition, Indirection, LoopControl, Node, Open,
+        FetchPosition, Indirection, LoopControl, Node, Open, ReturnQuery,
     },
     embedded_sql,
 };
@@ -249,8 +249,12 @@ fn nodes_statements(nodes: Vec<Node>, statements: &mut Vec<Statement>) {
             Node::Statement {
                 statement: query, ..
             }
-            | Node::Open(Open::Query { query, .. }) => statements.push(*query),
-            Node::Dynamic { dynamic, .. } | Node::Open(Open::Dynamic { dynamic, .. }) => {
+            | Node::Open(Open::Query { query, .. })
+            | Node::Perform { query }
+            | Node::ReturnQuery(ReturnQuery::Query(query)) => statements.push(*query),
+            Node::Dynamic { dynamic, .. }
+            | Node::Open(Open::Dynamic { dynamic, .. })
+            | Node::ReturnQuery(ReturnQuery::Dynamic(dynamic)) => {
                 dynamic_statements(dynamic, statements);
             }
             Node::Assignment(assignment) => {
@@ -274,7 +278,9 @@ fn nodes_statements(nodes: Vec<Node>, statements: &mut Vec<Statement>) {
             | Node::Commit { .. }
             | Node::Rollback { .. } => {}
             Node::Exit(exit) => statements.extend(exit.condition.map(Statement::Query)),
-            Node::Return { value } => statements.extend(value.map(Statement::Query)),
+            Node::Return { value } | Node::ReturnNext { value } => {
+                statements.extend(value.map(Statement::Query));
+            }
             Node::Raise(raise) => statements.extend(
                 raise
                     .arguments
