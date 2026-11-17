@@ -4,7 +4,7 @@
 use std::{collections::HashSet, ops::ControlFlow};
 
 use sql_traits::traits::{DatabaseLike, FunctionLike};
-use sqlparser::ast::{BinaryOperator, Expr, Ident, InTarget, Query, Value, Visitor};
+use sqlparser::ast::{BinaryOperator, Expr, Ident, InTarget, Query, Visitor};
 use sqlparser_plpgsql::{
     embedded::{Block, Node},
     namespace::{FunctionKind, NameKind, Namespace, Signature, Sql, TriggerVariable},
@@ -13,7 +13,10 @@ use sqlparser_plpgsql::{
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::{plpgsql_flow_support::plpgsql_block, trigger_support::evaluated, walk_support::walk},
+    rules::{
+        literal_support::text_literal, plpgsql_flow_support::plpgsql_block,
+        trigger_support::evaluated, walk_support::walk,
+    },
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
 };
 
@@ -90,18 +93,6 @@ fn is_table_name(namespace: &Namespace, expression: &Expr) -> bool {
     }
 }
 
-/// The string literal `expression` is, under parentheses.
-fn literal(expression: &Expr) -> Option<&str> {
-    match expression {
-        Expr::Nested(inner) => literal(inner),
-        Expr::Value(value) => match &value.value {
-            Value::SingleQuotedString(text) => Some(text),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// Finds the first comparison of the firing table's name with a literal.
 struct Comparison<'n> {
     namespace: &'n Namespace,
@@ -112,8 +103,8 @@ impl Visitor for Comparison<'_> {
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<String> {
         let compared = |left: &Expr, right: &Expr| {
-            (is_table_name(self.namespace, left) && literal(right).is_some())
-                || (is_table_name(self.namespace, right) && literal(left).is_some())
+            (is_table_name(self.namespace, left) && text_literal(right).is_some())
+                || (is_table_name(self.namespace, right) && text_literal(left).is_some())
         };
         let found = match expression {
             Expr::BinaryOp { left, op, right } => {
@@ -128,7 +119,7 @@ impl Visitor for Comparison<'_> {
                 ..
             } => {
                 is_table_name(self.namespace, expr)
-                    && list.iter().any(|item| literal(item).is_some())
+                    && list.iter().any(|item| text_literal(item).is_some())
             }
             Expr::Case {
                 operand: Some(operand),
@@ -138,7 +129,7 @@ impl Visitor for Comparison<'_> {
                 is_table_name(self.namespace, operand)
                     && conditions
                         .iter()
-                        .any(|when| literal(&when.condition).is_some())
+                        .any(|when| text_literal(&when.condition).is_some())
             }
             _ => false,
         };

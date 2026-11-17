@@ -28,6 +28,7 @@ fn findings(body: &str) -> Vec<String> {
 fn comparisons_of_the_table_name_with_a_literal_are_reported_once() {
     for body in [
         "IF TG_TABLE_NAME = 'notes' THEN INSERT INTO events VALUES ('note'); END IF;",
+        "IF TG_TABLE_NAME = 'notes'::name THEN INSERT INTO events VALUES ('note'); END IF;",
         "IF 'notes' <> tg_relname THEN INSERT INTO events VALUES ('other'); END IF;",
         "IF TG_TABLE_NAME IN ('notes', 'folders') THEN INSERT INTO events VALUES ('x'); END IF;",
         "CASE TG_TABLE_NAME WHEN 'notes' THEN kind := 'note'; ELSE kind := 'other'; END CASE;",
