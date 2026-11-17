@@ -227,3 +227,23 @@ fn a_column_keyed_to_the_parent_through_another_row_is_reported() {
         ["tubes.organization_id"]
     );
 }
+
+#[test]
+fn a_column_keyed_through_a_parent_column_outside_its_primary_key_is_reported() {
+    assert_eq!(
+        findings(
+            "CREATE TABLE assets (
+                 id INT PRIMARY KEY,
+                 serial INT NOT NULL,
+                 organization_id INT NOT NULL,
+                 UNIQUE (organization_id, serial)
+             );
+             CREATE TABLE tubes (
+                 id INT PRIMARY KEY REFERENCES assets (id),
+                 organization_id INT NOT NULL,
+                 FOREIGN KEY (organization_id, id) REFERENCES assets (organization_id, serial)
+             );",
+        ),
+        ["tubes.organization_id"]
+    );
+}
