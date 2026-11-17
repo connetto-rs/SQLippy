@@ -1,20 +1,97 @@
 //! Submodule providing the `NullableCompositeForeignKey` and
 //! `UnindexedForeignKey` rules.
 
+use std::borrow::Cow;
+
 use sql_traits::{
     errors::LookupError,
-    traits::{ColumnLike, DatabaseLike, ForeignKeyLike, IndexLike, TableLike},
+    traits::{CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, IndexLike, TableLike},
 };
+use sqlparser::ast::{BinaryOperator, Expr};
 
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
+        closed_set_support::stored_name,
         index_support::entry_columns,
         key_support::{equality_keys, nullable_host_columns},
+        policy_support::conjuncts,
     },
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
+
+/// The stored name of the column a nullness test reads, with whether it
+/// tests `IS NOT NULL`.
+fn null_test(mut expression: &Expr) -> Option<(bool, Cow<'_, str>)> {
+    while let Expr::Nested(inner) = expression {
+        expression = inner;
+    }
+    match expression {
+        Expr::IsNull(column) => Some((false, stored_name(column)?)),
+        Expr::IsNotNull(column) => Some((true, stored_name(column)?)),
+        _ => None,
+    }
+}
+
+/// The stored names of the two columns a check conjunct keeps `NULL`
+/// together, written `(a IS NULL) = (b IS NULL)` or
+/// `(a IS NOT NULL) = (b IS NOT NULL)`.
+fn tie(mut conjunct: &Expr) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
+    while let Expr::Nested(inner) = conjunct {
+        conjunct = inner;
+    }
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = conjunct
+    else {
+        return None;
+    };
+    let ((left_negated, left), (right_negated, right)) = (null_test(left)?, null_test(right)?);
+    (left_negated == right_negated).then_some((left, right))
+}
+
+/// Whether the checks of the host table of `foreign_key` keep each of the
+/// `nullable` key columns `NULL` exactly when the others are, through ties
+/// between two columns chained over shared ones.
+fn null_together<DB: DatabaseLike>(
+    database: &DB,
+    foreign_key: &DB::ForeignKey,
+    nullable: &[&DB::Column],
+) -> Result<bool, LookupError> {
+    let Some((first, rest)) = nullable.split_first() else {
+        return Ok(true);
+    };
+    let mut ties = Vec::new();
+    for check in foreign_key
+        .host_table(database)
+        .check_constraints(database)?
+    {
+        ties.extend(
+            conjuncts(check.expression(database))
+                .into_iter()
+                .filter_map(tie),
+        );
+    }
+    let first = first.stored_column_name();
+    let mut reached: Vec<&str> = vec![&*first];
+    let mut next = 0;
+    while let Some(&name) = reached.get(next) {
+        for (left, right) in &ties {
+            for (from, to) in [(left, right), (right, left)] {
+                if *from == name && !reached.contains(&&**to) {
+                    reached.push(to);
+                }
+            }
+        }
+        next += 1;
+    }
+    Ok(rest
+        .iter()
+        .all(|column| reached.contains(&&*column.stored_column_name())))
+}
 
 /// Struct defining a rule that reports a composite foreign key with two or
 /// more nullable columns under `MATCH SIMPLE`.
@@ -24,6 +101,11 @@ use crate::{
 /// nowhere. A key with one nullable column is an optional reference, such as
 /// `invitation_id` under `FOREIGN KEY (tenant_id, invitation_id)` with
 /// `tenant_id` `NOT NULL`, and is checked whole whenever that column is set.
+/// So is a key whose nullable columns the table's checks keep `NULL`
+/// together, each through `(a IS NULL) = (b IS NULL)` or a chain of such
+/// checks over a shared column, such as `previous_id` and `previous_version`
+/// under `FOREIGN KEY (previous_id, name, previous_version)` with `name`
+/// `NOT NULL`.
 ///
 /// # Example
 ///
@@ -65,7 +147,7 @@ impl<DB> Rule for NullableCompositeForeignKey<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(NullableCompositeForeignKey),
             group: LintGroup::Suspicious,
-            rationale: "Under MATCH SIMPLE a composite foreign key with any column NULL needs no matching row, so a key with two nullable columns can be partly filled and reference nothing.",
+            rationale: "Under MATCH SIMPLE a composite foreign key with any column NULL needs no matching row, so a key with two nullable columns that no check keeps NULL together can be partly filled and reference nothing.",
             source: Some("https://www.postgresql.org/docs/current/sql-createtable.html"),
             basis: Basis::Declared,
             example: RuleExample {
@@ -88,16 +170,18 @@ impl<DB: DatabaseLike> ForeignKeyRule for NullableCompositeForeignKey<DB> {
         foreign_key: &<Self::Database as DatabaseLike>::ForeignKey,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        if foreign_key.match_full(database)
-            || nullable_host_columns(database, foreign_key)?.len() < 2
-        {
+        if foreign_key.match_full(database) {
+            return Ok(());
+        }
+        let nullable = nullable_host_columns(database, foreign_key)?;
+        if nullable.len() < 2 || null_together(database, foreign_key, &nullable)? {
             return Ok(());
         }
         let host = foreign_key.host_table(database).table_name();
         reporter.foreign_key(
             foreign_key,
             format!("A composite foreign key of '{host}' has more than one nullable column under MATCH SIMPLE, so a row with one key column NULL and another set references nothing."),
-            "Declare all but one key column NOT NULL, or add MATCH FULL so a key is either complete or entirely NULL.".to_owned(),
+            "Declare all but one key column NOT NULL, add MATCH FULL so a key is either complete or entirely NULL, or add checks such as (a IS NULL) = (b IS NULL) that keep the nullable key columns NULL together.".to_owned(),
         )?;
         Ok(())
     }

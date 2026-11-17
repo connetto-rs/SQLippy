@@ -1,30 +1,40 @@
 //! Text columns a check constraint restricts to a list of string literals,
 //! shared by the rules that read such a column as a closed set.
 
+use std::borrow::Cow;
+
 use sql_traits::{
     errors::LookupError,
     traits::{CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike},
     utils::identifier_resolution::normalize_identifier,
 };
-use sqlparser::ast::{BinaryOperator, Expr, Ident, InTarget};
+use sqlparser::ast::{BinaryOperator, Expr, InTarget};
 
 use crate::rules::{
     literal_support::text_literal, policy_support::conjuncts, type_support::underlying_type,
 };
 
-/// Whether `expression`, under parentheses, names the column whose stored
-/// name is `column`, bare or qualified.
-pub(crate) fn names_column(mut expression: &Expr, column: &str) -> bool {
+/// The stored name of the column `expression` names under parentheses, bare
+/// or qualified.
+pub(crate) fn stored_name(mut expression: &Expr) -> Option<Cow<'_, str>> {
     while let Expr::Nested(inner) = expression {
         expression = inner;
     }
-    let stored =
-        |name: &Ident| normalize_identifier(&name.value, name.quote_style.is_some()) == column;
-    match expression {
-        Expr::Identifier(name) => stored(name),
-        Expr::CompoundIdentifier(parts) => parts.last().is_some_and(stored),
-        _ => false,
-    }
+    let name = match expression {
+        Expr::Identifier(name) => name,
+        Expr::CompoundIdentifier(parts) => parts.last()?,
+        _ => return None,
+    };
+    Some(normalize_identifier(
+        &name.value,
+        name.quote_style.is_some(),
+    ))
+}
+
+/// Whether `expression`, under parentheses, names the column whose stored
+/// name is `column`, bare or qualified.
+pub(crate) fn names_column(expression: &Expr, column: &str) -> bool {
+    stored_name(expression).is_some_and(|name| name == column)
 }
 
 /// Whether `expression`, under parentheses and casts, names the column whose
