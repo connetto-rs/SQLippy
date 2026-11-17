@@ -2,7 +2,6 @@
 
 use sql_traits::{
     errors::LookupError,
-    structs::TargetName,
     traits::{ColumnLike, DatabaseLike, IndexLike, TableLike},
     utils::columns_in_expression,
 };
@@ -11,7 +10,10 @@ use sqlparser::ast::{Expr, IndexType};
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::policy_support::{is_column_reference, unnested},
+    rules::{
+        index_support::index_target,
+        policy_support::{is_column_reference, unnested},
+    },
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -110,10 +112,7 @@ fn repeated<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
     }
     let table = IndexLike::table(index, database);
     let declared: Vec<&DB::Column> = table.columns(database)?.collect();
-    let mut target = TargetName::new(table.table_name(), table.table_name_is_quoted());
-    if let Some(schema) = table.table_schema() {
-        target = target.with_schema(schema, table.table_schema_is_quoted());
-    }
+    let target = index_target::<DB>(table);
     let keys: Vec<&DB::Column> = elements
         .into_iter()
         .flat_map(|element| {

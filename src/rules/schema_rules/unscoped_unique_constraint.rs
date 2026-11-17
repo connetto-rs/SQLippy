@@ -7,10 +7,10 @@ use sql_traits::{
 };
 
 use crate::{
-    deployment::Declaration,
+    deployment::{Declaration, Deployment},
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::authority_support::{TableColumn, authority_columns},
+    rules::{authority_support::authority_columns, index_support::read_columns},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::index_name},
 };
 
@@ -24,6 +24,41 @@ fn scoped<DB: DatabaseLike, I: IndexLike<DB = DB>>(
     Ok(index
         .columns(database)?
         .any(|column| subjects.contains(&column.stored_column_name().as_ref())))
+}
+
+/// Whether a declared client role may put a row under `index` of `table`, by
+/// inserting into `table` or updating a column the index reads.
+///
+/// A role the schema never creates may hold the privileges from outside it,
+/// and a deployment declaring no client role proves nothing.
+fn client_writable<DB: DatabaseLike, I: IndexLike<DB = DB>>(
+    database: &DB,
+    deployment: &Deployment,
+    table: &DB::Table,
+    index: &I,
+) -> Result<bool, LookupError> {
+    let mut roles = deployment
+        .app_roles()
+        .chain(deployment.anonymous_roles())
+        .peekable();
+    if roles.peek().is_none() {
+        return Ok(true);
+    }
+    let Some(read) = read_columns(database, index)? else {
+        return Ok(true);
+    };
+    for name in roles {
+        let Some(role) = database.role(name) else {
+            return Ok(true);
+        };
+        let possible = table.possible_privileges(role, database)?;
+        if possible.insert.on_any_column()
+            || read.iter().any(|column| possible.update.on_column(column))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The name an index goes by in a finding: the one an allowance takes, else
@@ -48,7 +83,11 @@ fn label<DB: DatabaseLike, I: IndexLike<DB = DB>>(
 ///
 /// A duplicate-key error then tells a caller that the value exists in rows
 /// its policies hide, such as another tenant's. The primary key is not
-/// reported. The rule needs declared credentials.
+/// reported, and neither is an index no declared client role can write
+/// under, by an `INSERT` into the table or an `UPDATE` of a column the index
+/// reads, since a duplicate-key error needs one of them. Writes a
+/// `SECURITY DEFINER` function makes for a caller are not considered. The
+/// rule needs declared credentials.
 ///
 /// # Example
 ///
@@ -128,8 +167,8 @@ impl<DB: DatabaseLike> SchemaRule for UnscopedUniqueConstraintOnRowLevelSecurity
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let subjects: Vec<TableColumn> =
-            authority_columns(database, reporter.deployment())?.subjects;
+        let deployment = reporter.deployment();
+        let subjects = authority_columns(database, deployment)?.subjects;
         for table in database.tables() {
             let own: Vec<&str> = subjects
                 .iter()
@@ -151,13 +190,20 @@ impl<DB: DatabaseLike> SchemaRule for UnscopedUniqueConstraintOnRowLevelSecurity
                 )
             };
             for index in table.unique_indices(database)? {
-                if !index.is_primary_key(database)? && !scoped(database, index, &own)? {
+                if !index.is_primary_key(database)?
+                    && !scoped(database, index, &own)?
+                    && client_writable(database, deployment, table, index)?
+                {
                     let label = label(database, index)?;
                     reporter.unique_index(index, message(&label), resolution(&label))?;
                 }
             }
             for index in table.indices(database)? {
-                if index.is_unique() && index.name().is_some() && !scoped(database, index, &own)? {
+                if index.is_unique()
+                    && index.name().is_some()
+                    && !scoped(database, index, &own)?
+                    && client_writable(database, deployment, table, index)?
+                {
                     let label = label(database, index)?;
                     reporter.index(index, message(&label), resolution(&label))?;
                 }
