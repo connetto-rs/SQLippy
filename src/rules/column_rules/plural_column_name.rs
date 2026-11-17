@@ -14,7 +14,9 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 /// column name is singular.
 ///
 /// For column names with underscores (e.g., `user_account`), only the last
-/// segment after the final underscore is checked for singularity.
+/// segment after the final underscore is checked for singularity. A last
+/// segment of one or two letters, such as the unit in `duration_s` or
+/// `latency_ms`, is an abbreviation and is never reported.
 ///
 /// # Example
 ///
@@ -47,6 +49,19 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 ///     ("matrices", false),
 ///     ("taxon", true),
 ///     ("taxa", false),
+/// ] {
+///     let schema = ParserDB::parse::<GenericDialect>(&format!("CREATE TABLE mytable ({name} INT);")).unwrap();
+///     assert_eq!(constrainer.validate_schema(&schema).is_ok(), singular, "{name}");
+/// }
+///
+/// // Unit suffixes and other abbreviations of one or two letters
+/// for (name, singular) in [
+///     ("duration_s", true),
+///     ("duration_ms", true),
+///     ("latency_us", true),
+///     ("created_ts", true),
+///     ("s", true),
+///     ("user_ids", false),
 /// ] {
 ///     let schema = ParserDB::parse::<GenericDialect>(&format!("CREATE TABLE mytable ({name} INT);")).unwrap();
 ///     assert_eq!(constrainer.validate_schema(&schema).is_ok(), singular, "{name}");
@@ -96,6 +111,9 @@ impl<DB: DatabaseLike> ColumnRule for PluralColumnName<DB> {
     ) -> Result<(), Interruption> {
         let column_name = column.column_name();
         let last_segment = column_name.split('_').next_back().unwrap_or(column_name);
+        if last_segment.chars().count() <= 2 {
+            return Ok(());
+        }
 
         let singularized = singularize(last_segment);
         if singularized == last_segment {
