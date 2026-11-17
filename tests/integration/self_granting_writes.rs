@@ -62,6 +62,8 @@ fn a_write_choosing_a_scope_freely_is_reported() {
            team_id IN (SELECT team_id FROM invitations));",
         "CREATE POLICY w ON members FOR INSERT WITH CHECK (
            parent IN (SELECT team_id FROM invitations WHERE invitee = CRED));",
+        "CREATE POLICY w ON members FOR INSERT WITH CHECK (
+           NOT (team_id = ANY (SELECT team_id FROM invitations WHERE invitee = CRED)));",
     ] {
         assert_eq!(
             reported(&format!("{READ_BY_SUBLINK} {write}")),
@@ -282,6 +284,77 @@ fn a_helper_reading_with_items_that_return_rows_without_a_credential_is_reported
             ["Warn members.w"],
             "{body}"
         );
+    }
+}
+
+/// Helpers and views returning the caller's teams, and every team.
+const RELATIONS: &str = "
+    CREATE FUNCTION my_teams() RETURNS SETOF INT LANGUAGE sql STABLE
+      AS $$ SELECT team_id FROM members WHERE member = current_setting('app.user_id', true) $$;
+    CREATE FUNCTION all_teams() RETURNS SETOF INT LANGUAGE sql STABLE
+      AS $$ SELECT team_id FROM members $$;
+    CREATE VIEW my_memberships AS SELECT team_id FROM members WHERE member = CRED;
+    CREATE VIEW my_team_ids AS SELECT my_teams() AS team_id;
+    CREATE VIEW all_memberships AS SELECT team_id FROM members;";
+
+/// A write scoped by the set `scope` returns.
+fn scoped_by(scope: &str) -> String {
+    format!(
+        "{READ_BY_SUBLINK} {RELATIONS}
+         CREATE POLICY w ON members FOR INSERT WITH CHECK (team_id IN ({scope}));"
+    )
+}
+
+#[test]
+fn a_set_reading_a_relation_that_requires_a_credential_passes() {
+    for scope in [
+        "SELECT d.team_id FROM (SELECT team_id FROM members WHERE member = CRED) d",
+        "SELECT t.id FROM teams t JOIN (SELECT team_id FROM members WHERE member = CRED) d
+           ON d.team_id = t.id",
+        "SELECT team_id FROM my_memberships",
+        "SELECT team_id FROM my_team_ids",
+        "SELECT t.id FROM (teams t JOIN my_memberships m ON m.team_id = t.id)",
+        "SELECT team_id FROM members WHERE member = CRED
+         INTERSECT SELECT team_id FROM invitations",
+        "SELECT team_id FROM invitations
+         INTERSECT SELECT team_id FROM members WHERE member = CRED",
+        "SELECT team_id FROM members WHERE member = CRED
+         EXCEPT SELECT team_id FROM invitations",
+    ] {
+        assert_eq!(reported(&scoped_by(scope)), Vec::<String>::new(), "{scope}");
+    }
+}
+
+#[test]
+fn a_set_compared_with_any_that_requires_a_credential_passes() {
+    for scope in [
+        "SELECT team_id FROM members WHERE member = CRED
+         UNION SELECT id FROM teams WHERE owner = CRED",
+        "SELECT my_teams()",
+    ] {
+        assert_eq!(
+            reported(&format!(
+                "{READ_BY_SUBLINK} {RELATIONS}
+                 CREATE POLICY w ON members FOR INSERT WITH CHECK (team_id = ANY ({scope}));"
+            )),
+            Vec::<String>::new(),
+            "{scope}"
+        );
+    }
+}
+
+#[test]
+fn a_set_reading_a_relation_that_returns_rows_without_a_credential_is_reported() {
+    for scope in [
+        "SELECT d.team_id FROM (SELECT team_id FROM members) d",
+        "SELECT t.id FROM teams t LEFT JOIN (SELECT team_id FROM members WHERE member = CRED) d
+           ON d.team_id = t.id",
+        "SELECT t FROM all_teams() t",
+        "SELECT team_id FROM all_memberships",
+        "SELECT team_id FROM invitations
+         EXCEPT SELECT team_id FROM members WHERE member = CRED",
+    ] {
+        assert_eq!(reported(&scoped_by(scope)), ["Warn members.w"], "{scope}");
     }
 }
 

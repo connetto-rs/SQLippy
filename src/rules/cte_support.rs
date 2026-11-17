@@ -393,13 +393,13 @@ impl<'q> RecursiveItem<'q> {
     }
 }
 
-/// The table `name` reads on `path`, treating a catalog qualifier as the
+/// The relation `name` reads on `path`, treating a catalog qualifier as the
 /// current database, as required for a valid PostgreSQL relation reference.
-pub(crate) fn stored_table<'db, DB: DatabaseLike>(
+pub(crate) fn stored_relation<'db, DB: DatabaseLike>(
     database: &'db DB,
     name: &ObjectName,
     path: Option<&[(Cow<'_, str>, bool)]>,
-) -> Result<Option<&'db DB::Table>, LookupError> {
+) -> Result<Option<Relation<'db, DB>>, LookupError> {
     let (schema, relation) = match name.0.as_slice() {
         [ObjectNamePart::Identifier(relation)] => (None, relation),
         [
@@ -417,13 +417,21 @@ pub(crate) fn stored_table<'db, DB: DatabaseLike>(
     if let Some(schema) = schema {
         target = target.with_schema(&schema.value, schema.quote_style.is_some());
     }
-    let relation = match path {
+    match path {
         Some(path) => {
-            database.resolve_target_relation_on_path(target, path, IdentifierCase::AsWritten)?
+            database.resolve_target_relation_on_path(target, path, IdentifierCase::AsWritten)
         }
-        None => database.resolve_target_relation(target, IdentifierCase::AsWritten)?,
-    };
-    Ok(match relation {
+        None => database.resolve_target_relation(target, IdentifierCase::AsWritten),
+    }
+}
+
+/// The table `name` reads on `path`, as [`stored_relation`] resolves it.
+pub(crate) fn stored_table<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    name: &ObjectName,
+    path: Option<&[(Cow<'_, str>, bool)]>,
+) -> Result<Option<&'db DB::Table>, LookupError> {
+    Ok(match stored_relation(database, name, path)? {
         Some(Relation::Table(table)) => Some(table),
         _ => None,
     })

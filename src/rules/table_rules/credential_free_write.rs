@@ -24,12 +24,14 @@ use crate::{
 /// declared credential `NULL` is reported when some anonymous caller it
 /// applies to, each declared anonymous role or a caller holding only
 /// `PUBLIC`, has no restrictive policy requiring a credential for the same
-/// command. A column compared to the set a set-returning `LANGUAGE sql`
-/// helper returns, written `= ANY (ARRAY(SELECT f()))` or `IN (SELECT f())`,
-/// requires a credential when every `UNION` arm of the helper's body does,
-/// reading nested helpers and the `WITH` items an arm joins the same way and
-/// a `WITH RECURSIVE` item by its non-recursive term. The rule is inactive
-/// until the deployment declares a credential.
+/// command. A column compared to a subquery, written `= ANY (...)`,
+/// `= ANY (ARRAY(...))` or `IN (...)`, requires a credential when the
+/// subquery returns no row without one. A `UNION` does when every arm does,
+/// an `INTERSECT` when one arm does and an `EXCEPT` when its left arm does,
+/// reading the set-returning `LANGUAGE sql` helpers an arm projects and the
+/// derived tables, views and `WITH` items it joins the same way, and a `WITH
+/// RECURSIVE` item by its non-recursive term. The rule is inactive until the
+/// deployment declares a credential.
 ///
 /// # Example
 ///

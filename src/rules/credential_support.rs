@@ -6,19 +6,21 @@ use std::{cell::RefCell, ops::ControlFlow, ptr};
 use sql_traits::{
     errors::LookupError,
     structs::IdentifierCase,
-    traits::{DatabaseLike, FunctionLike, PolicyLike},
+    traits::{DatabaseLike, FunctionLike, PolicyLike, Relation, ViewLike},
+    utils::identifier_resolution::SearchPath,
 };
 use sqlparser::ast::{
     BinaryOperator, Cte, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-    GroupByExpr, InTarget, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SelectItem,
-    SetExpr, SetOperator, TableFactor, UnaryOperator, Value, Visitor, With,
+    GroupByExpr, InTarget, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, Query, Select,
+    SelectItem, SetExpr, SetOperator, TableFactor, TableWithJoins, UnaryOperator, Value, Visitor,
+    With,
 };
 
 use crate::rules::walk_support::walk;
 use crate::{
     deployment::Deployment,
     rules::{
-        cte_support::same_name,
+        cte_support::{same_name, stored_relation},
         policy_support::{may_aggregate, sql_set_body},
     },
 };
@@ -62,16 +64,10 @@ impl<'s> Items<'s> {
         }
     }
 
-    /// The item `factor` reads and the scope of its body, which sees the
-    /// items before it, or every item under `WITH RECURSIVE`, as PostgreSQL
-    /// scopes them.
-    fn read_by(&'s self, factor: &TableFactor) -> Option<(&'s Cte, Self)> {
-        let TableFactor::Table {
-            name, args: None, ..
-        } = factor
-        else {
-            return None;
-        };
+    /// The item `name` reads and the scope of its body, which sees the items
+    /// before it, or every item under `WITH RECURSIVE`, as PostgreSQL scopes
+    /// them. A schema-qualified name never reads an item.
+    fn read_by(&'s self, name: &ObjectName) -> Option<(&'s Cte, Self)> {
         let [ObjectNamePart::Identifier(written)] = name.0.as_slice() else {
             return None;
         };
@@ -98,17 +94,26 @@ impl<'s> Items<'s> {
     }
 }
 
+/// A function body or view definition being read, whose calls and names
+/// resolve against the database.
+struct Reading<'a, F> {
+    /// The function whose body is read, or [`None`] for a view.
+    function: Option<&'a F>,
+    /// The search path the function sets.
+    path: Option<SearchPath<'a>>,
+}
+
 /// Judges the expressions of one policy against the declared credentials.
 pub(crate) struct CredentialJudge<'a, DB: DatabaseLike> {
     database: &'a DB,
     policy: &'a DB::Policy,
     deployment: &'a Deployment,
-    /// Functions whose bodies are being read, so a recursive one is not
-    /// read again.
-    reading: RefCell<Vec<&'a DB::Function>>,
-    /// `WITH` items whose bodies are being judged, by address, each taken
-    /// to return no row where it reads itself.
-    judging: RefCell<Vec<*const Cte>>,
+    /// Function bodies and view definitions being read, so a recursive
+    /// function is not read again.
+    reading: RefCell<Vec<Reading<'a, DB::Function>>>,
+    /// Queries of `WITH` items and views being judged, by address, each
+    /// taken to return no row where it reads itself.
+    judging: RefCell<Vec<*const Query>>,
 }
 
 impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
@@ -154,7 +159,9 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
             | Expr::SimilarTo { expr, pattern, .. } => {
                 self.is_null(expr, scope)? || self.is_null(pattern, scope)?
             }
-            Expr::AnyOp { right, .. } => self.is_null(right, scope)?,
+            Expr::AnyOp { right, .. } => {
+                !matches!(right.as_ref(), Expr::Subquery(_)) && self.is_null(right, scope)?
+            }
             Expr::In {
                 expr,
                 target: InTarget::List(_),
@@ -217,6 +224,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                         {
                             self.subquery_requires(subquery, scope)?
                         }
+                        Expr::Subquery(subquery) => self.subquery_requires(subquery, scope)?,
                         _ => false,
                     }
             }
@@ -331,7 +339,8 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     }
 
     /// Whether a query body returns no row when every credential is `NULL`,
-    /// which a `UNION` does when every arm does.
+    /// which a `UNION` does when every arm does, an `INTERSECT` when one arm
+    /// does and an `EXCEPT` when its left arm does.
     fn set_requires(&self, body: &SetExpr, scope: Scope<'_>) -> Result<bool, LookupError> {
         Ok(match body {
             SetExpr::Select(select) => {
@@ -346,6 +355,17 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                 right,
                 ..
             } => self.set_requires(left, scope)? && self.set_requires(right, scope)?,
+            SetExpr::SetOperation {
+                op: SetOperator::Intersect,
+                left,
+                right,
+                ..
+            } => self.set_requires(left, scope)? || self.set_requires(right, scope)?,
+            SetExpr::SetOperation {
+                op: SetOperator::Except,
+                left,
+                ..
+            } => self.set_requires(left, scope)?,
             _ => false,
         })
     }
@@ -374,7 +394,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     }
 
     /// Functions a call may reach, resolved by the policy, or by the database
-    /// for a call in a function body being read.
+    /// for a call in a function body or view definition being read.
     fn reached(
         &self,
         call: &Function,
@@ -406,14 +426,18 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
             .reading
             .borrow()
             .iter()
-            .any(|reading| std::ptr::eq(*reading, function));
+            .any(|reading| reading.function.is_some_and(|read| ptr::eq(read, function)));
         if reading {
             return Ok(false);
         }
         let Some(query) = sql_set_body(self.database, function)? else {
             return Ok(false);
         };
-        self.reading.borrow_mut().push(function);
+        let path = function.search_path(self.database)?;
+        self.reading.borrow_mut().push(Reading {
+            function: Some(function),
+            path,
+        });
         let requires = self.subquery_requires(&query, None);
         self.reading.borrow_mut().pop();
         requires
@@ -450,59 +474,99 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         Ok(false)
     }
 
-    /// Whether one of a `SELECT`'s `FROM` items is empty when every
-    /// credential is `NULL`, because it joins a `WITH` item that returns no
-    /// row through joins that keep no row of an empty side.
+    /// Whether one of a `SELECT`'s `FROM` items returns no row when every
+    /// credential is `NULL`.
     fn reads_no_row(&self, select: &Select, scope: Scope<'_>) -> Result<bool, LookupError> {
-        let Some(items) = scope else {
-            return Ok(false);
-        };
         for table in &select.from {
-            let mut empty = self.item_returns_no_row(items, &table.relation)?;
-            for join in &table.joins {
-                empty = match join.join_operator {
-                    JoinOperator::Join(_) | JoinOperator::Inner(_) | JoinOperator::CrossJoin(_) => {
-                        empty || self.item_returns_no_row(items, &join.relation)?
-                    }
-                    JoinOperator::Left(_) | JoinOperator::LeftOuter(_) => empty,
-                    JoinOperator::Right(_) | JoinOperator::RightOuter(_) => {
-                        self.item_returns_no_row(items, &join.relation)?
-                    }
-                    _ => false,
-                };
-            }
-            if empty {
+            if self.joined_returns_no_row(table, scope)? {
                 return Ok(true);
             }
         }
         Ok(false)
     }
 
-    /// Whether `factor` reads a `WITH` item of `items` that returns no row
+    /// Whether a `FROM` item returns no row when every credential is `NULL`,
+    /// because it joins a relation returning none through joins that keep no
+    /// row of an empty side.
+    fn joined_returns_no_row(
+        &self,
+        table: &TableWithJoins,
+        scope: Scope<'_>,
+    ) -> Result<bool, LookupError> {
+        let mut empty = self.relation_returns_no_row(&table.relation, scope)?;
+        for join in &table.joins {
+            empty = match join.join_operator {
+                JoinOperator::Join(_) | JoinOperator::Inner(_) | JoinOperator::CrossJoin(_) => {
+                    empty || self.relation_returns_no_row(&join.relation, scope)?
+                }
+                JoinOperator::Left(_) | JoinOperator::LeftOuter(_) => empty,
+                JoinOperator::Right(_) | JoinOperator::RightOuter(_) => {
+                    self.relation_returns_no_row(&join.relation, scope)?
+                }
+                _ => false,
+            };
+        }
+        Ok(empty)
+    }
+
+    /// Whether `factor` returns no row when every credential is `NULL`, as a
+    /// derived table, a parenthesized join, a `WITH` item or a view whose
+    /// query returns none does.
+    fn relation_returns_no_row(
+        &self,
+        factor: &TableFactor,
+        scope: Scope<'_>,
+    ) -> Result<bool, LookupError> {
+        match factor {
+            TableFactor::Derived { subquery, .. } => self.subquery_requires(subquery, scope),
+            TableFactor::NestedJoin {
+                table_with_joins, ..
+            } => self.joined_returns_no_row(table_with_joins, scope),
+            TableFactor::Table {
+                name, args: None, ..
+            } => {
+                if let Some((item, body)) = scope.and_then(|items| items.read_by(name)) {
+                    return self.defined_returns_no_row(&item.query, Some(&body));
+                }
+                let relation = {
+                    let reading = self.reading.borrow();
+                    let path = reading.last().and_then(|reading| reading.path.as_deref());
+                    stored_relation(self.database, name, path)?
+                };
+                match relation {
+                    Some(Relation::View(view)) => {
+                        self.reading.borrow_mut().push(Reading {
+                            function: None,
+                            path: None,
+                        });
+                        let requires = self.defined_returns_no_row(view.definition(), None);
+                        self.reading.borrow_mut().pop();
+                        requires
+                    }
+                    _ => Ok(false),
+                }
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Whether the query defining a `WITH` item or a view returns no row
     /// when every credential is `NULL`.
     ///
-    /// An item read inside its own body counts as returning none, which
-    /// judges a recursive item by its non-recursive term, since PostgreSQL
-    /// feeds the recursive term only the rows the non-recursive term
-    /// returns.
-    fn item_returns_no_row(
-        &self,
-        items: &Items<'_>,
-        factor: &TableFactor,
-    ) -> Result<bool, LookupError> {
-        let Some((item, body)) = items.read_by(factor) else {
-            return Ok(false);
-        };
+    /// A query read inside itself counts as returning none, which judges a
+    /// recursive item by its non-recursive term, since PostgreSQL feeds the
+    /// recursive term only the rows the non-recursive term returns.
+    fn defined_returns_no_row(&self, query: &Query, scope: Scope<'_>) -> Result<bool, LookupError> {
         if self
             .judging
             .borrow()
             .iter()
-            .any(|judged| ptr::eq(*judged, item))
+            .any(|judged| ptr::eq(*judged, query))
         {
             return Ok(true);
         }
-        self.judging.borrow_mut().push(item);
-        let requires = self.subquery_requires(&item.query, Some(&body));
+        self.judging.borrow_mut().push(query);
+        let requires = self.subquery_requires(query, scope);
         self.judging.borrow_mut().pop();
         requires
     }
