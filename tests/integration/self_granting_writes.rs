@@ -184,6 +184,9 @@ fn a_join_partner_inside_the_read_is_not_the_outer_row() {
         "CREATE POLICY w ON members FOR INSERT WITH CHECK (team_id IN (
            SELECT m.team_id FROM members m JOIN people p ON p.id = m.member
            WHERE m.member = CRED AND m.role = 'admin' AND p.active));",
+        "CREATE POLICY w ON members FOR INSERT WITH CHECK (team_id IN (
+           SELECT m.team_id FROM (members m CROSS JOIN people p)
+           WHERE p.id = m.member AND m.member = CRED AND m.role = 'admin' AND p.active));",
         "CREATE FUNCTION administered() RETURNS SETOF INT LANGUAGE sql STABLE AS $$
            SELECT m.team_id FROM members m JOIN people p ON p.id = m.member
            WHERE m.member = current_setting('app.user_id', true) AND m.role = 'admin' AND p.active $$;
