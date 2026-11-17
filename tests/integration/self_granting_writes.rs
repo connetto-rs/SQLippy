@@ -371,6 +371,55 @@ fn a_composite_key_binds_nothing_without_a_constrained_checked_column() {
     assert_eq!(reported(&filtered), ["Warn seats.w"]);
 }
 
+/// Takes every privilege on `members` from `app` and grants back reads and
+/// writes of columns other than `team_id`.
+const WITHHELD: &str = "CREATE ROLE app; REVOKE ALL ON members FROM app;
+    GRANT SELECT, INSERT (member, role), UPDATE (role) ON members TO app;";
+
+#[test]
+fn a_scope_the_writers_cannot_write_is_not_reported() {
+    for write in [
+        "CREATE POLICY w ON members FOR INSERT TO app WITH CHECK (member = CRED);",
+        "CREATE POLICY w ON members FOR UPDATE TO app USING (member = CRED)
+           WITH CHECK (member = CRED);",
+        "CREATE POLICY w ON members FOR ALL TO app USING (member = CRED);",
+    ] {
+        assert_eq!(
+            reported(&format!("{READ_BY_SUBLINK} {WITHHELD} {write}")),
+            Vec::<String>::new(),
+            "{write}"
+        );
+    }
+}
+
+#[test]
+fn a_scope_left_writable_by_a_writer_keeps_the_finding() {
+    for (write, grants) in [
+        (
+            "CREATE POLICY w ON members FOR UPDATE TO app USING (member = CRED);",
+            "GRANT UPDATE (team_id) ON members TO app;",
+        ),
+        (
+            "CREATE POLICY w ON members FOR ALL TO app USING (member = CRED);",
+            "GRANT INSERT ON members TO app;",
+        ),
+        (
+            "CREATE POLICY w ON members FOR UPDATE TO app, other USING (member = CRED);",
+            "CREATE ROLE other; GRANT SELECT, UPDATE ON members TO other;",
+        ),
+        (
+            "CREATE POLICY w ON members FOR UPDATE USING (member = CRED);",
+            "CREATE ROLE other; GRANT SELECT, UPDATE ON members TO other;",
+        ),
+    ] {
+        assert_eq!(
+            reported(&format!("{READ_BY_SUBLINK} {WITHHELD} {grants} {write}")),
+            ["Warn members.w"],
+            "{write} {grants}"
+        );
+    }
+}
+
 #[test]
 fn the_rule_waits_for_a_credential_and_warns_by_default() {
     let sql = format!(
