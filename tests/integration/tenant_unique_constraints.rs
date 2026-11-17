@@ -2,7 +2,10 @@
 //! table, observed through the public constrainer API. On PostgreSQL 17.11
 //! and 18.6, a tenant that saw no row of another tenant's `users` got a
 //! duplicate-key error inserting that tenant's email under a global unique
-//! index, and stored it under one scoped to the tenant.
+//! index, and stored it under one scoped to the tenant. A role holding no
+//! `INSERT` got `permission denied` before any duplicate-key check, and one
+//! holding only `UPDATE` of the predicate column of a partial unique index got
+//! the duplicate-key error by moving its own row under the index.
 
 use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
@@ -79,4 +82,105 @@ fn the_rule_waits_for_a_credential_and_warns_by_default() {
     );
     constrainer.set_deployment(deployment());
     assert_eq!(findings(&constrainer, "").len(), 1);
+}
+
+/// Messages of the rule's findings with `app` declared as the app role and
+/// `anon` as the anonymous role, both created and stripped of every privilege
+/// on `users` before `sql` runs.
+fn client_findings(sql: &str) -> Vec<String> {
+    let mut constrainer: GenericConstrainer<ParserDB> =
+        UnscopedUniqueConstraintOnRowLevelSecurityTable::default().into();
+    constrainer.set_deployment(
+        deployment()
+            .with_app_role("app")
+            .with_anonymous_role("anon"),
+    );
+    findings(
+        &constrainer,
+        &format!(
+            "CREATE ROLE app; CREATE ROLE anon;
+             REVOKE ALL ON users FROM app; REVOKE ALL ON users FROM anon;
+             CREATE UNIQUE INDEX users_email ON users (lower(email)) WHERE handle IS NOT NULL;
+             {sql}"
+        ),
+    )
+    .into_iter()
+    .map(|(_, message)| message)
+    .collect()
+}
+
+#[test]
+fn unique_indices_no_client_role_can_write_are_not_reported() {
+    assert_eq!(
+        client_findings("GRANT SELECT ON users TO app, anon; GRANT UPDATE (id) ON users TO app;"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_client_role_inserting_or_updating_a_key_column_keeps_the_finding() {
+    let email = "Unique constraint 'users_email' on 'users' leaves out 'tenant_id', so a duplicate-key error reveals values in rows the caller's policies hide.";
+    let handle = "Unique constraint 'users_handle_key' on 'users' leaves out 'tenant_id', so a duplicate-key error reveals values in rows the caller's policies hide.";
+    assert_eq!(
+        client_findings("GRANT INSERT (id) ON users TO anon;"),
+        [handle, email]
+    );
+    assert_eq!(
+        client_findings("GRANT UPDATE (email) ON users TO app;"),
+        [email]
+    );
+    assert_eq!(
+        client_findings("GRANT UPDATE (handle) ON users TO app;"),
+        [handle, email]
+    );
+    assert_eq!(
+        client_findings("GRANT UPDATE ON users TO PUBLIC;"),
+        [handle, email]
+    );
+}
+
+#[test]
+fn an_index_reading_a_column_its_table_does_not_declare_keeps_the_finding() {
+    assert_eq!(
+        client_findings(
+            "GRANT SELECT ON users TO app, anon;
+             CREATE UNIQUE INDEX users_slug ON users (handle) WHERE archived IS NULL;"
+        ),
+        [
+            "Unique constraint 'users_slug' on 'users' leaves out 'tenant_id', so a duplicate-key error reveals values in rows the caller's policies hide."
+        ]
+    );
+}
+
+#[test]
+fn a_declared_client_role_the_schema_never_creates_keeps_the_finding() {
+    let mut constrainer: GenericConstrainer<ParserDB> =
+        UnscopedUniqueConstraintOnRowLevelSecurityTable::default().into();
+    constrainer.set_deployment(deployment().with_app_role("app"));
+    assert_eq!(
+        findings(&constrainer, "REVOKE ALL ON users FROM PUBLIC;").len(),
+        1
+    );
+}
+
+#[test]
+fn each_subject_column_is_named_once() {
+    let mut constrainer: GenericConstrainer<ParserDB> =
+        UnscopedUniqueConstraintOnRowLevelSecurityTable::default().into();
+    constrainer.set_deployment(deployment());
+    let found = findings(
+        &constrainer,
+        "CREATE POLICY users_write ON users FOR UPDATE
+           USING (tenant_id = current_setting('app.tenant', true)::int)
+           WITH CHECK (tenant_id = current_setting('app.tenant', true)::int);",
+    );
+    assert_eq!(
+        found
+            .into_iter()
+            .map(|(_, message)| message)
+            .collect::<Vec<_>>(),
+        [
+            "Unique constraint 'users_handle_key' on 'users' leaves out 'tenant_id', so a duplicate-key error reveals values in rows the caller's policies hide."
+        ]
+    );
 }

@@ -1,7 +1,7 @@
 //! Authority tables: tables a policy reads by the caller's credential, whose
 //! rows say which scopes the caller holds.
 
-use std::ops::ControlFlow;
+use std::{collections::BTreeSet, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
@@ -22,16 +22,17 @@ use crate::{
 /// A column, as its table's position and its stored name.
 pub(crate) type TableColumn = (usize, String);
 
-/// The columns of the authority tables the schema's policies read.
+/// The columns of the authority tables the schema's policies read, each named
+/// once however many comparisons read it.
 pub(crate) struct AuthorityColumns {
     /// Columns compared with the outer row or returned as the compared set.
-    pub(crate) scopes: Vec<TableColumn>,
+    pub(crate) scopes: BTreeSet<TableColumn>,
     /// Columns compared with a credential, by a policy or in an authority
     /// read.
-    pub(crate) subjects: Vec<TableColumn>,
+    pub(crate) subjects: BTreeSet<TableColumn>,
     /// Columns an authority read compares with a literal or tests as a
     /// boolean.
-    pub(crate) attributes: Vec<TableColumn>,
+    pub(crate) attributes: BTreeSet<TableColumn>,
 }
 
 /// Whether the expression is a declared credential, parenthesised, cast or
@@ -357,9 +358,9 @@ impl<'db, DB: DatabaseLike> Authority<'_, 'db, DB> {
             top_reading: reading,
             uses: Uses::default(),
             found: AuthorityColumns {
-                scopes: Vec::new(),
-                subjects: Vec::new(),
-                attributes: Vec::new(),
+                scopes: BTreeSet::new(),
+                subjects: BTreeSet::new(),
+                attributes: BTreeSet::new(),
             },
             helpers: Vec::new(),
         };
@@ -606,7 +607,7 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
                 && is_column_reference(other)
                 && !reads_own(scope, select, other)?
             {
-                self.found.scopes.push((table, name));
+                self.found.scopes.insert((table, name));
             }
         }
         let tested: Vec<&Expr> = match reading {
@@ -615,7 +616,7 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
                     if let Some((table, name)) = self.base(scope, item)?
                         && subjects.iter().any(|(subject, _)| *subject == table)
                     {
-                        self.found.scopes.push((table, name));
+                        self.found.scopes.insert((table, name));
                     }
                 }
                 filters.to_vec()
@@ -628,7 +629,7 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
                 if let Some((table, name)) = self.base(scope, column)?
                     && subjects.iter().any(|(subject, _)| *subject == table)
                 {
-                    self.found.attributes.push((table, name));
+                    self.found.attributes.insert((table, name));
                 }
             }
         }
@@ -675,9 +676,9 @@ pub(crate) fn authority_columns<DB: DatabaseLike>(
         deployment,
         read: Vec::new(),
         columns: AuthorityColumns {
-            scopes: Vec::new(),
-            subjects: Vec::new(),
-            attributes: Vec::new(),
+            scopes: BTreeSet::new(),
+            subjects: BTreeSet::new(),
+            attributes: BTreeSet::new(),
         },
     };
     for table in database.tables() {

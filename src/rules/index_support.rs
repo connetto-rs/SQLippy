@@ -6,8 +6,9 @@ use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
-    structs::IdentifierCase,
+    structs::{IdentifierCase, TargetName},
     traits::{ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableLike},
+    utils::columns_in_expression,
 };
 use sqlparser::ast::{
     BinaryOperator, DataType, Expr, Ident, InTarget, ObjectName, ObjectNamePart, Query,
@@ -18,6 +19,39 @@ use crate::rules::{
     policy_support::{is_column_reference, unnested},
     statement_support::OwnLevel,
 };
+
+/// The name an index's expressions qualify the columns of `table` with.
+pub(crate) fn index_target<DB: DatabaseLike>(table: &DB::Table) -> TargetName<'_> {
+    let target = TargetName::new(table.table_name(), table.table_name_is_quoted());
+    match table.table_schema() {
+        Some(schema) => target.with_schema(schema, table.table_schema_is_quoted()),
+        None => target,
+    }
+}
+
+/// The columns `index` reads in its key and its predicate, or `None` when
+/// either names a column its table does not declare.
+pub(crate) fn read_columns<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
+    database: &'db DB,
+    index: &'db I,
+) -> Result<Option<Vec<&'db DB::Column>>, LookupError> {
+    let table = IndexLike::table(index, database);
+    let declared: Vec<&DB::Column> = table.columns(database)?.collect();
+    let target = index_target::<DB>(table);
+    let mut read = Vec::new();
+    for expression in [Some(index.expression(database)?), index.predicate()]
+        .into_iter()
+        .flatten()
+    {
+        let Ok(columns) =
+            columns_in_expression(expression, database.catalog_name(), &target, &declared)
+        else {
+            return Ok(None);
+        };
+        read.extend(columns);
+    }
+    Ok(Some(read))
+}
 
 /// Calls `visit` with each column side and other side a comparison an index
 /// can serve may have.
