@@ -27,7 +27,11 @@ schema_rule!(
     /// rows. Columns are compared by name, type, nullability and default, and
     /// constraints by primary key, unique keys, checks and the columns and
     /// actions of each foreign key. Tables that reference the same tables are
-    /// duplicates rather than parallels and are not reported.
+    /// duplicates rather than parallels and are not reported. Neither are
+    /// subtype tables extending different parents, whose primary key is a
+    /// foreign key to a parent that differs between them, since one table
+    /// under a common parent would no longer make each row a row of its own
+    /// parent.
     ///
     /// # Example
     ///
@@ -90,13 +94,23 @@ fn names<'db, C: ColumnLike + 'db>(columns: impl Iterator<Item = &'db C>) -> Vec
         .collect()
 }
 
-/// The shape of `table` and the table each foreign key references, in the
-/// order of `Shape::foreign_keys`, with `None` for a reference to `table`
-/// itself.
+/// The table a foreign key references and whether the foreign key makes its
+/// host table a subtype of that table.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Target {
+    /// Schema-qualified name of the referenced table, `None` for the host
+    /// table itself.
+    table: Option<String>,
+    /// Whether the host columns are the host table's primary key.
+    extends: bool,
+}
+
+/// The shape of `table` and the target of each foreign key, in the order of
+/// `Shape::foreign_keys`.
 fn shape_of<DB: DatabaseLike>(
     database: &DB,
     table: &DB::Table,
-) -> Result<(Shape, Vec<Option<String>>), LookupError> {
+) -> Result<(Shape, Vec<Target>), LookupError> {
     let mut columns = Vec::new();
     for column in table.columns(database)? {
         columns.push((
@@ -131,20 +145,28 @@ fn shape_of<DB: DatabaseLike>(
         .map(|check| check.expression(database).to_string())
         .collect();
     checks.sort_unstable();
+    let primary_key = names(table.primary_key_columns(database)?);
     let mut foreign_keys = Vec::new();
     for foreign_key in table.foreign_keys(database)? {
         let referenced = foreign_key.referenced_table(database)?;
-        let target = (referenced != table).then(|| {
-            format!(
-                "{}.{}",
-                referenced.table_schema().unwrap_or_default(),
-                referenced.table_name()
-            )
-        });
+        let host_columns = names(foreign_key.host_columns(database)?);
+        let target = Target {
+            table: (referenced != table).then(|| {
+                format!(
+                    "{}.{}",
+                    referenced.table_schema().unwrap_or_default(),
+                    referenced.table_name()
+                )
+            }),
+            extends: host_columns.len() == primary_key.len()
+                && host_columns
+                    .iter()
+                    .all(|column| primary_key.contains(column)),
+        };
         foreign_keys.push((
             format!(
                 "({}) REFERENCES ({}) ON DELETE {} ON UPDATE {} {}",
-                names(foreign_key.host_columns(database)?).join(", "),
+                host_columns.join(", "),
                 names(foreign_key.referenced_columns(database)?).join(", "),
                 foreign_key.on_delete(database),
                 foreign_key.on_update(database),
@@ -158,7 +180,7 @@ fn shape_of<DB: DatabaseLike>(
     Ok((
         Shape {
             columns,
-            primary_key: names(table.primary_key_columns(database)?),
+            primary_key,
             unique_keys,
             checks,
             foreign_keys,
@@ -166,6 +188,21 @@ fn shape_of<DB: DatabaseLike>(
         targets,
     ))
 }
+
+/// Whether two tables of one shape, whose foreign keys reference `targets`
+/// and `earlier`, reference different tables and none of the differing
+/// references is a subtype key.
+fn parallel(targets: &[Target], earlier: &[Target]) -> bool {
+    let mut differing = targets
+        .iter()
+        .zip(earlier)
+        .filter(|(target, earlier_target)| target.table != earlier_target.table)
+        .peekable();
+    differing.peek().is_some() && differing.all(|(target, _)| !target.extends)
+}
+
+/// The tables of one shape met so far, each with its foreign key targets.
+type SameShape<'db, T> = Vec<(&'db T, Vec<Target>)>;
 
 impl<DB: DatabaseLike> SchemaRule for ParallelTables<DB> {
     type Database = DB;
@@ -175,30 +212,29 @@ impl<DB: DatabaseLike> SchemaRule for ParallelTables<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let mut first: HashMap<Shape, (&DB::Table, Vec<Option<String>>)> = HashMap::new();
+        let mut by_shape: HashMap<Shape, SameShape<'_, DB::Table>> = HashMap::new();
         for table in database.tables() {
             let (shape, targets) = shape_of(database, table)?;
             if targets.is_empty() {
                 continue;
             }
-            match first.get(&shape) {
-                None => {
-                    first.insert(shape, (table, targets));
-                }
-                Some((earlier, earlier_targets)) if *earlier_targets != targets => {
-                    let (name, earlier) = (table.table_name(), earlier.table_name());
-                    reporter.table(
-                        table,
-                        format!(
-                            "Table '{name}' declares the columns and constraints of '{earlier}' and differs only in the tables its foreign keys reference."
-                        ),
-                        format!(
-                            "Give the tables '{name}' and '{earlier}' reference a common parent and keep their rows in one table referencing it, unless the two kinds of row must stay apart."
-                        ),
-                    )?;
-                }
-                Some(_) => {}
+            let earlier_tables = by_shape.entry(shape).or_default();
+            if let Some((earlier, _)) = earlier_tables
+                .iter()
+                .find(|(_, earlier_targets)| parallel(&targets, earlier_targets))
+            {
+                let (name, earlier) = (table.table_name(), earlier.table_name());
+                reporter.table(
+                    table,
+                    format!(
+                        "Table '{name}' declares the columns and constraints of '{earlier}' and differs only in the tables its foreign keys reference."
+                    ),
+                    format!(
+                        "Give the tables '{name}' and '{earlier}' reference a common parent and keep their rows in one table referencing it, unless the two kinds of row must stay apart."
+                    ),
+                )?;
             }
+            earlier_tables.push((table, targets));
         }
         Ok(())
     }
