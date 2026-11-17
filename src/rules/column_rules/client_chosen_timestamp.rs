@@ -13,7 +13,7 @@ use sqlparser::ast::{
     TriggerObjectKind, TriggerPeriod, UnaryOperator, Visitor,
 };
 use sqlparser_plpgsql::{
-    embedded::{self, AliasTarget, Block, DeclarationKind, Node, RaiseLevel, Target},
+    embedded::{self, AliasTarget, Block, DeclarationKind, Node, NodeKind, RaiseLevel, Target},
     embedded_sql,
 };
 
@@ -443,8 +443,8 @@ impl Stamping<'_> {
     }
 
     fn node(&self, node: &Node, reach: Reach) -> Option<Reach> {
-        match node {
-            Node::Assignment(assignment) => match self.target(&assignment.target) {
+        match &node.kind {
+            NodeKind::Assignment(assignment) => match self.target(&assignment.target) {
                 Written::Elsewhere => Some(reach),
                 Written::Unfollowed => None,
                 Written::Column if reach == Reach::NONE => Some(reach),
@@ -456,26 +456,26 @@ impl Stamping<'_> {
                     })
                 }
             },
-            Node::Statement { into, .. } | Node::Dynamic { into, .. } => into
+            NodeKind::Statement { into, .. } | NodeKind::Dynamic { into, .. } => into
                 .as_ref()
                 .is_none_or(|into| self.spares(&into.targets))
                 .then_some(reach),
-            Node::Fetch(fetch) => self.spares(&fetch.targets).then_some(reach),
-            Node::Diagnostics(diagnostics) => self
+            NodeKind::Fetch(fetch) => self.spares(&fetch.targets).then_some(reach),
+            NodeKind::Diagnostics(diagnostics) => self
                 .spares(diagnostics.items.iter().map(|item| &item.target))
                 .then_some(reach),
-            Node::Open(_)
-            | Node::Perform { .. }
-            | Node::Move { .. }
-            | Node::Close { .. }
-            | Node::Assert(_) => Some(reach),
-            Node::Raise(raise) => Some(if raise.level == RaiseLevel::Exception {
+            NodeKind::Open(_)
+            | NodeKind::Perform { .. }
+            | NodeKind::Move { .. }
+            | NodeKind::Close { .. }
+            | NodeKind::Assert(_) => Some(reach),
+            NodeKind::Raise(raise) => Some(if raise.level == RaiseLevel::Exception {
                 Reach::NONE
             } else {
                 reach
             }),
-            Node::Block(block) => self.block(block, reach),
-            Node::If(conditional) => self.branches(
+            NodeKind::Block(block) => self.block(block, reach),
+            NodeKind::If(conditional) => self.branches(
                 conditional
                     .branches
                     .iter()
@@ -483,17 +483,17 @@ impl Stamping<'_> {
                 &conditional.otherwise,
                 reach,
             ),
-            Node::Case(case) => self.branches(
+            NodeKind::Case(case) => self.branches(
                 case.branches.iter().map(|branch| {
                     (
                         case.subject.is_none().then_some(&branch.condition),
                         branch.statements.as_slice(),
                     )
                 }),
-                &case.otherwise,
+                case.otherwise.as_deref().unwrap_or_default(),
                 reach,
             ),
-            Node::Return { value: Some(value) } => {
+            NodeKind::Return { value: Some(value) } => {
                 let value = embedded::expression(value);
                 if is_null_literal(&value) || (names_record(&value, "new") && !reach.chosen) {
                     Some(Reach::NONE)
@@ -501,13 +501,13 @@ impl Stamping<'_> {
                     None
                 }
             }
-            Node::Return { value: None }
-            | Node::ReturnNext { .. }
-            | Node::ReturnQuery(_)
-            | Node::Loop(_)
-            | Node::Exit(_)
-            | Node::Commit { .. }
-            | Node::Rollback { .. } => None,
+            NodeKind::Return { value: None }
+            | NodeKind::ReturnNext { .. }
+            | NodeKind::ReturnQuery(_)
+            | NodeKind::Loop(_)
+            | NodeKind::Exit(_)
+            | NodeKind::Commit { .. }
+            | NodeKind::Rollback { .. } => None,
         }
     }
 

@@ -2,7 +2,7 @@
 
 use sql_traits::traits::{DatabaseLike, TableLike, TriggerLike};
 use sqlparser::ast::{Query, Statement, TriggerPeriod};
-use sqlparser_plpgsql::embedded::Node;
+use sqlparser_plpgsql::embedded::{Node, NodeKind};
 
 use crate::{
     error::Interruption,
@@ -94,7 +94,7 @@ impl<DB: DatabaseLike> FlowVisitor for Returns<'_, '_, DB> {
     }
 
     fn step(&mut self, node: &Node, state: &mut Wrote) {
-        if let Node::Return { value } = node
+        if let NodeKind::Return { value } = &node.kind
             && state.0
         {
             if value

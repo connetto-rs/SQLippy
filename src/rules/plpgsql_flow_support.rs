@@ -6,7 +6,7 @@ use sqlparser::ast::{Query, Statement};
 use sqlparser_plpgsql::{
     embedded::{
         Block, BoundCursor, Case, DeclarationKind, Dynamic, Exit, ExitKind, Fetch, If, Indirection,
-        Loop, LoopControl, Node, Open, RaiseLevel, ReturnQuery,
+        Loop, LoopControl, Node, NodeKind, Open, RaiseLevel, ReturnQuery,
     },
     embedded_sql,
 };
@@ -135,23 +135,24 @@ impl<'b, V: FlowVisitor> Walker<'_, 'b, V> {
     }
 
     fn node(&mut self, node: &'b Node, mut state: V::State) -> Option<V::State> {
-        match node {
-            Node::Block(block) => return self.block(block, state),
-            Node::If(conditional) => return self.conditional(conditional, state),
-            Node::Case(case) => return self.case(case, state),
-            Node::Loop(repeated) => return self.repeated(repeated, state),
-            Node::Exit(exit) => return self.exit(exit, state),
-            Node::Return { value: Some(value) } | Node::ReturnNext { value: Some(value) } => {
+        match &node.kind {
+            NodeKind::Block(block) => return self.block(block, state),
+            NodeKind::If(conditional) => return self.conditional(conditional, state),
+            NodeKind::Case(case) => return self.case(case, state),
+            NodeKind::Loop(repeated) => return self.repeated(repeated, state),
+            NodeKind::Exit(exit) => return self.exit(exit, state),
+            NodeKind::Return { value: Some(value) }
+            | NodeKind::ReturnNext { value: Some(value) } => {
                 self.visitor.query(value, &mut state);
             }
-            Node::Raise(raise) => {
+            NodeKind::Raise(raise) => {
                 let options = raise.options.iter().map(|option| &option.value);
                 for query in raise.arguments.iter().chain(options) {
                     self.visitor.query(query, &mut state);
                 }
             }
-            Node::Assert(assert) => self.visitor.query(&assert.condition, &mut state),
-            Node::Assignment(assignment) => {
+            NodeKind::Assert(assert) => self.visitor.query(&assert.condition, &mut state),
+            NodeKind::Assignment(assignment) => {
                 for indirection in &assignment.target.indirection {
                     match indirection {
                         Indirection::Field(_) => {}
@@ -165,37 +166,37 @@ impl<'b, V: FlowVisitor> Walker<'_, 'b, V> {
                 }
                 self.visitor.query(&assignment.value, &mut state);
             }
-            Node::Dynamic { dynamic, .. }
-            | Node::Open(Open::Dynamic { dynamic, .. })
-            | Node::ReturnQuery(ReturnQuery::Dynamic(dynamic)) => {
+            NodeKind::Dynamic { dynamic, .. }
+            | NodeKind::Open(Open::Dynamic { dynamic, .. })
+            | NodeKind::ReturnQuery(ReturnQuery::Dynamic(dynamic)) => {
                 self.dynamic(dynamic, &mut state);
             }
-            Node::Open(Open::Bound(cursor)) => self.cursor(cursor, &mut state),
-            Node::Statement { statement, .. }
-            | Node::Perform { query: statement }
-            | Node::Open(Open::Query {
+            NodeKind::Open(Open::Bound(cursor)) => self.cursor(cursor, &mut state),
+            NodeKind::Statement { statement, .. }
+            | NodeKind::Perform { query: statement }
+            | NodeKind::Open(Open::Query {
                 query: statement, ..
             })
-            | Node::ReturnQuery(ReturnQuery::Query(statement)) => {
+            | NodeKind::ReturnQuery(ReturnQuery::Query(statement)) => {
                 self.visitor.statement(statement, &mut state);
             }
-            Node::Fetch(Fetch { direction, .. }) | Node::Move { direction, .. } => {
+            NodeKind::Fetch(Fetch { direction, .. }) | NodeKind::Move { direction, .. } => {
                 if let Some(count) = direction.expression() {
                     self.visitor.query(count, &mut state);
                 }
             }
-            Node::Return { value: None }
-            | Node::ReturnNext { value: None }
-            | Node::Close { .. }
-            | Node::Commit { .. }
-            | Node::Rollback { .. }
-            | Node::Diagnostics(_) => {}
+            NodeKind::Return { value: None }
+            | NodeKind::ReturnNext { value: None }
+            | NodeKind::Close { .. }
+            | NodeKind::Commit { .. }
+            | NodeKind::Rollback { .. }
+            | NodeKind::Diagnostics(_) => {}
         }
         self.visitor.step(node, &mut state);
-        match node {
-            Node::Return { .. } => None,
-            Node::Raise(raise) if raise.level == RaiseLevel::Exception => None,
-            Node::Assert(assert) => {
+        match &node.kind {
+            NodeKind::Return { .. } => None,
+            NodeKind::Raise(raise) if raise.level == RaiseLevel::Exception => None,
+            NodeKind::Assert(assert) => {
                 self.visitor.assume(&assert.condition, true, &mut state);
                 Some(state)
             }
@@ -233,7 +234,10 @@ impl<'b, V: FlowVisitor> Walker<'_, 'b, V> {
             }
             out = joined(out, self.nodes(&branch.statements, Some(taken)));
         }
-        joined(out, self.nodes(&case.otherwise, Some(state)))
+        joined(
+            out,
+            self.nodes(case.otherwise.as_deref().unwrap_or_default(), Some(state)),
+        )
     }
 
     /// Walks a loop body twice, so the second pass sees what the first

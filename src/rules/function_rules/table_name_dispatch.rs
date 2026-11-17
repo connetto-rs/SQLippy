@@ -6,7 +6,7 @@ use std::{collections::HashSet, ops::ControlFlow};
 use sql_traits::traits::{DatabaseLike, FunctionLike};
 use sqlparser::ast::{BinaryOperator, Expr, Ident, InTarget, Query, Visitor};
 use sqlparser_plpgsql::{
-    embedded::{Block, Node},
+    embedded::{Block, Node, NodeKind},
     namespace::{FunctionKind, NameKind, Namespace, Signature, Sql, TriggerVariable},
 };
 
@@ -144,22 +144,22 @@ impl Visitor for Comparison<'_> {
 /// Collects the subject of every `CASE` statement in `nodes`.
 fn case_subjects(nodes: &[Node], subjects: &mut HashSet<*const Query>) {
     for node in nodes {
-        match node {
-            Node::Case(case) => {
+        match &node.kind {
+            NodeKind::Case(case) => {
                 subjects.extend(case.subject.as_deref().map(std::ptr::from_ref));
                 for branch in &case.branches {
                     case_subjects(&branch.statements, subjects);
                 }
-                case_subjects(&case.otherwise, subjects);
+                case_subjects(case.otherwise.as_deref().unwrap_or_default(), subjects);
             }
-            Node::If(conditional) => {
+            NodeKind::If(conditional) => {
                 for branch in &conditional.branches {
                     case_subjects(&branch.statements, subjects);
                 }
                 case_subjects(&conditional.otherwise, subjects);
             }
-            Node::Loop(repeated) => case_subjects(&repeated.statements, subjects),
-            Node::Block(block) => block_case_subjects(block, subjects),
+            NodeKind::Loop(repeated) => case_subjects(&repeated.statements, subjects),
+            NodeKind::Block(block) => block_case_subjects(block, subjects),
             _ => {}
         }
     }

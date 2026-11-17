@@ -43,6 +43,11 @@ fn sql_and_plpgsql_writes_are_reported_once() {
             ),
             (
                 "plpgsql",
+                "BEGIN CASE WHEN FALSE THEN NULL; ELSE INSERT INTO audit VALUES (6); END CASE; END",
+                "INSERT",
+            ),
+            (
+                "plpgsql",
                 "DECLARE x INT; BEGIN WITH d AS (INSERT INTO audit VALUES (5) RETURNING n) SELECT n INTO x FROM d; END",
                 "INSERT",
             ),

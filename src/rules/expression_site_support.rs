@@ -14,7 +14,7 @@ use sqlparser::{
 use sqlparser_plpgsql::{
     embedded::{
         Block, BoundCursor, DeclarationKind, Dynamic, Fetch, FetchCount, FetchDirection,
-        FetchPosition, Indirection, LoopControl, Node, Open, ReturnQuery,
+        FetchPosition, Indirection, LoopControl, Node, NodeKind, Open, ReturnQuery,
     },
     embedded_sql,
 };
@@ -245,19 +245,19 @@ fn dynamic_statements(dynamic: Dynamic, statements: &mut Vec<Statement>) {
 /// Appends every statement the PL/pgSQL `nodes` run.
 fn nodes_statements(nodes: Vec<Node>, statements: &mut Vec<Statement>) {
     for node in nodes {
-        match node {
-            Node::Statement {
+        match node.kind {
+            NodeKind::Statement {
                 statement: query, ..
             }
-            | Node::Open(Open::Query { query, .. })
-            | Node::Perform { query }
-            | Node::ReturnQuery(ReturnQuery::Query(query)) => statements.push(*query),
-            Node::Dynamic { dynamic, .. }
-            | Node::Open(Open::Dynamic { dynamic, .. })
-            | Node::ReturnQuery(ReturnQuery::Dynamic(dynamic)) => {
+            | NodeKind::Open(Open::Query { query, .. })
+            | NodeKind::Perform { query }
+            | NodeKind::ReturnQuery(ReturnQuery::Query(query)) => statements.push(*query),
+            NodeKind::Dynamic { dynamic, .. }
+            | NodeKind::Open(Open::Dynamic { dynamic, .. })
+            | NodeKind::ReturnQuery(ReturnQuery::Dynamic(dynamic)) => {
                 dynamic_statements(dynamic, statements);
             }
-            Node::Assignment(assignment) => {
+            NodeKind::Assignment(assignment) => {
                 for indirection in assignment.target.indirection {
                     match indirection {
                         Indirection::Field(_) => {}
@@ -269,46 +269,46 @@ fn nodes_statements(nodes: Vec<Node>, statements: &mut Vec<Statement>) {
                 }
                 statements.push(Statement::Query(assignment.value));
             }
-            Node::Open(Open::Bound(cursor)) => bound_cursor_statements(cursor, statements),
-            Node::Fetch(Fetch { direction, .. }) | Node::Move { direction, .. } => {
+            NodeKind::Open(Open::Bound(cursor)) => bound_cursor_statements(cursor, statements),
+            NodeKind::Fetch(Fetch { direction, .. }) | NodeKind::Move { direction, .. } => {
                 statements.extend(direction_query(direction).map(Statement::Query));
             }
-            Node::Diagnostics(_)
-            | Node::Close { .. }
-            | Node::Commit { .. }
-            | Node::Rollback { .. } => {}
-            Node::Exit(exit) => statements.extend(exit.condition.map(Statement::Query)),
-            Node::Return { value } | Node::ReturnNext { value } => {
+            NodeKind::Diagnostics(_)
+            | NodeKind::Close { .. }
+            | NodeKind::Commit { .. }
+            | NodeKind::Rollback { .. } => {}
+            NodeKind::Exit(exit) => statements.extend(exit.condition.map(Statement::Query)),
+            NodeKind::Return { value } | NodeKind::ReturnNext { value } => {
                 statements.extend(value.map(Statement::Query));
             }
-            Node::Raise(raise) => statements.extend(
+            NodeKind::Raise(raise) => statements.extend(
                 raise
                     .arguments
                     .into_iter()
                     .chain(raise.options.into_iter().map(|option| option.value))
                     .map(|argument| Statement::Query(Box::new(argument))),
             ),
-            Node::Assert(assert) => {
+            NodeKind::Assert(assert) => {
                 statements.push(Statement::Query(assert.condition));
                 statements.extend(assert.message.map(Statement::Query));
             }
-            Node::Block(block) => block_statements(block, statements),
-            Node::If(conditional) => {
+            NodeKind::Block(block) => block_statements(block, statements),
+            NodeKind::If(conditional) => {
                 for branch in conditional.branches {
                     statements.push(Statement::Query(branch.condition));
                     nodes_statements(branch.statements, statements);
                 }
                 nodes_statements(conditional.otherwise, statements);
             }
-            Node::Case(case) => {
+            NodeKind::Case(case) => {
                 statements.extend(case.subject.map(Statement::Query));
                 for branch in case.branches {
                     statements.push(Statement::Query(branch.condition));
                     nodes_statements(branch.statements, statements);
                 }
-                nodes_statements(case.otherwise, statements);
+                nodes_statements(case.otherwise.unwrap_or_default(), statements);
             }
-            Node::Loop(repeated) => {
+            NodeKind::Loop(repeated) => {
                 match repeated.control {
                     LoopControl::Unconditional => {}
                     LoopControl::While(query) | LoopControl::Array { array: query, .. } => {
