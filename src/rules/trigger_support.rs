@@ -1,11 +1,12 @@
 //! Facts about triggers and the functions they run, shared by the trigger
 //! rules.
 
-use sql_traits::traits::{DatabaseLike, TriggerLike};
+use sql_traits::traits::{DatabaseLike, FunctionLike, TriggerLike};
 use sqlparser::{
     ast::{
-        Expr, FromTable, Ident, ObjectName, Query, SelectItem, SetExpr, Statement, TableFactor,
-        TableObject, TableWithJoins, TriggerEvent, TriggerObject, TriggerObjectKind, TriggerPeriod,
+        Delete, Expr, FromTable, Ident, Insert, Merge, ObjectName, Query, SelectItem, Statement,
+        TableFactor, TableObject, TableWithJoins, TriggerEvent, TriggerObject, TriggerObjectKind,
+        TriggerPeriod, Update,
     },
     keywords::Keyword,
     tokenizer::Token,
@@ -63,40 +64,21 @@ pub(crate) fn fires_on_insert<T: TriggerLike>(trigger: &T) -> bool {
 /// The expression a PL/pgSQL expression evaluates, read as the `SELECT` of
 /// one expression PostgreSQL runs it as.
 pub(crate) fn evaluated(query: &Query) -> Option<&Expr> {
-    let SetExpr::Select(select) = query.body.as_ref() else {
-        return None;
-    };
+    let select = query.body.as_select()?;
     match select.projection.as_slice() {
         [SelectItem::UnnamedExpr(expression)] if select.from.is_empty() => Some(expression),
         _ => None,
     }
 }
 
-/// The name of a plain table reference.
-const fn factor_name(factor: &TableFactor) -> Option<&ObjectName> {
-    match factor {
-        TableFactor::Table { name, .. } => Some(name),
-        _ => None,
-    }
-}
-
-/// The tables a statement writes, by the names it writes them under, or
-/// `None` for a statement that writes nothing.
-fn written_names(statement: &Statement) -> Option<Vec<&ObjectName>> {
-    Some(match statement {
-        Statement::Insert(insert) => match &insert.table {
-            TableObject::TableName(name) => vec![name],
-            TableObject::TableFunction(_) | TableObject::TableQuery(_) => Vec::new(),
-        },
-        Statement::Update(update) => factor_name(&update.table.relation).into_iter().collect(),
-        Statement::Delete(delete) => match &delete.from {
-            FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables
-                .iter()
-                .filter_map(|table: &TableWithJoins| factor_name(&table.relation))
-                .collect(),
-        },
-        Statement::Merge(merge) => factor_name(&merge.table).into_iter().collect(),
-        _ => return None,
+/// Every trigger, with the function it runs.
+pub(crate) fn triggers_with_functions<DB: DatabaseLike>(
+    database: &DB,
+) -> impl Iterator<Item = (&DB::Function, &DB::Trigger)> {
+    database.functions().flat_map(move |function| {
+        function
+            .triggers(database)
+            .map(move |trigger| (function, trigger))
     })
 }
 
@@ -121,16 +103,41 @@ impl<DB: DatabaseLike> Sought for WritesElsewhere<'_, DB> {
         None
     }
 
+    /// A statement writes the table its `INSERT`, `UPDATE`, `DELETE` or
+    /// `MERGE` names.
     fn statement(&self, statement: &Statement) -> Option<()> {
-        written_names(statement)?
-            .into_iter()
-            .any(|name| {
-                !matches!(
-                    stored_table(self.database, name, None),
-                    Ok(Some(table)) if table == self.table
-                )
+        let elsewhere = |name: &ObjectName| {
+            !matches!(
+                stored_table(self.database, name, None),
+                Ok(Some(table)) if table == self.table
+            )
+        };
+        let writes_elsewhere = match statement {
+            Statement::Insert(Insert {
+                table: TableObject::TableName(name),
+                ..
             })
-            .then_some(())
+            | Statement::Update(Update {
+                table:
+                    TableWithJoins {
+                        relation: TableFactor::Table { name, .. },
+                        ..
+                    },
+                ..
+            })
+            | Statement::Merge(Merge {
+                table: TableFactor::Table { name, .. },
+                ..
+            }) => elsewhere(name),
+            Statement::Delete(Delete {
+                from: FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables),
+                ..
+            }) => tables.iter().any(
+                |table| matches!(&table.relation, TableFactor::Table { name, .. } if elsewhere(name)),
+            ),
+            _ => false,
+        };
+        writes_elsewhere.then_some(())
     }
 
     /// A called body writes when it holds `INSERT INTO`, `DELETE FROM`,

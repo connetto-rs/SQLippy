@@ -11,7 +11,9 @@ use crate::{
         expression_site_support::is_null_literal,
         function_reach_support::Reach,
         plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, walk_block},
-        trigger_support::{WritesElsewhere, evaluated, fires_on_insert, row_trigger},
+        trigger_support::{
+            WritesElsewhere, evaluated, fires_on_insert, row_trigger, triggers_with_functions,
+        },
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
@@ -116,13 +118,10 @@ impl<DB: DatabaseLike> SchemaRule for BeforeTriggerWritesOtherTable<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        for trigger in database.triggers() {
+        for (function, trigger) in triggers_with_functions(database) {
             if !row_trigger(trigger, TriggerPeriod::Before) || !fires_on_insert(trigger) {
                 continue;
             }
-            let Some(function) = trigger.function(database) else {
-                continue;
-            };
             let Some(block) = plpgsql_block(function) else {
                 continue;
             };

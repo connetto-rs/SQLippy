@@ -141,10 +141,8 @@ impl<'b, V: FlowVisitor> Walker<'_, 'b, V> {
             Node::Case(case) => return self.case(case, state),
             Node::Loop(repeated) => return self.repeated(repeated, state),
             Node::Exit(exit) => return self.exit(exit, state),
-            Node::Return { value } | Node::ReturnNext { value } => {
-                if let Some(value) = value {
-                    self.visitor.query(value, &mut state);
-                }
+            Node::Return { value: Some(value) } | Node::ReturnNext { value: Some(value) } => {
+                self.visitor.query(value, &mut state);
             }
             Node::Raise(raise) => {
                 let options = raise.options.iter().map(|option| &option.value);
@@ -186,7 +184,9 @@ impl<'b, V: FlowVisitor> Walker<'_, 'b, V> {
                     self.visitor.query(count, &mut state);
                 }
             }
-            Node::Close { .. }
+            Node::Return { value: None }
+            | Node::ReturnNext { value: None }
+            | Node::Close { .. }
             | Node::Commit { .. }
             | Node::Rollback { .. }
             | Node::Diagnostics(_) => {}
@@ -286,23 +286,20 @@ impl<'b, V: FlowVisitor> Walker<'_, 'b, V> {
         };
         let reached = match &exit.label {
             None => self.frames.iter().rposition(|frame| frame.repeats),
-            // A label no enclosing block or loop carries is the function's
-            // name, which labels the level holding the whole body.
-            Some(label) => Some(
-                self.frames
-                    .iter()
-                    .rposition(|frame| frame.label == Some(label.as_str()))
-                    .unwrap_or(0),
-            ),
+            Some(label) => self
+                .frames
+                .iter()
+                .rposition(|frame| frame.label == Some(label.as_str())),
         };
-        // PostgreSQL refuses an `EXIT` without a label outside every loop.
-        if let Some(frame) = reached.and_then(|at| self.frames.get_mut(at)) {
-            let paths = match exit.kind {
-                ExitKind::Exit => &mut frame.exits,
-                ExitKind::Continue => &mut frame.continues,
-            };
-            *paths = joined(paths.take(), Some(leaving));
-        }
+        // A label no enclosing block or loop carries is the function's name,
+        // which labels the level holding the whole body. An `EXIT` without a
+        // label outside every loop, which PostgreSQL refuses, reaches it too.
+        let frame = &mut self.frames[reached.unwrap_or(0)];
+        let paths = match exit.kind {
+            ExitKind::Exit => &mut frame.exits,
+            ExitKind::Continue => &mut frame.continues,
+        };
+        *paths = joined(paths.take(), Some(leaving));
         staying
     }
 

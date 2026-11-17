@@ -7,7 +7,7 @@ use sql_traits::{
     traits::{DatabaseLike, FunctionLike, TableLike, TriggerLike},
 };
 use sqlparser::ast::{
-    Expr, Function, FunctionBehavior, Ident, TriggerEvent, TriggerPeriod, Visitor,
+    Expr, Function, FunctionBehavior, Ident, ObjectNamePart, TriggerEvent, TriggerPeriod, Visitor,
 };
 use sqlparser_plpgsql::embedded::{DeclarationKind, Node};
 
@@ -118,13 +118,12 @@ impl<DB: DatabaseLike> Visitor for RowsRead<'_, DB> {
             Expr::Identifier(ident) => self.record(ident),
             Expr::Function(call) => self.immutable(call),
             Expr::CompoundIdentifier(parts) if parts.len() == 2 => self.record(&parts[0]),
-            Expr::QualifiedWildcard(name, _) => match name.0.as_slice() {
-                [part] => part
-                    .as_ident()
-                    .map_or(ControlFlow::Break(()), |ident| self.record(ident)),
-                _ => ControlFlow::Break(()),
-            },
-            Expr::CompoundIdentifier(_) => ControlFlow::Break(()),
+            Expr::QualifiedWildcard(name, _) if name.0.len() == 1 => name
+                .0
+                .first()
+                .and_then(ObjectNamePart::as_ident)
+                .map_or(ControlFlow::Break(()), |ident| self.record(ident)),
+            Expr::CompoundIdentifier(_) | Expr::QualifiedWildcard(..) => ControlFlow::Break(()),
             _ => ControlFlow::Continue(()),
         }
     }
@@ -205,8 +204,8 @@ impl<DB: DatabaseLike> SchemaRule for TriggerFilterInBody<DB> {
                     && trigger.events().iter().all(|event| match event {
                         TriggerEvent::Insert => !read.old,
                         TriggerEvent::Delete => !read.new,
-                        TriggerEvent::Update(_) => true,
-                        TriggerEvent::Truncate => false,
+                        // A row trigger never fires on `TRUNCATE`.
+                        event => matches!(event, TriggerEvent::Update(_)),
                     })
             };
             if triggers.is_empty() || !triggers.iter().all(movable) {

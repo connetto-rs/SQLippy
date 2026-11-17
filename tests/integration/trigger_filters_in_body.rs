@@ -110,6 +110,10 @@ fn filters_when_cannot_take_are_not_reported() {
             &["AFTER UPDATE"][..],
         ),
         (
+            filtered("on_note.new.body IS NOT DISTINCT FROM on_note.old.body"),
+            &["AFTER UPDATE"][..],
+        ),
+        (
             "BEGIN IF NEW.body IS NULL THEN RETURN NULL; ELSIF NEW.id = 0 THEN RETURN NULL; END IF; INSERT INTO audit VALUES (NEW.id); RETURN NULL; END".to_owned(),
             &["AFTER UPDATE"][..],
         ),

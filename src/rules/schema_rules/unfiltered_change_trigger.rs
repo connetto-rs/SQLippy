@@ -11,7 +11,9 @@ use crate::{
     rules::{
         function_reach_support::Reach,
         plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, walk_block},
-        trigger_support::{WritesElsewhere, evaluated, fires_on_update, row, row_trigger},
+        trigger_support::{
+            WritesElsewhere, evaluated, fires_on_update, row, row_trigger, triggers_with_functions,
+        },
         walk_support::walk,
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
@@ -144,16 +146,13 @@ impl<DB: DatabaseLike> SchemaRule for UnfilteredChangeTrigger<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        for trigger in database.triggers() {
+        for (function, trigger) in triggers_with_functions(database) {
             if !row_trigger(trigger, TriggerPeriod::After)
                 || !fires_on_update(trigger)
                 || trigger.condition().is_some()
             {
                 continue;
             }
-            let Some(function) = trigger.function(database) else {
-                continue;
-            };
             let Some(block) = plpgsql_block(function) else {
                 continue;
             };

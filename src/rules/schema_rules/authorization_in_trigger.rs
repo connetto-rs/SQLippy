@@ -22,7 +22,7 @@ use crate::{
         literal_support::text_literal,
         plpgsql_flow_support::plpgsql_block,
         policy_support::{Command, applied},
-        trigger_support::evaluated,
+        trigger_support::{evaluated, triggers_with_functions},
         walk_support::walk,
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
@@ -191,10 +191,7 @@ impl<DB: DatabaseLike> SchemaRule for AuthorizationInTrigger<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        for trigger in database.triggers() {
-            let Some(function) = trigger.function(database) else {
-                continue;
-            };
+        for (function, trigger) in triggers_with_functions(database) {
             let table = trigger.table(database)?;
             if !table.has_row_level_security(database)? {
                 continue;
