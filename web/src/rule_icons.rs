@@ -230,6 +230,8 @@ rule_icons! {
     "before_trigger_writes_other_table" => FaBolt,
     "unfiltered_change_trigger" => FaClockRotateLeft,
     "authorization_in_trigger" => FaUserCheck,
+    "table_name_dispatch" => FaTags,
+    "trigger_filter_in_body" => FaFilter,
 }
 #[cfg(test)]
 mod tests {
