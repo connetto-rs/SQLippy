@@ -3,12 +3,35 @@
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
+    rules::key_support::holds_through_references,
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
-use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, TableLike};
+use sql_traits::{
+    errors::LookupError,
+    traits::{CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, TableLike},
+};
+
+/// Whether `column` declares an enforced length or checks an upper bound on
+/// its length.
+fn is_bounded<DB: DatabaseLike>(database: &DB, column: &DB::Column) -> Result<bool, LookupError> {
+    if column
+        .data_type(database)
+        .max_character_length(database)
+        .is_some()
+    {
+        return Ok(true);
+    }
+    for check in column.check_constraints(database)? {
+        if check.is_upper_bounded_text_constraint(database)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 /// Struct defining a rule that requires every textual column to have an upper
-/// length bound, either an enforced declared length or a length check.
+/// length bound, either an enforced declared length or a length check, its
+/// own or that of a column a foreign key forces its values to equal.
 ///
 /// # Example
 ///
@@ -37,6 +60,14 @@ use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, Database
 /// // Valid: a declared length the engine enforces
 /// let declared = ParserDB::parse::<GenericDialect>("CREATE TABLE users (name VARCHAR(100));").unwrap();
 /// assert!(constrainer.validate_schema(&declared).is_ok());
+///
+/// // Valid: a reference to a bounded key
+/// let referencing = ParserDB::parse::<GenericDialect>(
+///     "CREATE TABLE statuses (id TEXT PRIMARY KEY CHECK (LENGTH(id) <= 63));
+///      CREATE TABLE runs (id INT PRIMARY KEY, status_id TEXT NOT NULL REFERENCES statuses (id));",
+/// )
+/// .unwrap();
+/// assert!(constrainer.validate_schema(&referencing).is_ok());
 /// ```
 pub struct UnboundedTextColumn<DB>(std::marker::PhantomData<DB>);
 
@@ -81,17 +112,9 @@ impl<DB: DatabaseLike> ColumnRule for UnboundedTextColumn<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         if !column.data_type(database).is_textual(database)
-            || column
-                .data_type(database)
-                .max_character_length(database)
-                .is_some()
+            || holds_through_references(database, column, |source| is_bounded(database, source))?
         {
             return Ok(());
-        }
-        for check in column.check_constraints(database)? {
-            if check.is_upper_bounded_text_constraint(database)?.is_some() {
-                return Ok(());
-            }
         }
 
         let table_name = column.table(database).table_name();

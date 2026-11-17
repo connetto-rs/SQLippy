@@ -3,12 +3,30 @@
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
+    rules::key_support::holds_through_references,
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
-use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, TableLike};
+use sql_traits::{
+    errors::LookupError,
+    traits::{CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, TableLike},
+};
+
+/// Whether a check constraint of `column` rejects the empty string.
+fn rejects_empty<DB: DatabaseLike>(
+    database: &DB,
+    column: &DB::Column,
+) -> Result<bool, LookupError> {
+    for check in column.check_constraints(database)? {
+        if check.is_not_empty_text_constraint(database)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 /// Struct defining a rule that requires every textual column to have a check
-/// constraint verifying it is not empty.
+/// constraint verifying it is not empty, its own or that of a column a
+/// foreign key forces its values to equal.
 ///
 /// # Example
 ///
@@ -25,6 +43,14 @@ use sql_traits::traits::{CheckConstraintLike, ColumnLike, DataTypeLike, Database
 /// // Valid: textual column with a not-empty check
 /// let valid_schema = ParserDB::parse::<GenericDialect>("CREATE TABLE users (name TEXT CHECK (name <> ''));").unwrap();
 /// assert!(constrainer.validate_schema(&valid_schema).is_ok());
+///
+/// // Valid: a reference to a non-empty key
+/// let referencing = ParserDB::parse::<GenericDialect>(
+///     "CREATE TABLE statuses (id TEXT PRIMARY KEY CHECK (id <> ''));
+///      CREATE TABLE runs (id INT PRIMARY KEY, status_id TEXT NOT NULL REFERENCES statuses (id));",
+/// )
+/// .unwrap();
+/// assert!(constrainer.validate_schema(&referencing).is_ok());
 /// ```
 pub struct EmptyTextAllowed<DB>(std::marker::PhantomData<DB>);
 
@@ -68,18 +94,9 @@ impl<DB: DatabaseLike> ColumnRule for EmptyTextAllowed<DB> {
         column: &<Self::Database as DatabaseLike>::Column,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        if !column.data_type(database).is_textual(database) {
-            return Ok(());
-        }
-
-        let mut has_not_empty_check = false;
-        for cc in column.check_constraints(database)? {
-            if cc.is_not_empty_text_constraint(database)? {
-                has_not_empty_check = true;
-                break;
-            }
-        }
-        if has_not_empty_check {
+        if !column.data_type(database).is_textual(database)
+            || holds_through_references(database, column, |source| rejects_empty(database, source))?
+        {
             return Ok(());
         }
 

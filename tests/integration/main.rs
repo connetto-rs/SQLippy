@@ -77,6 +77,7 @@ mod statement_types;
 mod subject_settable_attributes;
 mod superkey_primary_keys;
 mod tenant_unique_constraints;
+mod text_references;
 mod unaudited_authority_tables;
 mod uncached_policy_calls;
 mod undeletable_references;

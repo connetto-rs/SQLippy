@@ -499,6 +499,44 @@ pub(crate) fn key_pairs<'db, DB: DatabaseLike>(
         .collect())
 }
 
+/// Whether `holds` is true of `column` or of a column its non-`NULL` values
+/// must equal, followed along chains of foreign keys. A foreign key forces
+/// that equality under `MATCH FULL` or when every other host column is
+/// `NOT NULL`, since `MATCH SIMPLE` skips a row with a `NULL` in its key.
+pub(crate) fn holds_through_references<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    column: &'db DB::Column,
+    holds: impl Fn(&DB::Column) -> Result<bool, LookupError>,
+) -> Result<bool, LookupError> {
+    let mut pending = vec![column];
+    let mut visited = Vec::new();
+    while let Some(current) = pending.pop() {
+        if visited.contains(&current) {
+            continue;
+        }
+        visited.push(current);
+        if holds(current)? {
+            return Ok(true);
+        }
+        'keys: for foreign_key in current.foreign_keys(database)? {
+            let pairs = key_pairs(database, foreign_key)?;
+            if !foreign_key.match_full(database) {
+                for &(host, _) in &pairs {
+                    if host != current && host.is_nullable(database)? {
+                        continue 'keys;
+                    }
+                }
+            }
+            pending.extend(
+                pairs
+                    .into_iter()
+                    .filter_map(|(host, referenced)| (host == current).then_some(referenced)),
+            );
+        }
+    }
+    Ok(false)
+}
+
 /// Whether `wider` checks every row `narrower` holds against the same
 /// referenced columns: its column pairs contain those of `narrower`, and
 /// `MATCH SIMPLE` on a `NULL` extra column does not let a row escape it.
