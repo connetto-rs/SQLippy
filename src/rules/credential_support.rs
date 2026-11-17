@@ -5,7 +5,7 @@ use std::{cell::RefCell, ops::ControlFlow, ptr};
 
 use sql_traits::{
     errors::LookupError,
-    structs::IdentifierCase,
+    structs::{IdentifierCase, WrittenCall},
     traits::{DatabaseLike, FunctionLike, PolicyLike, Relation, ViewLike},
     utils::identifier_resolution::SearchPath,
 };
@@ -383,6 +383,16 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         else {
             return Ok(false);
         };
+        self.call_returns_no_row(call)
+    }
+
+    /// Whether a call reaches a function and every function it may reach is
+    /// a set-returning `LANGUAGE sql` one returning no row when every
+    /// credential is `NULL`.
+    fn call_returns_no_row<'c>(
+        &self,
+        call: impl Into<WrittenCall<'c>>,
+    ) -> Result<bool, LookupError> {
         let mut reached = false;
         for function in self.reached(call)? {
             reached = true;
@@ -395,10 +405,11 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
 
     /// Functions a call may reach, resolved by the policy, or by the database
     /// for a call in a function body or view definition being read.
-    fn reached(
+    fn reached<'c>(
         &self,
-        call: &Function,
+        call: impl Into<WrittenCall<'c>>,
     ) -> Result<impl Iterator<Item = &'a DB::Function>, LookupError> {
+        let call = call.into();
         let in_body = !self.reading.borrow().is_empty();
         let from_policy = if in_body {
             None
@@ -511,7 +522,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
 
     /// Whether `factor` returns no row when every credential is `NULL`, as a
     /// derived table, a parenthesized join, a `WITH` item or a view whose
-    /// query returns none does.
+    /// query returns none does, or a call to helpers whose bodies return none.
     fn relation_returns_no_row(
         &self,
         factor: &TableFactor,
@@ -546,7 +557,10 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                     _ => Ok(false),
                 }
             }
-            _ => Ok(false),
+            _ => match WrittenCall::relation(factor) {
+                Some(call) => self.call_returns_no_row(call),
+                None => Ok(false),
+            },
         }
     }
 

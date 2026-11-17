@@ -291,10 +291,13 @@ fn a_helper_reading_with_items_that_return_rows_without_a_credential_is_reported
 const RELATIONS: &str = "
     CREATE FUNCTION my_teams() RETURNS SETOF INT LANGUAGE sql STABLE
       AS $$ SELECT team_id FROM members WHERE member = current_setting('app.user_id', true) $$;
+    CREATE FUNCTION my_teams_again() RETURNS SETOF INT LANGUAGE sql STABLE
+      AS $$ SELECT t FROM my_teams() t $$;
     CREATE FUNCTION all_teams() RETURNS SETOF INT LANGUAGE sql STABLE
       AS $$ SELECT team_id FROM members $$;
     CREATE VIEW my_memberships AS SELECT team_id FROM members WHERE member = CRED;
     CREATE VIEW my_team_ids AS SELECT my_teams() AS team_id;
+    CREATE VIEW from_my_teams AS SELECT t AS team_id FROM my_teams() t;
     CREATE VIEW all_memberships AS SELECT team_id FROM members;";
 
 /// A write scoped by the set `scope` returns.
@@ -313,6 +316,10 @@ fn a_set_reading_a_relation_that_requires_a_credential_passes() {
            ON d.team_id = t.id",
         "SELECT team_id FROM my_memberships",
         "SELECT team_id FROM my_team_ids",
+        "SELECT t FROM my_teams() t",
+        "SELECT t.id FROM teams t, LATERAL my_teams() m WHERE m = t.id",
+        "SELECT team_id FROM from_my_teams",
+        "SELECT my_teams_again()",
         "SELECT t.id FROM (teams t JOIN my_memberships m ON m.team_id = t.id)",
         "SELECT team_id FROM members WHERE member = CRED
          INTERSECT SELECT team_id FROM invitations",
@@ -350,6 +357,8 @@ fn a_set_reading_a_relation_that_returns_rows_without_a_credential_is_reported()
         "SELECT t.id FROM teams t LEFT JOIN (SELECT team_id FROM members WHERE member = CRED) d
            ON d.team_id = t.id",
         "SELECT t FROM all_teams() t",
+        "SELECT u FROM unnest(ARRAY[1, 2]) u",
+        "SELECT t.id FROM teams t LEFT JOIN LATERAL my_teams() m ON m = t.id",
         "SELECT team_id FROM all_memberships",
         "SELECT team_id FROM invitations
          EXCEPT SELECT team_id FROM members WHERE member = CRED",
