@@ -114,3 +114,5 @@ mod unfiltered_change_trigger;
 pub use unfiltered_change_trigger::UnfilteredChangeTrigger;
 mod authorization_in_trigger;
 pub use authorization_in_trigger::AuthorizationInTrigger;
+mod trigger_filter_in_body;
+pub use trigger_filter_in_body::TriggerFilterInBody;
