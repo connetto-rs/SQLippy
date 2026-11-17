@@ -455,15 +455,22 @@ pub(crate) fn unnested(mut expression: &Expr) -> &Expr {
 
 /// The operands of the `AND` chain of an expression.
 pub(crate) fn conjuncts(expression: &Expr) -> Vec<&Expr> {
+    chain(expression, &BinaryOperator::And)
+}
+
+/// The operands of the `OR` chain of an expression.
+pub(crate) fn disjuncts(expression: &Expr) -> Vec<&Expr> {
+    chain(expression, &BinaryOperator::Or)
+}
+
+/// The operands of the `operator` chain of an expression, through
+/// parentheses.
+fn chain<'e>(expression: &'e Expr, operator: &BinaryOperator) -> Vec<&'e Expr> {
     match expression {
-        Expr::Nested(inner) => conjuncts(inner),
-        Expr::BinaryOp {
-            left,
-            op: BinaryOperator::And,
-            right,
-        } => {
-            let mut operands = conjuncts(left);
-            operands.extend(conjuncts(right));
+        Expr::Nested(inner) => chain(inner, operator),
+        Expr::BinaryOp { left, op, right } if op == operator => {
+            let mut operands = chain(left, operator);
+            operands.extend(chain(right, operator));
             operands
         }
         _ => vec![expression],
