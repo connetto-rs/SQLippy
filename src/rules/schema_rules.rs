@@ -110,3 +110,5 @@ mod before_trigger_writes_other_table;
 pub use before_trigger_writes_other_table::BeforeTriggerWritesOtherTable;
 mod unfiltered_change_trigger;
 pub use unfiltered_change_trigger::UnfilteredChangeTrigger;
+mod authorization_in_trigger;
+pub use authorization_in_trigger::AuthorizationInTrigger;

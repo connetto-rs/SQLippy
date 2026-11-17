@@ -2253,6 +2253,7 @@ dependencies = [
  "sql-traits",
  "sqlparser",
  "sqlparser-plpgsql",
+ "sqlstate 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "testcontainers",
  "thiserror",
 ]

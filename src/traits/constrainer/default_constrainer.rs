@@ -7,7 +7,7 @@ use crate::{
     lint::Level,
     rules::{
         AddressStoredAsText, AliasShadowedByColumn, ArrayMembershipPolicy, AssignmentConjunction,
-        AuthorityAttributeWritableBelowThreshold, AutovacuumDisabledTable,
+        AuthorityAttributeWritableBelowThreshold, AuthorizationInTrigger, AutovacuumDisabledTable,
         BeforeTriggerWritesOtherTable, BinarySendFailure, BlankPaddedCharacter,
         BooleanStateWithoutTime, CascadeIntoRowLevelSecurityTable, CaseSensitiveEmail,
         CatalogNameAsText, ChildWithoutRowLevelSecurity, ClientRoleBypassesRowLevelSecurity,
@@ -268,7 +268,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 68] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 69] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -337,6 +337,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(OrderedSetAsDisjunction::default()),
         Box::new(BeforeTriggerWritesOtherTable::default()),
         Box::new(UnfilteredChangeTrigger::default()),
+        Box::new(AuthorizationInTrigger::default()),
     ];
     for rule in schema_rules {
         constrainer.register_schema_rule_with_floor(rule, Level::Allow);

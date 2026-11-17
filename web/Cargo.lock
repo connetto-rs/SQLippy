@@ -3049,6 +3049,7 @@ dependencies = [
  "sql-traits",
  "sqlparser",
  "sqlparser-plpgsql",
+ "sqlstate",
  "thiserror 2.0.21",
 ]
 

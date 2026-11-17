@@ -227,6 +227,7 @@ rule_icons! {
     "ordered_set_as_disjunction" => FaArrowUpWideShort,
     "before_trigger_writes_other_table" => FaBolt,
     "unfiltered_change_trigger" => FaClockRotateLeft,
+    "authorization_in_trigger" => FaUserCheck,
 }
 #[cfg(test)]
 mod tests {
