@@ -6,7 +6,7 @@ use std::{collections::HashSet, ops::ControlFlow};
 use sql_traits::traits::{DatabaseLike, FunctionLike};
 use sqlparser::ast::{
     BinaryOperator, Expr, FunctionBehavior, InTarget, ObjectName, Query, SetExpr, Statement,
-    TableFactor, UnaryOperator, Value, Visit, Visitor,
+    TableFactor, UnaryOperator, Visit, Visitor,
 };
 use sqlparser_plpgsql::embedded::Node;
 
@@ -17,6 +17,7 @@ use crate::{
         cte_support::stored_table,
         expression_site_support::body_statements,
         function_reach_support::{literal_key, split},
+        literal_support::text_literal,
         plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, walk_block},
         trigger_support::evaluated,
         walk_support::walk,
@@ -165,18 +166,6 @@ fn reads_isolation(expression: &Expr, variables: &HashSet<String>) -> bool {
     }
 }
 
-/// The string literal `expression` is.
-fn literal(expression: &Expr) -> Option<&str> {
-    match expression {
-        Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => literal(inner),
-        Expr::Value(value) => match &value.value {
-            Value::SingleQuotedString(text) => Some(text),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// What `expression` evaluates to under `REPEATABLE READ`, `None` when it
 /// depends on anything else.
 fn under_repeatable_read(expression: &Expr, variables: &HashSet<String>) -> Option<bool> {
@@ -184,7 +173,7 @@ fn under_repeatable_read(expression: &Expr, variables: &HashSet<String>) -> Opti
     let compared = |left: &Expr, right: &Expr| {
         let level = |side: &Expr, other: &Expr| {
             reads_isolation(side, variables)
-                .then(|| literal(other))
+                .then(|| text_literal(other))
                 .flatten()
                 .map(|text| text.eq_ignore_ascii_case(LEVEL))
         };
@@ -231,7 +220,7 @@ fn under_repeatable_read(expression: &Expr, variables: &HashSet<String>) -> Opti
             negated,
             ..
         } if reads_isolation(expr, variables) => {
-            let mut levels = list.iter().map(literal);
+            let mut levels = list.iter().map(text_literal);
             let found = levels
                 .clone()
                 .flatten()
