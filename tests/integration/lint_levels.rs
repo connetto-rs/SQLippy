@@ -33,7 +33,7 @@ fn raised_by(violations: &[Violation<ParserDB>], rule: &str) -> Vec<Level> {
         .collect()
 }
 
-const UNCHECKED_TIMESTAMP: &str =
+const UNSTAMPED_TIMESTAMP: &str =
     "CREATE TABLE events (id INT PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL);";
 
 #[test]
@@ -59,8 +59,8 @@ fn groups_carry_their_clippy_names_and_default_levels() {
 
 #[test]
 fn an_individually_registered_allow_by_default_rule_runs_at_warn() {
-    let constrainer: GenericConstrainer<ParserDB> = UncheckedPastTimestamp::default().into();
-    let database = parse(UNCHECKED_TIMESTAMP);
+    let constrainer: GenericConstrainer<ParserDB> = ClientChosenTimestamp::default().into();
+    let database = parse(UNSTAMPED_TIMESTAMP);
     let Err(Error::Violation(violation)) = constrainer.validate_schema(&database) else {
         panic!("the explicitly registered pedantic rule must reject the schema");
     };
@@ -74,33 +74,30 @@ fn the_default_constrainer_leaves_pedantic_and_restriction_rules_at_allow() {
         "CREATE TABLE events (id INT PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, type INT NOT NULL);",
     );
     let raised = violations(&DefaultConstrainer::<ParserDB>::default(), &database);
-    assert_eq!(raised_by(&raised, "unchecked_past_timestamp"), []);
+    assert_eq!(raised_by(&raised, "client_chosen_timestamp"), []);
     assert_eq!(raised_by(&raised, "rust_keyword_column_name"), []);
 }
 
 #[test]
 fn a_group_override_enables_a_default_registered_group() {
-    let database = parse(UNCHECKED_TIMESTAMP);
+    let database = parse(UNSTAMPED_TIMESTAMP);
     let mut constrainer = DefaultConstrainer::<ParserDB>::default();
     constrainer.set_group_level(LintGroup::Pedantic, Level::Deny);
     let raised = violations(&constrainer, &database);
-    assert_eq!(
-        raised_by(&raised, "unchecked_past_timestamp"),
-        [Level::Deny]
-    );
+    assert_eq!(raised_by(&raised, "client_chosen_timestamp"), [Level::Deny]);
 }
 
 #[test]
 fn a_rule_override_wins_over_its_group_override_in_either_order() {
-    let database = parse(UNCHECKED_TIMESTAMP);
-    let mut rule_first: GenericConstrainer<ParserDB> = UncheckedPastTimestamp::default().into();
-    rule_first.set_rule_level("unchecked_past_timestamp", Level::Allow);
+    let database = parse(UNSTAMPED_TIMESTAMP);
+    let mut rule_first: GenericConstrainer<ParserDB> = ClientChosenTimestamp::default().into();
+    rule_first.set_rule_level("client_chosen_timestamp", Level::Allow);
     rule_first.set_group_level(LintGroup::Pedantic, Level::Deny);
     assert!(rule_first.validate_schema(&database).is_ok());
 
-    let mut group_first: GenericConstrainer<ParserDB> = UncheckedPastTimestamp::default().into();
+    let mut group_first: GenericConstrainer<ParserDB> = ClientChosenTimestamp::default().into();
     group_first.set_group_level(LintGroup::Pedantic, Level::Deny);
-    group_first.set_rule_level("unchecked_past_timestamp", Level::Allow);
+    group_first.set_rule_level("client_chosen_timestamp", Level::Allow);
     assert!(group_first.validate_schema(&database).is_ok());
 }
 
@@ -218,10 +215,10 @@ fn mismatched_foreign_key_types_are_suspicious_warnings() {
 
 #[test]
 fn the_latest_rule_level_wins() {
-    let database = parse(UNCHECKED_TIMESTAMP);
-    let mut constrainer: GenericConstrainer<ParserDB> = UncheckedPastTimestamp::default().into();
-    constrainer.set_rule_level("unchecked_past_timestamp", Level::Deny);
-    constrainer.set_rule_level("unchecked_past_timestamp", Level::Allow);
+    let database = parse(UNSTAMPED_TIMESTAMP);
+    let mut constrainer: GenericConstrainer<ParserDB> = ClientChosenTimestamp::default().into();
+    constrainer.set_rule_level("client_chosen_timestamp", Level::Deny);
+    constrainer.set_rule_level("client_chosen_timestamp", Level::Allow);
     assert!(constrainer.validate_schema(&database).is_ok());
 }
 
@@ -363,7 +360,7 @@ fn the_default_constrainer_reports_every_rule_at_its_group_level() {
     }
     assert!(
         !raised.iter().any(
-            |violation| violation.rule().name == "unchecked_past_timestamp"
+            |violation| violation.rule().name == "client_chosen_timestamp"
                 && violation.object() == "notes_.expires_at"
         ),
         "a column naming a future instant is exempt"
@@ -382,7 +379,7 @@ fn rules_that_read_names_say_they_guess() {
         FractionalCount::<ParserDB>::default().metadata(),
         SingularTableName::<ParserDB>::default().metadata(),
         PluralColumnName::<ParserDB>::default().metadata(),
-        UncheckedPastTimestamp::<ParserDB>::default().metadata(),
+        ClientChosenTimestamp::<ParserDB>::default().metadata(),
     ];
     for metadata in guessing {
         assert_eq!(metadata.basis, Basis::Names, "{}", metadata.name);
