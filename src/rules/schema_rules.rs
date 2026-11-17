@@ -108,3 +108,7 @@ mod ordered_set_as_disjunction;
 pub use ordered_set_as_disjunction::OrderedSetAsDisjunction;
 mod type_name_case_collision;
 pub use type_name_case_collision::TypeNameCaseCollision;
+mod before_trigger_writes_other_table;
+pub use before_trigger_writes_other_table::BeforeTriggerWritesOtherTable;
+mod unfiltered_change_trigger;
+pub use unfiltered_change_trigger::UnfilteredChangeTrigger;

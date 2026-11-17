@@ -10,6 +10,7 @@ mod rule_findings;
 
 mod assignment_conjunctions;
 mod authority_attribute_write_thresholds;
+mod before_trigger_writes;
 mod catalog_checks;
 mod catalogue_objects;
 mod client_chosen_timestamps;
@@ -86,6 +87,7 @@ mod unaudited_authority_tables;
 mod uncached_helper_queries;
 mod uncached_policy_calls;
 mod undeletable_references;
+mod unfiltered_change_triggers;
 mod unindexed_recursive_joins;
 mod unprotected_policy_reads;
 mod unseeded_policy_sets;

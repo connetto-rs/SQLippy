@@ -7,9 +7,10 @@ use crate::{
     lint::Level,
     rules::{
         AddressStoredAsText, AliasShadowedByColumn, ArrayMembershipPolicy, AssignmentConjunction,
-        AuthorityAttributeWritableBelowThreshold, AutovacuumDisabledTable, BinarySendFailure,
-        BlankPaddedCharacter, BooleanStateWithoutTime, CascadeIntoRowLevelSecurityTable,
-        CaseSensitiveEmail, CatalogNameAsText, ChildWithoutRowLevelSecurity, ClientChosenTimestamp,
+        AuthorityAttributeWritableBelowThreshold, AutovacuumDisabledTable,
+        BeforeTriggerWritesOtherTable, BinarySendFailure, BlankPaddedCharacter,
+        BooleanStateWithoutTime, CascadeIntoRowLevelSecurityTable, CaseSensitiveEmail,
+        CatalogNameAsText, ChildWithoutRowLevelSecurity, ClientChosenTimestamp,
         ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
         ClosedSetAsText, ConstantColumnNotGenerated, CopiedColumnThroughSuperkey,
         CorrelatedPolicySubquery, CredentialFreeWrite, CredentialPatternPolicy,
@@ -51,13 +52,13 @@ use crate::{
         TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
         TruncatedIdentifier, TruncatingIntegerDivision, TypeNameCaseCollision,
         UnauditedAuthorityTable, UnboundedTextColumn, UncachedHelperQuery, UncachedPolicyCall,
-        UndeletableReference, UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect,
-        UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin,
-        UnknownBinarySend, UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn, UnorderedLimit,
-        UnreadOuterJoin, UnsatisfiableCheck, UnsatisfiablePolicy,
-        UnscopedUniqueConstraintOnRowLevelSecurityTable, UnseededPolicySet, UnusedCte,
-        UnvalidatedConstraint, UuidStoredAsText, WildcardView, WritingNonVolatileFunction,
-        ZeroPrecisionTimestamp,
+        UndeletableReference, UnfilteredChangeTrigger, UnfilteredWrite, UnforcedRowLevelSecurity,
+        UnindexedCorrelatedSelect, UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter,
+        UnindexedRecursiveJoin, UnknownBinarySend, UnlinkedFromItem, UnloggedTable,
+        UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
+        UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable, UnseededPolicySet,
+        UnusedCte, UnvalidatedConstraint, UuidStoredAsText, WildcardView,
+        WritingNonVolatileFunction, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -268,7 +269,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 67] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 69] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -336,6 +337,8 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(RepeatedRecursionBound::default()),
         Box::new(OrderedSetAsDisjunction::default()),
         Box::new(TypeNameCaseCollision::default()),
+        Box::new(BeforeTriggerWritesOtherTable::default()),
+        Box::new(UnfilteredChangeTrigger::default()),
     ];
     for rule in schema_rules {
         constrainer.register_schema_rule_with_floor(rule, Level::Allow);
