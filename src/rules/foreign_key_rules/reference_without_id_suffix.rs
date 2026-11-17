@@ -112,28 +112,24 @@ CREATE TABLE children (parent_id INT REFERENCES parents (id));",
 }
 
 impl<DB: DatabaseLike> ReferenceWithoutIdSuffix<DB> {
-    /// Returns whether `column` of `table` is the host column of a foreign key
-    /// whose referenced columns include a primary key column.
-    fn references_primary_key_through_foreign_key(
-        database: &DB,
-        table: &DB::Table,
-        column: &DB::Column,
-    ) -> Result<bool, LookupError> {
-        for fk in table.foreign_keys(database)? {
-            if !fk
-                .host_columns(database)?
-                .any(|fk_host_col| fk_host_col.column_name() == column.column_name())
-            {
+    /// Returns the primary key column that `column` is mapped to by one of the
+    /// foreign keys of its table.
+    fn primary_key_column_through_foreign_key<'db>(
+        database: &'db DB,
+        column: &'db DB::Column,
+    ) -> Result<Option<&'db DB::Column>, LookupError> {
+        for foreign_key in column.table(database).foreign_keys(database)? {
+            let Some(referenced_column) =
+                foreign_key.referenced_column_for_host_column(database, column)?
+            else {
                 continue;
-            }
-            for fk_ref_col in fk.referenced_columns(database)? {
-                let fk_ref_table = fk.referenced_table(database)?;
-                if fk_ref_table.is_primary_key_column(database, fk_ref_col)? {
-                    return Ok(true);
-                }
+            };
+            let referenced_table = foreign_key.referenced_table(database)?;
+            if referenced_table.is_primary_key_column(database, referenced_column)? {
+                return Ok(Some(referenced_column));
             }
         }
-        Ok(false)
+        Ok(None)
     }
 }
 
@@ -153,33 +149,43 @@ impl<DB: DatabaseLike> ForeignKeyRule for ReferenceWithoutIdSuffix<DB> {
             .host_columns(database)?
             .zip(foreign_key.referenced_columns(database)?)
         {
-            // Check if the referenced column is a primary key or references a primary key
-            let references_primary_key = referenced_table
-                .is_primary_key_column(database, referenced_column)?
-                || Self::references_primary_key_through_foreign_key(
-                    database,
-                    referenced_table,
-                    referenced_column,
-                )?;
-
-            if references_primary_key && !host_column.column_name().ends_with("id") {
-                reporter.foreign_key(
-                    foreign_key,
+            if host_column.column_name().ends_with("id") {
+                continue;
+            }
+            let reference =
+                if referenced_table.is_primary_key_column(database, referenced_column)? {
                     format!(
-                        "Foreign key host column '{}.{}' references primary key column '{}.{}' but does not end with 'id'.",
-                        host_table.table_name(),
-                        host_column.column_name(),
+                        "primary key column '{}.{}'",
                         referenced_table.table_name(),
                         referenced_column.column_name()
-                    ),
+                    )
+                } else if let Some(primary_key_column) =
+                    Self::primary_key_column_through_foreign_key(database, referenced_column)?
+                {
                     format!(
-                        "Rename column '{}.{}' to '{}_id'.",
-                        host_table.table_name(),
-                        host_column.column_name(),
-                        host_column.column_name()
-                    ),
-                )?;
-            }
+                        "'{}.{}', which references primary key column '{}.{}',",
+                        referenced_table.table_name(),
+                        referenced_column.column_name(),
+                        primary_key_column.table(database).table_name(),
+                        primary_key_column.column_name()
+                    )
+                } else {
+                    continue;
+                };
+            reporter.foreign_key(
+                foreign_key,
+                format!(
+                    "Foreign key host column '{}.{}' references {reference} but does not end with 'id'.",
+                    host_table.table_name(),
+                    host_column.column_name(),
+                ),
+                format!(
+                    "Rename column '{}.{}' to '{}_id'.",
+                    host_table.table_name(),
+                    host_column.column_name(),
+                    host_column.column_name()
+                ),
+            )?;
         }
 
         Ok(())
