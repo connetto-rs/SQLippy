@@ -20,6 +20,8 @@ mod writing_non_volatile_function;
 pub use writing_non_volatile_function::WritingNonVolatileFunction;
 mod table_name_dispatch;
 pub use table_name_dispatch::TableNameDispatch;
+mod snapshot_before_lock;
+pub use snapshot_before_lock::SnapshotBeforeLock;
 
 use sql_traits::{
     errors::LookupError,
