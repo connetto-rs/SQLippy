@@ -7,7 +7,7 @@ use sql_traits::{
     structs::IdentifierCase,
     traits::{DatabaseLike, FunctionLike, PolicyLike, TableLike, TriggerLike},
 };
-use sqlparser::ast::{Expr, TriggerEvent, Value, Visitor};
+use sqlparser::ast::{Expr, TriggerEvent, Visitor};
 use sqlparser_plpgsql::{
     condition::errcode,
     embedded::{Block, Condition, Node, Raise, RaiseOptionKind},
@@ -19,6 +19,7 @@ use crate::{
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         function_reach_support::reaches_function,
+        literal_support::text_literal,
         plpgsql_flow_support::plpgsql_block,
         policy_support::{Command, applied},
         trigger_support::evaluated,
@@ -135,8 +136,9 @@ fn raises_insufficient_privilege(raise: &Raise) -> bool {
     named
         || raise.options.iter().any(|option| {
             option.kind == RaiseOptionKind::Errcode
-                && matches!(evaluated(&option.value), Some(Expr::Value(value))
-                    if matches!(&value.value, Value::SingleQuotedString(code) if errcode(code) == Ok(Some(INSUFFICIENT_PRIVILEGE))))
+                && evaluated(&option.value)
+                    .and_then(text_literal)
+                    .is_some_and(|code| errcode(code) == Ok(Some(INSUFFICIENT_PRIVILEGE)))
         })
 }
 
