@@ -30,8 +30,8 @@ pub use nullable_concatenation::NullableConcatenation;
 mod nullable_unique;
 mod owner_rights_view;
 pub use exposure_rules::{
-    ExtensionInExposedSchema, ReachableSequence, SecurityBarrierMissingOnFilteringView,
-    SecurityDefinerFunctionExposed,
+    DefinerSchemaWithoutDefaultRevoke, ExtensionInExposedSchema, ReachableSequence,
+    SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
 };
 pub use nullable_unique::NullableUniqueColumn;
 mod table_hygiene_rules;
@@ -68,6 +68,8 @@ mod monotonic_flag_reset;
 pub use monotonic_flag_reset::MonotonicFlagReset;
 mod repeated_setting_read;
 pub use repeated_setting_read::RepeatedSettingRead;
+mod role_defined_in_schema;
+pub use role_defined_in_schema::RoleDefinedInSchema;
 mod definer_takes_acting_user;
 mod unscoped_unique_constraint;
 pub use definer_takes_acting_user::DefinerTakesActingUser;

@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use sql_traits::{prelude::ParserDB, traits::DatabaseLike};
 use sqlparser::{
     ast::Expr,
     dialect::PostgreSqlDialect,
@@ -13,6 +14,9 @@ use sqlparser::{
 };
 
 use crate::vocabulary::Vocabulary;
+
+mod cluster;
+pub(crate) use cluster::{ClusterBootstrap, Membership, RoleAttributes};
 
 /// Roles and schemas of the deployment a schema serves.
 ///
@@ -50,6 +54,7 @@ pub struct Deployment {
     pooled: Option<bool>,
     clock_tolerance: Option<Duration>,
     vocabularies: Vec<Vocabulary>,
+    cluster_bootstrap: Option<ClusterBootstrap>,
 }
 
 /// A column, by the stored names of its schema, table and column.
@@ -104,19 +109,21 @@ fn parse_expression(expression: &str) -> Result<Expr, ParserError> {
 impl Deployment {
     /// The deployment every [`RuleExample`](crate::lint::RuleExample) is
     /// written for, a pooled API serving the `public` schema to the
-    /// anonymous role `anon` and the app role `authenticated`, naming the
-    /// caller with `current_setting('app.user_id', true)`, selecting the
-    /// acting installation with `current_setting('app.installation_id',
-    /// true)`, trusting no `current_setting('app.user_metadata', true)`
-    /// claim, and taking the rows of `public.drafts` from clients that author
-    /// them offline, and streaming `public.events` over binary logical
+    /// anonymous role `anon` and the app role `authenticated`, which a
+    /// cluster bootstrap creates with `NOLOGIN`, naming the caller with
+    /// `current_setting('app.user_id', true)`, selecting the acting
+    /// installation with `current_setting('app.installation_id', true)`,
+    /// trusting no `current_setting('app.user_metadata', true)` claim, and
+    /// taking the rows of `public.drafts` from clients that author them
+    /// offline, and streaming `public.events` over binary logical
     /// replication. Its tenants are keyed by `organization_id` in
     /// `public.resources` and `public.caps`, a token's `public.tokens.revoked_at`
     /// is never cleared, and `public.record_authority` audits every write.
     ///
     /// # Panics
     ///
-    /// Never panics, since the declared expressions are fixed PostgreSQL.
+    /// Never panics, since the declared expressions and the bootstrap are
+    /// fixed PostgreSQL.
     ///
     /// # Example
     ///
@@ -154,6 +161,12 @@ impl Deployment {
                 deployment.with_self_asserted_claim("current_setting('app.user_metadata', true)")
             })
             .expect("the example's expressions are PostgreSQL")
+            .with_cluster_bootstrap(
+                &ParserDB::parse::<PostgreSqlDialect>(
+                    "CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN;",
+                )
+                .expect("the example's bootstrap is PostgreSQL"),
+            )
     }
 
     /// Declares a role that callers holding no credential act as.
@@ -205,6 +218,40 @@ impl Deployment {
     #[must_use]
     pub fn clock_tolerance(&self) -> Option<Duration> {
         self.clock_tolerance
+    }
+
+    /// Declares the cluster bootstrap, the script provisioning the roles
+    /// every database of the cluster shares, from a database built from
+    /// that script alone. The roles it creates with their attributes, the
+    /// memberships it grants and the role settings it makes are the
+    /// cluster's, replacing any bootstrap declared before.
+    ///
+    /// A schema checked under this declaration is the bootstrap followed by
+    /// the database-local schema, so the rules resolving roles see the
+    /// cluster's roles.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlippy::prelude::*;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    ///
+    /// let bootstrap = "CREATE ROLE app NOLOGIN;";
+    /// let cluster = ParserDB::parse::<PostgreSqlDialect>(bootstrap).unwrap();
+    /// let deployment = Deployment::default().with_cluster_bootstrap(&cluster);
+    /// assert!(deployment.declares(Declaration::ClusterBootstrap));
+    /// ```
+    #[must_use]
+    pub fn with_cluster_bootstrap<DB: DatabaseLike>(mut self, cluster: &DB) -> Self {
+        self.cluster_bootstrap = Some(ClusterBootstrap::of(cluster));
+        self
+    }
+
+    /// Returns what the declared cluster bootstrap provisions, nothing when
+    /// none is declared.
+    pub(crate) fn cluster_bootstrap(&self) -> &ClusterBootstrap {
+        static UNDECLARED: ClusterBootstrap = ClusterBootstrap::EMPTY;
+        self.cluster_bootstrap.as_ref().unwrap_or(&UNDECLARED)
     }
 
     /// Selects a vocabulary the rules reading column names match against,
@@ -489,6 +536,7 @@ impl Deployment {
             Declaration::IrreversibleColumns => !self.irreversible_columns.is_empty(),
             Declaration::AuditFunctions => !self.audit_functions.is_empty(),
             Declaration::Pooled => self.pooled.is_some(),
+            Declaration::ClusterBootstrap => self.cluster_bootstrap.is_some(),
         }
     }
 }
@@ -512,6 +560,8 @@ pub enum Declaration {
     AuditFunctions,
     /// Whether the deployment is pooled.
     Pooled,
+    /// The cluster bootstrap provisioning the roles databases share.
+    ClusterBootstrap,
 }
 
 impl Display for Declaration {
@@ -525,6 +575,7 @@ impl Display for Declaration {
             Self::IrreversibleColumns => "irreversible columns",
             Self::AuditFunctions => "audit functions",
             Self::Pooled => "whether it is pooled",
+            Self::ClusterBootstrap => "its cluster bootstrap",
         })
     }
 }

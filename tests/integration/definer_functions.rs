@@ -219,6 +219,11 @@ fn the_default_constrainer_runs_the_function_rules_at_their_group_levels() {
         function_rules,
         [
             (
+                "definer_schema_without_default_revoke".to_owned(),
+                Level::Warn,
+                "doc_count()".to_owned()
+            ),
+            (
                 "definer_temporary_schema_not_last".to_owned(),
                 Level::Deny,
                 "doc_count()".to_owned()
