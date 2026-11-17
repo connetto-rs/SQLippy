@@ -88,6 +88,48 @@ fn a_composite_key_that_can_point_nowhere_is_reported() {
 }
 
 #[test]
+fn a_composite_key_whose_checks_keep_nullable_columns_null_together_is_not_reported() {
+    let found = of(
+        "nullable_composite_foreign_key",
+        "CREATE TABLE w (a INT NOT NULL, b INT NOT NULL, c INT NOT NULL, PRIMARY KEY (a, b, c));
+         CREATE TABLE tied (a INT, b INT, c INT NOT NULL,
+           CHECK ((a IS NULL) = (b IS NULL)),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE mirrored (a INT, b INT, c INT NOT NULL,
+           CHECK ((b IS NOT NULL) = (a IS NOT NULL)),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE conjoined (a INT, b INT, c INT NOT NULL,
+           CHECK (c > 0 AND (a IS NULL) = (b IS NULL)),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE chained (a INT, b INT, c INT NOT NULL, x INT,
+           CHECK ((x IS NULL) = (a IS NULL)),
+           CHECK ((x IS NULL) = (b IS NULL)),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE crossed (a INT, b INT, c INT NOT NULL,
+           CHECK ((a IS NULL) = (b IS NOT NULL)),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE loose (a INT, b INT, c INT NOT NULL, x INT,
+           CHECK ((a IS NULL) = (x IS NULL)),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE disjoined (a INT, b INT, c INT NOT NULL,
+           CHECK ((a IS NULL) = (b IS NULL) OR c > 0),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE partly (a INT, b INT, c INT,
+           CHECK ((a IS NULL) = (b IS NULL)),
+           FOREIGN KEY (a, b, c) REFERENCES w (a, b, c));",
+    );
+    assert_eq!(found.len(), 4, "{found:?}");
+    for table in ["crossed", "loose", "disjoined", "partly"] {
+        assert!(
+            found
+                .iter()
+                .any(|object| object.starts_with(&format!("{table}."))),
+            "{table}: {found:?}"
+        );
+    }
+}
+
+#[test]
 fn a_foreign_key_no_index_leads_with_is_reported() {
     let found = of(
         "unindexed_foreign_key",
