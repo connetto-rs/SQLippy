@@ -1,22 +1,28 @@
 //! Submodule providing the `DuplicateColumnNameInExtensionGraph` constraint,
 //! which enforces that column names are unique within an extension graph.
 
-use std::collections::HashSet;
-
 use sql_traits::{
     errors::LookupError,
-    traits::{ColumnLike, DatabaseLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, ForeignKeyLike, TableLike},
 };
 
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
+    rules::key_support::key_pairs,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
 /// Struct defining a constraint that enforces that column names are unique
 /// within an extension graph (i.e., a table which extends other tables cannot
 /// have a column whose name also appears in other tables it extends).
+///
+/// A column that foreign keys keep equal to every same-named column of the
+/// hierarchy is not reported, as a tenant column is when the subtype keys
+/// `(organization_id, id)` to the same columns of its parent. Each such key
+/// pairs the primary keys of the two tables and the column with its
+/// namesake, and checks every row, through `MATCH FULL` or `NOT NULL`
+/// columns.
 ///
 /// # Example
 ///
@@ -100,6 +106,21 @@ use crate::{
 /// )
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&invalid_transitive).is_err());
+///
+/// // Valid: a foreign key keeps the tenant column equal to the parent's
+/// let valid_tenant = ParserDB::parse::<GenericDialect>(
+///     "
+/// CREATE TABLE parent_table (id INT PRIMARY KEY, tenant_id INT NOT NULL, UNIQUE (tenant_id, id));
+/// CREATE TABLE child_table (
+///     id INT PRIMARY KEY,
+///     tenant_id INT NOT NULL,
+///     FOREIGN KEY (id) REFERENCES parent_table(id),
+///     FOREIGN KEY (tenant_id, id) REFERENCES parent_table(tenant_id, id)
+/// );
+/// ",
+/// )
+/// .unwrap();
+/// assert!(constrainer.validate_schema(&valid_tenant).is_ok());
 /// ```
 pub struct DuplicateColumnNameInExtensionGraph<DB>(std::marker::PhantomData<DB>);
 
@@ -138,53 +159,141 @@ CREATE TABLE notes (id INT PRIMARY KEY REFERENCES records (id), description TEXT
     }
 }
 
+/// Whether `foreign_key` pairs its host's primary key with the primary key of
+/// the referenced table and the host column named `column_name` with the
+/// referenced column of that name, on every row, so the two columns of one
+/// entity always hold the same value.
+fn pins<DB: DatabaseLike>(
+    database: &DB,
+    foreign_key: &DB::ForeignKey,
+    column_name: &str,
+) -> Result<bool, LookupError> {
+    let pairs = key_pairs(database, foreign_key)?;
+    if !pairs.iter().any(|(host, referenced)| {
+        host.column_name() == column_name && referenced.column_name() == column_name
+    }) {
+        return Ok(false);
+    }
+    let referenced_primary_key: Vec<&DB::Column> = foreign_key
+        .referenced_table(database)?
+        .primary_key_columns(database)?
+        .collect();
+    let mut paired = Vec::new();
+    for host_column in foreign_key
+        .host_table(database)
+        .primary_key_columns(database)?
+    {
+        let Some((_, referenced)) = pairs.iter().find(|(host, _)| *host == host_column) else {
+            return Ok(false);
+        };
+        paired.push(*referenced);
+    }
+    if paired.is_empty()
+        || paired.len() != referenced_primary_key.len()
+        || !referenced_primary_key
+            .iter()
+            .all(|column| paired.contains(column))
+    {
+        return Ok(false);
+    }
+    if foreign_key.match_full(database) {
+        return Ok(true);
+    }
+    for (host, _) in &pairs {
+        if host.is_nullable(database)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 impl<DB: DatabaseLike> DuplicateColumnNameInExtensionGraph<DB> {
-    /// Helper method to find duplicate column names in the extension graph
-    fn find_duplicate_columns(
-        database: &DB,
-        table: &<DB as DatabaseLike>::Table,
-    ) -> Result<Vec<String>, LookupError> {
-        let mut duplicates = Vec::new();
-        let extended_tables = table
-            .extended_tables(database)?
-            .collect::<Vec<&<DB as DatabaseLike>::Table>>();
-
-        if extended_tables.is_empty() {
-            return Ok(duplicates);
-        }
-
-        let mut extended_column_names: HashSet<String> = HashSet::new();
-        let mut tables_to_check = extended_tables;
-        let mut checked_tables: HashSet<String> = HashSet::new();
-
+    /// The columns of `table` outside its primary key that share their name
+    /// with a column of a table it extends, directly or transitively, and
+    /// that some such column may differ from.
+    ///
+    /// Foreign keys that [`pins`] the column tie the tables of the hierarchy,
+    /// and the tables they reference, which hold the row of the same entity,
+    /// into groups whose copies of the column hold one value. A column is
+    /// reported unless every same-named column of the hierarchy is in its
+    /// group.
+    fn find_duplicate_columns<'db>(
+        database: &'db DB,
+        table: &'db DB::Table,
+    ) -> Result<Vec<&'db DB::Column>, LookupError> {
+        let mut tables: Vec<&DB::Table> = vec![table];
+        let mut tables_to_check: Vec<&DB::Table> = table.extended_tables(database)?.collect();
         while let Some(extended_table) = tables_to_check.pop() {
-            let table_name = extended_table.table_name().to_string();
-            if checked_tables.contains(&table_name) {
+            if tables.contains(&extended_table) {
                 continue;
             }
-            checked_tables.insert(table_name);
-            for column in extended_table.columns(database)? {
-                extended_column_names.insert(column.column_name().to_string());
-            }
-
-            for parent in extended_table.extended_tables(database)? {
-                tables_to_check.push(parent);
-            }
+            tables.push(extended_table);
+            tables_to_check.extend(extended_table.extended_tables(database)?);
+        }
+        let hierarchy = tables.len();
+        if hierarchy == 1 {
+            return Ok(Vec::new());
         }
 
+        let primary_key: Vec<&DB::Column> = table.primary_key_columns(database)?.collect();
+        let mut carriers: Vec<&DB::Table> = Vec::new();
+        let mut edges: Vec<(&DB::Table, &DB::Table)> = Vec::new();
+        let mut tied: Vec<&DB::Table> = Vec::new();
+        let mut duplicates = Vec::new();
         for column in table.columns(database)? {
-            let column_name = column.column_name();
-            if table
-                .primary_key_columns(database)?
-                .any(|pk_col| pk_col.column_name() == column_name)
-            {
+            if primary_key.contains(&column) {
                 continue;
             }
-            if extended_column_names.contains(column_name) {
-                duplicates.push(column_name.to_string());
+            let column_name = column.column_name();
+            carriers.clear();
+            for &ancestor in &tables[1..hierarchy] {
+                if ancestor
+                    .columns(database)?
+                    .any(|other| other.column_name() == column_name)
+                {
+                    carriers.push(ancestor);
+                }
+            }
+            if carriers.is_empty() {
+                continue;
+            }
+
+            tables.truncate(hierarchy);
+            edges.clear();
+            let mut next = 0;
+            while let Some(&host) = tables.get(next) {
+                next += 1;
+                for foreign_key in host.foreign_keys(database)? {
+                    let referenced = foreign_key.referenced_table(database)?;
+                    if referenced != host && pins(database, foreign_key, column_name)? {
+                        edges.push((host, referenced));
+                        if !tables.contains(&referenced) {
+                            tables.push(referenced);
+                        }
+                    }
+                }
+            }
+
+            tied.clear();
+            tied.push(table);
+            let mut grown = true;
+            while grown {
+                grown = false;
+                for &(host, referenced) in &edges {
+                    if tied.contains(&host) != tied.contains(&referenced) {
+                        tied.push(if tied.contains(&host) {
+                            referenced
+                        } else {
+                            host
+                        });
+                        grown = true;
+                    }
+                }
+            }
+            if !carriers.iter().all(|carrier| tied.contains(carrier)) {
+                duplicates.push(column);
             }
         }
-
         Ok(duplicates)
     }
 }
@@ -198,26 +307,18 @@ impl<DB: DatabaseLike> TableRule for DuplicateColumnNameInExtensionGraph<DB> {
         table: &<Self::Database as DatabaseLike>::Table,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        // Check if any column in the current table conflicts with extended tables
-        let duplicates = Self::find_duplicate_columns(database, table)?;
-        if duplicates.is_empty() {
-            return Ok(());
-        }
-
         let table_name = table.table_name();
-        for column in table.columns(database)? {
+        for column in Self::find_duplicate_columns(database, table)? {
             let column_name = column.column_name();
-            if duplicates.iter().any(|name| name == column_name) {
-                reporter.column(
-                    column,
-                    format!(
-                        "Column '{column_name}' of table '{table_name}' conflicts with a column of the same name in the tables it extends."
-                    ),
-                    format!(
-                        "Rename the column '{column_name}' in table '{table_name}' so its name is unique across the extension hierarchy."
-                    ),
-                )?;
-            }
+            reporter.column(
+                column,
+                format!(
+                    "Column '{column_name}' of table '{table_name}' conflicts with a column of the same name in the tables it extends."
+                ),
+                format!(
+                    "Rename the column '{column_name}' in table '{table_name}' so its name is unique across the extension hierarchy."
+                ),
+            )?;
         }
         Ok(())
     }
