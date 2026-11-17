@@ -11,8 +11,8 @@ use sql_traits::{
 };
 use sqlparser::{
     ast::{
-        BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-        SelectItem, SetExpr, Statement, Visit, Visitor,
+        BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, SelectItem, SetExpr,
+        Statement, Visit, Visitor,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -23,7 +23,7 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         closed_set_support::names_cast_column,
-        function_reach_support::{calls, literal_key, split},
+        function_reach_support::{call_arguments, calls, literal_key, split},
         literal_support::text_literal,
         name_support::names_email,
         policy_support::{conjuncts, unnested},
@@ -112,36 +112,19 @@ fn folding(function: &Function) -> Option<(Case, &Expr)> {
     } else {
         return None;
     };
-    match &function.args {
-        FunctionArguments::List(list) => match list.args.as_slice() {
-            [FunctionArg::Unnamed(FunctionArgExpr::Expr(argument))] => Some((case, argument)),
-            _ => None,
-        },
+    match call_arguments(function) {
+        [FunctionArg::Unnamed(FunctionArgExpr::Expr(argument))] => Some((case, argument)),
         _ => None,
     }
 }
 
 /// The first argument of `function`, when it is a call to `NULLIF`.
 fn nullif_value(function: &Function) -> Option<&Expr> {
-    if !matches!(split(&function.name), Some((None | Some("pg_catalog"), name)) if name.eq_ignore_ascii_case("nullif"))
-    {
+    let [FunctionArg::Unnamed(FunctionArgExpr::Expr(value)), _] = call_arguments(function) else {
         return None;
-    }
-    match &function.args {
-        FunctionArguments::List(list) => match list.args.first() {
-            Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(value))) => Some(value),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// The number of arguments `function` passes.
-fn argument_count(function: &Function) -> usize {
-    match &function.args {
-        FunctionArguments::List(list) => list.args.len(),
-        _ => 0,
-    }
+    };
+    matches!(split(&function.name), Some((None | Some("pg_catalog"), name)) if name.eq_ignore_ascii_case("nullif"))
+        .then_some(value)
 }
 
 /// The expression a `LANGUAGE sql` function returns, when its body is
@@ -219,11 +202,8 @@ fn source<DB: DatabaseLike>(
             ..
         } => {
             let path = text_literal(right)?;
-            let key = path
-                .trim_matches(|character| character == '{' || character == '}')
-                .rsplit(',')
-                .next()?
-                .trim();
+            let path = path.trim_matches(|character| character == '{' || character == '}');
+            let key = path.rsplit_once(',').map_or(path, |(_, last)| last).trim();
             names_email(vocabularies, key).then(|| Source {
                 origin: format!("JSON key '{key}'"),
                 folded: None,
@@ -241,7 +221,7 @@ fn source<DB: DatabaseLike>(
             if matches!(split(&function.name), Some((None | Some("pg_catalog"), name)) if name.eq_ignore_ascii_case("current_setting"))
             {
                 let setting = literal_key(function)?;
-                let last = setting.rsplit('.').next()?;
+                let last = setting.rsplit_once('.').map_or(setting, |(_, last)| last);
                 return names_email(vocabularies, last).then(|| Source {
                     origin: format!("setting '{setting}'"),
                     folded: None,
@@ -251,7 +231,7 @@ fn source<DB: DatabaseLike>(
                 return None;
             }
             let (schema, name) = split(&function.name)?;
-            let arguments = argument_count(function);
+            let arguments = call_arguments(function).len();
             let mut candidates = database.functions().filter(|candidate| {
                 candidate.stored_name().eq_ignore_ascii_case(name)
                     && schema.is_none_or(|schema| {

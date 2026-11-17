@@ -130,6 +130,15 @@ pub(crate) fn split(name: &ObjectName) -> Option<(Option<&str>, &str)> {
     Some((schema, last.value.as_str()))
 }
 
+/// The arguments `function` passes, none for a call written without
+/// parentheses such as `CURRENT_USER`.
+pub(crate) fn call_arguments(function: &Function) -> &[FunctionArg] {
+    match &function.args {
+        FunctionArguments::List(list) => &list.args,
+        _ => &[],
+    }
+}
+
 /// The string literal a call passes as its first argument.
 pub(crate) fn literal_key(function: &Function) -> Option<&str> {
     if let FunctionArguments::List(list) = &function.args
@@ -362,10 +371,7 @@ impl<DB: DatabaseLike, S: Sought> Visitor for Occurrences<'_, '_, DB, S> {
                 return None;
             };
             let (schema, name) = split(&function.name)?;
-            let arguments = match &function.args {
-                FunctionArguments::List(list) => list.args.len(),
-                _ => 0,
-            };
+            let arguments = call_arguments(function).len();
             self.reach
                 .calls_reaching(schema, name, arguments)
                 .then(|| self.reach.sought.call())

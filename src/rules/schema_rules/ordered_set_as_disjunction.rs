@@ -535,17 +535,14 @@ impl<DB: DatabaseLike> Disjunctions<'_, '_, '_, DB> {
             return Ok(None);
         }
         let labels = &domain.labels;
+        // Without a NULL operand every answer is TRUE or FALSE.
         let relation: Vec<Vec<bool>> = (0..labels.len())
             .map(|left| {
                 (0..labels.len())
-                    .map(|right| formula.evaluate(&[Some(left), Some(right)], labels))
-                    .collect::<Option<Vec<bool>>>()
+                    .map(|right| formula.evaluate(&[Some(left), Some(right)], labels) == Some(true))
+                    .collect()
             })
-            .collect::<Option<_>>()
-            .unwrap_or_default();
-        if relation.is_empty() {
-            return Ok(None);
-        }
+            .collect();
         let (left, right) = (&operands[0].written, &operands[1].written);
         let comparison = match &domain.declared {
             Some(_) => declared_comparison(&relation).map(|operator| Comparison {
