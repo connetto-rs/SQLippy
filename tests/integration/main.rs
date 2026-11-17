@@ -13,6 +13,7 @@ mod authority_attribute_write_thresholds;
 mod catalog_checks;
 mod catalogue_objects;
 mod client_grants;
+mod closed_domains;
 mod cluster_roles;
 mod column_types;
 mod constant_policy_clauses;

@@ -105,6 +105,30 @@ pub(crate) fn names_count(vocabularies: &[Vocabulary], name: &str) -> bool {
         && !words(name).any(|word| in_vocabularies(vocabularies, Vocabulary::is_average_term, word))
 }
 
+/// Whether the name closes with an email term in one of the vocabularies, as
+/// `email` closes `owner_email`.
+pub(crate) fn names_email(vocabularies: &[Vocabulary], name: &str) -> bool {
+    names_ending(vocabularies, Ending::Email, name)
+}
+
+/// The lifecycle term a name is, alone or after a flag prefix, in one of the
+/// vocabularies, as `revoked` is `is_revoked`.
+pub(crate) fn lifecycle_event<'n>(vocabularies: &[Vocabulary], name: &'n str) -> Option<&'n str> {
+    let mut parts = words(name);
+    let first = parts.next()?;
+    let event = match parts.next() {
+        None => first,
+        Some(second)
+            if parts.next().is_none()
+                && in_vocabularies(vocabularies, Vocabulary::is_flag_prefix, first) =>
+        {
+            second
+        }
+        Some(_) => return None,
+    };
+    in_vocabularies(vocabularies, Vocabulary::is_lifecycle_term, event).then_some(event)
+}
+
 /// A column whose name says what it holds while its stored type cannot hold
 /// that faithfully, as one rule reports it.
 pub(crate) struct NameHint {

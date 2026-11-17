@@ -582,7 +582,11 @@ fn guaranteed_null(body: &SetExpr) -> bool {
 }
 
 /// Whether a column's range-table entry is null-extended by a join.
-fn null_extended(joined: &TableWithJoins, target: &TableFactor, inherited: bool) -> bool {
+pub(crate) fn null_extended(
+    joined: &TableWithJoins,
+    target: &TableFactor,
+    inherited: bool,
+) -> bool {
     let extends_left = |operator: &JoinOperator| {
         matches!(
             operator,
