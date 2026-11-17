@@ -12,6 +12,7 @@ mod assignment_conjunctions;
 mod authority_attribute_write_thresholds;
 mod catalog_checks;
 mod catalogue_objects;
+mod client_chosen_timestamps;
 mod client_grants;
 mod closed_domains;
 mod cluster_roles;

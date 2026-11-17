@@ -201,7 +201,7 @@ rule_icons! {
     "empty_text_allowed" => FaQuoteLeft,
     "nullable_unique_column" => FaSnowflake,
     "offset_paging" => FaForward,
-    "unchecked_past_timestamp" => FaClockRotateLeft,
+    "client_chosen_timestamp" => FaClockRotateLeft,
     "random_order_limit" => FaDice,
     "references_granted_to_client_role" => FaHandshake,
     "scaled_numeric" => FaCalculator,

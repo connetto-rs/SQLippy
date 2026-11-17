@@ -417,17 +417,13 @@ fn typed_moments_and_names_not_ending_in_a_moment_word_are_not_reported() {
 fn the_past_time_rule_leaves_a_text_moment_to_the_moment_hint() {
     let sql = "CREATE TABLE events (created_at TEXT, updated_at TIMESTAMPTZ);";
     assert_eq!(
-        objects(
-            UncheckedPastTimestamp::default(),
-            Deployment::default(),
-            sql
-        ),
+        objects(ClientChosenTimestamp::default(), Deployment::default(), sql),
         ["events.updated_at"]
     );
     let german = Vocabulary::default().with_moment_term("datum");
     assert_eq!(
         objects(
-            UncheckedPastTimestamp::default(),
+            ClientChosenTimestamp::default(),
             Deployment::default().with_vocabulary(german.clone()),
             sql
         ),
@@ -582,7 +578,7 @@ fn a_flag_prefix_leaves_the_name_to_the_flag_hint() {
         UuidStoredAsText::default().into(),
         JsonStoredAsText::default().into(),
         FractionalCount::default().into(),
-        UncheckedPastTimestamp::default().into(),
+        ClientChosenTimestamp::default().into(),
     ] {
         assert_eq!(
             objects(rule, Deployment::default(), sql),

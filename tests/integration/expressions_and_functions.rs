@@ -175,16 +175,16 @@ fn immutable_functions_reading_what_can_change_are_reported() {
     );
 }
 
-/// Resolution of every `unchecked_past_timestamp` finding on `sql` under `deployment`.
+/// Resolution of every `client_chosen_timestamp` finding on `sql` under `deployment`.
 fn past_time_resolutions(deployment: Deployment, sql: &str) -> Vec<String> {
-    let mut constrainer: GenericConstrainer<ParserDB> = UncheckedPastTimestamp::default().into();
+    let mut constrainer: GenericConstrainer<ParserDB> = ClientChosenTimestamp::default().into();
     constrainer.set_deployment(deployment);
     let database = ParserDB::parse::<PostgreSqlDialect>(sql).expect("schema parses");
     constrainer
         .diagnostics(&database)
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == "unchecked_past_timestamp" => {
+            Error::Violation(violation) if violation.rule().name == "client_chosen_timestamp" => {
                 Some(violation.resolution().to_owned())
             }
             _ => None,
