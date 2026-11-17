@@ -188,6 +188,66 @@ fn a_whole_primary_key_or_a_self_reference_names_no_other_scope() {
     );
 }
 
+/// A write scoped by a helper whose body reads `WITH` items.
+fn scoped_by_helper(body: &str) -> String {
+    format!(
+        "{READ_BY_SUBLINK}
+         CREATE FUNCTION administered() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ {body} $$;
+         CREATE POLICY w ON members FOR INSERT WITH CHECK (team_id IN (SELECT administered()));"
+    )
+}
+
+#[test]
+fn a_helper_reading_with_items_that_require_a_credential_passes() {
+    for body in [
+        "WITH mine AS (SELECT m.team_id FROM members m WHERE m.member = CRED AND m.role = 'admin')
+         SELECT team_id FROM mine",
+        "WITH mine AS (SELECT team_id FROM members WHERE member = CRED),
+              chosen AS (SELECT team_id FROM mine)
+         SELECT t.id FROM teams t JOIN chosen c ON c.team_id = t.id",
+        "WITH mine AS (SELECT team_id FROM members WHERE member = CRED)
+         SELECT t.id FROM teams t, mine WHERE mine.team_id = t.id",
+        "WITH mine AS (SELECT team_id FROM members WHERE member = CRED)
+         SELECT id FROM teams WHERE id IN (SELECT team_id FROM mine)",
+        "WITH mine AS (SELECT team_id FROM members WHERE member = CRED)
+         SELECT id FROM teams WHERE id = (SELECT team_id FROM mine LIMIT 1)",
+        "WITH RECURSIVE tree (id) AS (
+           SELECT team_id FROM members WHERE member = CRED
+           UNION SELECT m.parent FROM members m JOIN tree ON m.team_id = tree.id)
+         SELECT id FROM tree",
+    ] {
+        assert_eq!(
+            reported(&scoped_by_helper(body)),
+            Vec::<String>::new(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_helper_reading_with_items_that_return_rows_without_a_credential_is_reported() {
+    for body in [
+        "WITH everyone AS (SELECT team_id FROM members) SELECT team_id FROM everyone",
+        "WITH mine AS (SELECT team_id FROM members WHERE member = CRED)
+         SELECT t.id FROM teams t LEFT JOIN mine ON mine.team_id = t.id",
+        "WITH mine AS (SELECT team_id FROM members WHERE member = CRED)
+         SELECT i.team_id FROM mine JOIN teams t ON mine.team_id = t.id FULL JOIN invitations i ON true",
+        "WITH chosen AS (SELECT team_id FROM invitations),
+              invitations AS (SELECT team_id FROM members WHERE member = CRED)
+         SELECT team_id FROM chosen",
+        "WITH RECURSIVE tree (id) AS (
+           SELECT team_id FROM members
+           UNION SELECT m.parent FROM members m JOIN tree ON m.team_id = tree.id WHERE m.member = CRED)
+         SELECT id FROM tree",
+    ] {
+        assert_eq!(
+            reported(&scoped_by_helper(body)),
+            ["Warn members.w"],
+            "{body}"
+        );
+    }
+}
+
 #[test]
 fn the_rule_waits_for_a_credential_and_warns_by_default() {
     let sql = format!(

@@ -27,8 +27,9 @@ use crate::{
 /// command. A column compared to the set a set-returning `LANGUAGE sql`
 /// helper returns, written `= ANY (ARRAY(SELECT f()))` or `IN (SELECT f())`,
 /// requires a credential when every `UNION` arm of the helper's body does,
-/// reading nested helpers the same way. The rule is inactive until the
-/// deployment declares a credential.
+/// reading nested helpers and the `WITH` items an arm joins the same way and
+/// a `WITH RECURSIVE` item by its non-recursive term. The rule is inactive
+/// until the deployment declares a credential.
 ///
 /// # Example
 ///
