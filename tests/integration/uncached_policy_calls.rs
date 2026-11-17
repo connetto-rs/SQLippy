@@ -134,3 +134,41 @@ fn the_default_constrainer_warns() {
     );
     assert_eq!(found, [(Level::Warn, "auth.uid()".to_owned(), false)]);
 }
+
+#[test]
+fn volatile_sql_helpers_are_said_to_block_an_index_unless_postgresql_inlines_them() {
+    assert_eq!(
+        calls(
+            "CREATE FUNCTION auth.tagged(u TEXT) RETURNS TEXT LANGUAGE sql STRICT AS 'SELECT u || ''@''';
+             CREATE FUNCTION auth.constant(u TEXT) RETURNS TEXT LANGUAGE sql STRICT AS 'SELECT ''x''';
+             CREATE FUNCTION auth.null_tested(u TEXT) RETURNS TEXT LANGUAGE sql STRICT
+               AS 'SELECT CASE WHEN u IS NULL THEN ''x'' ELSE u END';
+             CREATE FUNCTION auth.undeclared(u TEXT) RETURNS TEXT LANGUAGE sql STRICT AS 'SELECT auth.missing(u)';
+             CREATE FUNCTION auth.windowed(u TEXT) RETURNS TEXT LANGUAGE sql AS 'SELECT max(u) OVER ()';
+             CREATE FUNCTION auth.limited(u TEXT) RETURNS TEXT LANGUAGE sql AS 'SELECT u LIMIT 1';
+             CREATE FUNCTION auth.valued(u TEXT) RETURNS TEXT LANGUAGE sql AS 'VALUES (u)';
+             CREATE FUNCTION auth.twice(u TEXT) RETURNS TEXT LANGUAGE sql AS 'SELECT u; SELECT u';
+             CREATE FUNCTION auth.membership(u TEXT) RETURNS members LANGUAGE sql AS 'SELECT 1, u';
+             CREATE POLICY tagged ON docs USING (owner = auth.tagged('a'));
+             CREATE POLICY constant ON docs USING (owner = auth.constant('a'));
+             CREATE POLICY null_tested ON docs USING (owner = auth.null_tested('a'));
+             CREATE POLICY undeclared ON docs USING (owner = auth.undeclared('a'));
+             CREATE POLICY windowed ON docs USING (owner = auth.windowed('a'));
+             CREATE POLICY limited ON docs USING (owner = auth.limited('a'));
+             CREATE POLICY valued ON docs USING (owner = auth.valued('a'));
+             CREATE POLICY twice ON docs USING (owner = auth.twice('a'));
+             CREATE POLICY membership ON docs USING (owner = (auth.membership('a')).member);",
+        ),
+        [
+            ("auth.constant('a')".to_owned(), true),
+            ("auth.limited('a')".to_owned(), true),
+            ("auth.membership('a')".to_owned(), true),
+            ("auth.null_tested('a')".to_owned(), true),
+            ("auth.tagged('a')".to_owned(), false),
+            ("auth.twice('a')".to_owned(), true),
+            ("auth.undeclared('a')".to_owned(), true),
+            ("auth.valued('a')".to_owned(), true),
+            ("auth.windowed('a')".to_owned(), true),
+        ]
+    );
+}

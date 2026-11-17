@@ -5,8 +5,9 @@ use std::{collections::HashMap, ops::ControlFlow};
 use sql_traits::{
     errors::LookupError,
     structs::{
-        CallResolution, ColumnDefinition, Definition, DefinitionId, DefinitionSource, EmbeddedSql,
-        ExpressionContext, ExpressionScope, IdentifierCase, Reaching, VariableRead,
+        CallApplication, CallResolution, ColumnDefinition, Definition, DefinitionId,
+        DefinitionSource, EmbeddedSql, ExpressionContext, ExpressionScope, IdentifierCase,
+        Reaching, VariableRead,
     },
     traits::{DataStatementLike, DatabaseLike, FunctionLike, PolicyLike, TableLike},
 };
@@ -20,23 +21,28 @@ use crate::{
         function_rules::unreadable_body,
         inline_support::{inlined_in_expression, inlined_in_from},
         policy_support::{reads_row, walked_clauses},
-        walk_support::walk,
+        walk_support::{stop_on, stopped, walk},
     },
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule, reporter::signature},
 };
 
 const CASE: IdentifierCase = IdentifierCase::Folded;
 
-/// The functions PostgreSQL may run for a call it resolved as `resolution`.
-fn called<'db, DB: DatabaseLike>(resolution: &CallResolution<'db, DB>) -> Vec<&'db DB::Function> {
+/// The function PostgreSQL runs for a call it resolved as `resolution`, none
+/// for a call it refuses or reads as a cast.
+fn called<'db, DB: DatabaseLike>(
+    resolution: &CallResolution<'db, DB>,
+) -> Option<&'db DB::Function> {
     match resolution {
-        CallResolution::Selected(selected) => vec![selected.function()],
-        CallResolution::Ambiguous(functions) => functions.clone(),
-        CallResolution::UnboundPolymorphic(function) => vec![*function],
-        CallResolution::Cast(_) | CallResolution::NotFound | CallResolution::Undetermined => {
-            Vec::new()
-        }
+        CallResolution::Selected(selected) => Some(selected.function()),
+        _ => None,
     }
+}
+
+/// `result`, or the default value for a body that is not SQL, is missing or
+/// does not parse.
+fn readable<T: Default>(result: Result<T, LookupError>) -> Result<T, LookupError> {
+    result.or_else(|error| unreadable_body(&error).then(T::default).ok_or(error))
 }
 
 /// Whether a value the definition gives its variable may come from the
@@ -76,13 +82,14 @@ fn tainted<DB: DatabaseLike>(
 }
 
 /// Whether a definition reaching `read` may come from the function's
-/// arguments.
+/// arguments. A read no definition reaches sits where the body never runs,
+/// so it counts as dependent and is not reported.
 fn read_tainted<DB: DatabaseLike>(
     read: &VariableRead<'_, '_, DB>,
     followed: &mut Vec<DefinitionId>,
 ) -> Result<bool, LookupError> {
     match read.reaching() {
-        Reaching::Unreachable => Ok(false),
+        Reaching::Unreachable => Ok(true),
         Reaching::Definitions(definitions) => {
             for definition in definitions {
                 if tainted(definition, followed)? {
@@ -113,14 +120,11 @@ impl<'db, DB: DatabaseLike> Root<'_, '_, '_, 'db, DB> {
             Some((
                 ColumnDefinition::Variable(variable) | ColumnDefinition::VariableField(variable),
                 _,
-            )) => match self
+            )) => self
                 .reads
                 .iter()
                 .find(|read| read.variable().id() == variable.id())
-            {
-                Some(read) => read_tainted(read, &mut Vec::new()),
-                None => Ok(true),
-            },
+                .map_or(Ok(true), |read| read_tainted(read, &mut Vec::new())),
             _ => Ok(true),
         }
     }
@@ -155,21 +159,13 @@ impl<'db, DB: DatabaseLike> Root<'_, '_, '_, 'db, DB> {
                         }) {
                             return ControlFlow::Continue(());
                         }
-                        match self.root.dependent_reference(expression) {
-                            Ok(false) => ControlFlow::Continue(()),
-                            Ok(true) => ControlFlow::Break(None),
-                            Err(error) => ControlFlow::Break(Some(error)),
-                        }
+                        stop_on(self.root.dependent_reference(expression))
                     }
                     _ => ControlFlow::Continue(()),
                 }
             }
         }
-        match walk(node, &mut References { root: self, local }) {
-            ControlFlow::Continue(()) => Ok(true),
-            ControlFlow::Break(None) => Ok(false),
-            ControlFlow::Break(Some(error)) => Err(error),
-        }
+        Ok(!stopped(walk(node, &mut References { root: self, local }))?)
     }
 
     /// The text naming a part: the expression of the `SELECT` PostgreSQL
@@ -203,23 +199,12 @@ impl<'db, DB: DatabaseLike> Relations<'db, DB> {
         if function.target_name().schema() == Some("pg_catalog") {
             return Ok(false);
         }
-        let mut reads = match function.referenced_relations(self.database) {
-            Ok(relations) => !relations.is_empty(),
-            Err(error) if unreadable_body(&error) => false,
-            Err(error) => return Err(error),
-        };
-        if !reads {
-            let functions = match function.referenced_functions(self.database) {
-                Ok(functions) => functions,
-                Err(error) if unreadable_body(&error) => Vec::new(),
-                Err(error) => return Err(error),
-            };
-            for called in functions {
-                if self.function(called)? {
-                    reads = true;
-                    break;
-                }
+        let mut reads = !readable(function.referenced_relations(self.database))?.is_empty();
+        for called in readable(function.referenced_functions(self.database))? {
+            if reads {
+                break;
             }
+            reads = self.function(called)?;
         }
         self.known.insert(function, reads);
         Ok(reads)
@@ -239,49 +224,36 @@ impl<'db, DB: DatabaseLike> Relations<'db, DB> {
         impl<'db, DB: DatabaseLike> Calls<'_, '_, '_, 'db, DB> {
             fn reaches(
                 &mut self,
-                functions: Vec<&'db DB::Function>,
+                application: Result<Option<CallApplication<'_, 'db, DB>>, LookupError>,
             ) -> ControlFlow<Option<LookupError>> {
-                for function in functions {
-                    match self.relations.function(function) {
-                        Ok(false) => {}
-                        Ok(true) => return ControlFlow::Break(None),
-                        Err(error) => return ControlFlow::Break(Some(error)),
-                    }
-                }
-                ControlFlow::Continue(())
+                stop_on(application.and_then(|application| {
+                    application
+                        .and_then(|application| called(application.resolution()))
+                        .map_or(Ok(false), |function| self.relations.function(function))
+                }))
             }
         }
         impl<DB: DatabaseLike> Visitor for Calls<'_, '_, '_, '_, DB> {
             type Break = Option<LookupError>;
             fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Option<LookupError>> {
-                match self.context.call(expression) {
-                    Ok(Some(application)) => self.reaches(called(application.resolution())),
-                    Ok(None) => ControlFlow::Continue(()),
-                    Err(error) => ControlFlow::Break(Some(error)),
-                }
+                let application = self.context.call(expression);
+                self.reaches(application)
             }
             fn pre_visit_table_factor(
                 &mut self,
                 factor: &TableFactor,
             ) -> ControlFlow<Option<LookupError>> {
-                match self.context.relation_call(factor) {
-                    Ok(Some(application)) => self.reaches(called(application.resolution())),
-                    Ok(None) => ControlFlow::Continue(()),
-                    Err(error) => ControlFlow::Break(Some(error)),
-                }
+                let application = self.context.relation_call(factor);
+                self.reaches(application)
             }
         }
-        match walk(
+        stopped(walk(
             node,
             &mut Calls {
                 relations: self,
                 context,
             },
-        ) {
-            ControlFlow::Continue(()) => Ok(false),
-            ControlFlow::Break(None) => Ok(true),
-            ControlFlow::Break(Some(error)) => Err(error),
-        }
+        ))
     }
 }
 
@@ -312,11 +284,13 @@ impl<DB: DatabaseLike> Parts<'_, '_, '_, '_, '_, DB> {
     }
 
     fn expression(&mut self, expression: &Expr) -> Result<(), LookupError> {
-        let Some(application) = self.root.context.call(expression)? else {
-            return Ok(());
-        };
-        let functions = called(application.resolution());
-        if functions.is_empty() || !functions.iter().all(|function| function.returns_set()) {
+        if !self
+            .root
+            .context
+            .call(expression)?
+            .and_then(|application| called(application.resolution()))
+            .is_some_and(FunctionLike::returns_set)
+        {
             return Ok(());
         }
         let empty = ExpressionScope::Empty;
@@ -332,46 +306,38 @@ impl<DB: DatabaseLike> Parts<'_, '_, '_, '_, '_, DB> {
     }
 
     fn table_factor(&mut self, factor: &TableFactor) -> Result<(), LookupError> {
-        let Some(application) = self.root.context.relation_call(factor)? else {
+        let Some((application, function)) =
+            self.root
+                .context
+                .relation_call(factor)?
+                .and_then(|application| {
+                    called(application.resolution()).map(|function| (application, function))
+                })
+        else {
             return Ok(());
         };
-        let functions = called(application.resolution());
-        if functions.is_empty() {
+        if inlined_in_from(self.database, function)? {
             return Ok(());
         }
-        for function in &functions {
-            if inlined_in_from(self.database, *function)? {
-                return Ok(());
-            }
-        }
         let empty = ExpressionScope::Empty;
+        let mut reads = self.relations.function(function)?;
         for argument in application.arguments() {
             let local =
                 ExpressionContext::for_expression(argument, &empty, self.database, CASE).ok();
             if !self.root.independent(*argument, local.as_ref())? {
                 return Ok(());
             }
+            reads = reads || self.relations.calls(self.root.context, *argument)?;
         }
         self.within = Some(std::ptr::from_ref(factor).cast());
-        let mut reads = false;
-        for function in functions {
-            reads |= self.relations.function(function)?;
-        }
-        for argument in application.arguments() {
-            reads |= self.relations.calls(self.root.context, *argument)?;
-        }
         if reads {
-            let (TableFactor::Table {
-                name,
-                args: Some(sqlparser::ast::TableFunctionArgs { args, .. }),
-                ..
-            }
-            | TableFactor::Function { name, args, .. }) = factor
-            else {
-                return Ok(());
-            };
-            let arguments: Vec<String> = args.iter().map(ToString::to_string).collect();
-            self.found.push(format!("{name}({})", arguments.join(", ")));
+            let arguments: Vec<String> = application
+                .arguments()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            self.found
+                .push(format!("{}({})", application.name(), arguments.join(", ")));
         }
         Ok(())
     }
@@ -457,17 +423,10 @@ fn independent_parts<'db, DB: DatabaseLike>(
     let mut found = Vec::new();
     match function.stored_language().as_deref() {
         Some("plpgsql") => {
-            let body = match function.plpgsql_sites(database) {
-                Ok(body) => body,
-                Err(error) if unreadable_body(&error) => return Ok(found),
-                Err(error) => return Err(error),
+            let Some(body) = readable(function.plpgsql_sites(database).map(Some))? else {
+                return Ok(found);
             };
-            let sites = match body.sites() {
-                Ok(sites) => sites,
-                Err(error) if unreadable_body(&error) => return Ok(found),
-                Err(error) => return Err(error),
-            };
-            for site in &sites {
+            for site in &readable(body.sites())? {
                 let context = site.context(CASE)?;
                 let reads = site.reads(CASE)?;
                 let sql = site.sql();
@@ -536,26 +495,24 @@ struct PerRowCalls<'a, 'c, 'q, 'db, DB: DatabaseLike> {
 
 impl<DB: DatabaseLike> PerRowCalls<'_, '_, '_, '_, DB> {
     fn call(&mut self, expression: &Expr) -> Result<(), LookupError> {
-        let Some(application) = self.context.call(expression)? else {
+        let Some(function) = self
+            .context
+            .call(expression)?
+            .and_then(|application| called(application.resolution()))
+        else {
             return Ok(());
         };
-        let functions = called(application.resolution());
-        if functions.is_empty() || !reads_row(self.database, self.table, None, expression)? {
+        if !reads_row(self.database, self.table, None, expression)?
+            || inlined_in_expression(self.database, function)?
+        {
             return Ok(());
         }
-        for function in functions {
-            if function.target_name().schema() == Some("pg_catalog")
-                || inlined_in_expression(self.database, function)?
-            {
-                continue;
-            }
-            for part in independent_parts(self.database, function, self.relations)? {
-                self.findings.push(Finding {
-                    call: expression.to_string(),
-                    function: signature(function, self.database),
-                    part,
-                });
-            }
+        for part in independent_parts(self.database, function, self.relations)? {
+            self.findings.push(Finding {
+                call: expression.to_string(),
+                function: signature(function, self.database),
+                part,
+            });
         }
         Ok(())
     }

@@ -197,3 +197,169 @@ fn set_returning_calls_in_from_are_reported_unless_postgresql_inlines_them() {
         )]
     );
 }
+
+#[test]
+fn helpers_postgresql_does_not_inline_are_reported() {
+    assert_eq!(
+        messages(
+            "CREATE FUNCTION authz.team_array() RETURNS UUID[] LANGUAGE sql STABLE SECURITY DEFINER
+               AS $$ SELECT ARRAY(SELECT authz.member_teams()) $$;
+             CREATE FUNCTION authz.volatile_team_array() RETURNS UUID[] LANGUAGE sql VOLATILE SECURITY DEFINER
+               AS $$ SELECT ARRAY(SELECT authz.member_teams()) $$;
+             CREATE FUNCTION authz.immutable_teams(doc_team UUID) RETURNS UUID[] LANGUAGE sql IMMUTABLE
+               AS $$ SELECT authz.team_array() $$;
+             CREATE FUNCTION authz.volatile_teams(doc_team UUID) RETURNS UUID[] LANGUAGE sql STABLE
+               AS $$ SELECT authz.volatile_team_array() $$;
+             CREATE FUNCTION authz.limited_teams(doc_team UUID) RETURNS UUID[] LANGUAGE sql STABLE
+               AS $$ SELECT authz.team_array() LIMIT 1 $$;
+             CREATE POLICY immutable ON docs USING (team_id = ANY (authz.immutable_teams(team_id)));
+             CREATE POLICY limited ON docs USING (team_id = ANY (authz.limited_teams(team_id)));
+             CREATE POLICY volatile ON docs USING (team_id = ANY (authz.volatile_teams(team_id)));"
+        ),
+        [
+            reported(
+                "immutable",
+                "authz.immutable_teams(team_id)",
+                "immutable_teams(UUID)",
+                "SELECT authz.team_array()"
+            ),
+            reported(
+                "limited",
+                "authz.limited_teams(team_id)",
+                "limited_teams(UUID)",
+                "SELECT authz.team_array() LIMIT 1"
+            ),
+            reported(
+                "volatile",
+                "authz.volatile_teams(team_id)",
+                "volatile_teams(UUID)",
+                "SELECT authz.volatile_team_array()"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn plpgsql_parts_follow_unassigned_looping_and_unreachable_variables() {
+    assert_eq!(
+        messages(
+            "CREATE FUNCTION authz.gated(doc_team UUID) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$
+             BEGIN
+               IF EXISTS (SELECT 1 FROM team_members WHERE user_id = authz.caller_id()) THEN
+                 RETURN doc_team IS NOT NULL;
+               END IF;
+               RETURN false;
+             END $$;
+             CREATE FUNCTION authz.counted(doc_team UUID) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$
+             DECLARE
+               me UUID;
+               tries INT := 0;
+             BEGIN
+               LOOP
+                 tries := tries + 1;
+                 EXIT WHEN tries > 3;
+               END LOOP;
+               IF current_setting('app.user_id', true) <> '' THEN
+                 me := authz.caller_id();
+               END IF;
+               RETURN doc_team IN (SELECT team_id FROM team_members WHERE user_id = me AND tries > 0);
+             END $$;
+             CREATE FUNCTION authz.selected_into(doc_team UUID) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$
+             DECLARE teams UUID[];
+             BEGIN
+               SELECT array_agg(team_id) INTO teams FROM team_members WHERE user_id = authz.caller_id();
+               RETURN doc_team = ANY (teams);
+             END $$;
+             CREATE FUNCTION authz.dead(doc_team UUID) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$
+             DECLARE me UUID := authz.caller_id();
+             BEGIN
+               RETURN doc_team IS NOT NULL;
+               RETURN doc_team IN (SELECT team_id FROM team_members WHERE user_id = me);
+             END $$;
+             CREATE FUNCTION authz.broken(doc_team UUID) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$
+             BEGIN RETURN doc_team IN (SELECT authz.member_teams()) $$;
+             CREATE FUNCTION authz.positional(UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+               AS $$ SELECT EXISTS (SELECT 1 FROM public.team_members m WHERE m.team_id = $1) $$;
+             CREATE POLICY gated ON docs USING (authz.gated(team_id));
+             CREATE POLICY counted ON docs USING (authz.counted(team_id));
+             CREATE POLICY selected_into ON docs USING (authz.selected_into(team_id));
+             CREATE POLICY dead ON docs USING (authz.dead(team_id));
+             CREATE POLICY broken ON docs USING (authz.broken(team_id));
+             CREATE POLICY positional ON docs USING (authz.positional(team_id));"
+        ),
+        [
+            reported(
+                "counted",
+                "authz.counted(team_id)",
+                "counted(UUID)",
+                "SELECT team_id FROM team_members WHERE user_id = me AND tries > 0"
+            ),
+            reported(
+                "gated",
+                "authz.gated(team_id)",
+                "gated(UUID)",
+                "EXISTS (SELECT 1 FROM team_members WHERE user_id = authz.caller_id())"
+            ),
+            reported(
+                "selected_into",
+                "authz.selected_into(team_id)",
+                "selected_into(UUID)",
+                "SELECT array_agg(team_id) FROM team_members WHERE user_id = authz.caller_id()"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn set_returning_calls_in_set_operations_and_from_arguments_are_reported() {
+    assert_eq!(
+        messages(
+            "CREATE FUNCTION authz.teams_of_user(member UUID) RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER
+               AS $$ SELECT team_id FROM public.team_members WHERE user_id = member $$;
+             CREATE FUNCTION authz.intersected(doc_team UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+               AS $$ SELECT EXISTS (SELECT authz.member_teams() INTERSECT SELECT doc_team) $$;
+             CREATE FUNCTION authz.by_caller(doc_team UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+               AS $$ SELECT EXISTS (SELECT 1 FROM authz.teams_of_user((SELECT authz.caller_id())) t WHERE t = doc_team) $$;
+             CREATE FUNCTION authz.by_team(doc_team UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+               AS $$ SELECT EXISTS (SELECT 1 FROM authz.teams_of_user(doc_team) t) $$;
+             CREATE FUNCTION authz.counted(doc_team UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+               AS $$ SELECT doc_team IS NOT NULL AND (SELECT count(*) FROM authz.member_teams()) > 0 $$;
+             CREATE FUNCTION authz.series(doc_team UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+               AS $$ SELECT EXISTS (SELECT 1 FROM generate_series(1, 3) g WHERE doc_team IS NOT NULL) $$;
+             CREATE FUNCTION authz.undeclared(doc_team UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+               AS $$ SELECT EXISTS (SELECT 1 FROM authz.missing(doc_team) m) $$;
+             CREATE FUNCTION authz.intersected_by_team(doc_team UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+               AS $$ SELECT EXISTS (SELECT authz.teams_of_user(doc_team) INTERSECT SELECT doc_team) $$;
+             CREATE FUNCTION authz.intersected_series(doc_team UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+               AS $$ SELECT EXISTS (SELECT generate_series(1, 3) INTERSECT SELECT 1 WHERE doc_team IS NOT NULL) $$;
+             CREATE POLICY intersected_by_team ON docs USING (authz.intersected_by_team(team_id));
+             CREATE POLICY intersected_series ON docs USING (authz.intersected_series(team_id));
+             CREATE POLICY intersected ON docs USING (authz.intersected(team_id));
+             CREATE POLICY by_caller ON docs USING (authz.by_caller(team_id));
+             CREATE POLICY by_team ON docs USING (authz.by_team(team_id));
+             CREATE POLICY counted ON docs USING (authz.counted(team_id));
+             CREATE POLICY series ON docs USING (authz.series(team_id));
+             CREATE POLICY undeclared ON docs USING (authz.undeclared(team_id));"
+        ),
+        [
+            reported(
+                "by_caller",
+                "authz.by_caller(team_id)",
+                "by_caller(UUID)",
+                "authz.teams_of_user((SELECT authz.caller_id()))"
+            ),
+            reported(
+                "counted",
+                "authz.counted(team_id)",
+                "counted(UUID)",
+                "SELECT count(*) FROM authz.member_teams()"
+            ),
+            reported(
+                "intersected",
+                "authz.intersected(team_id)",
+                "intersected(UUID)",
+                "authz.member_teams()"
+            ),
+        ]
+    );
+}

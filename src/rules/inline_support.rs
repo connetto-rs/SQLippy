@@ -20,8 +20,10 @@ use sqlparser::{
 };
 
 use super::{
-    function_body_support::parameter, policy_support::sql_set_body,
-    volatility_support::runs_volatile, walk_support::walk,
+    function_body_support::parameter,
+    policy_support::sql_set_body,
+    volatility_support::runs_volatile,
+    walk_support::{stop_on, stopped, walk},
 };
 
 /// Whether `function` is `LANGUAGE sql`, runs as its caller and sets no
@@ -94,7 +96,6 @@ struct Showstopper<'db, DB: DatabaseLike> {
     database: &'db DB,
     immutable: bool,
     strict: bool,
-    error: Option<LookupError>,
 }
 
 impl<DB: DatabaseLike> Showstopper<'_, DB> {
@@ -144,21 +145,14 @@ impl<DB: DatabaseLike> Showstopper<'_, DB> {
 }
 
 impl<DB: DatabaseLike> Visitor for Showstopper<'_, DB> {
-    type Break = ();
+    type Break = Option<LookupError>;
 
-    fn pre_visit_query(&mut self, _query: &Query) -> ControlFlow<()> {
-        ControlFlow::Break(())
+    fn pre_visit_query(&mut self, _query: &Query) -> ControlFlow<Option<LookupError>> {
+        ControlFlow::Break(None)
     }
 
-    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
-        match self.stops(expression) {
-            Ok(false) => ControlFlow::Continue(()),
-            Ok(true) => ControlFlow::Break(()),
-            Err(error) => {
-                self.error = Some(error);
-                ControlFlow::Break(())
-            }
-        }
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Option<LookupError>> {
+        stop_on(self.stops(expression))
     }
 }
 
@@ -244,13 +238,8 @@ pub(crate) fn inlined_in_expression<DB: DatabaseLike>(
         database,
         immutable: volatility == FunctionBehavior::Immutable,
         strict,
-        error: None,
     };
-    let stopped = walk(expression, &mut showstopper).is_break();
-    if let Some(error) = showstopper.error {
-        return Err(error);
-    }
-    if stopped {
+    if stopped(walk(expression, &mut showstopper))? {
         return Ok(false);
     }
     Ok(!strict

@@ -3,6 +3,8 @@
 
 use std::ops::ControlFlow;
 
+use sql_traits::errors::LookupError;
+
 use sqlparser::ast::{
     Expr, GroupByExpr, Ident, ObjectName, OrderBy, OrderByExpr, Query, Select, Statement,
     TableFactor, ValueWithSpan, Visit, Visitor,
@@ -114,4 +116,25 @@ impl<B> Visitor for Dynamic<'_, B> {
     fn post_visit_group_by(&mut self, group_by: &GroupByExpr) -> ControlFlow<B> {
         self.0.post_visit_group_by(group_by)
     }
+}
+
+/// Continues on `Ok(false)` and stops on `Ok(true)` or on an error, which it
+/// carries.
+pub(crate) fn stop_on(result: Result<bool, LookupError>) -> ControlFlow<Option<LookupError>> {
+    result.map_or_else(
+        |error| ControlFlow::Break(Some(error)),
+        |stop| {
+            if stop {
+                ControlFlow::Break(None)
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+    )
+}
+
+/// Whether a walk `stop_on` drove stopped on `Ok(true)`.
+pub(crate) fn stopped(flow: ControlFlow<Option<LookupError>>) -> Result<bool, LookupError> {
+    flow.break_value()
+        .map_or(Ok(false), |error| error.map_or(Ok(true), Err))
 }
