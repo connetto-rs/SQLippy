@@ -58,6 +58,65 @@ fn serial_columns_on_their_own_sequences_do_not_hide_parallel_tables() {
 }
 
 #[test]
+fn subtype_tables_extending_different_parents_pass() {
+    for sql in [
+        "CREATE TABLE camera_models (id INT PRIMARY KEY);
+         CREATE TABLE camera_lots (id INT PRIMARY KEY);
+         CREATE TABLE phone_models (id INT PRIMARY KEY REFERENCES camera_models (id) ON DELETE CASCADE);
+         CREATE TABLE phone_lots (id INT PRIMARY KEY REFERENCES camera_lots (id) ON DELETE CASCADE);",
+        // The parents differ beside another reference that differs too.
+        "CREATE TABLE camera_models (id INT PRIMARY KEY);
+         CREATE TABLE camera_lots (id INT PRIMARY KEY);
+         CREATE TABLE phone_models (id INT PRIMARY KEY REFERENCES camera_models (id), owner_id INT REFERENCES teams (id));
+         CREATE TABLE phone_lots (id INT PRIMARY KEY REFERENCES camera_lots (id), owner_id INT REFERENCES people (id));",
+        // The primary key references a unique key of each parent.
+        "CREATE TABLE camera_models (id INT PRIMARY KEY, code INT UNIQUE);
+         CREATE TABLE camera_lots (id INT PRIMARY KEY, code INT UNIQUE);
+         CREATE TABLE phone_models (code INT PRIMARY KEY REFERENCES camera_models (code));
+         CREATE TABLE phone_lots (code INT PRIMARY KEY REFERENCES camera_lots (code));",
+    ] {
+        assert_eq!(reported(sql), Vec::<String>::new(), "{sql}");
+    }
+}
+
+#[test]
+fn subtype_tables_of_one_parent_differing_in_another_reference_are_reported() {
+    assert_eq!(
+        reported(
+            "CREATE TABLE badges (id INT PRIMARY KEY);
+             CREATE TABLE team_badges (id INT PRIMARY KEY REFERENCES badges (id), holder_id INT REFERENCES teams (id));
+             CREATE TABLE person_badges (id INT PRIMARY KEY REFERENCES badges (id), holder_id INT REFERENCES people (id));"
+        ),
+        ["team_badges"]
+    );
+}
+
+#[test]
+fn subtype_tables_of_one_parent_are_reported_past_a_table_extending_another() {
+    assert_eq!(
+        reported(
+            "CREATE TABLE camera_models (id INT PRIMARY KEY);
+             CREATE TABLE camera_lots (id INT PRIMARY KEY);
+             CREATE TABLE lot_team_marks (id INT PRIMARY KEY REFERENCES camera_lots (id), holder_id INT REFERENCES teams (id));
+             CREATE TABLE model_person_marks (id INT PRIMARY KEY REFERENCES camera_models (id), holder_id INT REFERENCES people (id));
+             CREATE TABLE model_team_marks (id INT PRIMARY KEY REFERENCES camera_models (id), holder_id INT REFERENCES teams (id));"
+        ),
+        ["model_team_marks"]
+    );
+}
+
+#[test]
+fn references_from_part_of_a_composite_primary_key_are_reported() {
+    assert_eq!(
+        reported(
+            "CREATE TABLE team_slots (subject_id INT REFERENCES teams (id), slot INT, PRIMARY KEY (subject_id, slot));
+             CREATE TABLE person_slots (subject_id INT REFERENCES people (id), slot INT, PRIMARY KEY (subject_id, slot));"
+        ),
+        ["team_slots"]
+    );
+}
+
+#[test]
 fn tables_differing_in_anything_else_pass() {
     for sql in [
         // Same targets: duplicates, not parallels.
