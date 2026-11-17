@@ -6,20 +6,13 @@ use sql_traits::{
     errors::LookupError,
     traits::{DatabaseLike, FunctionLike, PolicyLike, TableLike},
 };
-use sqlparser::{
-    ast::{
-        Expr, FunctionArguments, FunctionBehavior, FunctionSecurity, Query, SetExpr, Statement,
-        Visitor,
-    },
-    dialect::PostgreSqlDialect,
-    parser::Parser,
-};
+use sqlparser::ast::{Expr, FunctionArguments, FunctionBehavior, Query, Visitor};
 
 use crate::rules::walk_support::walk;
 use crate::{
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::policy_support::walked_clauses,
+    rules::{inline_support::inlined_in_expression, policy_support::walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -36,37 +29,6 @@ fn reads_a_column(expression: &Expr) -> bool {
         }
     }
     walk(expression, &mut Names).is_break()
-}
-
-/// Whether a parsed body is one `SELECT` of one expression and nothing else.
-fn scalar_select(statements: &[Statement]) -> bool {
-    matches!(statements, [Statement::Query(query)]
-        if query.with.is_none()
-            && query.order_by.is_none()
-            && query.limit_clause.is_none()
-            && matches!(query.body.as_ref(), SetExpr::Select(select)
-                if select.projection.len() == 1
-                    && select.from.is_empty()
-                    && select.selection.is_none()
-                    && select.having.is_none()))
-}
-
-/// Whether PostgreSQL inlines a call to the function into the calling query,
-/// which a `RETURN` body or a body of one `SELECT` of one expression allows.
-fn inlinable<F: FunctionLike>(database: &F::DB, function: &F) -> bool {
-    function
-        .stored_language()
-        .is_none_or(|language| language == "sql")
-        && function.security_mode() != FunctionSecurity::Definer
-        && function.configuration_parameters().is_empty()
-        && !function.returns_set()
-        && (function
-            .body_expression(database)
-            .is_ok_and(|body| body.is_some())
-            || function
-                .body()
-                .and_then(|body| Parser::parse_sql(&PostgreSqlDialect {}, body).ok())
-                .is_some_and(|statements| scalar_select(&statements)))
 }
 
 /// One call the rule reports.
@@ -107,7 +69,7 @@ impl<DB: DatabaseLike> RowIndependentCalls<'_, DB> {
                 FunctionBehavior::Stable => immutable = false,
                 FunctionBehavior::Volatile => {
                     immutable = false;
-                    volatile |= !inlinable(self.database, function);
+                    volatile |= !inlined_in_expression(self.database, function)?;
                 }
             }
         }

@@ -78,6 +78,7 @@ mod subject_settable_attributes;
 mod superkey_primary_keys;
 mod tenant_unique_constraints;
 mod unaudited_authority_tables;
+mod uncached_helper_queries;
 mod uncached_policy_calls;
 mod undeletable_references;
 mod unindexed_recursive_joins;

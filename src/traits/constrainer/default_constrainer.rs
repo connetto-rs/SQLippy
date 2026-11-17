@@ -50,13 +50,14 @@ use crate::{
         TautologicalWithCheck, TimeDependentCheck, TimeWithTimeZone, TimestampBetween,
         TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
         TruncatedIdentifier, TruncatingIntegerDivision, UnauditedAuthorityTable,
-        UnboundedTextColumn, UncachedPolicyCall, UncheckedPastTimestamp, UndeletableReference,
-        UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
-        UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin, UnknownBinarySend,
-        UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin,
-        UnsatisfiableCheck, UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
-        UnseededPolicySet, UnusedCte, UnvalidatedConstraint, UuidStoredAsText, WildcardView,
-        WritingNonVolatileFunction, ZeroPrecisionTimestamp,
+        UnboundedTextColumn, UncachedHelperQuery, UncachedPolicyCall, UncheckedPastTimestamp,
+        UndeletableReference, UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect,
+        UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin,
+        UnknownBinarySend, UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn, UnorderedLimit,
+        UnreadOuterJoin, UnsatisfiableCheck, UnsatisfiablePolicy,
+        UnscopedUniqueConstraintOnRowLevelSecurityTable, UnseededPolicySet, UnusedCte,
+        UnvalidatedConstraint, UuidStoredAsText, WildcardView, WritingNonVolatileFunction,
+        ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -167,7 +168,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 49] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 50] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(RepeatedIndexColumn::default()),
@@ -198,6 +199,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(CorrelatedPolicySubquery::default()),
         Box::new(NestedPolicySubquery::default()),
         Box::new(UncachedPolicyCall::default()),
+        Box::new(UncachedHelperQuery::default()),
         Box::new(RepeatedPolicyCall::default()),
         Box::new(RaisingSettingRead::default()),
         Box::new(UnindexedPolicyFilter::default()),

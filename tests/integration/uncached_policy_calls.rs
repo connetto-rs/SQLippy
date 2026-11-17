@@ -17,6 +17,8 @@ const SCHEMA: &str = "
       AS 'BEGIN RETURN current_setting(''app.user_id'', true); END';
     CREATE FUNCTION auth.uid_inlined() RETURNS TEXT LANGUAGE sql
       AS 'SELECT current_setting(''app.user_id'', true)';
+    CREATE FUNCTION auth.uid_sublink() RETURNS TEXT LANGUAGE sql
+      AS 'SELECT (SELECT current_setting(''app.user_id'', true))';
     CREATE FUNCTION can_read(o TEXT, u TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE AS 'SELECT o = u';
     CREATE TABLE members (team INT, member TEXT);
     CREATE TABLE docs (owner TEXT, team INT);
@@ -85,10 +87,12 @@ fn only_a_volatile_call_postgresql_cannot_inline_is_said_to_block_an_index() {
     assert_eq!(
         calls(
             "CREATE POLICY volatile ON docs USING (owner = auth.uid_volatile());
-             CREATE POLICY inlined ON docs USING (owner = auth.uid_inlined());",
+             CREATE POLICY inlined ON docs USING (owner = auth.uid_inlined());
+             CREATE POLICY sublink ON docs USING (owner = auth.uid_sublink());",
         ),
         [
             ("auth.uid_inlined()".to_owned(), false),
+            ("auth.uid_sublink()".to_owned(), true),
             ("auth.uid_volatile()".to_owned(), true),
         ]
     );

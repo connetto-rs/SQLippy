@@ -165,6 +165,7 @@ rule_icons! {
     "prefix_redundant_index" => FaTags,
     "repeated_index_column" => FaClone,
     "uncached_policy_call" => FaBolt,
+    "uncached_helper_query" => FaBolt,
     "repeated_policy_call" => FaBolt,
     "raising_setting_read" => FaTriangleExclamation,
     "unindexed_correlated_select" => FaMagnifyingGlassArrowRight,
