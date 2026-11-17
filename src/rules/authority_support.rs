@@ -10,7 +10,7 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArguments, InTarget, JoinConstraint, JoinOperator,
-    Query, Select, SelectItem, SetExpr, UnaryOperator, Value, Visitor,
+    Query, Select, SelectItem, SetExpr, TableFactor, TableWithJoins, UnaryOperator, Value, Visitor,
 };
 
 use crate::rules::walk_support::walk;
@@ -500,6 +500,35 @@ fn projected(select: &Select) -> impl Iterator<Item = &Expr> {
     })
 }
 
+/// Whether `factor` is a relation `joined` reads, inside nested joins too.
+fn reads_factor(joined: &TableWithJoins, factor: &TableFactor) -> bool {
+    std::iter::once(&joined.relation)
+        .chain(joined.joins.iter().map(|join| &join.relation))
+        .any(|relation| {
+            std::ptr::eq(relation, factor)
+                || matches!(relation, TableFactor::NestedJoin { table_with_joins, .. }
+                    if reads_factor(table_with_joins, factor))
+        })
+}
+
+/// Whether `reference` binds to a relation of `select`'s own `FROM`, so it
+/// reads neither the outer row nor a parameter.
+fn reads_own<DB: DatabaseLike>(
+    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    select: &Select,
+    reference: &Expr,
+) -> Result<bool, LookupError> {
+    Ok(scope
+        .resolve_column_binding(reference)?
+        .and_then(|(_, binding)| binding.entry())
+        .is_some_and(|entry| {
+            select
+                .from
+                .iter()
+                .any(|joined| reads_factor(joined, entry.factor()))
+        }))
+}
+
 impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
     /// The table position and column a reference resolves to, when it is a
     /// stored column.
@@ -573,11 +602,10 @@ impl<DB: DatabaseLike> QueryWalk<'_, '_, '_, '_, '_, DB> {
             let Some((table, name)) = self.base(scope, column)? else {
                 continue;
             };
-            let outer = is_column_reference(other)
-                && self
-                    .base(scope, other)?
-                    .is_none_or(|(owner, _)| owner != table);
-            if subjects.iter().any(|(subject, _)| *subject == table) && outer {
+            if subjects.iter().any(|(subject, _)| *subject == table)
+                && is_column_reference(other)
+                && !reads_own(scope, select, other)?
+            {
                 self.found.scopes.push((table, name));
             }
         }
