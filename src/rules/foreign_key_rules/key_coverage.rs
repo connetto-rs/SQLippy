@@ -34,13 +34,10 @@ fn null_test(mut expression: &Expr) -> Option<(bool, Cow<'_, str>)> {
     }
 }
 
-/// The stored names of the two columns a check conjunct keeps `NULL`
-/// together, written `(a IS NULL) = (b IS NULL)` or
-/// `(a IS NOT NULL) = (b IS NOT NULL)`.
-fn tie(mut conjunct: &Expr) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
-    while let Expr::Nested(inner) = conjunct {
-        conjunct = inner;
-    }
+/// The stored names of the two columns a check conjunct, as `conjuncts`
+/// yields it outside parentheses, keeps `NULL` together, written
+/// `(a IS NULL) = (b IS NULL)` or `(a IS NOT NULL) = (b IS NOT NULL)`.
+fn tie(conjunct: &Expr) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
     let Expr::BinaryOp {
         left,
         op: BinaryOperator::Eq,
@@ -54,16 +51,14 @@ fn tie(mut conjunct: &Expr) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
 }
 
 /// Whether the checks of the host table of `foreign_key` keep each of the
-/// `nullable` key columns `NULL` exactly when the others are, through ties
+/// nullable key columns `rest` `NULL` exactly when `first` is, through ties
 /// between two columns chained over shared ones.
 fn null_together<DB: DatabaseLike>(
     database: &DB,
     foreign_key: &DB::ForeignKey,
-    nullable: &[&DB::Column],
+    first: &DB::Column,
+    rest: &[&DB::Column],
 ) -> Result<bool, LookupError> {
-    let Some((first, rest)) = nullable.split_first() else {
-        return Ok(true);
-    };
     let mut ties = Vec::new();
     for check in foreign_key
         .host_table(database)
@@ -174,7 +169,10 @@ impl<DB: DatabaseLike> ForeignKeyRule for NullableCompositeForeignKey<DB> {
             return Ok(());
         }
         let nullable = nullable_host_columns(database, foreign_key)?;
-        if nullable.len() < 2 || null_together(database, foreign_key, &nullable)? {
+        let [first, rest @ ..] = nullable.as_slice() else {
+            return Ok(());
+        };
+        if rest.is_empty() || null_together(database, foreign_key, first, rest)? {
             return Ok(());
         }
         let host = foreign_key.host_table(database).table_name();

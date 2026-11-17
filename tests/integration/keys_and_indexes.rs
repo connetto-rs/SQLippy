@@ -114,12 +114,15 @@ fn a_composite_key_whose_checks_keep_nullable_columns_null_together_is_not_repor
          CREATE TABLE disjoined (a INT, b INT, c INT NOT NULL,
            CHECK ((a IS NULL) = (b IS NULL) OR c > 0),
            FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE equated (a INT, b INT, c INT NOT NULL,
+           CHECK (a = b),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
          CREATE TABLE partly (a INT, b INT, c INT,
            CHECK ((a IS NULL) = (b IS NULL)),
            FOREIGN KEY (a, b, c) REFERENCES w (a, b, c));",
     );
-    assert_eq!(found.len(), 4, "{found:?}");
-    for table in ["crossed", "loose", "disjoined", "partly"] {
+    assert_eq!(found.len(), 5, "{found:?}");
+    for table in ["crossed", "loose", "disjoined", "equated", "partly"] {
         assert!(
             found
                 .iter()
