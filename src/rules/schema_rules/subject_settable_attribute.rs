@@ -20,7 +20,8 @@ use crate::{
         authority_support::{TableColumn, authority_columns, credential_compared, is_literal},
         grant_support::withheld,
         policy_support::{
-            Command, Stage, applied, conjuncts, covers, is_column_reference, policy_roles,
+            Command, Stage, applied, conjuncts, covers, disjuncts, is_column_reference,
+            policy_roles,
         },
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
@@ -174,6 +175,37 @@ fn guarded<DB: DatabaseLike>(
     Ok(false)
 }
 
+/// The `OR` arms of the expression that admit the row's subject.
+fn admitting_arms<'e, DB: DatabaseLike>(
+    database: &DB,
+    deployment: &Deployment,
+    scope: &ColumnScope<'_, '_, DB>,
+    expression: &'e Expr,
+) -> Result<Vec<&'e Expr>, LookupError> {
+    let mut arms = Vec::new();
+    for arm in disjuncts(expression) {
+        if admits_subject(database, deployment, scope, arm)? {
+            arms.push(arm);
+        }
+    }
+    Ok(arms)
+}
+
+/// Whether every arm fixes `attribute`.
+fn fixed_in_every<DB: DatabaseLike>(
+    database: &DB,
+    scope: &ColumnScope<'_, '_, DB>,
+    attribute: &TableColumn,
+    arms: &[&Expr],
+) -> Result<bool, LookupError> {
+    for arm in arms {
+        if !fixes(database, scope, attribute, arm)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Struct defining a rule that reports a write policy on an authority table
 /// letting the row's own subject set an attribute column other policies test
 /// to grant access.
@@ -182,11 +214,12 @@ fn guarded<DB: DatabaseLike>(
 /// `LANGUAGE sql` helper it calls, set-returning or scalar, by comparing a
 /// column with a declared credential. Its attribute columns are the ones that
 /// read compares with a literal or tests as a boolean, such as
-/// `profiles.is_admin`. A permissive `INSERT` or `UPDATE` policy whose
-/// new-row clause compares a column of the row with a credential admits the
-/// row's subject, and when no top-level conjunct pins an attribute column to
-/// literals other than `true` or tests it false, the subject can set it and
-/// grant themselves what the reading policies grant.
+/// `profiles.is_admin`. A permissive `INSERT` or `UPDATE` policy admits the
+/// row's subject through each `OR` arm of its new-row clause that compares a
+/// column of the row with a credential. When such an arm has no top-level
+/// conjunct pinning an attribute column to literals other than `true` or
+/// testing it false, the subject can set it and grant themselves what the
+/// reading policies grant.
 ///
 /// A restrictive policy for the same command covering the policy's roles
 /// closes the gap when it fixes the column. So does the source proving that
@@ -317,13 +350,16 @@ impl<DB: DatabaseLike> SchemaRule for SubjectSettableAttribute<DB> {
                         continue;
                     }
                     for position in applied(database, policy, command)? {
-                        if position.stage != Stage::Check
-                            || !admits_subject(database, deployment, &scope, position.expression)?
-                        {
+                        if position.stage != Stage::Check {
+                            continue;
+                        }
+                        let arms =
+                            admitting_arms(database, deployment, &scope, position.expression)?;
+                        if arms.is_empty() {
                             continue;
                         }
                         for (column, attribute) in &columns {
-                            if fixes(database, &scope, attribute, position.expression)?
+                            if fixed_in_every(database, &scope, attribute, &arms)?
                                 || guarded(
                                     database,
                                     &scope,

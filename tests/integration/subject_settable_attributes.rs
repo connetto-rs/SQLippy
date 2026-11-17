@@ -74,6 +74,10 @@ fn a_write_admitting_the_subject_and_leaving_an_attribute_free_is_reported() {
            WITH CHECK (id = CRED AND (is_admin = false OR display_name = 'x'));",
         "CREATE POLICY w ON profiles FOR UPDATE USING (id = CRED)
            WITH CHECK (id = CRED AND role = 'member');",
+        "CREATE POLICY w ON profiles FOR INSERT
+           WITH CHECK ((id = CRED AND NOT is_admin) OR (id = CRED));",
+        "CREATE POLICY w ON profiles FOR INSERT
+           WITH CHECK (((display_name = 'x') OR (id = CRED AND NOT is_admin)) OR CRED = id);",
     ] {
         assert_eq!(
             reported(&format!("{ADMIN_READ} {write}")),
@@ -102,6 +106,8 @@ fn a_fixed_attribute_passes() {
         "CREATE POLICY w ON profiles FOR UPDATE USING (id = CRED)
            WITH CHECK (EXISTS (SELECT 1 FROM docs WHERE profiles.id = CRED));",
         "CREATE POLICY w ON profiles AS RESTRICTIVE FOR UPDATE USING (id = CRED);",
+        "CREATE POLICY w ON profiles FOR INSERT
+           WITH CHECK ((id = CRED AND NOT is_admin) OR (CRED = id AND is_admin IS FALSE));",
         "CREATE POLICY w ON profiles FOR UPDATE USING (id = CRED);
          CREATE POLICY g ON profiles AS RESTRICTIVE FOR UPDATE WITH CHECK (NOT is_admin);",
     ] {
@@ -124,6 +130,37 @@ fn a_restrictive_guard_for_other_roles_or_commands_does_not_close_the_gap() {
             reported(&format!("{ADMIN_READ} {OPEN_UPDATE} {guard}")),
             ["Warn profiles.w"],
             "{guard}"
+        );
+    }
+}
+
+#[test]
+fn each_or_arm_admitting_the_subject_is_judged_by_its_own_pins() {
+    let schema = "
+        CREATE TABLE orgs (id INT PRIMARY KEY, founder TEXT NOT NULL);
+        CREATE TABLE members (org_id INT NOT NULL REFERENCES orgs (id), member TEXT NOT NULL,
+          state TEXT NOT NULL, PRIMARY KEY (org_id, member));
+        CREATE TABLE files (org_id INT);
+        ALTER TABLE files ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE members ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY files_read ON files FOR SELECT TO app USING (org_id IN (
+          SELECT org_id FROM members WHERE member = CRED AND state = 'active'));";
+    let admin = "(org_id IN (SELECT org_id FROM members WHERE member = CRED AND state = 'admin'))";
+    let founder = "(member = CRED AND state = 'active'
+        AND org_id IN (SELECT id FROM orgs WHERE founder = CRED))";
+    for (check, expected) in [
+        (format!("{admin} OR {founder}"), Vec::<&str>::new()),
+        (
+            format!("{admin} OR member = CRED"),
+            vec!["Warn members.join_org"],
+        ),
+    ] {
+        assert_eq!(
+            reported(&format!(
+                "{schema} CREATE POLICY join_org ON members FOR INSERT TO app WITH CHECK ({check});"
+            )),
+            expected,
+            "{check}"
         );
     }
 }
