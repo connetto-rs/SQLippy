@@ -225,6 +225,8 @@ rule_icons! {
     "case_sensitive_email" => FaEnvelope,
     "repeated_recursion_bound" => FaRulerVertical,
     "ordered_set_as_disjunction" => FaArrowUpWideShort,
+    "before_trigger_writes_other_table" => FaBolt,
+    "unfiltered_change_trigger" => FaClockRotateLeft,
 }
 #[cfg(test)]
 mod tests {

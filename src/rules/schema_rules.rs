@@ -106,3 +106,7 @@ mod repeated_recursion_bound;
 pub use repeated_recursion_bound::RepeatedRecursionBound;
 mod ordered_set_as_disjunction;
 pub use ordered_set_as_disjunction::OrderedSetAsDisjunction;
+mod before_trigger_writes_other_table;
+pub use before_trigger_writes_other_table::BeforeTriggerWritesOtherTable;
+mod unfiltered_change_trigger;
+pub use unfiltered_change_trigger::UnfilteredChangeTrigger;
