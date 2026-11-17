@@ -9,8 +9,8 @@ use sql_traits::{
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{
-    BinaryOperator, Expr, Ident, ObjectName, TriggerEvent, TriggerObject, TriggerObjectKind,
-    TriggerPeriod, UnaryOperator, Visitor,
+    BinaryOperator, Expr, Ident, ObjectName, ObjectNamePart, TriggerEvent, TriggerObject,
+    TriggerObjectKind, TriggerPeriod, UnaryOperator, Visitor,
 };
 use sqlparser_plpgsql::{
     embedded::{self, AliasTarget, Block, DeclarationKind, Node, RaiseLevel, Target},
@@ -223,11 +223,13 @@ fn client_writes<DB: DatabaseLike>(
     Ok(if declared { writes } else { Writes::BOTH })
 }
 
-/// The stored name of each part of `name`.
-fn stored_parts(name: &ObjectName) -> Option<Vec<Cow<'_, str>>> {
+/// The stored name of each part of `name`, which the PL/pgSQL parser builds
+/// from identifiers alone.
+fn stored_parts(name: &ObjectName) -> Vec<Cow<'_, str>> {
     name.0
         .iter()
-        .map(|part| part.as_ident().map(stored))
+        .filter_map(ObjectNamePart::as_ident)
+        .map(stored)
         .collect()
 }
 
@@ -391,9 +393,7 @@ enum Written {
 
 impl Stamping<'_> {
     fn target(&self, target: &Target) -> Written {
-        let Some(parts) = stored_parts(&target.name) else {
-            return Written::Unfollowed;
-        };
+        let parts = stored_parts(&target.name);
         match parts.as_slice() {
             [record, column] if record == "new" && column == self.column => {
                 if target.indirection.is_empty() {
@@ -427,7 +427,7 @@ impl Stamping<'_> {
         let shadows = block.declarations.iter().any(|declaration| {
             declaration.name == "new"
                 || matches!(&declaration.kind, DeclarationKind::Alias(AliasTarget::Name(name))
-                    if stored_parts(name).is_none_or(|parts| parts.iter().any(|part| part == "new")))
+                    if stored_parts(name).iter().any(|part| part == "new"))
         });
         if shadows || !block.handlers.is_empty() {
             return None;

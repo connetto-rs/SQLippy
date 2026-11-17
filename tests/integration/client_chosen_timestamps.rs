@@ -234,6 +234,48 @@ fn a_trigger_stamping_every_value_a_client_sets_covers_its_commands() {
             "CREATE TRIGGER restamp BEFORE UPDATE OF name, archived_at ON resources
              FOR EACH ROW EXECUTE FUNCTION stamp();"
         ),
+        format!(
+            "{} {}",
+            function("BEGIN BEGIN NEW.archived_at := now(); END; RETURN NEW; END"),
+            trigger("INSERT OR UPDATE", "stamp")
+        ),
+        format!(
+            "{} {}",
+            function(
+                "DECLARE
+                   pending CURSOR FOR SELECT 1;
+                   counted INT;
+                 BEGIN
+                   OPEN pending;
+                   FETCH pending INTO counted;
+                   MOVE pending;
+                   CLOSE pending;
+                   PERFORM 1;
+                   ASSERT counted IS NOT NULL;
+                   GET DIAGNOSTICS counted = ROW_COUNT;
+                   RAISE NOTICE 'stamping %', counted;
+                   IF (NEW.archived_at IS NULL) THEN RETURN (NEW); END IF;
+                   NEW.archived_at := now();
+                   RETURN NEW;
+                 END"
+            ),
+            trigger("INSERT OR UPDATE", "stamp")
+        ),
+        format!(
+            "{} {}",
+            function(
+                "BEGIN
+                   CASE WHEN NEW.archived_at IS NULL THEN RETURN NEW;
+                   ELSE NEW.archived_at := now();
+                   END CASE;
+                   CASE TG_OP WHEN 'INSERT' THEN NEW.archived_at := now();
+                   ELSE NEW.archived_at := clock_timestamp();
+                   END CASE;
+                   RETURN NEW;
+                 END"
+            ),
+            trigger("INSERT OR UPDATE", "stamp")
+        ),
     ] {
         assert_eq!(
             reported(app(), &format!("{writable}{stamping}")),
@@ -258,6 +300,12 @@ fn a_trigger_keeping_a_value_the_client_chose_stamps_nothing() {
         "BEGIN FOR i IN 1..2 LOOP NEW.archived_at := now(); END LOOP; RETURN NEW; END",
         "BEGIN NEW.archived_at := now(); RETURN NEW; EXCEPTION WHEN others THEN RETURN NEW; END",
         "BEGIN SELECT NEW.archived_at INTO NEW.archived_at; RETURN NEW; END",
+        "BEGIN NEW := OLD; NEW.archived_at := now(); RETURN NEW; END",
+        "BEGIN NEW.archived_at[1] := now(); RETURN NEW; END",
+        "DECLARE fresh ALIAS FOR NEW; BEGIN NEW.archived_at := now(); RETURN fresh; END",
+        "BEGIN NEW.archived_at := now(); RETURN 1; END",
+        "BEGIN CASE TG_OP WHEN 'INSERT' THEN NEW.archived_at := now(); END CASE; RETURN NEW; END",
+        "BEGIN NEW.archived_at := now() RETURN NEW; END",
     ] {
         assert_eq!(
             unstamped_commands(
@@ -272,6 +320,25 @@ fn a_trigger_keeping_a_value_the_client_chose_stamps_nothing() {
             "{body}"
         );
     }
+}
+
+#[test]
+fn a_trigger_function_in_another_language_stamps_nothing() {
+    assert_eq!(
+        unstamped_commands(
+            app(),
+            &format!(
+                "{RESOURCES} GRANT INSERT, UPDATE ON resources TO app;
+                 CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plpython3u AS $$
+                 TD['new']['archived_at'] = plpy.execute('SELECT now()')[0]['now']
+                 return 'MODIFY'
+                 $$;
+                 {}",
+                trigger("INSERT OR UPDATE", "stamp")
+            )
+        ),
+        ["INSERT", "UPDATE"]
+    );
 }
 
 #[test]
@@ -338,6 +405,11 @@ fn a_condition_skipping_only_rows_without_a_chosen_value_keeps_the_trigger_stamp
                 "UPDATE OF archived_at",
                 "OLD.archived_at IS DISTINCT FROM NEW.archived_at"
             )
+        ),
+        conditional_trigger("INSERT OR UPDATE", "(NEW.archived_at IS NOT NULL)"),
+        conditional_trigger(
+            "INSERT OR UPDATE",
+            "NEW.name IS NULL OR NEW.archived_at IS NOT NULL",
         ),
     ] {
         assert_eq!(
