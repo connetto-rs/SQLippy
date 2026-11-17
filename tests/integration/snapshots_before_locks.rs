@@ -43,6 +43,7 @@ fn every_lock_kind_before_a_read_is_reported() {
         "LOCK TABLE quotas IN EXCLUSIVE MODE;",
         "PERFORM 1 FROM quotas WHERE id = 1 FOR UPDATE;",
         "PERFORM 1 FROM quotas WHERE id = 1 FOR SHARE;",
+        "PERFORM 1 FROM quotas, slots WHERE quotas.id = slots.id FOR UPDATE;",
     ] {
         let found = findings(&plpgsql(&format!("BEGIN {lock} {CHECK} END")));
         assert_eq!(found.len(), 1, "{lock}: {found:?}");
@@ -72,6 +73,11 @@ fn a_guard_refusing_repeatable_read_before_the_lock_prevents_the_finding() {
         "ASSERT current_setting('transaction_isolation') = 'read committed';",
         "level := current_setting('transaction_isolation'); IF level IS DISTINCT FROM 'read committed' THEN RAISE EXCEPTION 'rc'; END IF;",
         "IF current_setting('transaction_isolation') = 'read committed' THEN NULL; ELSE RAISE EXCEPTION 'rc'; END IF;",
+        "IF current_setting('transaction_isolation')::text <> 'read committed' THEN RAISE EXCEPTION 'rc'; END IF;",
+        "IF current_setting('transaction_isolation') <> 'read committed' AND current_setting('transaction_isolation') <> 'read uncommitted' THEN RAISE EXCEPTION 'rc'; END IF;",
+        "IF current_setting('transaction_isolation') = 'read committed' AND slot > 0 THEN NULL; ELSE RAISE EXCEPTION 'rc'; END IF;",
+        "IF current_setting('transaction_isolation') = 'repeatable read' OR current_setting('transaction_isolation') = 'serializable' THEN RAISE EXCEPTION 'rr'; END IF;",
+        "IF current_setting('transaction_isolation') = 'read committed' OR current_setting('transaction_isolation') = 'read uncommitted' THEN NULL; ELSE RAISE EXCEPTION 'rc'; END IF;",
     ] {
         let body = format!(
             "DECLARE level TEXT; BEGIN {guard} PERFORM pg_advisory_xact_lock(1); {CHECK} END"
@@ -94,6 +100,9 @@ fn guards_that_let_repeatable_read_through_or_follow_the_lock_do_not_count() {
         ),
         format!(
             "BEGIN IF current_setting('search_path') <> 'public' THEN RAISE EXCEPTION 'path'; END IF; PERFORM pg_advisory_xact_lock(1); {CHECK} END"
+        ),
+        format!(
+            "BEGIN IF current_setting('transaction_isolation') = 'serializable' OR slot > 0 THEN RAISE EXCEPTION 'no'; END IF; PERFORM pg_advisory_xact_lock(1); {CHECK} END"
         ),
     ] {
         assert_eq!(findings(&plpgsql(&body)).len(), 1, "{body}");
@@ -130,6 +139,36 @@ fn lock_on_one_branch_reaches_a_read_after_the_join() {
         "BEGIN IF slot > 0 THEN PERFORM pg_advisory_xact_lock(1); END IF; {CHECK} END"
     ));
     assert_eq!(findings(&body).len(), 1);
+}
+
+#[test]
+fn a_read_through_a_derived_table_is_reported() {
+    let body = plpgsql(
+        "DECLARE n INT; BEGIN PERFORM pg_advisory_xact_lock(1); SELECT count(*) INTO n FROM (SELECT 1 FROM slots) AS taken; END",
+    );
+    assert_eq!(findings(&body).len(), 1);
+}
+
+#[test]
+fn a_transaction_end_drops_the_locks_and_only_a_chain_keeps_the_guard() {
+    let after_lock = |end: &str| {
+        plpgsql(&format!(
+            "BEGIN PERFORM pg_advisory_xact_lock(1); {end} {CHECK} END"
+        ))
+    };
+    assert_eq!(findings(&after_lock("COMMIT;")), Vec::<String>::new());
+    assert_eq!(findings(&after_lock("ROLLBACK;")), Vec::<String>::new());
+    assert_eq!(findings(&after_lock("")).len(), 1);
+    let after_guard = |end: &str| {
+        plpgsql(&format!(
+            "BEGIN IF current_setting('transaction_isolation') <> 'read committed' THEN RAISE EXCEPTION 'rc'; END IF; {end} PERFORM pg_advisory_xact_lock(1); {CHECK} END"
+        ))
+    };
+    assert_eq!(findings(&after_guard("COMMIT;")).len(), 1);
+    assert_eq!(
+        findings(&after_guard("COMMIT AND CHAIN;")),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
