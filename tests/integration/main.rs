@@ -80,6 +80,7 @@ mod subject_settable_attributes;
 mod superkey_primary_keys;
 mod tenant_unique_constraints;
 mod text_references;
+mod type_name_case_collisions;
 mod unaudited_authority_tables;
 mod uncached_helper_queries;
 mod uncached_policy_calls;

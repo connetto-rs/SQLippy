@@ -43,6 +43,8 @@ pub enum Location<DB: DatabaseLike> {
     Function(Box<DB::Function>),
     /// A domain.
     Domain(Box<DB::Domain>),
+    /// A user-defined type, the object `CREATE TYPE` defines.
+    UserDefinedType(Box<DB::UserDefinedType>),
     /// A grant statement.
     Grant(Box<DB::TableGrant>),
     /// An extension.

@@ -226,6 +226,7 @@ rule_icons! {
     "case_sensitive_email" => FaEnvelope,
     "repeated_recursion_bound" => FaRulerVertical,
     "ordered_set_as_disjunction" => FaArrowUpWideShort,
+    "type_name_case_collision" => FaSpellCheck,
 }
 #[cfg(test)]
 mod tests {
