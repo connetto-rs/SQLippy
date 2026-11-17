@@ -220,12 +220,10 @@ impl<DB: DatabaseLike> FunctionRule for TableNameDispatch<DB> {
         let Some(block) = plpgsql_block(function) else {
             return Ok(());
         };
+        // PostgreSQL refuses a trigger function that declares parameters.
         let trigger_signature = Signature {
             name: function.stored_name().into_owned(),
-            parameters: function
-                .stored_argument_names(database)
-                .map(|name| name.map(std::borrow::Cow::into_owned))
-                .collect(),
+            parameters: Vec::new(),
             kind: FunctionKind::Trigger,
         };
         if let Some(found) = dispatch(&block, &trigger_signature) {

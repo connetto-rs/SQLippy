@@ -35,6 +35,11 @@ fn comparisons_of_the_table_name_with_a_literal_are_reported_once() {
         "kind := CASE WHEN TG_TABLE_NAME = 'notes' THEN 'note' ELSE 'other' END;",
         "INSERT INTO events SELECT 'note' WHERE TG_TABLE_NAME = 'notes';",
         "WHILE TG_TABLE_NAME = 'notes' LOOP EXIT; END LOOP;",
+        "IF (TG_TABLE_NAME) = 'notes' THEN INSERT INTO events VALUES ('note'); END IF;",
+        "IF \"tg_table_name\" = 'notes' THEN INSERT INTO events VALUES ('note'); END IF;",
+        "kind := CASE TG_TABLE_NAME WHEN 'notes' THEN 'note' ELSE 'other' END;",
+        "BEGIN CASE TG_TABLE_NAME WHEN 'notes' THEN kind := 'note'; ELSE NULL; END CASE; END;",
+        "BEGIN NULL; EXCEPTION WHEN others THEN CASE TG_TABLE_NAME WHEN 'notes' THEN kind := 'note'; ELSE NULL; END CASE; END;",
     ] {
         let found = findings(body);
         assert_eq!(found.len(), 1, "{body}: {found:?}");
@@ -48,6 +53,7 @@ fn reading_the_name_without_comparing_it_is_not_reported() {
         "INSERT INTO events VALUES (TG_ARGV[0]);",
         "IF TG_OP = 'INSERT' THEN INSERT INTO events VALUES ('insert'); END IF;",
         "IF TG_TABLE_NAME = TG_ARGV[0] THEN INSERT INTO events VALUES ('x'); END IF;",
+        "EXECUTE 'INSERT INTO events VALUES (''x'')';",
     ] {
         assert!(findings(body).is_empty(), "{body}");
     }

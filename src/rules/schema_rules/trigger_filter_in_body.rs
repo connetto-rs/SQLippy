@@ -133,10 +133,6 @@ impl<DB: DatabaseLike> Visitor for RowsRead<'_, DB> {
     fn pre_visit_query(&mut self, _query: &sqlparser::ast::Query) -> ControlFlow<()> {
         ControlFlow::Break(())
     }
-
-    fn pre_visit_relation(&mut self, _relation: &sqlparser::ast::ObjectName) -> ControlFlow<()> {
-        ControlFlow::Break(())
-    }
 }
 
 /// The `WHEN` condition that fires exactly when the body does not return at

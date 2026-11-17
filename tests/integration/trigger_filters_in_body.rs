@@ -55,6 +55,12 @@ fn the_suggested_when_is_the_exact_negation() {
             "WHEN (OLD.body IS NOT DISTINCT FROM NEW.body)",
         ),
         ("NEW.body IS NULL", "WHEN (NEW.body IS NOT NULL)"),
+        ("(NEW.body IS NULL)", "WHEN (NEW.body IS NOT NULL)"),
+        ("NEW.body IS NOT NULL", "WHEN (NEW.body IS NULL)"),
+        (
+            "lower(NEW.body) = 'x'",
+            "WHEN ((lower(NEW.body) = 'x') IS NOT TRUE)",
+        ),
         (
             "OLD.body = NEW.body",
             "WHEN ((OLD.body = NEW.body) IS NOT TRUE)",
@@ -98,6 +104,15 @@ fn filters_when_cannot_take_are_not_reported() {
             &["AFTER UPDATE"][..],
         ),
         (filtered("TG_OP = 'UPDATE'"), &["AFTER UPDATE"][..]),
+        (filtered("no_such_function(NEW.body)"), &["AFTER UPDATE"][..]),
+        (
+            filtered("vault.public.lower(NEW.body) = 'x'"),
+            &["AFTER UPDATE"][..],
+        ),
+        (
+            "BEGIN IF NEW.body IS NULL THEN RETURN NULL; ELSIF NEW.id = 0 THEN RETURN NULL; END IF; INSERT INTO audit VALUES (NEW.id); RETURN NULL; END".to_owned(),
+            &["AFTER UPDATE"][..],
+        ),
         (
             "DECLARE seen INT := 0; BEGIN IF NEW.body IS NULL THEN RETURN NULL; END IF; INSERT INTO audit VALUES (NEW.id); RETURN NULL; END".to_owned(),
             &["AFTER UPDATE"][..],
