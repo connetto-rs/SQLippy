@@ -110,14 +110,12 @@ impl<DB: DatabaseLike> Maintained<'_, '_, DB> {
                 (AssignmentTarget::Tuple(columns), _) => (columns.as_slice(), &[][..]),
             };
             for (position, column) in columns.iter().enumerate() {
-                let Some(name) = column.0.first().and_then(|part| part.as_ident()) else {
-                    continue;
-                };
-                let kept = column.0.len() == 1
-                    && values
-                        .get(position)
-                        .is_some_and(|value| target.keeps(name, value));
-                if !kept {
+                if let Some(name) = column.0.first().and_then(|part| part.as_ident())
+                    && !(column.0.len() == 1
+                        && values
+                            .get(position)
+                            .is_some_and(|value| target.keeps(name, value)))
+                {
                     self.record(target.name, name)?;
                 }
             }

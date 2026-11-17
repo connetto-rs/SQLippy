@@ -187,6 +187,7 @@ fn definer_maintained_columns_ignore_self_assignments() {
         "UPDATE folders AS kept SET depth = other.depth FROM folders AS other WHERE other.id = kept.id + 1",
         "UPDATE folders SET (depth, label) = (label::INT, depth::TEXT)",
         "UPDATE folders SET (label, depth) = (label, 1)",
+        "UPDATE folders SET (depth, label) = (SELECT 1, 'root')",
         "INSERT INTO folders (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET depth = EXCLUDED.depth",
         "MERGE INTO folders AS kept USING (SELECT 1 AS id, 2 AS depth) AS source ON kept.id = source.id WHEN MATCHED THEN UPDATE SET depth = source.depth",
     ] {
