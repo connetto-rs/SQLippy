@@ -7,12 +7,13 @@ use sql_traits::{
 use sqlparser::ast::{BinaryOperator, CreatePolicyType, Expr, InTarget};
 
 use crate::{
-    deployment::Declaration,
+    deployment::{Declaration, Deployment},
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         authority_support::authority_columns,
         credential_support::CredentialJudge,
+        grant_support::withheld,
         null_support::{null_when, rejects_null},
         policy_support::{
             Command, Stage, applied, covers, holds_sublink_or_call, is_column_reference,
@@ -203,6 +204,32 @@ impl<'db, DB: DatabaseLike> CheckedRow<'db, DB> {
             }
         }
     }
+
+    /// The positions in `scope_positions` of the columns the roles of
+    /// `policy` may write with `command`.
+    fn writable(
+        &self,
+        deployment: &Deployment,
+        policy: &DB::Policy,
+        command: Command,
+        scope_positions: &[usize],
+    ) -> Result<Vec<usize>, LookupError> {
+        let mut writable = Vec::with_capacity(scope_positions.len());
+        for &position in scope_positions {
+            let column = self.columns[position];
+            if !withheld(
+                self.database,
+                deployment,
+                self.table,
+                policy,
+                command,
+                column,
+            )? {
+                writable.push(position);
+            }
+        }
+        Ok(writable)
+    }
 }
 
 /// Whether `column` sits in a foreign key to another table and is not the
@@ -244,7 +271,10 @@ fn scopes_another_table<DB: DatabaseLike>(
 /// foreign key holding the column beside one the clause constrains also
 /// closes it when PostgreSQL checks the key whenever the column is non-null,
 /// which `MATCH FULL` does always and `MATCH SIMPLE` does once the clause
-/// keeps every other key column non-null.
+/// keeps every other key column non-null. So does the source proving that the
+/// policy's roles, or the declared client roles for a policy applying to
+/// `PUBLIC`, lack the command's privilege on the column, as
+/// [`SubjectSettableAttribute`](crate::rules::SubjectSettableAttribute) reads it.
 ///
 /// # Example
 ///
@@ -368,15 +398,13 @@ impl<DB: DatabaseLike> SchemaRule for SelfGrantingWrite<DB> {
                     if !command.covered_by(policy.command()) {
                         continue;
                     }
+                    let writable = row.writable(deployment, policy, command, &scope_positions)?;
                     for position in applied(database, policy, command)? {
                         if position.stage != Stage::Check {
                             continue;
                         }
                         let mut bound = row.bound(&judge, position.expression)?;
-                        if scope_positions
-                            .iter()
-                            .all(|&column| bound.constrained[column])
-                        {
+                        if writable.iter().all(|&column| bound.constrained[column]) {
                             continue;
                         }
                         for guard in &restrictive {
@@ -399,7 +427,7 @@ impl<DB: DatabaseLike> SchemaRule for SelfGrantingWrite<DB> {
                                 }
                             }
                         }
-                        for &column in &scope_positions {
+                        for &column in &writable {
                             if bound.constrained[column] {
                                 continue;
                             }
