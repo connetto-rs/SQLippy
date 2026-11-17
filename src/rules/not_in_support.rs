@@ -22,6 +22,7 @@ use sqlparser::ast::{
 use crate::rules::{
     credential_support::is_strict_operator,
     expression_site_support::{ExpressionFinder, is_null_literal},
+    null_support::rejects_null,
     policy_support::conjuncts,
     walk_support::walk,
 };
@@ -620,14 +621,28 @@ fn factor_extended(factor: &TableFactor, target: &TableFactor, extended: bool) -
         }
 }
 
+/// Whether an expression is a column reference to the bound column of
+/// `entry`.
+fn bound_to<DB: DatabaseLike>(
+    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    entry: RangeTableEntry<'_>,
+) -> impl Fn(&Expr) -> Result<bool, LookupError> {
+    move |expression| {
+        Ok(scope
+            .resolve_column_binding(expression)?
+            .is_some_and(|(_, binding)| binding.entry() == Some(entry)))
+    }
+}
+
 /// Whether a filter rejects a null value of this exact bound column.
 fn excludes_null<DB: DatabaseLike>(
     scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
     select: &Select,
     entry: RangeTableEntry<'_>,
 ) -> Result<bool, LookupError> {
+    let bound = bound_to(scope, entry);
     for filter in select.selection.iter().flat_map(conjuncts) {
-        if rejects_null(scope, filter, entry)? {
+        if rejects_null(filter, &bound)? {
             return Ok(true);
         }
     }
@@ -645,6 +660,7 @@ fn join_rejects_null<DB: DatabaseLike>(
     joined: &TableWithJoins,
     entry: RangeTableEntry<'_>,
 ) -> Result<bool, LookupError> {
+    let bound = bound_to(scope, entry);
     if let TableFactor::NestedJoin {
         table_with_joins, ..
     } = &joined.relation
@@ -666,7 +682,7 @@ fn join_rejects_null<DB: DatabaseLike>(
         | JoinOperator::Inner(JoinConstraint::On(filter)) = &join.join_operator
         {
             for filter in conjuncts(filter) {
-                if rejects_null(scope, filter, entry)? {
+                if rejects_null(filter, &bound)? {
                     return Ok(true);
                 }
             }
@@ -681,77 +697,6 @@ fn join_rejects_null<DB: DatabaseLike>(
         }
     }
     Ok(false)
-}
-
-/// Whether a predicate cannot be true while the bound column is null.
-fn rejects_null<DB: DatabaseLike>(
-    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
-    filter: &Expr,
-    entry: RangeTableEntry<'_>,
-) -> Result<bool, LookupError> {
-    Ok(match filter {
-        Expr::IsNotNull(inner) => null_when(scope, inner, entry)?,
-        Expr::UnaryOp {
-            op: UnaryOperator::Not,
-            expr,
-        } => {
-            let mut inner = expr.as_ref();
-            while let Expr::Nested(nested) = inner {
-                inner = nested;
-            }
-            match inner {
-                Expr::IsNull(inner) => null_when(scope, inner, entry)?,
-                _ => null_when(scope, inner, entry)?,
-            }
-        }
-        _ => null_when(scope, filter, entry)?,
-    })
-}
-
-/// Whether a strict expression becomes null when the bound column is null.
-fn null_when<DB: DatabaseLike>(
-    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
-    expression: &Expr,
-    entry: RangeTableEntry<'_>,
-) -> Result<bool, LookupError> {
-    Ok(match expression {
-        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => scope
-            .resolve_column_binding(expression)?
-            .is_some_and(|(_, binding)| binding.entry() == Some(entry)),
-        Expr::Nested(inner)
-        | Expr::Cast {
-            kind: CastKind::Cast | CastKind::DoubleColon,
-            expr: inner,
-            ..
-        }
-        | Expr::UnaryOp {
-            op: UnaryOperator::Plus | UnaryOperator::Minus | UnaryOperator::Not,
-            expr: inner,
-        } => null_when(scope, inner, entry)?,
-        Expr::BinaryOp { left, op, right } if is_strict_operator(op) => {
-            null_when(scope, left, entry)? || null_when(scope, right, entry)?
-        }
-        Expr::Like { expr, pattern, .. }
-        | Expr::ILike { expr, pattern, .. }
-        | Expr::SimilarTo { expr, pattern, .. } => {
-            null_when(scope, expr, entry)? || null_when(scope, pattern, entry)?
-        }
-        Expr::Between { expr, .. }
-        | Expr::In {
-            expr,
-            target: InTarget::List(_),
-            ..
-        } => null_when(scope, expr, entry)?,
-        Expr::AnyOp {
-            left,
-            compare_op,
-            right,
-            ..
-        } if is_strict_operator(compare_op) => {
-            null_when(scope, left, entry)? || null_when(scope, right, entry)?
-        }
-        _ => false,
-    })
 }
 
 /// Resolves a `WITH` item and the visibility boundary inside its definition.
