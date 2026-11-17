@@ -204,6 +204,21 @@ pub(crate) fn equality_keys<'db, DB: DatabaseLike>(
         .collect())
 }
 
+/// The nullable host columns of `foreign_key`. With at most one,
+/// `MATCH SIMPLE` checks the whole key or the row references nothing.
+pub(crate) fn nullable_host_columns<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    foreign_key: &'db DB::ForeignKey,
+) -> Result<Vec<&'db DB::Column>, LookupError> {
+    let mut nullable = Vec::new();
+    for column in foreign_key.host_columns(database)? {
+        if column.is_nullable(database)? {
+            nullable.push(column);
+        }
+    }
+    Ok(nullable)
+}
+
 /// Collects the expressions a node holds at its top, outside the
 /// expressions they nest.
 #[derive(Default)]

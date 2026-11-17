@@ -75,7 +75,8 @@ fn a_composite_key_that_can_point_nowhere_is_reported() {
         "nullable_composite_foreign_key",
         &format!(
             "{PARENT}
-             CREATE TABLE simple (a INT, b INT NOT NULL, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE TABLE simple (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE TABLE optional (a INT, b INT NOT NULL, FOREIGN KEY (a, b) REFERENCES p (a, b));
              CREATE TABLE full_match (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b) MATCH FULL);
              CREATE TABLE required (a INT NOT NULL, b INT NOT NULL, FOREIGN KEY (a, b) REFERENCES p (a, b));
              CREATE TABLE q (a INT PRIMARY KEY);

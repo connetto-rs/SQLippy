@@ -8,10 +8,26 @@ use sql_traits::{
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    rules::key_support::nullable_host_columns,
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
 
-/// The nullable columns of a unique index that treats nulls as distinct.
+/// Whether `column` is the one nullable column of a foreign key of its
+/// table, so a `NULL` there means the row references nothing.
+fn is_optional_reference<DB: DatabaseLike>(
+    database: &DB,
+    column: &DB::Column,
+) -> Result<bool, LookupError> {
+    for foreign_key in column.foreign_keys(database)? {
+        if nullable_host_columns(database, foreign_key)?.len() == 1 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The nullable columns of a unique index that treats nulls as distinct,
+/// other than optional references.
 fn nullable_columns<DB: DatabaseLike, I: IndexLike<DB = DB>>(
     database: &DB,
     index: &I,
@@ -21,7 +37,7 @@ fn nullable_columns<DB: DatabaseLike, I: IndexLike<DB = DB>>(
     }
     let mut nullable = Vec::new();
     for column in index.columns(database)? {
-        if column.is_nullable(database)? {
+        if column.is_nullable(database)? && !is_optional_reference(database, column)? {
             nullable.push(format!("'{}'", column.column_name()));
         }
     }
@@ -31,6 +47,11 @@ fn nullable_columns<DB: DatabaseLike, I: IndexLike<DB = DB>>(
 schema_rule!(
     /// Struct defining a rule that reports a unique constraint or unique
     /// index over a nullable column without `NULLS NOT DISTINCT`.
+    ///
+    /// An optional reference, the one nullable column of a foreign key such
+    /// as `invitation_id` under `FOREIGN KEY (tenant_id, invitation_id)` with
+    /// `tenant_id` `NOT NULL`, is exempt, since distinct `NULL`s there let
+    /// many rows reference nothing.
     ///
     /// # Example
     ///

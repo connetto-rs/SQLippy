@@ -9,15 +9,21 @@ use sql_traits::{
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::{index_support::entry_columns, key_support::equality_keys},
+    rules::{
+        index_support::entry_columns,
+        key_support::{equality_keys, nullable_host_columns},
+    },
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
-/// Struct defining a rule that reports a composite foreign key with a
-/// nullable column under `MATCH SIMPLE`.
+/// Struct defining a rule that reports a composite foreign key with two or
+/// more nullable columns under `MATCH SIMPLE`.
 ///
 /// Under `MATCH SIMPLE`, a row with any foreign key column `NULL` needs no
-/// match, so a half-filled key points nowhere.
+/// match, so a key with one nullable column set and another `NULL` points
+/// nowhere. A key with one nullable column is an optional reference, such as
+/// `invitation_id` under `FOREIGN KEY (tenant_id, invitation_id)` with
+/// `tenant_id` `NOT NULL`, and is checked whole whenever that column is set.
 ///
 /// # Example
 ///
@@ -59,7 +65,7 @@ impl<DB> Rule for NullableCompositeForeignKey<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(NullableCompositeForeignKey),
             group: LintGroup::Suspicious,
-            rationale: "Under MATCH SIMPLE a composite foreign key with any column NULL needs no matching row, so a partly filled key references nothing.",
+            rationale: "Under MATCH SIMPLE a composite foreign key with any column NULL needs no matching row, so a key with two nullable columns can be partly filled and reference nothing.",
             source: Some("https://www.postgresql.org/docs/current/sql-createtable.html"),
             basis: Basis::Declared,
             example: RuleExample {
@@ -83,16 +89,15 @@ impl<DB: DatabaseLike> ForeignKeyRule for NullableCompositeForeignKey<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         if foreign_key.match_full(database)
-            || !foreign_key.is_composite(database)?
-            || !foreign_key.has_nullable_host_columns(database)?
+            || nullable_host_columns(database, foreign_key)?.len() < 2
         {
             return Ok(());
         }
         let host = foreign_key.host_table(database).table_name();
         reporter.foreign_key(
             foreign_key,
-            format!("A composite foreign key of '{host}' has a nullable column under MATCH SIMPLE, so a row with one key column NULL references nothing."),
-            "Declare every key column NOT NULL, or add MATCH FULL so a key is either complete or entirely NULL.".to_owned(),
+            format!("A composite foreign key of '{host}' has more than one nullable column under MATCH SIMPLE, so a row with one key column NULL and another set references nothing."),
+            "Declare all but one key column NOT NULL, or add MATCH FULL so a key is either complete or entirely NULL.".to_owned(),
         )?;
         Ok(())
     }
