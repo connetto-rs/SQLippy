@@ -229,6 +229,7 @@ rule_icons! {
     "type_name_case_collision" => FaSpellCheck,
     "before_trigger_writes_other_table" => FaBolt,
     "unfiltered_change_trigger" => FaClockRotateLeft,
+    "authorization_in_trigger" => FaUserCheck,
 }
 #[cfg(test)]
 mod tests {
