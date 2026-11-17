@@ -211,6 +211,10 @@ fn a_helper_reading_with_items_that_require_a_credential_passes() {
          SELECT id FROM teams WHERE id IN (SELECT team_id FROM mine)",
         "WITH mine AS (SELECT team_id FROM members WHERE member = CRED)
          SELECT id FROM teams WHERE id = (SELECT team_id FROM mine LIMIT 1)",
+        "WITH mine AS (SELECT team_id FROM members WHERE member = CRED)
+         SELECT t.id FROM teams t RIGHT JOIN mine ON mine.team_id = t.id",
+        "WITH mine AS (SELECT team_id FROM members WHERE member = CRED)
+         SELECT d.id FROM (SELECT id FROM teams) d JOIN mine ON mine.team_id = d.id",
         "WITH RECURSIVE tree (id) AS (
            SELECT team_id FROM members WHERE member = CRED
            UNION SELECT m.parent FROM members m JOIN tree ON m.team_id = tree.id)
@@ -235,6 +239,8 @@ fn a_helper_reading_with_items_that_return_rows_without_a_credential_is_reported
         "WITH chosen AS (SELECT team_id FROM invitations),
               invitations AS (SELECT team_id FROM members WHERE member = CRED)
          SELECT team_id FROM chosen",
+        "WITH members AS (SELECT team_id FROM public.members WHERE member = CRED)
+         SELECT team_id FROM public.members",
         "WITH RECURSIVE tree (id) AS (
            SELECT team_id FROM members
            UNION SELECT m.parent FROM members m JOIN tree ON m.team_id = tree.id WHERE m.member = CRED)
