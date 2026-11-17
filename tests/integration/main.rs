@@ -61,6 +61,7 @@ mod policy_targets_bypass_role;
 mod policy_without_row_reference;
 mod raising_setting_reads;
 mod recursive_steps_over_unions;
+mod reference_id_suffixes;
 mod repeated_policy_calls;
 mod repeated_setting_reads;
 mod restrictive_without_permissive;
