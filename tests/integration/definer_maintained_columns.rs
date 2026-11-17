@@ -159,6 +159,48 @@ fn tuple_assignments_maintain_each_target_column() {
     ));
 }
 
+/// Assigning a column its own value only takes a new row version.
+#[test]
+fn definer_maintained_columns_ignore_self_assignments() {
+    for body in [
+        "UPDATE folders SET depth = depth",
+        "UPDATE folders SET depth = (depth)",
+        "UPDATE folders SET depth = folders.depth",
+        "UPDATE public.folders SET depth = depth",
+        "UPDATE public.folders SET depth = public.folders.depth",
+        "UPDATE folders AS kept SET depth = kept.depth",
+        "UPDATE folders SET (depth, label) = (depth, (folders.label))",
+        "INSERT INTO folders (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET depth = folders.depth",
+        "INSERT INTO folders AS kept (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET depth = kept.depth",
+        "MERGE INTO folders AS kept USING (SELECT 1 AS id) AS source ON kept.id = source.id WHEN MATCHED THEN UPDATE SET depth = kept.depth",
+    ] {
+        assert!(
+            !reported(body, "GRANT UPDATE ON folders TO authenticated;", "DEFINER"),
+            "{body}"
+        );
+    }
+    for body in [
+        "UPDATE folders SET depth = depth + 1",
+        "UPDATE folders SET depth = id",
+        "UPDATE public.folders SET depth = 1",
+        "UPDATE folders SET depth = source.depth FROM folders AS source WHERE source.id = folders.id + 1",
+        "UPDATE folders AS kept SET depth = other.depth FROM folders AS other WHERE other.id = kept.id + 1",
+        "UPDATE folders SET (depth, label) = (label::INT, depth::TEXT)",
+        "UPDATE folders SET (label, depth) = (label, 1)",
+        "INSERT INTO folders (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET depth = EXCLUDED.depth",
+        "MERGE INTO folders AS kept USING (SELECT 1 AS id, 2 AS depth) AS source ON kept.id = source.id WHEN MATCHED THEN UPDATE SET depth = source.depth",
+    ] {
+        assert!(
+            reported(
+                body,
+                "GRANT UPDATE (depth) ON folders TO authenticated;",
+                "DEFINER"
+            ),
+            "{body}"
+        );
+    }
+}
+
 #[test]
 fn unresolved_maintenance_targets_do_not_claim_stored_columns() {
     for body in [
