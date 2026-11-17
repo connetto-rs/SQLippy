@@ -7,7 +7,8 @@ use sql_traits::{
     structs::RoleSetting,
     traits::{
         ColumnLike, DatabaseLike, DomainLike, ExtensionLike, ForeignKeyLike, FunctionLike,
-        IndexLike, PolicyLike, RoleLike, RoleMembershipLike, SequenceLike, TableLike, ViewLike,
+        IndexLike, PolicyLike, RoleLike, RoleMembershipLike, SequenceLike, TableLike,
+        UserDefinedTypeLike, ViewLike,
     },
 };
 use sqlparser::ast::Statement;
@@ -443,6 +444,27 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         let object = domain.name().to_owned();
         self.emit(
             Location::Domain(Box::new(domain.clone())),
+            object,
+            message,
+            resolution,
+        )
+    }
+
+    /// Reports a violation on a user-defined type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn user_defined_type(
+        &mut self,
+        user_defined_type: &DB::UserDefinedType,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        let object = user_defined_type.name().to_owned();
+        self.emit(
+            Location::UserDefinedType(Box::new(user_defined_type.clone())),
             object,
             message,
             resolution,

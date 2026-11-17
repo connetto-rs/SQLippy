@@ -106,3 +106,5 @@ mod repeated_recursion_bound;
 pub use repeated_recursion_bound::RepeatedRecursionBound;
 mod ordered_set_as_disjunction;
 pub use ordered_set_as_disjunction::OrderedSetAsDisjunction;
+mod type_name_case_collision;
+pub use type_name_case_collision::TypeNameCaseCollision;
