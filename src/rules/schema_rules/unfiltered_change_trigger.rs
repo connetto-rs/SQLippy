@@ -3,15 +3,14 @@
 use std::ops::ControlFlow;
 
 use sql_traits::traits::{DatabaseLike, TableLike, TriggerLike};
-use sqlparser::ast::{Expr, Query, TriggerPeriod, Visitor};
-use sqlparser_plpgsql::embedded::Node;
+use sqlparser::ast::{Expr, Query, Statement, TriggerPeriod, Visitor};
 
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         function_reach_support::Reach,
-        plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, ran_statement, walk_block},
+        plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, walk_block},
         trigger_support::{WritesElsewhere, evaluated, fires_on_update, row, row_trigger},
         walk_support::walk,
     },
@@ -124,10 +123,8 @@ impl<DB: DatabaseLike> FlowVisitor for Unfiltered<'_, '_, DB> {
         self.wrote(query, *state);
     }
 
-    fn step(&mut self, node: &Node, state: &mut Compared) {
-        if let Some(statement) = ran_statement(node) {
-            self.wrote(statement, *state);
-        }
+    fn statement(&mut self, statement: &Statement, state: &mut Compared) {
+        self.wrote(statement, *state);
     }
 
     fn assume(&mut self, condition: &Query, _holds: bool, state: &mut Compared) {

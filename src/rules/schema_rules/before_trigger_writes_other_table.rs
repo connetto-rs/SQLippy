@@ -1,7 +1,7 @@
 //! Submodule providing the `BeforeTriggerWritesOtherTable` rule.
 
 use sql_traits::traits::{DatabaseLike, TableLike, TriggerLike};
-use sqlparser::ast::TriggerPeriod;
+use sqlparser::ast::{Query, Statement, TriggerPeriod};
 use sqlparser_plpgsql::embedded::Node;
 
 use crate::{
@@ -10,7 +10,7 @@ use crate::{
     rules::{
         expression_site_support::is_null_literal,
         function_reach_support::Reach,
-        plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, ran_statement, walk_block},
+        plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, walk_block},
         trigger_support::{WritesElsewhere, evaluated, fires_on_insert, row_trigger},
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
@@ -83,14 +83,15 @@ struct Returns<'r, 'db, DB: DatabaseLike> {
 impl<DB: DatabaseLike> FlowVisitor for Returns<'_, '_, DB> {
     type State = Wrote;
 
-    fn query(&mut self, query: &sqlparser::ast::Query, state: &mut Wrote) {
+    fn query(&mut self, query: &Query, state: &mut Wrote) {
         state.0 |= !self.reach.occurrences(query).is_empty();
     }
 
+    fn statement(&mut self, statement: &Statement, state: &mut Wrote) {
+        state.0 |= !self.reach.occurrences(statement).is_empty();
+    }
+
     fn step(&mut self, node: &Node, state: &mut Wrote) {
-        if let Some(statement) = ran_statement(node) {
-            state.0 |= !self.reach.occurrences(statement).is_empty();
-        }
         if let Node::Return { value } = node
             && state.0
         {

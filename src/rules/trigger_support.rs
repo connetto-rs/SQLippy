@@ -14,14 +14,18 @@ use sqlparser::{
 use crate::rules::{cte_support::stored_table, function_reach_support::Sought};
 
 /// The trigger row an identifier names, `Some(true)` for `NEW` and
-/// `Some(false)` for `OLD`.
+/// `Some(false)` for `OLD`, a quoted name matching only in lower case.
 pub(crate) fn row(ident: &Ident) -> Option<bool> {
-    if ident.quote_style.is_some() {
-        return None;
-    }
-    if ident.value.eq_ignore_ascii_case("new") {
+    let names = |row: &str| {
+        if ident.quote_style.is_some() {
+            ident.value == row
+        } else {
+            ident.value.eq_ignore_ascii_case(row)
+        }
+    };
+    if names("new") {
         Some(true)
-    } else if ident.value.eq_ignore_ascii_case("old") {
+    } else if names("old") {
         Some(false)
     } else {
         None

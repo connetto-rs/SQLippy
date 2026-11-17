@@ -3,16 +3,21 @@
 use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
-/// Messages of every finding for `sql` after a table of notes and an
-/// ownership helper.
-fn findings(sql: &str) -> Vec<String> {
-    let database = ParserDB::parse::<PostgreSqlDialect>(&format!(
+/// The schema `sql` after a table of notes and an ownership helper.
+fn schema(sql: &str) -> ParserDB {
+    ParserDB::parse::<PostgreSqlDialect>(&format!(
         "CREATE TABLE notes (id INT PRIMARY KEY, owner_id UUID NOT NULL, body TEXT NOT NULL);
          CREATE FUNCTION owns_note(subject UUID) RETURNS BOOLEAN LANGUAGE sql STABLE AS
            $$ SELECT subject = current_setting('app.user_id')::uuid $$;
          {sql}"
     ))
-    .expect("schema parses");
+    .expect("schema parses")
+}
+
+/// Messages of every finding for `sql` after a table of notes and an
+/// ownership helper.
+fn findings(sql: &str) -> Vec<String> {
+    let database = schema(sql);
     let constrainer: GenericConstrainer<ParserDB> = AuthorizationInTrigger::default().into();
     constrainer
         .diagnostics(&database)
@@ -86,6 +91,8 @@ fn raising_insufficient_privilege_for_a_covered_command_is_reported() {
         "IF NEW.owner_id IS NULL THEN RAISE EXCEPTION 'not yours' USING ERRCODE = 'insufficient_privilege'; END IF;",
         "IF NEW.owner_id IS NULL THEN RAISE EXCEPTION 'not yours' USING ERRCODE = '42501'; END IF;",
         "BEGIN PERFORM 1 / 0; EXCEPTION WHEN division_by_zero THEN RAISE insufficient_privilege; END;",
+        "CASE WHEN NEW.owner_id IS NOT NULL THEN NULL; ELSE RAISE insufficient_privilege; END CASE;",
+        "FOR i IN 1..1 LOOP IF NEW.owner_id IS NULL THEN RAISE insufficient_privilege; END IF; END LOOP;",
     ] {
         let found = findings(&format!(
             "{SECURED} CREATE POLICY guard ON notes FOR INSERT WITH CHECK (owner_id IS NOT NULL); {}",
@@ -117,6 +124,12 @@ fn other_errors_and_uncovered_commands_are_not_reported() {
             "CREATE POLICY guard ON notes FOR INSERT WITH CHECK (owner_id IS NOT NULL); {}",
             raising("INSERT", "RAISE insufficient_privilege;")
         ),
+        format!(
+            "{SECURED} CREATE POLICY guard ON notes USING (owner_id IS NOT NULL);
+             CREATE FUNCTION check_truncate() RETURNS trigger LANGUAGE plpgsql AS
+               $$ BEGIN RAISE insufficient_privilege; END $$;
+             CREATE TRIGGER check_truncate BEFORE TRUNCATE ON notes FOR EACH STATEMENT EXECUTE FUNCTION check_truncate();"
+        ),
     ] {
         assert_eq!(findings(&sql), Vec::<String>::new(), "{sql}");
     }
@@ -140,4 +153,17 @@ fn other_commands_tables_without_row_security_and_other_checks_are_not_reported(
     ] {
         assert!(findings(&sql).is_empty(), "{sql}");
     }
+}
+
+#[test]
+fn a_policy_helper_that_cannot_be_resolved_is_a_lookup_failure() {
+    let database = schema(&format!(
+        "{SECURED} CREATE POLICY guard ON notes FOR INSERT WITH CHECK (vault.public.owns_note(owner_id)); {}",
+        trigger("INSERT", "owns_note(NEW.owner_id)")
+    ));
+    let constrainer: GenericConstrainer<ParserDB> = AuthorizationInTrigger::default().into();
+    assert!(matches!(
+        constrainer.validate_schema(&database),
+        Err(Error::Lookup(_))
+    ));
 }
