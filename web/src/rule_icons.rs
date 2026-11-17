@@ -233,6 +233,7 @@ rule_icons! {
     "table_name_dispatch" => FaTags,
     "trigger_filter_in_body" => FaFilter,
     "snapshot_before_lock" => FaLockOpen,
+    "plpgsql_ambiguous_name" => FaCircleQuestion,
 }
 #[cfg(test)]
 mod tests {

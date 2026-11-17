@@ -58,6 +58,7 @@ mod nullable_concatenation;
 mod nullable_unique;
 mod owner_rights_views;
 mod parallel_tables;
+mod plpgsql_ambiguous_names;
 mod policy_advisories;
 mod policy_checks;
 mod policy_read_cycles;
