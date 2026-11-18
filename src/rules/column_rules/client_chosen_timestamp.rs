@@ -480,7 +480,7 @@ impl Stamping<'_> {
                     .branches
                     .iter()
                     .map(|branch| (Some(&branch.condition), branch.statements.as_slice())),
-                &conditional.otherwise,
+                Some(&conditional.otherwise),
                 reach,
             ),
             NodeKind::Case(case) => self.branches(
@@ -490,7 +490,7 @@ impl Stamping<'_> {
                         branch.statements.as_slice(),
                     )
                 }),
-                case.otherwise.as_deref().unwrap_or_default(),
+                case.otherwise.as_deref(),
                 reach,
             ),
             NodeKind::Return { value: Some(value) } => {
@@ -513,10 +513,12 @@ impl Stamping<'_> {
 
     /// The paths through branches tried in order, each run where its
     /// condition, when one is known, is true and every earlier one is not.
+    /// The paths no branch takes run `otherwise`, and end where it is
+    /// `None`, a `CASE` without `ELSE` raising `case_not_found`.
     fn branches<'n>(
         &self,
         branches: impl Iterator<Item = (Option<&'n Box<sqlparser::ast::Query>>, &'n [Node])>,
-        otherwise: &[Node],
+        otherwise: Option<&[Node]>,
         mut reach: Reach,
     ) -> Option<Reach> {
         let mut out = Reach::NONE;
@@ -530,6 +532,9 @@ impl Stamping<'_> {
                 reach = reach.when(condition, self.column, false);
             }
         }
+        let Some(otherwise) = otherwise else {
+            return Some(out);
+        };
         Some(out.union(self.nodes(otherwise, reach)?))
     }
 }

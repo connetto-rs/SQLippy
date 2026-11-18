@@ -286,6 +286,23 @@ fn a_trigger_stamping_every_value_a_client_sets_covers_its_commands() {
 }
 
 #[test]
+fn a_case_without_else_refuses_the_commands_no_branch_stamps() {
+    let body =
+        "BEGIN CASE TG_OP WHEN 'INSERT' THEN NEW.archived_at := now(); END CASE; RETURN NEW; END";
+    assert_eq!(
+        reported(
+            app(),
+            &format!(
+                "{RESOURCES} GRANT INSERT, UPDATE ON resources TO app; {} {}",
+                function(body),
+                trigger("INSERT OR UPDATE", "stamp")
+            )
+        ),
+        []
+    );
+}
+
+#[test]
 fn a_trigger_keeping_a_value_the_client_chose_stamps_nothing() {
     let writable = format!("{RESOURCES} GRANT INSERT, UPDATE ON resources TO app;");
     for body in [
@@ -304,7 +321,7 @@ fn a_trigger_keeping_a_value_the_client_chose_stamps_nothing() {
         "BEGIN NEW.archived_at[1] := now(); RETURN NEW; END",
         "DECLARE fresh ALIAS FOR NEW; BEGIN NEW.archived_at := now(); RETURN fresh; END",
         "BEGIN NEW.archived_at := now(); RETURN 1; END",
-        "BEGIN CASE TG_OP WHEN 'INSERT' THEN NEW.archived_at := now(); END CASE; RETURN NEW; END",
+        "BEGIN CASE TG_OP WHEN 'INSERT' THEN NEW.archived_at := now(); ELSE END CASE; RETURN NEW; END",
         "BEGIN NEW.archived_at := now() RETURN NEW; END",
     ] {
         assert_eq!(

@@ -58,13 +58,18 @@ fn writes_reaching_another_table_are_reported() {
 
 #[test]
 fn routing_the_row_elsewhere_gets_its_own_message() {
-    let found = findings(
-        "BEFORE",
-        "INSERT",
+    // A `CASE` without `ELSE` ends every other path with `case_not_found`.
+    for body in [
         "BEGIN INSERT INTO audit VALUES (NEW.id); RETURN NULL; END",
-    );
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("returns NULL"), "{found:?}");
+        "BEGIN INSERT INTO audit VALUES (NEW.id); CASE WHEN NEW.id > 0 THEN RETURN NULL; END CASE; RETURN NEW; END",
+    ] {
+        let found = findings("BEFORE", "INSERT", body);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("writes the row to another table and returns NULL"),
+            "{body}: {found:?}"
+        );
+    }
 }
 
 #[test]
