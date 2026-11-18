@@ -21,8 +21,9 @@ rule_definition!(
     /// relation and function with its schema and bodies PostgreSQL binds at
     /// creation, whose exposure to the caller's path is smaller today but
     /// returns with the first unqualified name a later revision adds.
-    /// Aggregates, which take no configuration, are skipped. So are the
-    /// findings `definer_without_search_path`,
+    /// Aggregates, which take no configuration, are skipped, and so are
+    /// procedures, since the parser refuses the `SET` clause that would fix
+    /// one. So are the findings `definer_without_search_path`,
     /// `definer_temporary_schema_not_last`, `definer_path_creatable_schema` and
     /// `invoker_without_search_path` already raise on the same function.
     ///
@@ -82,7 +83,10 @@ impl<DB: DatabaseLike> FunctionRule for FunctionWithoutSafeSearchPath<DB> {
     ) -> Result<(), Interruption> {
         if function.target_name().schema() == Some("pg_catalog")
             || super::resolves_as_definer::<DB>(function)
-            || function.kind(database)? == FunctionKind::Aggregate
+            || matches!(
+                function.kind(database)?,
+                FunctionKind::Aggregate | FunctionKind::Procedure
+            )
         {
             return Ok(());
         }

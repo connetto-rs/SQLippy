@@ -118,3 +118,14 @@ fn an_aggregate_is_not_reported() {
         Vec::<String>::new()
     );
 }
+
+#[test]
+fn a_procedure_is_not_reported() {
+    assert_eq!(
+        unsafe_paths(
+            "CREATE TABLE docs (id INT);
+             CREATE PROCEDURE archive(target INT) LANGUAGE sql AS 'DELETE FROM docs WHERE id = target';"
+        ),
+        Vec::<String>::new()
+    );
+}
