@@ -98,3 +98,7 @@ mod time_dependent_check;
 pub use time_dependent_check::TimeDependentCheck;
 mod superkey_primary_key;
 pub use superkey_primary_key::SuperkeyPrimaryKey;
+mod sensitive_columns_exposed;
+pub use sensitive_columns_exposed::SensitiveColumnsExposed;
+mod unconditional_client_write_policy;
+pub use unconditional_client_write_policy::UnconditionalClientWritePolicy;

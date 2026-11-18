@@ -24,17 +24,137 @@ mod snapshot_before_lock;
 pub use snapshot_before_lock::SnapshotBeforeLock;
 mod plpgsql_ambiguous_name;
 pub use plpgsql_ambiguous_name::PlpgsqlAmbiguousName;
+mod function_without_safe_search_path;
+pub use function_without_safe_search_path::FunctionWithoutSafeSearchPath;
+
+use std::borrow::Cow;
 
 use sql_traits::{
     errors::LookupError,
-    traits::{DatabaseLike, FunctionLike},
+    traits::{DatabaseLike, FunctionLike, GrantLike, SchemaLike, grant::GrantTarget},
+    utils::identifier_resolution::{SearchPath, is_temporary_schema, normalize_identifier},
 };
-use sqlparser::ast::FunctionSecurity;
+use sqlparser::ast::{Action, FunctionSecurity, GranteeName};
+
+use crate::rules::grant_support::grants_privilege;
+
+/// The predefined role owning the `public` schema, standing for whoever owns
+/// the database.
+const DATABASE_OWNER: &str = "pg_database_owner";
 
 /// Whether the function runs with its owner's rights and resolves the names in
 /// its body when it is called.
 fn resolves_as_definer<DB: DatabaseLike>(function: &DB::Function) -> bool {
     function.security_mode() == FunctionSecurity::Definer && !function.body_is_bound()
+}
+
+/// Where `path` leaves `pg_temp` when it names a schema and does not search
+/// `pg_temp` last, as it reads in a message.
+///
+/// PostgreSQL searches the temporary schema first for relations unless the
+/// path places it. A path naming no schema is left to the body's qualified
+/// names.
+fn misplaced_temporary_schema(path: &SearchPath<'_>) -> Option<&'static str> {
+    let mut schemas = path.iter().filter(|(schema, _)| !schema.is_empty());
+    let (last, last_quoted) = schemas.next_back()?;
+    if is_temporary_schema(last, *last_quoted) {
+        return None;
+    }
+    Some(
+        if schemas.any(|(schema, quoted)| is_temporary_schema(schema, *quoted)) {
+            "before the end"
+        } else {
+            "out, so it is searched first"
+        },
+    )
+}
+
+/// The schemas of `path`, as `SET search_path` lists them.
+fn written_path(path: &SearchPath<'_>) -> String {
+    path.iter()
+        .map(|(schema, _)| schema.as_ref())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The schemas of `path` with `pg_temp` moved last, as `SET search_path`
+/// lists them.
+fn temporary_schema_last(path: &SearchPath<'_>) -> String {
+    path.iter()
+        .map(|(schema, _)| schema.as_ref())
+        .filter(|schema| !schema.is_empty() && !is_temporary_schema(schema, false))
+        .chain(["pg_temp"])
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Each schema on `path` that a role other than `owner` may create objects
+/// in, with those roles as they read in a message.
+///
+/// `pg_catalog`, `pg_temp` and `$user` are not judged.
+fn creatable_path_schemas<'path, DB: DatabaseLike>(
+    database: &DB,
+    path: &'path SearchPath<'_>,
+    owner: Option<&str>,
+) -> Vec<(Cow<'path, str>, Vec<String>)> {
+    path.iter()
+        .map(|(schema, quoted)| normalize_identifier(schema, *quoted))
+        .filter(|schema| {
+            !schema.is_empty()
+                && schema != "pg_catalog"
+                && schema != "$user"
+                && !is_temporary_schema(schema, true)
+        })
+        .filter_map(|schema| {
+            let creators = creators(database, &schema, owner);
+            (!creators.is_empty()).then_some((schema, creators))
+        })
+        .collect()
+}
+
+/// The roles other than `owner` that may create objects in `schema`, as they
+/// read in a message.
+fn creators<DB: DatabaseLike>(database: &DB, schema: &str, owner: Option<&str>) -> Vec<String> {
+    let mut creators = Vec::new();
+    let is_owner = |role: &str| owner == Some(role);
+    if let Some(schema_owner) = database
+        .schema(schema)
+        .and_then(SchemaLike::authorization)
+        .filter(|schema_owner| *schema_owner != DATABASE_OWNER && !is_owner(schema_owner))
+    {
+        creators.push(format!("its owner '{schema_owner}'"));
+    }
+    for grant in database.table_grants() {
+        let GrantTarget::Schemas(mut targets) = grant.target() else {
+            continue;
+        };
+        if !targets
+            .any(|target| normalize_identifier(target.name(), target.name_is_quoted()) == schema)
+            || !grants_privilege(database, grant, |action| {
+                matches!(action, Action::Create { .. })
+            })
+        {
+            continue;
+        }
+        if grant.applies_to_public() {
+            creators.push("PUBLIC".to_owned());
+            continue;
+        }
+        for grantee in grant.grantees(database) {
+            let Some(GranteeName::ObjectName(name)) = &grantee.name else {
+                continue;
+            };
+            let Some(ident) = name.0.last().and_then(|part| part.as_ident()) else {
+                continue;
+            };
+            let role = normalize_identifier(&ident.value, ident.quote_style.is_some());
+            let creator = format!("role '{role}'");
+            if !is_owner(&role) && !creators.contains(&creator) {
+                creators.push(creator);
+            }
+        }
+    }
+    creators
 }
 
 /// Whether the error says a function body's reads cannot be known, as opposed

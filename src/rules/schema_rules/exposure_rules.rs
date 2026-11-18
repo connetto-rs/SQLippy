@@ -1,11 +1,12 @@
 //! Submodule providing the rules on objects a client role reaches: definer
-//! functions, extensions, sequences and row-filtering views.
+//! functions, extensions, sequences, row-filtering, owner-rights and
+//! materialized views.
 
 use std::{borrow::Cow, cell::LazyCell};
 
 use sql_traits::traits::{
-    DatabaseLike, ExtensionLike, FunctionLike, Relation, RoleLike, SequenceLike, TableGrantLike,
-    ViewLike,
+    ColumnGrantLike, DataStatementLike, DatabaseLike, ExtensionLike, FunctionLike, Relation,
+    RoleLike, SequenceLike, TableGrantLike, TableLike, ViewLike,
 };
 use sqlparser::ast::{Action, FunctionSecurity, SetExpr};
 
@@ -18,7 +19,8 @@ use crate::{
 };
 
 /// The reasons a client role reaches a relation: an exposed schema, or a
-/// grant reaching a client role with a privilege `wanted` accepts.
+/// table or column grant reaching a client role with a privilege `wanted`
+/// accepts.
 fn reach_reasons<DB: DatabaseLike>(
     database: &DB,
     deployment: &Deployment,
@@ -33,6 +35,16 @@ fn reach_reasons<DB: DatabaseLike>(
     let roles = LazyCell::new(|| ClientRoles::new(database, deployment));
     for grant in database.table_grants() {
         if grant.relations(database).any(|relation| reaches(&relation))
+            && grants_privilege(database, grant, &wanted)
+            && roles.reach_client(database, grant)
+        {
+            reasons.push(format!("is granted to {}", grantee_list(database, grant)));
+        }
+    }
+    for grant in database.column_grants() {
+        if grant
+            .relation(database)
+            .is_some_and(|relation| reaches(&relation))
             && grants_privilege(database, grant, &wanted)
             && roles.reach_client(database, grant)
         {
@@ -419,6 +431,179 @@ impl<DB: DatabaseLike> SchemaRule for SecurityBarrierMissingOnFilteringView<DB> 
                     reasons.join(" and ")
                 ),
                 format!("ALTER VIEW {name} SET (security_barrier = true); if the filter hides rows on purpose."),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+schema_rule!(
+    /// Struct defining a rule that reports a view without `security_invoker`
+    /// that a client role reaches, through an exposed schema or a `SELECT`
+    /// grant, whatever its sources.
+    ///
+    /// The view reads its sources with its owner's privileges and row-level
+    /// security, so a client reads through it what the owner may read.
+    /// `owner_rights_view` reports the narrower case of a source whose
+    /// policies the owner bypasses or misses, and stays on by default.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sqlippy::prelude::*;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    ///
+    /// let constrainer: GenericConstrainer<ParserDB> = OwnerRightsViewExposed::default().into();
+    /// let owner_rights = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE docs (id INT);
+    ///      CREATE VIEW doc_ids AS SELECT id FROM docs;
+    ///      GRANT SELECT ON doc_ids TO PUBLIC;",
+    /// )
+    /// .unwrap();
+    /// assert!(constrainer.validate_schema(&owner_rights).is_err());
+    /// let invoker = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE docs (id INT);
+    ///      CREATE VIEW doc_ids WITH (security_invoker = true) AS SELECT id FROM docs;
+    ///      GRANT SELECT ON doc_ids TO PUBLIC;",
+    /// )
+    /// .unwrap();
+    /// assert!(constrainer.validate_schema(&invoker).is_ok());
+    /// ```
+    OwnerRightsViewExposed,
+    LintGroup::Restriction,
+    "A view without `security_invoker` reads its sources with its owner's privileges and policies, so a client reaching the view reads data its own grants on those sources would refuse.",
+    Some("https://github.com/supabase/splinter/blob/main/lints/0010_security_definer_view.sql"),
+    RuleExample {
+        bad: "CREATE TABLE public.documents (identifier INT PRIMARY KEY);\n\
+CREATE VIEW public.document_identifiers AS SELECT identifier FROM public.documents;\n\
+GRANT SELECT ON public.document_identifiers TO PUBLIC;",
+        good: "CREATE TABLE public.documents (identifier INT PRIMARY KEY);\n\
+CREATE VIEW public.document_identifiers WITH (security_invoker = true)\n\
+AS SELECT identifier FROM public.documents;\n\
+GRANT SELECT ON public.document_identifiers TO PUBLIC;",
+    }
+);
+
+impl<DB: DatabaseLike> SchemaRule for OwnerRightsViewExposed<DB> {
+    type Database = DB;
+
+    fn check_schema(
+        &self,
+        database: &Self::Database,
+        reporter: &mut Reporter<'_, Self::Database>,
+    ) -> Result<(), Interruption> {
+        let deployment = reporter.deployment();
+        let owner_rights = database
+            .views()
+            .filter(|view| !view.is_materialized() && !view.is_security_invoker());
+        for view in owner_rights {
+            let schema = schema_of(database, view.stored_view_schema());
+            let reasons = reach_reasons(
+                database,
+                deployment,
+                &schema,
+                |relation| matches!(relation, Relation::View(granted) if *granted == view),
+                |action| matches!(action, Action::Select { .. }),
+            );
+            if reasons.is_empty() {
+                continue;
+            }
+            let name = view.view_name();
+            let owner = view
+                .owner(database)?
+                .map_or_else(|| "its owner".to_owned(), |owner| format!("'{owner}'"));
+            reporter.view(
+                view,
+                format!(
+                    "View '{name}' {} and reads its sources with the privileges and policies of {owner}, so a client reads what {owner} may read.",
+                    reasons.join(" and ")
+                ),
+                format!("ALTER VIEW {name} SET (security_invoker = true); and grant client roles what they may read from its sources."),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+schema_rule!(
+    /// Struct defining a rule that reports a materialized view a client role
+    /// reaches, through an exposed schema or a `SELECT` grant, over sources
+    /// without row-level security.
+    ///
+    /// PostgreSQL refuses row-level security on a materialized view, so every
+    /// reader sees every stored row, whatever grants and policies its sources
+    /// carry later. `reachable_materialized_view` reports one reading a
+    /// row-level-security table and stays on by default.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sqlippy::prelude::*;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    ///
+    /// let constrainer: GenericConstrainer<ParserDB> = MaterializedViewExposed::default().into();
+    /// let granted = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE docs (id INT);
+    ///      CREATE MATERIALIZED VIEW doc_ids AS SELECT id FROM docs;
+    ///      GRANT SELECT ON doc_ids TO PUBLIC;",
+    /// )
+    /// .unwrap();
+    /// assert!(constrainer.validate_schema(&granted).is_err());
+    /// let kept = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE docs (id INT); CREATE MATERIALIZED VIEW doc_ids AS SELECT id FROM docs;",
+    /// )
+    /// .unwrap();
+    /// assert!(constrainer.validate_schema(&kept).is_ok());
+    /// ```
+    MaterializedViewExposed,
+    LintGroup::Restriction,
+    "A materialized view cannot have row-level security, so a client reaching it reads every stored row, and later grants or policies on its sources never filter them.",
+    Some("https://github.com/supabase/splinter/blob/main/lints/0016_materialized_view_in_api.sql"),
+    RuleExample {
+        bad: "CREATE TABLE public.documents (identifier INT PRIMARY KEY);\n\
+CREATE MATERIALIZED VIEW public.document_identifiers AS SELECT identifier FROM public.documents;\n\
+GRANT SELECT ON public.document_identifiers TO PUBLIC;",
+        good: "CREATE SCHEMA private;\n\
+CREATE TABLE public.documents (identifier INT PRIMARY KEY);\n\
+CREATE MATERIALIZED VIEW private.document_identifiers AS SELECT identifier FROM public.documents;\n\
+REVOKE ALL ON private.document_identifiers FROM PUBLIC;",
+    }
+);
+
+impl<DB: DatabaseLike> SchemaRule for MaterializedViewExposed<DB> {
+    type Database = DB;
+
+    fn check_schema(
+        &self,
+        database: &Self::Database,
+        reporter: &mut Reporter<'_, Self::Database>,
+    ) -> Result<(), Interruption> {
+        let deployment = reporter.deployment();
+        'views: for view in database.materialized_views() {
+            for table in view.definition().referenced_tables(database)? {
+                if table.has_row_level_security(database)? {
+                    continue 'views;
+                }
+            }
+            let schema = schema_of(database, view.stored_view_schema());
+            let reasons = reach_reasons(
+                database,
+                deployment,
+                &schema,
+                |relation| matches!(relation, Relation::MaterializedView(granted) if *granted == view),
+                |action| matches!(action, Action::Select { .. }),
+            );
+            if reasons.is_empty() {
+                continue;
+            }
+            let name = view.view_name();
+            reporter.materialized_view(
+                view,
+                format!(
+                    "Materialized view '{name}' {}, so a client reads every row it stored, which no policy filters.",
+                    reasons.join(" and ")
+                ),
+                format!("Move {name} to a schema no client role reaches and revoke the client roles' grants on it, or replace it with a view WITH (security_invoker = true)."),
             )?;
         }
         Ok(())
