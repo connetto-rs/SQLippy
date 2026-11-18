@@ -22,6 +22,8 @@ mod table_name_dispatch;
 pub use table_name_dispatch::TableNameDispatch;
 mod snapshot_before_lock;
 pub use snapshot_before_lock::SnapshotBeforeLock;
+mod plpgsql_ambiguous_name;
+pub use plpgsql_ambiguous_name::PlpgsqlAmbiguousName;
 
 use sql_traits::{
     errors::LookupError,
@@ -45,4 +47,10 @@ pub(crate) fn unreadable_body(error: &LookupError) -> bool {
             | LookupError::FunctionBodyUnresolvable { .. }
             | LookupError::FunctionBodyUnparsable { .. }
     )
+}
+
+/// `result`, or the default value for a body that is not SQL, is missing or
+/// does not parse.
+pub(crate) fn readable<T: Default>(result: Result<T, LookupError>) -> Result<T, LookupError> {
+    result.or_else(|error| unreadable_body(&error).then(T::default).ok_or(error))
 }

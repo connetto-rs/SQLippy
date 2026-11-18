@@ -32,21 +32,22 @@ use crate::{
         NonSnakeCaseTableName, NonterminatingRecursiveCte, NotInNullList, NotInNullableSubquery,
         NotInSubquery, NullComparison, NullCredentialRead, NullableCompositeForeignKey,
         NullableConcatenation, NullableUniqueColumn, OffsetPaging, OrderedSetAsDisjunction,
-        OuterColumnCapture, OwnerRightsView, ParallelTables, PluralColumnName,
-        PolicyExpressionDefeatsIndex, PolicyReadCycle, PolicyReadsUnprotectedTable,
-        PolicyTargetsBypassRole, PolicyToCreatingRole, PolicyWithoutRowLevelSecurity,
-        PolicyWithoutRowReference, PrefixRedundantIndex, PrimaryKeyNotNamedId, PublicSchemaCreate,
-        QueryRewriteRule, RaisingSettingRead, RandomOrderLimit, ReachableForeignTable,
-        ReachableMaterializedView, ReachableSequence, ReachableTableWithoutRowLevelSecurity,
-        RecursiveStepOverUnion, RedundantExtensionEdge, ReferenceWithoutIdSuffix,
-        ReferencesGrantedToClientRole, RegColumnType, RepeatedIndexColumn, RepeatedPolicyCall,
-        RepeatedRecursionBound, RepeatedSettingRead, ReservedKeywordIdentifier,
-        RestrictiveWithoutPermissive, RoleDefinedInSchema, RoleKeyedPolicyWhenPooled,
-        RowLevelSecurityWithoutPolicies, RustKeywordColumnName, RustKeywordForeignKeyName,
-        RustKeywordTableName, ScaledNumeric, SecurityBarrierMissingOnFilteringView,
-        SecurityDefinerFunctionExposed, SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite,
-        SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
-        SingularTableName, SnapshotBeforeLock, SubjectSettableAttribute, SuperkeyPrimaryKey,
+        OuterColumnCapture, OwnerRightsView, ParallelTables, PlpgsqlAmbiguousName,
+        PluralColumnName, PolicyExpressionDefeatsIndex, PolicyReadCycle,
+        PolicyReadsUnprotectedTable, PolicyTargetsBypassRole, PolicyToCreatingRole,
+        PolicyWithoutRowLevelSecurity, PolicyWithoutRowReference, PrefixRedundantIndex,
+        PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
+        RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
+        ReachableTableWithoutRowLevelSecurity, RecursiveStepOverUnion, RedundantExtensionEdge,
+        ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole, RegColumnType,
+        RepeatedIndexColumn, RepeatedPolicyCall, RepeatedRecursionBound, RepeatedSettingRead,
+        ReservedKeywordIdentifier, RestrictiveWithoutPermissive, RoleDefinedInSchema,
+        RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
+        RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
+        SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
+        SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SerialColumn,
+        SessionTimeZoneDependence, SettableMembershipInBypassingRole, SingularTableName,
+        SnapshotBeforeLock, SubjectSettableAttribute, SuperkeyPrimaryKey,
         SurrogatePrimaryKeyInExtension, TableInheritance, TableNameDispatch, TautologicalCheck,
         TautologicalPolicy, TautologicalWithCheck, TimeDependentCheck, TimeWithTimeZone,
         TimestampBetween, TimestampWithoutTimeZone, TriggerFilterInBody,
@@ -148,7 +149,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
         register_schema_rules(&mut constrainer);
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 12] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 13] = [
             Box::new(ImpureImmutableFunction::default()),
             Box::new(WritingNonVolatileFunction::default()),
             Box::new(DefinerWithoutSearchPath::default()),
@@ -161,6 +162,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(DynamicSqlInjection::default()),
             Box::new(TableNameDispatch::default()),
             Box::new(SnapshotBeforeLock::default()),
+            Box::new(PlpgsqlAmbiguousName::default()),
         ];
         for rule in function_rules {
             constrainer.register_function_rule_with_floor(rule, Level::Allow);
