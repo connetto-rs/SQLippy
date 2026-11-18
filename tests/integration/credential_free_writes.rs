@@ -409,7 +409,7 @@ fn an_aggregation_without_the_empty_grouping_set_passes() {
 const HELPERS: &str = "
     CREATE SCHEMA authz;
     CREATE TABLE grants (team INT, member TEXT);
-    CREATE FUNCTION authz.mine() RETURNS SETOF INT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ''
+    CREATE FUNCTION authz.mine() RETURNS SETOF INT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp
       AS $$ SELECT g.team FROM public.grants g WHERE g.member = current_setting('app.user_id', true) $$;
     CREATE FUNCTION authz.nested() RETURNS SETOF INT LANGUAGE sql STABLE AS $$
       SELECT g.team FROM public.grants g WHERE g.member = current_setting('app.user_id', true)

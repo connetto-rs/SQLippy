@@ -36,7 +36,7 @@ use crate::{
 /// let pinned = ParserDB::parse::<PostgreSqlDialect>(
 ///     "CREATE TABLE docs (id INT);
 ///      CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER
-///        SET search_path = '' AS 'SELECT count(*) FROM public.docs';",
+///        SET search_path = pg_catalog, pg_temp AS 'SELECT count(*) FROM public.docs';",
 /// )
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&pinned).is_ok());
@@ -71,7 +71,7 @@ impl<DB> Rule for DefinerWithoutSearchPath<DB> {
                 bad: "CREATE TABLE docs (id INT);\n\
 CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER AS 'SELECT count(*) FROM public.docs';",
                 good: "CREATE TABLE docs (id INT);\n\
-CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS 'SELECT count(*) FROM public.docs';",
+CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS 'SELECT count(*) FROM public.docs';",
             },
         };
         &METADATA
@@ -98,7 +98,7 @@ impl<DB: DatabaseLike> FunctionRule for DefinerWithoutSearchPath<DB> {
                 "`SECURITY DEFINER` function '{signature}' sets no `search_path`, so the names in its body resolve under the caller's path, temporary tables first."
             ),
             format!(
-                "ALTER FUNCTION {signature} SET search_path = ''; and qualify every name its body uses."
+                "ALTER FUNCTION {signature} SET search_path = pg_catalog, pg_temp; and qualify every other name its body uses."
             ),
         )
     }

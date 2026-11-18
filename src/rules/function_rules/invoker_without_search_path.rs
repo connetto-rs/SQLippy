@@ -66,7 +66,7 @@ impl<DB> Rule for InvokerWithoutSearchPath<DB> {
             basis: Basis::Declared,
             example: RuleExample {
                 bad: "CREATE TABLE allowed (v INT);\nCREATE FUNCTION ok(x INT) RETURNS BOOLEAN LANGUAGE sql AS 'SELECT EXISTS (SELECT FROM allowed WHERE v = x)';\nCREATE TABLE docs (v INT CHECK (ok(v)));",
-                good: "CREATE TABLE allowed (v INT);\nCREATE FUNCTION ok(x INT) RETURNS BOOLEAN LANGUAGE sql SET search_path = '' AS 'SELECT EXISTS (SELECT FROM public.allowed WHERE v = x)';\nCREATE TABLE docs (v INT CHECK (ok(v)));",
+                good: "CREATE TABLE allowed (v INT);\nCREATE FUNCTION ok(x INT) RETURNS BOOLEAN LANGUAGE sql SET search_path = pg_catalog, pg_temp AS 'SELECT EXISTS (SELECT FROM public.allowed WHERE v = x)';\nCREATE TABLE docs (v INT CHECK (ok(v)));",
             },
         };
         &METADATA
@@ -240,7 +240,7 @@ impl<DB: DatabaseLike> FunctionRule for InvokerWithoutSearchPath<DB> {
             reporter.function(
                 function,
                 format!("Invoker function '{signature}' is reached by {site} and resolves unqualified names under the calling session's `search_path`."),
-                format!("ALTER FUNCTION {signature} SET search_path = ''; and qualify every name its body uses."),
+                format!("ALTER FUNCTION {signature} SET search_path = pg_catalog, pg_temp; and qualify every other name its body uses."),
             )?;
         }
         Ok(())

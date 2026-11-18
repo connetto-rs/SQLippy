@@ -94,7 +94,7 @@ fn a_helper_a_policy_calls_is_reported_on_the_function() {
         &format!(
             "{SCHEMA}
              CREATE SCHEMA authz;
-             CREATE FUNCTION authz.groups_readable_all() RETURNS SETOF INT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+             CREATE FUNCTION authz.groups_readable_all() RETURNS SETOF INT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
                WITH RECURSIVE r(id) AS (SELECT group_id FROM public.grants WHERE principal = current_setting('app.user_id', true)
                  UNION ALL SELECT g.id FROM public.groups g JOIN r ON g.parent_id = r.id) SELECT id FROM r $$;
              CREATE FUNCTION authz.groups_below(root INT) RETURNS SETOF INT LANGUAGE plpgsql STABLE AS $$

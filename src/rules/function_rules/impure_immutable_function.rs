@@ -28,7 +28,7 @@ use crate::{
 /// let schema = "CREATE TABLE rates (rate NUMERIC);";
 /// let reading = ParserDB::parse::<PostgreSqlDialect>(&format!(
 ///     "{schema} CREATE FUNCTION rate() RETURNS NUMERIC LANGUAGE sql IMMUTABLE
-///        SET search_path = '' AS $$ SELECT max(rate) FROM public.rates $$;"
+///        SET search_path = pg_catalog, pg_temp AS $$ SELECT max(rate) FROM public.rates $$;"
 /// ))
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&reading).is_err());
@@ -65,9 +65,9 @@ impl<DB> Rule for ImpureImmutableFunction<DB> {
             basis: Basis::Declared,
             example: RuleExample {
                 bad: "CREATE TABLE rates (rate NUMERIC);\n\
-CREATE FUNCTION rate() RETURNS NUMERIC LANGUAGE sql IMMUTABLE SET search_path = '' AS 'SELECT max(rate) FROM public.rates';",
+CREATE FUNCTION rate() RETURNS NUMERIC LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, pg_temp AS 'SELECT max(rate) FROM public.rates';",
                 good: "CREATE TABLE rates (rate NUMERIC);\n\
-CREATE FUNCTION rate() RETURNS NUMERIC LANGUAGE sql STABLE SET search_path = '' AS 'SELECT max(rate) FROM public.rates';",
+CREATE FUNCTION rate() RETURNS NUMERIC LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS 'SELECT max(rate) FROM public.rates';",
             },
         };
         &METADATA

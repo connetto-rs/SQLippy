@@ -41,7 +41,7 @@ const ROLES: &str =
 fn exposed_definer_functions_are_reported() {
     let definer = |name: &str| {
         format!(
-            "CREATE FUNCTION {name}() RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS 'SELECT 1';"
+            "CREATE FUNCTION {name}() RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS 'SELECT 1';"
         )
     };
     assert_eq!(

@@ -48,29 +48,28 @@ fn resolves_as_definer<DB: DatabaseLike>(function: &DB::Function) -> bool {
     function.security_mode() == FunctionSecurity::Definer && !function.body_is_bound()
 }
 
-/// Where `path` leaves `pg_temp` when it names a schema and does not search
-/// `pg_temp` last, as it reads in a message.
+/// Where `path` leaves `pg_temp` when it does not search `pg_temp` last, as it
+/// reads in a message.
 ///
-/// PostgreSQL searches the temporary schema first for relations unless the
-/// path places it. A path naming no schema is left to the body's qualified
-/// names.
+/// PostgreSQL searches the temporary schema first for relations and types
+/// unless the path places it, so a path naming no schema searches it before
+/// `pg_catalog`.
 fn misplaced_temporary_schema(path: &SearchPath<'_>) -> Option<&'static str> {
     let mut schemas = path.iter().filter(|(schema, _)| !schema.is_empty());
-    let (last, last_quoted) = schemas.next_back()?;
-    if is_temporary_schema(last, *last_quoted) {
-        return None;
+    match schemas.next_back() {
+        Some((last, last_quoted)) if is_temporary_schema(last, *last_quoted) => None,
+        Some(_) if schemas.any(|(schema, quoted)| is_temporary_schema(schema, *quoted)) => {
+            Some("before the end")
+        }
+        _ => Some("out, so it is searched first"),
     }
-    Some(
-        if schemas.any(|(schema, quoted)| is_temporary_schema(schema, *quoted)) {
-            "before the end"
-        } else {
-            "out, so it is searched first"
-        },
-    )
 }
 
 /// The schemas of `path`, as `SET search_path` lists them.
 fn written_path(path: &SearchPath<'_>) -> String {
+    if path.iter().all(|(schema, _)| schema.is_empty()) {
+        return "''".to_owned();
+    }
     path.iter()
         .map(|(schema, _)| schema.as_ref())
         .collect::<Vec<_>>()
@@ -78,14 +77,18 @@ fn written_path(path: &SearchPath<'_>) -> String {
 }
 
 /// The schemas of `path` with `pg_temp` moved last, as `SET search_path`
-/// lists them.
+/// lists them, behind `pg_catalog` when `path` names no other schema.
 fn temporary_schema_last(path: &SearchPath<'_>) -> String {
-    path.iter()
+    let mut schemas: Vec<&str> = path
+        .iter()
         .map(|(schema, _)| schema.as_ref())
         .filter(|schema| !schema.is_empty() && !is_temporary_schema(schema, false))
-        .chain(["pg_temp"])
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect();
+    if schemas.is_empty() {
+        schemas.push("pg_catalog");
+    }
+    schemas.push("pg_temp");
+    schemas.join(", ")
 }
 
 /// Each schema on `path` that a role other than `owner` may create objects

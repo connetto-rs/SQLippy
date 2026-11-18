@@ -155,12 +155,12 @@ fn immutable_functions_reading_what_can_change_are_reported() {
         "impure_immutable_function",
         "CREATE TABLE rates (rate NUMERIC);
          CREATE FUNCTION rate() RETURNS NUMERIC LANGUAGE sql IMMUTABLE
-           SET search_path = '' AS $$ SELECT max(rate) FROM public.rates $$;
+           SET search_path = pg_catalog, pg_temp AS $$ SELECT max(rate) FROM public.rates $$;
          CREATE FUNCTION stamped(x INT) RETURNS TEXT LANGUAGE sql IMMUTABLE
            AS $$ SELECT x || now()::text $$;
          CREATE FUNCTION twice(x NUMERIC) RETURNS NUMERIC LANGUAGE sql IMMUTABLE AS $$ SELECT x * 2 $$;
          CREATE FUNCTION stable_rate() RETURNS NUMERIC LANGUAGE sql STABLE
-           SET search_path = '' AS $$ SELECT max(rate) FROM public.rates $$;
+           SET search_path = pg_catalog, pg_temp AS $$ SELECT max(rate) FROM public.rates $$;
          CREATE FUNCTION opaque(x INT) RETURNS INT LANGUAGE plpgsql IMMUTABLE
            AS $$ BEGIN RETURN (SELECT count(*) FROM rates); END $$;
          CREATE FUNCTION native(x INT) RETURNS INT LANGUAGE internal IMMUTABLE AS 'int4abs';",

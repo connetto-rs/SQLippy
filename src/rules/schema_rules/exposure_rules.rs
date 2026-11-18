@@ -68,7 +68,7 @@ schema_rule!(
     /// let mut constrainer: GenericConstrainer<ParserDB> = SecurityDefinerFunctionExposed::default().into();
     /// constrainer.set_deployment(Deployment::default().with_exposed_schema("public"));
     /// let schema = "CREATE FUNCTION bump() RETURNS INT LANGUAGE sql SECURITY DEFINER
-    ///     SET search_path = '' AS 'SELECT 1';";
+    ///     SET search_path = pg_catalog, pg_temp AS 'SELECT 1';";
     /// let open = ParserDB::parse::<PostgreSqlDialect>(schema).unwrap();
     /// assert!(constrainer.validate_schema(&open).is_err());
     /// let closed = ParserDB::parse::<PostgreSqlDialect>(&format!(
@@ -84,8 +84,8 @@ schema_rule!(
         "https://github.com/supabase/splinter/blob/main/lints/0028_anon_security_definer_function_executable.sql"
     ),
     RuleExample {
-        bad: "CREATE FUNCTION bump() RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS 'SELECT 1';",
-        good: "CREATE FUNCTION bump() RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS 'SELECT 1';\n\
+        bad: "CREATE FUNCTION bump() RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS 'SELECT 1';",
+        good: "CREATE FUNCTION bump() RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS 'SELECT 1';\n\
 REVOKE EXECUTE ON FUNCTION bump() FROM PUBLIC;",
     }
 );
@@ -162,7 +162,7 @@ schema_rule!(
     ///     DefinerSchemaWithoutDefaultRevoke::default().into();
     /// let schema = "CREATE SCHEMA private;
     ///     CREATE FUNCTION private.answer() RETURNS INT LANGUAGE sql SECURITY DEFINER
-    ///     SET search_path = '' AS 'SELECT 42';
+    ///     SET search_path = pg_catalog, pg_temp AS 'SELECT 42';
     ///     REVOKE EXECUTE ON FUNCTION private.answer() FROM PUBLIC;";
     /// let revoked_once = ParserDB::parse::<PostgreSqlDialect>(schema).unwrap();
     /// assert!(constrainer.validate_schema(&revoked_once).is_err());
