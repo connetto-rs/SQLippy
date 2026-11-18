@@ -180,9 +180,7 @@ impl<DB: DatabaseLike> TableRule for UnconditionalClientWritePolicy<DB> {
                     {
                         continue;
                     }
-                    if !commands.contains(&keyword) {
-                        commands.push(keyword);
-                    }
+                    commands.push(keyword);
                     writers.extend(reached.iter().copied());
                     let expression = clause.expression.to_string();
                     if !sites

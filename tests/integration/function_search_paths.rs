@@ -76,7 +76,8 @@ fn a_path_searching_a_schema_another_role_creates_in_is_reported() {
     );
     assert_eq!(
         unsafe_paths(&format!(
-            "CREATE ROLE mallory; CREATE SCHEMA app; GRANT USAGE ON SCHEMA app TO mallory; {function}"
+            "CREATE ROLE mallory; CREATE SCHEMA app; GRANT USAGE ON SCHEMA app TO mallory;
+             CREATE TABLE app.t (id INT); GRANT INSERT ON app.t TO mallory; {function}"
         )),
         Vec::<String>::new()
     );

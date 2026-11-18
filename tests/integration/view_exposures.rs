@@ -52,6 +52,7 @@ fn an_invoker_unread_or_materialized_view_is_not_an_owner_rights_exposure() {
         "CREATE VIEW ids AS SELECT id FROM plain; GRANT SELECT ON ids TO reporting;",
         "CREATE VIEW ids AS SELECT id FROM plain; GRANT INSERT ON ids TO anon;",
         "CREATE MATERIALIZED VIEW ids AS SELECT id FROM plain; GRANT SELECT ON ids TO PUBLIC;",
+        "CREATE VIEW ids AS SELECT id FROM plain; GRANT SELECT (id) ON plain TO anon;",
     ] {
         assert_eq!(
             findings(

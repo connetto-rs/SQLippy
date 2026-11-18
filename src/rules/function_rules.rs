@@ -34,9 +34,9 @@ use sql_traits::{
     traits::{DatabaseLike, FunctionLike, GrantLike, SchemaLike, grant::GrantTarget},
     utils::identifier_resolution::{SearchPath, is_temporary_schema, normalize_identifier},
 };
-use sqlparser::ast::{Action, FunctionSecurity, GranteeName};
+use sqlparser::ast::{Action, FunctionSecurity};
 
-use crate::rules::grant_support::grants_privilege;
+use crate::rules::grant_support::{grantee_role, grants_privilege};
 
 /// The predefined role owning the `public` schema, standing for whoever owns
 /// the database.
@@ -140,14 +140,7 @@ fn creators<DB: DatabaseLike>(database: &DB, schema: &str, owner: Option<&str>) 
             creators.push("PUBLIC".to_owned());
             continue;
         }
-        for grantee in grant.grantees(database) {
-            let Some(GranteeName::ObjectName(name)) = &grantee.name else {
-                continue;
-            };
-            let Some(ident) = name.0.last().and_then(|part| part.as_ident()) else {
-                continue;
-            };
-            let role = normalize_identifier(&ident.value, ident.quote_style.is_some());
+        for role in grant.grantees(database).filter_map(grantee_role) {
             let creator = format!("role '{role}'");
             if !is_owner(&role) && !creators.contains(&creator) {
                 creators.push(creator);

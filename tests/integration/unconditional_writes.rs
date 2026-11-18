@@ -15,6 +15,9 @@ fn a_write_policy_true_for_every_row_of_a_client_role_is_reported() {
         "CREATE POLICY w ON docs FOR INSERT TO authenticated WITH CHECK (1 = 1);",
         "CREATE POLICY w ON docs FOR ALL TO authenticated USING (true);",
         "CREATE POLICY w ON docs FOR DELETE USING (true);",
+        "CREATE POLICY w ON docs FOR DELETE TO authenticated USING ((true));",
+        "CREATE POLICY w ON docs FOR DELETE TO authenticated USING (true);
+         CREATE POLICY r ON docs AS RESTRICTIVE FOR DELETE TO authenticated USING (true);",
     ] {
         assert_eq!(
             findings(

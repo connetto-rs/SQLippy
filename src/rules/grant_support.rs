@@ -120,20 +120,22 @@ fn names_any<DB: DatabaseLike>(
         .any(|grantee| grantee_names(grantee, roles))
 }
 
-/// Whether the grantee names one of `roles`.
-pub(crate) fn grantee_names(grantee: &Grantee, roles: &BTreeSet<String>) -> bool {
+/// The role a grantee names, folded as PostgreSQL stores it, or `None` for
+/// `PUBLIC` and a MySQL user and host.
+pub(crate) fn grantee_role(grantee: &Grantee) -> Option<Cow<'_, str>> {
     match &grantee.name {
         Some(GranteeName::ObjectName(name)) => name
             .0
             .last()
             .and_then(|part| part.as_ident())
-            .is_some_and(|ident| {
-                roles.contains(
-                    normalize_identifier(&ident.value, ident.quote_style.is_some()).as_ref(),
-                )
-            }),
-        Some(GranteeName::UserHost { .. }) | None => false,
+            .map(|ident| normalize_identifier(&ident.value, ident.quote_style.is_some())),
+        Some(GranteeName::UserHost { .. }) | None => None,
     }
+}
+
+/// Whether the grantee names one of `roles`.
+pub(crate) fn grantee_names(grantee: &Grantee, roles: &BTreeSet<String>) -> bool {
+    grantee_role(grantee).is_some_and(|role| roles.contains(role.as_ref()))
 }
 
 /// Whether the grant reaches `PUBLIC` or names one of `roles`.
