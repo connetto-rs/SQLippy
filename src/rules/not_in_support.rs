@@ -5,10 +5,7 @@ use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
-    structs::{
-        ColumnDefinition, ColumnDefinitionScope, ColumnScope, IdentifierCase, RangeTableEntry,
-        TargetName,
-    },
+    structs::{ColumnDefinition, ExpressionContext, IdentifierCase, RangeTableEntry, TargetName},
     traits::{ColumnLike, DatabaseLike, TableLike},
     utils::identifier_resolution::identifiers_match,
 };
@@ -20,9 +17,8 @@ use sqlparser::ast::{
 };
 
 use crate::rules::{
-    credential_support::is_strict_operator,
     expression_site_support::{ExpressionFinder, is_null_literal},
-    null_support::rejects_null,
+    null_support::{rejects_null, strictness},
     policy_support::conjuncts,
     walk_support::walk,
 };
@@ -93,10 +89,10 @@ fn nullable_output<DB: DatabaseLike>(
     database: &DB,
     query: &Query,
 ) -> Result<Option<String>, LookupError> {
-    let scope = ColumnScope::from_query(query, database, IdentifierCase::Folded)?;
+    let types = ExpressionContext::new(query, database, IdentifierCase::Folded)?;
     let mut judge = OutputJudge {
         database,
-        scope: &scope,
+        types: &types,
         visible: Vec::new(),
         visible_head: None,
         visited: Vec::new(),
@@ -111,7 +107,7 @@ fn nullable_output<DB: DatabaseLike>(
 /// Judges outputs in their declared scopes without rendering intermediate results.
 struct OutputJudge<'scope, 'query, 'database, DB: DatabaseLike> {
     database: &'database DB,
-    scope: &'scope ColumnScope<'query, 'database, DB>,
+    types: &'scope ExpressionContext<'query, 'database, DB>,
     visible: Vec<WithScope<'scope>>,
     visible_head: Option<usize>,
     visited: Vec<&'scope Expr>,
@@ -281,9 +277,19 @@ impl<'scope, 'query: 'scope, 'database: 'scope, DB: DatabaseLike>
                 op: UnaryOperator::Plus | UnaryOperator::Minus | UnaryOperator::Not,
                 expr: inner,
             } => self.expression(select, inner)?,
-            Expr::BinaryOp { left, op, right } if is_strict_operator(op) => self
-                .expression(select, left)?
-                .union(self.expression(select, right)?),
+            Expr::BinaryOp { left, op, right } => {
+                let (left_strict, right_strict) =
+                    strictness(self.database, self.types, expression, op)?;
+                match (
+                    self.expression(select, left)?,
+                    self.expression(select, right)?,
+                ) {
+                    (nullable @ Nullability::Nullable(_), _) if left_strict => nullable,
+                    (_, nullable @ Nullability::Nullable(_)) if right_strict => nullable,
+                    (Nullability::NotNull, Nullability::NotNull) => Nullability::NotNull,
+                    _ => Nullability::Unknown,
+                }
+            }
             Expr::IsNull(_)
             | Expr::IsNotNull(_)
             | Expr::IsTrue(_)
@@ -372,14 +378,11 @@ impl<'scope, 'query: 'scope, 'database: 'scope, DB: DatabaseLike>
         select: &'scope Select,
         output: &'scope Expr,
     ) -> Result<Nullability<'scope>, LookupError> {
-        let Some(scope) = self.scope.scope_for_select(select) else {
-            return Ok(Nullability::Unknown);
-        };
-        let Some((definition, binding)) = scope.resolve_column_binding(output)? else {
+        let Some((definition, binding)) = self.types.reference(output)? else {
             return Ok(Nullability::Unknown);
         };
         if let Some(entry) = binding.entry() {
-            if excludes_null(&scope, select, entry)? {
+            if excludes_null(self.database, self.types, select, entry)? {
                 return Ok(Nullability::NotNull);
             }
             if select
@@ -628,30 +631,31 @@ fn factor_extended(factor: &TableFactor, target: &TableFactor, extended: bool) -
 /// Whether an expression is a column reference to the bound column of
 /// `entry`.
 fn bound_to<DB: DatabaseLike>(
-    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    types: &ExpressionContext<'_, '_, DB>,
     entry: RangeTableEntry<'_>,
 ) -> impl Fn(&Expr) -> Result<bool, LookupError> {
     move |expression| {
-        Ok(scope
-            .resolve_column_binding(expression)?
+        Ok(types
+            .reference(expression)?
             .is_some_and(|(_, binding)| binding.entry() == Some(entry)))
     }
 }
 
 /// Whether a filter rejects a null value of this exact bound column.
 fn excludes_null<DB: DatabaseLike>(
-    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    database: &DB,
+    types: &ExpressionContext<'_, '_, DB>,
     select: &Select,
     entry: RangeTableEntry<'_>,
 ) -> Result<bool, LookupError> {
-    let bound = bound_to(scope, entry);
+    let bound = bound_to(types, entry);
     for filter in select.selection.iter().flat_map(conjuncts) {
-        if rejects_null(filter, &bound)? {
+        if rejects_null(filter, &bound, database, types)? {
             return Ok(true);
         }
     }
     for joined in &select.from {
-        if join_rejects_null(scope, joined, entry)? {
+        if join_rejects_null(database, types, joined, entry)? {
             return Ok(true);
         }
     }
@@ -660,16 +664,17 @@ fn excludes_null<DB: DatabaseLike>(
 
 /// Finds inner-join predicates whose effect survives subsequent outer joins.
 fn join_rejects_null<DB: DatabaseLike>(
-    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+    database: &DB,
+    types: &ExpressionContext<'_, '_, DB>,
     joined: &TableWithJoins,
     entry: RangeTableEntry<'_>,
 ) -> Result<bool, LookupError> {
-    let bound = bound_to(scope, entry);
+    let bound = bound_to(types, entry);
     if let TableFactor::NestedJoin {
         table_with_joins, ..
     } = &joined.relation
         && !null_extended(joined, entry.factor(), false)
-        && join_rejects_null(scope, table_with_joins, entry)?
+        && join_rejects_null(database, types, table_with_joins, entry)?
     {
         return Ok(true);
     }
@@ -686,7 +691,7 @@ fn join_rejects_null<DB: DatabaseLike>(
         | JoinOperator::Inner(JoinConstraint::On(filter)) = &join.join_operator
         {
             for filter in conjuncts(filter) {
-                if rejects_null(filter, &bound)? {
+                if rejects_null(filter, &bound, database, types)? {
                     return Ok(true);
                 }
             }
@@ -695,7 +700,7 @@ fn join_rejects_null<DB: DatabaseLike>(
             table_with_joins, ..
         } = &join.relation
             && !null_extended(joined, entry.factor(), false)
-            && join_rejects_null(scope, table_with_joins, entry)?
+            && join_rejects_null(database, types, table_with_joins, entry)?
         {
             return Ok(true);
         }

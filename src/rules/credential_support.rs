@@ -5,10 +5,8 @@ use std::{borrow::Cow, cell::RefCell, ops::ControlFlow, ptr};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{
-        ExpressionContext, ExpressionScope, IdentifierCase, OperatorResolution, WrittenCall,
-    },
-    traits::{DatabaseLike, FunctionLike, OperatorLike, PolicyLike, Relation, ViewLike},
+    structs::{ExpressionContext, ExpressionScope, IdentifierCase, WrittenCall},
+    traits::{DatabaseLike, FunctionLike, PolicyLike, Relation, ViewLike},
     utils::identifier_resolution::SearchPath,
 };
 use sqlparser::ast::{
@@ -18,7 +16,7 @@ use sqlparser::ast::{
     TableFunctionArgs, TableWithJoins, UnaryOperator, Value, Visitor, With,
 };
 
-use crate::rules::walk_support::walk;
+use crate::rules::{null_support::strictness, walk_support::walk};
 use crate::{
     deployment::Deployment,
     rules::{
@@ -186,7 +184,8 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
             } => self.is_null(inner, scope)?,
             Expr::Value(literal) => matches!(literal.value, Value::Null),
             Expr::BinaryOp { left, op, right } => {
-                let (left_strict, right_strict) = self.strictness(expression, op, scope)?;
+                let (left_strict, right_strict) =
+                    strictness(self.database, scope.types, expression, op)?;
                 (left_strict && self.is_null(left, scope)?)
                     || (right_strict && self.is_null(right, scope)?)
             }
@@ -209,7 +208,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
             } => match right.as_ref() {
                 Expr::Subquery(_) => false,
                 Expr::Array(array) => {
-                    self.strictness(expression, compare_op, scope)?.1
+                    strictness(self.database, scope.types, expression, compare_op)?.1
                         && self.all_null(&array.elem, scope)?
                 }
                 _ => self.is_null(right, scope)?,
@@ -562,32 +561,6 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                 _ => Ok(false),
             }
         })
-    }
-
-    /// Whether the operator a binary `expression` applies returns `NULL`
-    /// for a `NULL` left operand and for a `NULL` right one, as the function
-    /// implementing the operator PostgreSQL selects declares. Where the
-    /// selection is undetermined, each overload of a comparison or an
-    /// arithmetic operator is strict, unlike those of `||`, which appends to
-    /// an array whatever the other operand holds.
-    fn strictness(
-        &self,
-        expression: &Expr,
-        operator: &BinaryOperator,
-        scope: &Scope<'_, '_, 'a, DB>,
-    ) -> Result<(bool, bool), LookupError> {
-        if let Some(applications) = scope.types.operators(expression)?
-            && let [application] = applications.as_slice()
-            && let OperatorResolution::Selected(selected) = application.resolution()
-            && let Some(function) = selected.operator().implementation(self.database)
-        {
-            return Ok((
-                function.returns_null_on_null_argument(self.database, 0),
-                function.returns_null_on_null_argument(self.database, 1),
-            ));
-        }
-        let strict = *operator != BinaryOperator::StringConcat && is_strict_operator(operator);
-        Ok((strict, strict))
     }
 
     /// Whether a subquery returns no row when every credential is `NULL`.
@@ -1097,29 +1070,4 @@ fn folded(name: &Ident) -> Cow<'_, str> {
         Some(_) => Cow::Borrowed(&name.value),
         None => Cow::Owned(name.value.to_lowercase()),
     }
-}
-
-/// Operators that yield `NULL` when an operand is `NULL`.
-pub(crate) fn is_strict_operator(operator: &BinaryOperator) -> bool {
-    matches!(
-        operator,
-        BinaryOperator::Eq
-            | BinaryOperator::NotEq
-            | BinaryOperator::Lt
-            | BinaryOperator::LtEq
-            | BinaryOperator::Gt
-            | BinaryOperator::GtEq
-            | BinaryOperator::Plus
-            | BinaryOperator::Minus
-            | BinaryOperator::Multiply
-            | BinaryOperator::Divide
-            | BinaryOperator::Modulo
-            | BinaryOperator::StringConcat
-            | BinaryOperator::PGRegexMatch
-            | BinaryOperator::PGRegexIMatch
-            | BinaryOperator::PGRegexNotMatch
-            | BinaryOperator::PGRegexNotIMatch
-            | BinaryOperator::Arrow
-            | BinaryOperator::LongArrow
-    )
 }
