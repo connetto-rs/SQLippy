@@ -114,6 +114,18 @@ fn qualified_references_and_unshared_names_are_not_reported() {
          DECLARE v TEXT; BEGIN SELECT new INTO v FROM notes LIMIT 1; RETURN v; END $$;",
         "CREATE FUNCTION copy_new() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN INSERT INTO audit VALUES (NEW.label); RETURN NEW; END $$;",
+        "CREATE FUNCTION drop_note() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+         BEGIN DELETE FROM public.notes WHERE id = OLD.id; RETURN NULL; END $$;
+         CREATE TRIGGER notes_dropped AFTER DELETE ON audit FOR EACH ROW EXECUTE FUNCTION drop_note();",
+        "CREATE FUNCTION drop_labelled_note() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+         BEGIN DELETE FROM public.notes WHERE id = OLD.id AND label = 'ownable'; RETURN NULL; END $$;
+         CREATE TRIGGER labelled_notes_dropped AFTER DELETE ON notes FOR EACH ROW EXECUTE FUNCTION drop_labelled_note();",
+        "CREATE FUNCTION drop_audit() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+         BEGIN DELETE FROM public.audit WHERE v = OLD.label AND v <> OLD.new; RETURN NULL; END $$;
+         CREATE TRIGGER audit_dropped AFTER DELETE ON notes FOR EACH ROW EXECUTE FUNCTION drop_audit();",
+        "CREATE FUNCTION relabel_note() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+         BEGIN UPDATE public.notes SET label = OLD.label WHERE id = OLD.id; RETURN NULL; END $$;
+         CREATE TRIGGER notes_relabelled AFTER UPDATE ON notes FOR EACH ROW EXECUTE FUNCTION relabel_note();",
         "CREATE FUNCTION spread() RETURNS BIGINT LANGUAGE plpgsql AS $$
          DECLARE s INT; c BIGINT; BEGIN SELECT count(*) INTO c FROM (SELECT s.* FROM notes s) x; RETURN c; END $$;",
         "CREATE FUNCTION upsert() RETURNS TABLE(note_id INT) LANGUAGE plpgsql AS $$

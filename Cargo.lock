@@ -2220,7 +2220,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#e1663e8b3c7eb515c50b734bc76750fa2efaa969"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#992935bccafddb31d849e7d586421994449acaf3"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -2262,7 +2262,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#039ce8a6ac44a717fa136183f2006f34e03fd05d"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#9429cd30ce211eeb8676c81b685630560969c147"
 dependencies = [
  "log",
  "recursive",
@@ -2294,7 +2294,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#039ce8a6ac44a717fa136183f2006f34e03fd05d"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#9429cd30ce211eeb8676c81b685630560969c147"
 dependencies = [
  "proc-macro2",
  "quote",
