@@ -1,9 +1,6 @@
 //! Submodule providing the `DefinerTemporarySchemaNotLast` rule.
 
-use sql_traits::{
-    traits::{DatabaseLike, FunctionLike},
-    utils::identifier_resolution::is_temporary_schema,
-};
+use sql_traits::traits::{DatabaseLike, FunctionLike};
 
 use crate::{
     error::Interruption,
@@ -97,34 +94,19 @@ impl<DB: DatabaseLike> FunctionRule for DefinerTemporarySchemaNotLast<DB> {
         let Some(path) = function.search_path(database)? else {
             return Ok(());
         };
-        let mut schemas = path.iter().filter(|(schema, _)| !schema.is_empty());
-        let Some((last, last_quoted)) = schemas.next_back() else {
+        let Some(place) = super::misplaced_temporary_schema(&path) else {
             return Ok(());
         };
-        if is_temporary_schema(last, *last_quoted) {
-            return Ok(());
-        }
-        let placed = schemas.any(|(schema, quoted)| is_temporary_schema(schema, *quoted));
         let signature = signature(function, database);
-        let path: Vec<&str> = path.iter().map(|(schema, _)| schema.as_ref()).collect();
-        let place = if placed {
-            "before the end"
-        } else {
-            "out, so it is searched first"
-        };
         reporter.function(
             function,
             format!(
                 "`SECURITY DEFINER` function '{signature}' sets `search_path = {}` and leaves `pg_temp` {place}.",
-                path.join(", ")
+                super::written_path(&path)
             ),
             format!(
-                "ALTER FUNCTION {signature} SET search_path = {}, pg_temp;",
-                path.iter()
-                    .copied()
-                    .filter(|schema| !schema.is_empty() && !is_temporary_schema(schema, false))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "ALTER FUNCTION {signature} SET search_path = {};",
+                super::temporary_schema_last(&path)
             ),
         )
     }

@@ -1,21 +1,12 @@
 //! Submodule providing the `DefinerPathCreatableSchema` rule.
 
-use sql_traits::{
-    traits::{DatabaseLike, FunctionLike, GrantLike, SchemaLike, grant::GrantTarget},
-    utils::identifier_resolution::{is_temporary_schema, normalize_identifier},
-};
-use sqlparser::ast::{Action, GranteeName};
+use sql_traits::traits::{DatabaseLike, FunctionLike};
 
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::grant_support::grants_privilege,
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
 };
-
-/// The predefined role owning the `public` schema, standing for whoever owns
-/// the database.
-const DATABASE_OWNER: &str = "pg_database_owner";
 
 /// Struct defining a rule that reports a `SECURITY DEFINER` function whose
 /// own `search_path` names a schema another role may create objects in.
@@ -94,51 +85,6 @@ CREATE FUNCTION app.norm(x TEXT) RETURNS TEXT LANGUAGE sql SECURITY DEFINER SET 
     }
 }
 
-/// The roles other than `owner` that may create objects in `schema`, as they
-/// read in a message.
-fn creators<DB: DatabaseLike>(database: &DB, schema: &str, owner: Option<&str>) -> Vec<String> {
-    let mut creators = Vec::new();
-    let is_owner = |role: &str| owner == Some(role);
-    if let Some(schema_owner) = database
-        .schema(schema)
-        .and_then(SchemaLike::authorization)
-        .filter(|schema_owner| *schema_owner != DATABASE_OWNER && !is_owner(schema_owner))
-    {
-        creators.push(format!("its owner '{schema_owner}'"));
-    }
-    for grant in database.table_grants() {
-        let GrantTarget::Schemas(mut targets) = grant.target() else {
-            continue;
-        };
-        if !targets
-            .any(|target| normalize_identifier(target.name(), target.name_is_quoted()) == schema)
-            || !grants_privilege(database, grant, |action| {
-                matches!(action, Action::Create { .. })
-            })
-        {
-            continue;
-        }
-        if grant.applies_to_public() {
-            creators.push("PUBLIC".to_owned());
-            continue;
-        }
-        for grantee in grant.grantees(database) {
-            let Some(GranteeName::ObjectName(name)) = &grantee.name else {
-                continue;
-            };
-            let Some(ident) = name.0.last().and_then(|part| part.as_ident()) else {
-                continue;
-            };
-            let role = normalize_identifier(&ident.value, ident.quote_style.is_some());
-            let creator = format!("role '{role}'");
-            if !is_owner(&role) && !creators.contains(&creator) {
-                creators.push(creator);
-            }
-        }
-    }
-    creators
-}
-
 impl<DB: DatabaseLike> FunctionRule for DefinerPathCreatableSchema<DB> {
     type Database = DB;
 
@@ -155,19 +101,7 @@ impl<DB: DatabaseLike> FunctionRule for DefinerPathCreatableSchema<DB> {
             return Ok(());
         };
         let owner = function.owner(database)?;
-        for (schema, quoted) in &path {
-            let schema = normalize_identifier(schema, *quoted);
-            if schema.is_empty()
-                || schema == "pg_catalog"
-                || schema == "$user"
-                || is_temporary_schema(&schema, true)
-            {
-                continue;
-            }
-            let creators = creators(database, &schema, owner);
-            if creators.is_empty() {
-                continue;
-            }
+        for (schema, creators) in super::creatable_path_schemas(database, &path, owner) {
             let signature = signature(function, database);
             reporter.function(
                 function,

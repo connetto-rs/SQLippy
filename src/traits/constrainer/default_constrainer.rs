@@ -23,17 +23,18 @@ use crate::{
         EmptyTextAllowed, ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FlagNotBoolean,
         FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
-        FunctionMediatedPolicyCycle, GrantOptionToClientRole, ImpureImmutableFunction,
-        IncompatibleForeignKey, InvokerWithoutSearchPath, JsonStoredAsText, JsonType,
-        KeyWithoutExactEquality, LatentPolicyReadCycle, LeakproofUserFunction, MissingPrimaryKey,
-        MixedCaseColumnName, MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText,
-        MoneyType, MonotonicFlagReset, MultiplePermissivePolicies, NarrowIntegerKey,
+        FunctionMediatedPolicyCycle, FunctionWithoutSafeSearchPath, GrantOptionToClientRole,
+        ImpureImmutableFunction, IncompatibleForeignKey, InvokerWithoutSearchPath,
+        JsonStoredAsText, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
+        LeakproofUserFunction, MaterializedViewExposed, MissingPrimaryKey, MixedCaseColumnName,
+        MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText, MoneyType,
+        MonotonicFlagReset, MultiplePermissivePolicies, NarrowIntegerKey,
         NarrowerReferencingColumn, NestedPolicySubquery, NilUuidSentinel, NonSnakeCaseColumnName,
         NonSnakeCaseTableName, NonterminatingRecursiveCte, NotInNullList, NotInNullableSubquery,
         NotInSubquery, NullComparison, NullCredentialRead, NullableCompositeForeignKey,
         NullableConcatenation, NullableUniqueColumn, OffsetPaging, OrderedSetAsDisjunction,
-        OuterColumnCapture, OwnerRightsView, ParallelTables, PlpgsqlAmbiguousName,
-        PluralColumnName, PolicyExpressionDefeatsIndex, PolicyReadCycle,
+        OuterColumnCapture, OwnerRightsView, OwnerRightsViewExposed, ParallelTables,
+        PlpgsqlAmbiguousName, PluralColumnName, PolicyExpressionDefeatsIndex, PolicyReadCycle,
         PolicyReadsUnprotectedTable, PolicyTargetsBypassRole, PolicyToCreatingRole,
         PolicyWithoutRowLevelSecurity, PolicyWithoutRowReference, PrefixRedundantIndex,
         PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
@@ -45,21 +46,21 @@ use crate::{
         RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
         RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
         SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
-        SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SerialColumn,
-        SessionTimeZoneDependence, SettableMembershipInBypassingRole, SingularTableName,
-        SnapshotBeforeLock, SubjectSettableAttribute, SuperkeyPrimaryKey,
+        SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SensitiveColumnsExposed,
+        SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
+        SingularTableName, SnapshotBeforeLock, SubjectSettableAttribute, SuperkeyPrimaryKey,
         SurrogatePrimaryKeyInExtension, TableInheritance, TableNameDispatch, TautologicalCheck,
         TautologicalPolicy, TautologicalWithCheck, TimeDependentCheck, TimeWithTimeZone,
         TimestampBetween, TimestampWithoutTimeZone, TriggerFilterInBody,
         TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
         TruncatingIntegerDivision, TypeNameCaseCollision, UnauditedAuthorityTable,
-        UnboundedTextColumn, UncachedHelperQuery, UncachedPolicyCall, UndeletableReference,
-        UnfilteredChangeTrigger, UnfilteredWrite, UnforcedRowLevelSecurity,
-        UnindexedCorrelatedSelect, UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter,
-        UnindexedRecursiveJoin, UnknownBinarySend, UnlinkedFromItem, UnloggedTable,
-        UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
-        UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable, UnseededPolicySet,
-        UnusedCte, UnvalidatedConstraint, UuidStoredAsText, WildcardView,
+        UnboundedTextColumn, UncachedHelperQuery, UncachedPolicyCall,
+        UnconditionalClientWritePolicy, UndeletableReference, UnfilteredChangeTrigger,
+        UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
+        UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin, UnknownBinarySend,
+        UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin,
+        UnsatisfiableCheck, UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
+        UnseededPolicySet, UnusedCte, UnvalidatedConstraint, UuidStoredAsText, WildcardView,
         WritingNonVolatileFunction, ZeroPrecisionTimestamp,
     },
     traits::{
@@ -149,11 +150,12 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
         register_schema_rules(&mut constrainer);
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 13] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 14] = [
             Box::new(ImpureImmutableFunction::default()),
             Box::new(WritingNonVolatileFunction::default()),
             Box::new(DefinerWithoutSearchPath::default()),
             Box::new(InvokerWithoutSearchPath::default()),
+            Box::new(FunctionWithoutSafeSearchPath::default()),
             Box::new(DefinerTemporarySchemaNotLast::default()),
             Box::new(DefinerPathCreatableSchema::default()),
             Box::new(LeakproofUserFunction::default()),
@@ -174,7 +176,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 50] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 52] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(RepeatedIndexColumn::default()),
@@ -225,6 +227,8 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(CredentialFreeWrite::default()),
         Box::new(SuperkeyPrimaryKey::default()),
         Box::new(NullCredentialRead::default()),
+        Box::new(SensitiveColumnsExposed::default()),
+        Box::new(UnconditionalClientWritePolicy::default()),
     ];
     for rule in table_rules {
         constrainer.register_table_rule_with_floor(rule, Level::Allow);
@@ -274,7 +278,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 71] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 73] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -319,6 +323,8 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(FunctionMediatedPolicyCycle::default()),
         Box::new(ReachableMaterializedView::default()),
         Box::new(ReachableForeignTable::default()),
+        Box::new(MaterializedViewExposed::default()),
+        Box::new(OwnerRightsViewExposed::default()),
         Box::new(ChildWithoutRowLevelSecurity::default()),
         Box::new(OwnerRightsView::default()),
         Box::new(ClientRoleBypassesRowLevelSecurity::default()),

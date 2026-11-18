@@ -31,6 +31,9 @@ pub(crate) trait FlowVisitor {
     /// What the rule carries along each path.
     type State: FlowState;
 
+    /// Reads a block as a path enters it, before its declarations.
+    fn enter(&mut self, _block: &Block, _state: &mut Self::State) {}
+
     /// Reads a query the body evaluates, such as a condition, a loop bound,
     /// a declaration default or an assigned value.
     fn query(&mut self, query: &Query, state: &mut Self::State);
@@ -110,6 +113,7 @@ fn joined<S: FlowState>(left: Option<S>, right: Option<S>) -> Option<S> {
 impl<'b, V: FlowVisitor> Walker<'_, 'b, V> {
     fn block(&mut self, block: &'b Block, mut state: V::State) -> Option<V::State> {
         self.frames.push(Frame::new(block.label.as_deref(), false));
+        self.visitor.enter(block, &mut state);
         for declaration in &block.declarations {
             if let DeclarationKind::Variable(variable) = &declaration.kind
                 && let Some(default) = &variable.default

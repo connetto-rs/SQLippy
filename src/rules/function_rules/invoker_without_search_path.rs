@@ -207,6 +207,25 @@ fn reaching_site<DB: DatabaseLike>(
     Ok(None)
 }
 
+/// Names the stored schema expression reaching an invoker function that sets
+/// no `search_path` and names a relation or function without its schema in a
+/// body resolved when it runs, the function this rule reports.
+pub(super) fn unpinned_reaching_site<DB: DatabaseLike>(
+    database: &DB,
+    function: &DB::Function,
+) -> Result<Option<String>, LookupError> {
+    if function.security_mode() == FunctionSecurity::Definer
+        || function.body_is_bound()
+        || function.search_path(database)?.is_some()
+    {
+        return Ok(None);
+    }
+    if super::readable(function.unqualified_names(database))?.is_empty() {
+        return Ok(None);
+    }
+    reaching_site(database, function)
+}
+
 impl<DB: DatabaseLike> FunctionRule for InvokerWithoutSearchPath<DB> {
     type Database = DB;
 
@@ -216,18 +235,7 @@ impl<DB: DatabaseLike> FunctionRule for InvokerWithoutSearchPath<DB> {
         function: &<Self::Database as DatabaseLike>::Function,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        if function.security_mode() == FunctionSecurity::Definer
-            || function.body_is_bound()
-            || function.search_path(database)?.is_some()
-        {
-            return Ok(());
-        }
-        let unqualified = match function.unqualified_names(database) {
-            Ok(names) => !names.is_empty(),
-            Err(error) if super::unreadable_body(&error) => false,
-            Err(error) => return Err(error.into()),
-        };
-        if unqualified && let Some(site) = reaching_site(database, function)? {
+        if let Some(site) = unpinned_reaching_site(database, function)? {
             let signature = signature(function, database);
             reporter.function(
                 function,
