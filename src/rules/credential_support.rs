@@ -57,24 +57,12 @@ struct Scope<'s, 'q, 'a, DB: DatabaseLike> {
     types: &'s ExpressionContext<'q, 'a, DB>,
 }
 
-#[expect(
-    clippy::expl_impl_clone_on_copy,
-    reason = "deriving would bound the database type by `Copy`"
-)]
-impl<DB: DatabaseLike> Clone for Scope<'_, '_, '_, DB> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<DB: DatabaseLike> Copy for Scope<'_, '_, '_, DB> {}
-
 impl<'s, 'q, 'a, DB: DatabaseLike> Scope<'s, 'q, 'a, DB> {
     /// Calls `judge` with the scope of `query`, which sees its own `WITH`
     /// items before those in reach here.
-    fn within<R>(self, query: &'s Query, judge: impl FnOnce(Scope<'_, 'q, 'a, DB>) -> R) -> R {
+    fn within<R>(&self, query: &'s Query, judge: impl FnOnce(&Scope<'_, 'q, 'a, DB>) -> R) -> R {
         match &query.with {
-            Some(clause) => judge(Scope {
+            Some(clause) => judge(&Scope {
                 items: Some(&Items {
                     clause,
                     visible: clause.cte_tables.len(),
@@ -167,7 +155,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         )?;
         self.requires_within(
             expression,
-            Scope {
+            &Scope {
                 items: None,
                 types: &types,
             },
@@ -178,7 +166,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn is_null(
         &self,
         expression: &Expr,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         if self.deployment.is_credential(expression) {
             return Ok(true);
@@ -238,7 +226,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn requires_within(
         &self,
         expression: &Expr,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         if self.is_null(expression, scope)? {
             return Ok(true);
@@ -348,7 +336,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn all_null(
         &self,
         expressions: &[Expr],
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         for expression in expressions {
             if !self.is_null(expression, scope)? {
@@ -363,7 +351,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn call_is_null(
         &self,
         call: &Function,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         let FunctionArguments::List(list) = &call.args else {
             return Ok(false);
@@ -402,7 +390,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         &self,
         expression: &Expr,
         operator: &BinaryOperator,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<(bool, bool), LookupError> {
         if let Some(applications) = scope.types.operators(expression)?
             && let [application] = applications.as_slice()
@@ -422,7 +410,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn subquery_requires(
         &self,
         query: &Query,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         scope.within(query, |scope| {
             self.set_requires(&query.body, query.order_by.as_ref(), scope)
@@ -437,7 +425,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         &self,
         body: &SetExpr,
         order_by: Option<&OrderBy>,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         Ok(match body {
             SetExpr::Select(select) => {
@@ -549,7 +537,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         });
         let requires = self.subquery_requires(
             &query,
-            Scope {
+            &Scope {
                 items: None,
                 types: &types,
             },
@@ -563,7 +551,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn select_returns_no_row(
         &self,
         select: &Select,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         Ok(self.filter_requires(select, scope)? || self.reads_no_row(select, scope)?)
     }
@@ -573,7 +561,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn filter_requires(
         &self,
         select: &Select,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         if let Some(selection) = &select.selection
             && self.requires_within(selection, scope)?
@@ -598,7 +586,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn reads_no_row(
         &self,
         select: &Select,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         for table in &select.from {
             if self.joined_returns_no_row(table, scope)? {
@@ -614,7 +602,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn joined_returns_no_row(
         &self,
         table: &TableWithJoins,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         let mut empty = self.relation_returns_no_row(&table.relation, scope)?;
         for join in &table.joins {
@@ -638,7 +626,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn relation_returns_no_row(
         &self,
         factor: &TableFactor,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         match factor {
             TableFactor::Derived { subquery, .. } => self.subquery_requires(subquery, scope),
@@ -651,7 +639,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                 if let Some((item, body)) = scope.items.and_then(|items| items.read_by(name)) {
                     return self.defined_returns_no_row(
                         &item.query,
-                        Scope {
+                        &Scope {
                             items: Some(&body),
                             types: scope.types,
                         },
@@ -676,7 +664,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                         });
                         let requires = self.defined_returns_no_row(
                             definition,
-                            Scope {
+                            &Scope {
                                 items: None,
                                 types: &types,
                             },
@@ -703,7 +691,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn defined_returns_no_row(
         &self,
         query: &Query,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         if self
             .judging
@@ -733,14 +721,14 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         &self,
         select: &Select,
         order_by: Option<&OrderBy>,
-        scope: Scope<'_, '_, 'a, DB>,
+        scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
-        let GroupByExpr::Expressions(grouping, _) = &select.group_by else {
-            return Ok(false);
+        let grouping = match &select.group_by {
+            GroupByExpr::Expressions(grouping, _) if grouping.iter().all(may_group_by_nothing) => {
+                grouping
+            }
+            _ => return Ok(false),
         };
-        if !grouping.iter().all(may_group_by_nothing) {
-            return Ok(false);
-        }
         if let Some(having) = &select.having {
             return Ok(!self.requires_within(having, scope)?);
         }
