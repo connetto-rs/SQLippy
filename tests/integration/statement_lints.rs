@@ -264,6 +264,33 @@ const NOT_IN_OUTPUTS: &[(&str, bool)] = &[
         "WITH item(value) AS (SELECT (a_id IS NULL)::int FROM b UNION SELECT a_id FROM b WHERE a_id IS NOT NULL) SELECT value FROM item",
         false,
     ),
+    (
+        "SELECT a_id FROM b WHERE NOT (a_id = ANY ('{}'::int[]))",
+        true,
+    ),
+    (
+        "SELECT a_id FROM b WHERE (a_id = ANY ('{}'::int[])) IS NOT NULL",
+        true,
+    ),
+    (
+        "SELECT a_id FROM b WHERE NOT (a_id = ANY (SELECT team FROM pairs WHERE false))",
+        true,
+    ),
+    (
+        "SELECT a_id FROM b WHERE NOT (a_id > ANY (SELECT team FROM pairs WHERE team > 99))",
+        true,
+    ),
+    (
+        "SELECT a_id FROM b WHERE NOT (a_id = ANY (ARRAY[1, 2]))",
+        false,
+    ),
+    ("SELECT (data ->> 'm')::int FROM j", true),
+    ("SELECT (data -> 'm')::int FROM j", true),
+    ("SELECT (data #>> '{m}')::int FROM j", true),
+    ("SELECT (data #> '{m}')::int FROM j", true),
+    ("SELECT ((data -> 'k') ->> 'y')::int FROM j", true),
+    ("SELECT abs(a_id) FROM b", true),
+    ("SELECT abs(id) FROM c", false),
 ];
 
 #[test]
@@ -273,7 +300,8 @@ fn not_in_measured_output_nullability() {
          CREATE TABLE b (a_id INT);
          CREATE TABLE c (id INT PRIMARY KEY, a_id INT NOT NULL);
          CREATE TABLE pairs (a_id INT, team INT NOT NULL);
-         CREATE TABLE non_null (value INT NOT NULL);",
+         CREATE TABLE non_null (value INT NOT NULL);
+         CREATE TABLE j (data JSONB NOT NULL);",
     )
     .expect("schema parses");
     let constrainer = not_in_rules();

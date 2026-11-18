@@ -412,6 +412,9 @@ fn a_composite_key_binds_its_columns_to_a_constrained_one() {
         "person = CRED AND (pass_id::text || 'x') IS NOT NULL
            AND coalesce(pass_id, 0) IN (SELECT id FROM passes WHERE invitee = CRED)"
             .to_owned(),
+        "person = CRED AND NOT (pass_id = ANY (ARRAY[0]))
+           AND coalesce(pass_id, 0) IN (SELECT id FROM passes WHERE invitee = CRED)"
+            .to_owned(),
     ] {
         let sql = format!(
             "{} CREATE POLICY w ON seats FOR INSERT WITH CHECK ({check});",
@@ -436,6 +439,7 @@ fn a_composite_key_binds_nothing_without_a_constrained_checked_column() {
         nullable_pass.to_owned(),
         format!("person = CRED OR {BY_PASS}"),
         format!("(ARRAY[0] || pass_id) IS NOT NULL AND {nullable_pass}"),
+        format!("NOT (pass_id = ANY ('{{}}'::int[])) AND {nullable_pass}"),
     ] {
         let sql = format!(
             "{} CREATE POLICY w ON seats FOR INSERT WITH CHECK ({check});",
