@@ -2,6 +2,7 @@
 
 use sql_traits::{
     errors::LookupError,
+    structs::{ExpressionContext, ExpressionScope, IdentifierCase},
     traits::{ColumnLike, DatabaseLike, ForeignKeyLike, PolicyLike, TableLike},
 };
 use sqlparser::ast::{BinaryOperator, CreatePolicyType, Expr, InTarget};
@@ -86,26 +87,44 @@ impl<'db, DB: DatabaseLike> CheckedRow<'db, DB> {
         })
     }
 
-    /// What `expression` binds, judging credentials with `judge`.
-    fn bound(
+    /// What the new-row clause `clause` binds, judging credentials with
+    /// `judge`.
+    fn bound(&self, judge: &CredentialJudge<'_, DB>, clause: &Expr) -> Result<Bound, LookupError> {
+        let table = ExpressionScope::Table(self.table);
+        let types = ExpressionContext::for_expression(
+            clause,
+            &table,
+            self.database,
+            IdentifierCase::Folded,
+        )?;
+        self.binds(judge, &types, clause)
+    }
+
+    /// What `expression` binds, judging credentials with `judge` and reading
+    /// operators as `types` types them.
+    fn binds(
         &self,
         judge: &CredentialJudge<'_, DB>,
+        types: &ExpressionContext<'_, '_, DB>,
         expression: &Expr,
     ) -> Result<Bound, LookupError> {
         Ok(match expression {
-            Expr::Nested(inner) => self.bound(judge, inner)?,
+            Expr::Nested(inner) => self.binds(judge, types, inner)?,
             Expr::BinaryOp {
                 left,
                 op: BinaryOperator::And,
                 right,
-            } => self.conjoin(self.bound(judge, left)?, &self.bound(judge, right)?),
+            } => self.conjoin(
+                self.binds(judge, types, left)?,
+                &self.binds(judge, types, right)?,
+            ),
             Expr::BinaryOp {
                 left,
                 op: BinaryOperator::Or,
                 right,
             } => {
-                let mut left = self.bound(judge, left)?;
-                let right = self.bound(judge, right)?;
+                let mut left = self.binds(judge, types, left)?;
+                let right = self.binds(judge, types, right)?;
                 for (mine, theirs) in left.constrained.iter_mut().zip(right.constrained) {
                     *mine &= theirs;
                 }
@@ -114,7 +133,7 @@ impl<'db, DB: DatabaseLike> CheckedRow<'db, DB> {
                 }
                 left
             }
-            _ => self.leaf(judge, expression)?,
+            _ => self.leaf(judge, types, expression)?,
         })
     }
 
@@ -124,6 +143,7 @@ impl<'db, DB: DatabaseLike> CheckedRow<'db, DB> {
     fn leaf(
         &self,
         judge: &CredentialJudge<'_, DB>,
+        types: &ExpressionContext<'_, '_, DB>,
         expression: &Expr,
     ) -> Result<Bound, LookupError> {
         let mut bound = Bound {
@@ -143,7 +163,7 @@ impl<'db, DB: DatabaseLike> CheckedRow<'db, DB> {
                 bound.constrained[position] = credential == Some(true);
             }
             if !bound.non_null[position] {
-                bound.non_null[position] = self.rejects_null(expression, column)?;
+                bound.non_null[position] = self.rejects_null(types, expression, column)?;
             }
         }
         self.close(&mut bound);
@@ -151,7 +171,12 @@ impl<'db, DB: DatabaseLike> CheckedRow<'db, DB> {
     }
 
     /// Whether `predicate` cannot be true while `column` of the row is null.
-    fn rejects_null(&self, predicate: &Expr, column: &DB::Column) -> Result<bool, LookupError> {
+    fn rejects_null(
+        &self,
+        types: &ExpressionContext<'_, '_, DB>,
+        predicate: &Expr,
+        column: &DB::Column,
+    ) -> Result<bool, LookupError> {
         let is_column = |expression: &Expr| {
             Ok(is_column_reference(expression)
                 && reads_row(self.database, self.table, Some(column), expression)?)
@@ -162,8 +187,8 @@ impl<'db, DB: DatabaseLike> CheckedRow<'db, DB> {
                 target: InTarget::Subquery(_),
                 negated: false,
                 ..
-            } => null_when(expr, &is_column),
-            _ => rejects_null(predicate, &is_column),
+            } => null_when(expr, &is_column, self.database, types),
+            _ => rejects_null(predicate, &is_column, self.database, types),
         }
     }
 

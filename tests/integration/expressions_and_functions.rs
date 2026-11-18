@@ -55,6 +55,8 @@ fn not_in_over_non_null_or_filtered_columns_and_other_forms_pass() {
         "SELECT id FROM a WHERE id NOT IN (SELECT a_id, team FROM b)",
         "SELECT id FROM a WHERE id NOT IN (1, 2)",
         "SELECT id FROM a WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.a_id = a.id)",
+        "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b WHERE (a_id::text || 'x') IS NOT NULL)",
+        "SELECT id FROM a WHERE ARRAY[id] NOT IN (SELECT ARRAY[team] || a_id FROM b)",
     ] {
         assert_eq!(
             objects(
@@ -74,6 +76,8 @@ fn not_in_nullable_expressions_and_union_outputs_are_reported() {
     for view in [
         "SELECT id FROM a WHERE id NOT IN (SELECT a_id + 1 FROM b)",
         "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b UNION SELECT team FROM b)",
+        "SELECT id FROM a WHERE id::text NOT IN (SELECT a_id::text || 'x' FROM b)",
+        "SELECT id FROM a WHERE id NOT IN (SELECT a_id FROM b WHERE (ARRAY[0] || a_id) IS NOT NULL)",
     ] {
         assert_eq!(
             objects(
