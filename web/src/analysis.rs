@@ -98,9 +98,9 @@ fn record(report: &mut Report, error: Error<ParserDB>) {
 /// Checks the schema DDL and the application statements in `sql` with
 /// `constrainer`.
 ///
-/// Schema statements build the database the rules read. `SELECT`, `INSERT`,
-/// `UPDATE`, `DELETE` and `MERGE` statements are checked against it with the
-/// query rules.
+/// Schema statements build the database the rules read. The script rules read
+/// every statement in order. `SELECT`, `INSERT`, `UPDATE`, `DELETE` and
+/// `MERGE` statements are checked against the schema with the query rules.
 ///
 /// # Errors
 ///
@@ -110,11 +110,12 @@ pub fn analyze(
     sql: &str,
     constrainer: &DefaultConstrainer<ParserDB>,
 ) -> Result<Report, AnalysisError> {
-    let statements: Vec<Statement> = Parser::parse_sql(&PostgreSqlDialect {}, sql)?
-        .into_iter()
-        .filter(is_application_statement)
-        .collect();
+    let script = Parser::parse_sql(&PostgreSqlDialect {}, sql)?;
     let database = ParserDB::parse::<PostgreSqlDialect>(sql)?;
+    let statements: Vec<&Statement> = script
+        .iter()
+        .filter(|statement| is_application_statement(statement))
+        .collect();
     let mut report = Report {
         statements: statements.len(),
         ..Report::default()
@@ -122,7 +123,10 @@ pub fn analyze(
     for error in constrainer.diagnostics(&database) {
         record(&mut report, error);
     }
-    for statement in &statements {
+    for error in constrainer.script_diagnostics(&database, &script) {
+        record(&mut report, error);
+    }
+    for statement in statements {
         for error in constrainer.statement_diagnostics(&database, statement) {
             record(&mut report, error);
         }

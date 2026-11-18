@@ -220,6 +220,8 @@ pub enum RuleKind {
     Function,
     /// Each statement an application sends.
     Query,
+    /// The statements of a script, in the order they run.
+    Script,
 }
 
 /// A rule registered on a constrainer and the level it runs at there.

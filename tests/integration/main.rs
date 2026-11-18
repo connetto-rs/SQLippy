@@ -73,6 +73,7 @@ mod repeated_setting_reads;
 mod restrictive_without_permissive;
 mod role_memberships;
 mod schema_allowances;
+mod script_rules;
 mod self_asserted_claims;
 mod self_granting_writes;
 mod sensitive_columns;

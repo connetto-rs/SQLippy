@@ -17,7 +17,7 @@ use crate::{
     lint::{Level, LintGroup, RegisteredRule, Rule, RuleKind, RuleMetadata},
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, QueryRule, Reporter, SchemaRule,
-        TableRule,
+        ScriptRule, TableRule,
         reporter::{Allowances, ResolvedAllowance},
     },
 };
@@ -61,6 +61,7 @@ pub struct GenericConstrainer<DB: DatabaseLike> {
     schemas: Vec<Registered<dyn SchemaRule<Database = DB>>>,
     functions: Vec<Registered<dyn FunctionRule<Database = DB>>>,
     queries: Vec<Registered<dyn QueryRule<Database = DB>>>,
+    scripts: Vec<Registered<dyn ScriptRule<Database = DB>>>,
     levels: Levels,
     allowances: Vec<SchemaAllowance>,
     statement_allowances: Vec<StatementAllowance>,
@@ -77,6 +78,7 @@ impl<DB: DatabaseLike> Default for GenericConstrainer<DB> {
             schemas: Vec::new(),
             functions: Vec::new(),
             queries: Vec::new(),
+            scripts: Vec::new(),
             levels: Levels::default(),
             allowances: Vec::new(),
             statement_allowances: Vec::new(),
@@ -142,6 +144,39 @@ impl<'run, DB: DatabaseLike> Run<'run, DB> {
             Err(Interruption::Halted) => ControlFlow::Break(()),
             Err(Interruption::Lookup(error)) => sink(Error::Lookup(error)),
         }
+    }
+
+    /// Runs one rule check and returns whether it raised a violation,
+    /// forwarding other failures to `sink` and recording them in `failed`.
+    fn fires(
+        &mut self,
+        rule: &'static RuleMetadata,
+        level: Level,
+        sink: &mut dyn FnMut(Error<DB>) -> ControlFlow<()>,
+        failed: &mut bool,
+        check: impl FnOnce(&mut Reporter<'_, DB>) -> Result<(), Interruption>,
+    ) -> ControlFlow<(), bool> {
+        let mut fired = false;
+        let flow = self.check(
+            rule,
+            level,
+            &mut |error| match error {
+                Error::Violation(_) => {
+                    fired = true;
+                    ControlFlow::Break(())
+                }
+                other => {
+                    *failed = true;
+                    sink(other)
+                }
+            },
+            check,
+        );
+        if fired {
+            return ControlFlow::Continue(true);
+        }
+        flow?;
+        ControlFlow::Continue(false)
     }
 }
 
@@ -264,6 +299,15 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         self.queries.push(registered);
     }
 
+    pub(crate) fn register_script_rule_with_floor(
+        &mut self,
+        rule: Box<dyn ScriptRule<Database = DB>>,
+        floor: Level,
+    ) {
+        let registered = self.registered(rule, floor);
+        self.scripts.push(registered);
+    }
+
     pub(crate) fn set_rule_level(&mut self, rule: &str, level: Level) {
         match self.levels.rules.iter_mut().find(|(name, _)| name == rule) {
             Some(entry) => entry.1 = level,
@@ -316,6 +360,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             .chain(inactive(&self.schemas, deployment))
             .chain(inactive(&self.functions, deployment))
             .chain(inactive(&self.queries, deployment))
+            .chain(inactive(&self.scripts, deployment))
             .collect()
     }
 
@@ -326,6 +371,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             .chain(listed(&self.schemas, RuleKind::Schema))
             .chain(listed(&self.functions, RuleKind::Function))
             .chain(listed(&self.queries, RuleKind::Query))
+            .chain(listed(&self.scripts, RuleKind::Script))
             .collect()
     }
 
@@ -336,6 +382,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         self.levels.refresh(&mut self.schemas);
         self.levels.refresh(&mut self.functions);
         self.levels.refresh(&mut self.queries);
+        self.levels.refresh(&mut self.scripts);
     }
 
     pub(crate) fn visit(
@@ -436,8 +483,10 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
     }
 
     /// Whether the rule a statement allowance names, at its configured level,
-    /// still reports the allowance's own statement. A lookup failure goes to
-    /// `sink` and keeps the allowance, since the rule could not decide.
+    /// still reports the allowance's own statement. A script rule judges the
+    /// statement as a script of its own, where no earlier statement excuses
+    /// it. A lookup failure goes to `sink` and keeps the allowance, since the
+    /// rule could not decide.
     fn allowance_holds(
         &self,
         database: &DB,
@@ -449,29 +498,28 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         };
         let deployment = &self.deployment;
         let mut run = Run::for_statements(database, deployment, &[]);
-        let (mut fired, mut failed) = (false, false);
+        let mut failed = false;
         for entry in enabled(&self.queries, deployment)
             .filter(|entry| entry.rule.metadata().name == allowance.rule)
         {
-            let flow = run.check(
-                entry.rule.metadata(),
-                entry.level,
-                &mut |error| match error {
-                    Error::Violation(_) => {
-                        fired = true;
-                        ControlFlow::Break(())
-                    }
-                    other => {
-                        failed = true;
-                        sink(other)
-                    }
-                },
-                |reporter| entry.rule.check_statement(database, statement, reporter),
-            );
-            if fired {
+            let check = |reporter: &mut Reporter<'_, DB>| {
+                entry.rule.check_statement(database, statement, reporter)
+            };
+            if run.fires(entry.rule.metadata(), entry.level, sink, &mut failed, check)? {
                 return ControlFlow::Continue(true);
             }
-            flow?;
+        }
+        for entry in enabled(&self.scripts, deployment)
+            .filter(|entry| entry.rule.metadata().name == allowance.rule)
+        {
+            let check = |reporter: &mut Reporter<'_, DB>| {
+                entry
+                    .rule
+                    .check_script(database, std::slice::from_ref(statement), reporter)
+            };
+            if run.fires(entry.rule.metadata(), entry.level, sink, &mut failed, check)? {
+                return ControlFlow::Continue(true);
+            }
         }
         ControlFlow::Continue(failed)
     }
@@ -487,6 +535,22 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         for entry in enabled(&self.queries, deployment) {
             run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
                 entry.rule.check_statement(database, statement, reporter)
+            })?;
+        }
+        ControlFlow::Continue(())
+    }
+
+    pub(crate) fn visit_script(
+        &self,
+        database: &DB,
+        statements: &[Statement],
+        sink: &mut dyn FnMut(Error<DB>) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        let deployment = &self.deployment;
+        let mut run = Run::for_statements(database, deployment, &self.statement_allowances);
+        for entry in enabled(&self.scripts, deployment) {
+            run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
+                entry.rule.check_script(database, statements, reporter)
             })?;
         }
         ControlFlow::Continue(())

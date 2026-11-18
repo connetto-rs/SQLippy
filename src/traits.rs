@@ -16,3 +16,5 @@ pub(crate) mod reporter;
 pub use reporter::Reporter;
 mod schema_rule;
 pub use schema_rule::SchemaRule;
+mod script_rule;
+pub use script_rule::ScriptRule;
