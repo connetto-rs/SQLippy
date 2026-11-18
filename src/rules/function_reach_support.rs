@@ -36,6 +36,20 @@ pub(crate) fn reaches_function<DB: DatabaseLike>(
     visit_reachable(database, vec![root], |function| function == target)
 }
 
+/// Every function `root` reaches through its callees, itself included, in
+/// first-reached order.
+pub(crate) fn reachable_functions<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    root: &'db DB::Function,
+) -> Result<Vec<&'db DB::Function>, LookupError> {
+    let mut functions = Vec::new();
+    visit_reachable(database, vec![root], |function| {
+        functions.push(function);
+        false
+    })?;
+    Ok(functions)
+}
+
 /// Visits each reachable function once, stopping when the visitor returns `true`.
 fn visit_reachable<'database, DB: DatabaseLike>(
     database: &'database DB,
