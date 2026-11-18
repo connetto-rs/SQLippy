@@ -219,7 +219,8 @@ impl<'b, V: FlowVisitor> Walker<'_, 'b, V> {
     }
 
     /// Walks each branch a `CASE` can take, narrowing only a searched
-    /// `CASE`, which tests each condition as a boolean.
+    /// `CASE`, which tests each condition as a boolean. Without an `ELSE`, a
+    /// value no branch matches raises `case_not_found`.
     fn case(&mut self, case: &'b Case, mut state: V::State) -> Option<V::State> {
         if let Some(subject) = &case.subject {
             self.visitor.query(subject, &mut state);
@@ -234,10 +235,10 @@ impl<'b, V: FlowVisitor> Walker<'_, 'b, V> {
             }
             out = joined(out, self.nodes(&branch.statements, Some(taken)));
         }
-        joined(
-            out,
-            self.nodes(case.otherwise.as_deref().unwrap_or_default(), Some(state)),
-        )
+        let Some(otherwise) = &case.otherwise else {
+            return out;
+        };
+        joined(out, self.nodes(otherwise, Some(state)))
     }
 
     /// Walks a loop body twice, so the second pass sees what the first
