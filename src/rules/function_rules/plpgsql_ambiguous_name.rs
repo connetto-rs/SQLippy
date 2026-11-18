@@ -12,14 +12,14 @@ use sql_traits::{
     traits::{DatabaseLike, FunctionLike},
 };
 use sqlparser::ast::{
-    ArgMode, ConflictTarget, Expr, Ident, OnInsert, Query, SelectItem,
-    SelectItemQualifiedWildcardKind, SetExpr, Statement, TableFactor, Visitor,
+    ArgMode, ConflictTarget, Expr, Ident, ObjectNamePart, OnInsert, Query, SelectItem,
+    SelectItemQualifiedWildcardKind, Statement, TableFactor, TableWithJoins, Visitor,
 };
 
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::{function_rules::unreadable_body, walk_support::walk},
+    rules::{function_rules::readable, walk_support::walk},
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
 };
 
@@ -74,6 +74,16 @@ struct Collision {
     kind: &'static str,
 }
 
+impl Collision {
+    fn new(name: String, variable: &PlPgSqlVariable<'_>) -> Self {
+        Self {
+            name,
+            variable: variable.name().to_owned(),
+            kind: kind(variable),
+        }
+    }
+}
+
 /// What `variable` is, as a message names it.
 fn kind(variable: &PlPgSqlVariable<'_>) -> &'static str {
     match variable.kind() {
@@ -92,22 +102,36 @@ fn kind(variable: &PlPgSqlVariable<'_>) -> &'static str {
     }
 }
 
-/// Whether a relation of `select`'s `FROM` is named or aliased `qualifier`.
-fn names_relation(from: &[sqlparser::ast::TableWithJoins], qualifier: &Ident) -> bool {
-    from.iter()
-        .flat_map(|item| {
-            std::iter::once(&item.relation).chain(item.joins.iter().map(|join| &join.relation))
-        })
+/// Whether a relation `item` joins, inside an unaliased parenthesized join
+/// too, is named or aliased `qualifier`.
+fn names_relation(item: &TableWithJoins, qualifier: &Ident) -> bool {
+    std::iter::once(&item.relation)
+        .chain(item.joins.iter().map(|join| &join.relation))
         .any(|factor| {
             let named = match factor {
                 TableFactor::Table { name, alias, .. } => alias
                     .as_ref()
                     .map(|alias| &alias.name)
-                    .or_else(|| name.0.last().and_then(|part| part.as_ident())),
-                TableFactor::Derived { alias, .. } | TableFactor::Function { alias, .. } => {
+                    .or_else(|| name.0.last().and_then(ObjectNamePart::as_ident)),
+                TableFactor::NestedJoin {
+                    table_with_joins,
+                    alias: None,
+                } => return names_relation(table_with_joins, qualifier),
+                TableFactor::NestedJoin { alias, .. }
+                | TableFactor::Derived { alias, .. }
+                | TableFactor::TableFunction { alias, .. }
+                | TableFactor::Function { alias, .. }
+                | TableFactor::UNNEST { alias, .. }
+                | TableFactor::JsonTable { alias, .. }
+                | TableFactor::OpenJsonTable { alias, .. }
+                | TableFactor::Pivot { alias, .. }
+                | TableFactor::Unpivot { alias, .. }
+                | TableFactor::MatchRecognize { alias, .. }
+                | TableFactor::XmlTable { alias, .. }
+                | TableFactor::SemanticView { alias, .. } => {
                     alias.as_ref().map(|alias| &alias.name)
                 }
-                _ => None,
+                TableFactor::UnpivotExpr { .. } => None,
             };
             named.is_some_and(|named| {
                 IdentifierCase::Folded.identifiers_match(
@@ -127,15 +151,42 @@ struct Collisions<'c, 'b, 'db, DB: DatabaseLike> {
 }
 
 impl<DB: DatabaseLike> Collisions<'_, '_, '_, DB> {
-    fn found(
-        name: String,
-        variable: &PlPgSqlVariable<'_>,
-    ) -> ControlFlow<Result<Collision, LookupError>> {
-        ControlFlow::Break(Ok(Collision {
-            name,
-            variable: variable.name().to_owned(),
-            kind: kind(variable),
-        }))
+    /// The collision of a column reference that also names a variable.
+    fn reference(&self, expression: &Expr) -> Result<Option<Collision>, LookupError> {
+        if !matches!(
+            expression,
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_)
+        ) {
+            return Ok(None);
+        }
+        let column = self
+            .context
+            .reference(expression)?
+            .is_some_and(|(definition, _)| {
+                !matches!(
+                    definition,
+                    ColumnDefinition::Variable(_)
+                        | ColumnDefinition::VariableField(_)
+                        | ColumnDefinition::Parameter { .. }
+                )
+            });
+        if !column {
+            return Ok(None);
+        }
+        Ok(self
+            .context
+            .variable(expression)?
+            .map(|variable| Collision::new(expression.to_string(), &variable)))
+    }
+}
+
+/// Stops the walk at `collision`, a lookup failure included.
+fn stop(
+    collision: Result<Option<Collision>, LookupError>,
+) -> ControlFlow<Result<Collision, LookupError>> {
+    match collision.transpose() {
+        Some(found) => ControlFlow::Break(found),
+        None => ControlFlow::Continue(()),
     }
 }
 
@@ -143,71 +194,53 @@ impl<DB: DatabaseLike> Visitor for Collisions<'_, '_, '_, DB> {
     type Break = Result<Collision, LookupError>;
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
-        if !matches!(
-            expression,
-            Expr::Identifier(_) | Expr::CompoundIdentifier(_)
-        ) {
-            return ControlFlow::Continue(());
-        }
-        let column = match self.context.reference(expression) {
-            Ok(found) => found.is_some_and(|(definition, _)| {
-                !matches!(
-                    definition,
-                    ColumnDefinition::Variable(_)
-                        | ColumnDefinition::VariableField(_)
-                        | ColumnDefinition::Parameter { .. }
-                )
-            }),
-            Err(error) => return ControlFlow::Break(Err(error)),
-        };
-        if !column {
-            return ControlFlow::Continue(());
-        }
-        match self.context.variable(expression) {
-            Ok(Some(variable)) => Self::found(expression.to_string(), &variable),
-            Ok(None) => ControlFlow::Continue(()),
-            Err(error) => ControlFlow::Break(Err(error)),
-        }
+        stop(self.reference(expression))
     }
 
+    /// An `alias.*` whose alias names both a relation of the `FROM` and a
+    /// variable.
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        let SetExpr::Select(select) = query.body.as_ref() else {
+        let Some(select) = query.body.as_select() else {
             return ControlFlow::Continue(());
         };
-        for item in &select.projection {
-            let SelectItem::QualifiedWildcard(SelectItemQualifiedWildcardKind::ObjectName(name), _) =
-                item
-            else {
-                continue;
-            };
-            let Some(qualifier) = name
-                .0
-                .iter()
-                .map(|part| part.as_ident().cloned())
-                .collect::<Option<Vec<Ident>>>()
-            else {
-                continue;
-            };
-            if let [relation] = qualifier.as_slice()
-                && names_relation(&select.from, relation)
-                && let Some(variable) = self.scope.wildcard_variable(&qualifier)
-            {
-                return Self::found(format!("{name}.*"), &variable);
-            }
-        }
-        ControlFlow::Continue(())
+        let found =
+            select.projection.iter().find_map(|item| {
+                let SelectItem::QualifiedWildcard(
+                    SelectItemQualifiedWildcardKind::ObjectName(name),
+                    _,
+                ) = item
+                else {
+                    return None;
+                };
+                let [part] = name.0.as_slice() else {
+                    return None;
+                };
+                let relation = part.as_ident()?;
+                if !select
+                    .from
+                    .iter()
+                    .any(|item| names_relation(item, relation))
+                {
+                    return None;
+                }
+                self.scope
+                    .wildcard_variable(std::slice::from_ref(relation))
+                    .map(|variable| Collision::new(format!("{name}.*"), &variable))
+            });
+        stop(Ok(found))
     }
 
+    /// An `ON CONFLICT` column that also names a variable.
     fn pre_visit_statement(&mut self, statement: &Statement) -> ControlFlow<Self::Break> {
         if let Statement::Insert(insert) = statement
             && let Some(OnInsert::OnConflict(conflict)) = &insert.on
             && let Some(ConflictTarget::Columns { columns, .. }) = &conflict.conflict_target
         {
-            for column in columns {
-                if let Some(variable) = self.scope.variable(std::slice::from_ref(column)) {
-                    return Self::found(column.to_string(), &variable);
-                }
-            }
+            return stop(Ok(columns.iter().find_map(|column| {
+                self.scope
+                    .variable(std::slice::from_ref(column))
+                    .map(|variable| Collision::new(column.to_string(), &variable))
+            })));
         }
         ControlFlow::Continue(())
     }
@@ -218,16 +251,10 @@ fn collision<DB: DatabaseLike>(
     database: &DB,
     function: &DB::Function,
 ) -> Result<Option<Collision>, LookupError> {
-    let body = match function.plpgsql_sites(database) {
-        Ok(body) => body,
-        Err(error) if unreadable_body(&error) => return Ok(None),
-        Err(error) => return Err(error),
+    let Some(body) = readable(function.plpgsql_sites(database).map(Some))? else {
+        return Ok(None);
     };
-    let sites = match body.sites() {
-        Ok(sites) => sites,
-        Err(error) if unreadable_body(&error) => return Ok(None),
-        Err(error) => return Err(error),
-    };
+    let sites = readable(body.sites())?;
     for site in &sites {
         let context = site.context(IdentifierCase::Folded)?;
         let mut collisions = Collisions {

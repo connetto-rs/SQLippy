@@ -48,3 +48,9 @@ pub(crate) fn unreadable_body(error: &LookupError) -> bool {
             | LookupError::FunctionBodyUnparsable { .. }
     )
 }
+
+/// `result`, or the default value for a body that is not SQL, is missing or
+/// does not parse.
+pub(crate) fn readable<T: Default>(result: Result<T, LookupError>) -> Result<T, LookupError> {
+    result.or_else(|error| unreadable_body(&error).then(T::default).ok_or(error))
+}

@@ -18,7 +18,7 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         function_body_support::{BodyNode, function_body},
-        function_rules::unreadable_body,
+        function_rules::readable,
         inline_support::{inlined_in_expression, inlined_in_from},
         policy_support::{reads_row, walked_clauses},
         walk_support::{stop_on, stopped, walk},
@@ -37,12 +37,6 @@ fn called<'db, DB: DatabaseLike>(
         CallResolution::Selected(selected) => Some(selected.function()),
         _ => None,
     }
-}
-
-/// `result`, or the default value for a body that is not SQL, is missing or
-/// does not parse.
-fn readable<T: Default>(result: Result<T, LookupError>) -> Result<T, LookupError> {
-    result.or_else(|error| unreadable_body(&error).then(T::default).ok_or(error))
 }
 
 /// Whether a value the definition gives its variable may come from the
