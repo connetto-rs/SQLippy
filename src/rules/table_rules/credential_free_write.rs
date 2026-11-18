@@ -28,10 +28,10 @@ use crate::{
 /// `= ANY (ARRAY(...))` or `IN (...)`, requires a credential when the
 /// subquery returns no row without one. A `UNION` does when every arm does,
 /// an `INTERSECT` when one arm does and an `EXCEPT` when its left arm does,
-/// reading the set-returning `LANGUAGE sql` helpers an arm projects and the
-/// derived tables, views and `WITH` items it joins the same way, and a `WITH
-/// RECURSIVE` item by its non-recursive term. The rule is inactive until the
-/// deployment declares a credential.
+/// reading the set-returning `LANGUAGE sql` helpers an arm projects or calls
+/// in `FROM` and the derived tables, views and `WITH` items it joins the same
+/// way, and a `WITH RECURSIVE` item by its non-recursive term. The rule is
+/// inactive until the deployment declares a credential.
 ///
 /// # Example
 ///

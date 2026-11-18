@@ -8,7 +8,7 @@ use sqlparser::ast::{
     BinaryOperator, Expr, FunctionBehavior, InTarget, ObjectName, Query, SetExpr, Statement,
     TableFactor, UnaryOperator, Visit, Visitor,
 };
-use sqlparser_plpgsql::embedded::Node;
+use sqlparser_plpgsql::embedded::{Node, NodeKind};
 
 use crate::{
     error::Interruption,
@@ -365,8 +365,8 @@ impl<DB: DatabaseLike> FlowVisitor for Locks<'_, DB> {
     }
 
     fn step(&mut self, node: &Node, state: &mut Snapshot) {
-        match node {
-            Node::Assignment(assignment) => {
+        match &node.kind {
+            NodeKind::Assignment(assignment) => {
                 let target = assignment.target.name.to_string().to_lowercase();
                 if evaluated(&assignment.value)
                     .is_some_and(|value| reads_isolation(value, &state.isolation))
@@ -379,7 +379,7 @@ impl<DB: DatabaseLike> FlowVisitor for Locks<'_, DB> {
             // The next transaction's snapshot follows every lock taken so
             // far, and only `AND CHAIN` keeps the isolation level a guard
             // checked.
-            Node::Commit { chain } | Node::Rollback { chain } => {
+            NodeKind::Commit { chain } | NodeKind::Rollback { chain } => {
                 state.held.clear();
                 state.guarded &= *chain;
             }

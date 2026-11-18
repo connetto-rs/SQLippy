@@ -10,7 +10,7 @@ use sql_traits::{
 use sqlparser::ast::{Expr, TriggerEvent, Visitor};
 use sqlparser_plpgsql::{
     condition::errcode,
-    embedded::{Block, Condition, Node, Raise, RaiseOptionKind},
+    embedded::{Block, Condition, Node, NodeKind, Raise, RaiseOptionKind},
 };
 use sqlstate::pg::INSUFFICIENT_PRIVILEGE;
 
@@ -145,23 +145,23 @@ fn raises_insufficient_privilege(raise: &Raise) -> bool {
 /// Whether any statement of `nodes`, at any depth, raises
 /// `insufficient_privilege`.
 fn nodes_raise(nodes: &[Node]) -> bool {
-    nodes.iter().any(|node| match node {
-        Node::Raise(raise) => raises_insufficient_privilege(raise),
-        Node::Block(block) => block_raises(block),
-        Node::If(conditional) => {
+    nodes.iter().any(|node| match &node.kind {
+        NodeKind::Raise(raise) => raises_insufficient_privilege(raise),
+        NodeKind::Block(block) => block_raises(block),
+        NodeKind::If(conditional) => {
             conditional
                 .branches
                 .iter()
                 .any(|branch| nodes_raise(&branch.statements))
                 || nodes_raise(&conditional.otherwise)
         }
-        Node::Case(case) => {
+        NodeKind::Case(case) => {
             case.branches
                 .iter()
                 .any(|branch| nodes_raise(&branch.statements))
-                || nodes_raise(&case.otherwise)
+                || nodes_raise(case.otherwise.as_deref().unwrap_or_default())
         }
-        Node::Loop(repeated) => nodes_raise(&repeated.statements),
+        NodeKind::Loop(repeated) => nodes_raise(&repeated.statements),
         _ => false,
     })
 }

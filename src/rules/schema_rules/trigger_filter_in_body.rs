@@ -9,7 +9,7 @@ use sql_traits::{
 use sqlparser::ast::{
     Expr, Function, FunctionBehavior, Ident, ObjectNamePart, TriggerEvent, TriggerPeriod, Visitor,
 };
-use sqlparser_plpgsql::embedded::{DeclarationKind, Node};
+use sqlparser_plpgsql::embedded::{DeclarationKind, Node, NodeKind};
 
 use crate::{
     error::Interruption,
@@ -153,14 +153,24 @@ fn early_return<'b, 'db, DB: DatabaseLike>(
     database: &'db DB,
     nodes: &'b [Node],
 ) -> Option<(&'b Expr, RowsRead<'db, DB>)> {
-    let Some(Node::If(conditional)) = nodes.first() else {
+    let Some(Node {
+        kind: NodeKind::If(conditional),
+        ..
+    }) = nodes.first()
+    else {
         return None;
     };
     let [branch] = conditional.branches.as_slice() else {
         return None;
     };
     if !conditional.otherwise.is_empty()
-        || !matches!(branch.statements.as_slice(), [Node::Return { .. }])
+        || !matches!(
+            branch.statements.as_slice(),
+            [Node {
+                kind: NodeKind::Return { .. },
+                ..
+            }]
+        )
     {
         return None;
     }
