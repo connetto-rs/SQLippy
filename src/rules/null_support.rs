@@ -3,7 +3,7 @@
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ExpressionContext, OperatorResolution},
+    structs::{CallResolution, ExpressionContext, OperatorResolution},
     traits::{DatabaseLike, FunctionLike, OperatorLike},
 };
 use sqlparser::ast::{BinaryOperator, CastKind, Expr, InTarget, UnaryOperator};
@@ -94,8 +94,39 @@ pub(crate) fn null_when<DB: DatabaseLike>(
             target: InTarget::List(_),
             ..
         } => null(expr)?,
+        Expr::Function(_) => find_null_passing_argument(database, types, expression, |argument| {
+            Ok(null(argument)?.then_some(()))
+        })?
+        .is_some(),
         _ => false,
     })
+}
+
+/// The first of `judge`'s answers for the arguments of the call `expression`
+/// that pass a parameter whose `NULL` makes the function PostgreSQL selects
+/// return `NULL`, none where `types` cannot tell the selection.
+pub(crate) fn find_null_passing_argument<'node, DB: DatabaseLike, T>(
+    database: &DB,
+    types: &ExpressionContext<'_, '_, DB>,
+    expression: &'node Expr,
+    mut judge: impl FnMut(&'node Expr) -> Result<Option<T>, LookupError>,
+) -> Result<Option<T>, LookupError> {
+    let Some(application) = types.call(expression)? else {
+        return Ok(None);
+    };
+    let CallResolution::Selected(selected) = application.resolution() else {
+        return Ok(None);
+    };
+    for (&argument, passed) in application.arguments().iter().zip(selected.arguments()) {
+        if selected
+            .function()
+            .returns_null_on_null_argument(database, passed.parameter())
+            && let Some(answer) = judge(argument)?
+        {
+            return Ok(Some(answer));
+        }
+    }
+    Ok(None)
 }
 
 /// Whether `expression`, applying `operator`, is `NULL` for a `NULL` left
