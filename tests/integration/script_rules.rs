@@ -4,11 +4,16 @@
 use sqlippy::prelude::*;
 use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
-/// The object of every violation `rule` raises on `sql` read as a script.
-fn script_findings(rule: impl Into<GenericConstrainer<ParserDB>>, sql: &str) -> Vec<String> {
+/// The object of every violation `rule` raises on `script` read statement by
+/// statement, beside the schema `schema` builds.
+fn findings_on(
+    rule: impl Into<GenericConstrainer<ParserDB>>,
+    schema: &str,
+    script: &str,
+) -> Vec<String> {
     let constrainer = rule.into();
-    let database = crate::common::parse(sql);
-    let statements = Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("script parses");
+    let database = crate::common::parse(schema);
+    let statements = Parser::parse_sql(&PostgreSqlDialect {}, script).expect("script parses");
     constrainer
         .script_diagnostics(&database, &statements)
         .into_iter()
@@ -17,6 +22,11 @@ fn script_findings(rule: impl Into<GenericConstrainer<ParserDB>>, sql: &str) -> 
             other => panic!("unexpected failure: {other}"),
         })
         .collect()
+}
+
+/// The object of every violation `rule` raises on `sql` read as a script.
+fn script_findings(rule: impl Into<GenericConstrainer<ParserDB>>, sql: &str) -> Vec<String> {
+    findings_on(rule, sql, sql)
 }
 
 fn unqualified(sql: &str) -> Vec<String> {
@@ -336,6 +346,189 @@ fn a_misquoted_path_is_reported_where_it_is_set() {
     assert_eq!(
         findings("SET search_path = \"app\", pg_temp;"),
         Vec::<String>::new()
+    );
+}
+
+#[test]
+fn an_altered_function_path_is_judged_as_written() {
+    let findings = |sql: &str| script_findings(MisquotedSearchPath::default(), sql);
+    let function = "CREATE FUNCTION public.f() RETURNS INT LANGUAGE sql \
+                    SET search_path TO DEFAULT AS 'SELECT 1';";
+    assert_eq!(
+        findings(&format!(
+            "{function} ALTER FUNCTION public.f() SET search_path = 'pg_catalog, pg_temp';"
+        )),
+        ["\"pg_catalog, pg_temp\""]
+    );
+    assert_eq!(
+        findings(&format!(
+            "{function} ALTER FUNCTION public.f() SET search_path TO DEFAULT;
+             ALTER FUNCTION public.f() SET work_mem = '1MB';
+             ALTER FUNCTION public.f() RENAME TO g;"
+        )),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn operators_and_unqualified_creation_targets_are_named() {
+    assert_eq!(
+        unqualified("SELECT 'a' ILIKE 'b', 'a' SIMILAR TO 'b', 1 = ANY(ARRAY[1]), ~1;"),
+        ["ILIKE, SIMILAR TO, =, ~"]
+    );
+    assert_eq!(
+        findings_on(
+            UnqualifiedNameUnderUnsafeSearchPath::default(),
+            "",
+            "CREATE DOMAIN d AS INT;
+             CREATE AGGREGATE total(integer) (SFUNC = pg_catalog.int4pl, STYPE = integer);"
+        ),
+        ["d", "total"]
+    );
+}
+
+#[test]
+fn resetting_every_setting_returns_to_the_default_path() {
+    let trusted = "SET search_path = pg_catalog, pg_temp;";
+    for (reset, expected) in [
+        ("RESET ALL;", ["lower"].as_slice()),
+        ("DISCARD ALL;", &["lower"]),
+        ("RESET SESSION AUTHORIZATION;", &[]),
+    ] {
+        assert_eq!(
+            findings_on(
+                UnqualifiedNameUnderUnsafeSearchPath::default(),
+                "",
+                &format!("{trusted} {reset} SELECT lower('a');")
+            ),
+            expected,
+            "{reset}"
+        );
+    }
+}
+
+#[test]
+fn a_savepoint_the_transaction_never_set_changes_nothing() {
+    assert_eq!(
+        findings_on(
+            UnqualifiedNameUnderUnsafeSearchPath::default(),
+            "",
+            "BEGIN; SET LOCAL search_path = pg_catalog, pg_temp;
+             ROLLBACK TO SAVEPOINT missing; RELEASE SAVEPOINT missing; SELECT lower('a');"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn an_owner_named_schema_and_a_quoted_configured_entry_are_trusted() {
+    assert_eq!(
+        unqualified(
+            "CREATE ROLE app; CREATE SCHEMA AUTHORIZATION app;
+             SET search_path = pg_catalog, app, pg_temp; SELECT lower('a');"
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        unqualified(
+            "CREATE SCHEMA \"App\";
+             SELECT pg_catalog.set_config('search_path', 'pg_catalog, \"App\", pg_temp', false);
+             SELECT lower('a');"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_configured_path_that_is_not_a_literal_list_is_untrusted() {
+    for value in ["pg_catalog.current_setting('search_path')", "NULL"] {
+        assert_eq!(
+            unqualified(&format!(
+                "SET search_path = pg_catalog, pg_temp;
+                 SELECT pg_catalog.set_config('search_path', {value}, false);
+                 SELECT lower('a');"
+            )),
+            ["lower"],
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn a_default_function_path_follows_the_caller_and_a_bound_body_the_session() {
+    assert_eq!(
+        unqualified(
+            "SET search_path = pg_catalog, pg_temp;
+             CREATE FUNCTION public.f(x TEXT) RETURNS TEXT LANGUAGE sql
+             SET search_path TO DEFAULT AS $$ SELECT lower(x) $$;"
+        ),
+        ["lower"]
+    );
+    assert_eq!(
+        unqualified(
+            "SET search_path = pg_catalog, pg_temp;
+             CREATE FUNCTION public.f() RETURNS INT LANGUAGE sql RETURN abs(1);"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn aggregate_and_trigger_replacements_are_named_by_signature() {
+    let findings = |sql: &str| findings_on(ReplacementWithoutTrustedCreation::default(), "", sql);
+    let state = "(SFUNC = pg_catalog.int4pl, STYPE = integer)";
+    assert_eq!(
+        findings(&format!(
+            "CREATE OR REPLACE AGGREGATE public.total(int4) {state};"
+        )),
+        ["aggregate public.total(integer)"]
+    );
+    assert_eq!(
+        findings(&format!(
+            "CREATE AGGREGATE public.total(integer) {state};
+             CREATE OR REPLACE AGGREGATE public.total(int4) {state};"
+        )),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        findings(
+            "CREATE OR REPLACE AGGREGATE public.c(*) (SFUNC = pg_catalog.int8inc, STYPE = int8);
+             CREATE OR REPLACE AGGREGATE public.p(float8 ORDER BY float8)
+             (SFUNC = pg_catalog.ordered_set_transition, STYPE = internal);
+             CREATE OR REPLACE AGGREGATE public.l (BASETYPE = integer, SFUNC = pg_catalog.int4pl, STYPE = integer);
+             CREATE OR REPLACE TRIGGER tr BEFORE INSERT ON public.t
+             FOR EACH ROW EXECUTE FUNCTION public.g();"
+        ),
+        [
+            "aggregate public.c(*)",
+            "aggregate public.p(double precision ORDER BY double precision)",
+            "aggregate public.l()",
+            "trigger tr on public.t"
+        ]
+    );
+    assert_eq!(
+        findings(
+            "CREATE FUNCTION public.h(a int2, b int8, c float4, d float8, e bool, f char(3),
+               g varbit, h timestamp, i timestamptz, j time, k timetz)
+             RETURNS INT LANGUAGE sql AS 'SELECT 1';
+             CREATE OR REPLACE FUNCTION public.h(a SMALLINT, b BIGINT, c REAL,
+               d DOUBLE PRECISION, e BOOLEAN, f CHARACTER, g BIT VARYING,
+               h TIMESTAMP WITHOUT TIME ZONE, i TIMESTAMP WITH TIME ZONE,
+               j TIME WITHOUT TIME ZONE, k TIME WITH TIME ZONE)
+             RETURNS INT LANGUAGE sql AS 'SELECT 2';"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn guarded_creation_of_an_unqualified_table_or_a_materialized_view_is_reported() {
+    assert_eq!(
+        conditional(
+            "CREATE TABLE IF NOT EXISTS t (id INT);
+             CREATE MATERIALIZED VIEW IF NOT EXISTS public.m AS SELECT 1 AS one;"
+        ),
+        ["table t", "materialized view public.m"]
     );
 }
 

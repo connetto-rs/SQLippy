@@ -28,11 +28,20 @@ pub(crate) fn fold(ident: &Ident) -> String {
 fn folded_parts(name: &ObjectName) -> Option<Vec<String>> {
     name.0
         .iter()
-        .map(|part| match part {
-            ObjectNamePart::Identifier(ident) => Some(fold(ident)),
-            ObjectNamePart::Function(_) => None,
-        })
+        .map(|part| part.as_ident().map(fold))
         .collect()
+}
+
+/// The text of a quoted or dollar-quoted string literal.
+fn string_literal(expression: &Expr) -> Option<&str> {
+    let Expr::Value(literal) = expression else {
+        return None;
+    };
+    match &literal.value {
+        Value::SingleQuotedString(text) | Value::EscapedStringLiteral(text) => Some(text),
+        Value::DollarQuotedString(text) => Some(&text.value),
+        _ => None,
+    }
 }
 
 /// The schema `name` qualifies its object with, folded, or `None` for an
@@ -73,13 +82,7 @@ pub(crate) fn path_entries(values: &[Expr]) -> Option<Vec<PathEntry>> {
         .iter()
         .map(|value| match value {
             Expr::Identifier(ident) => Some(fold(ident)),
-            Expr::Value(literal) => match &literal.value {
-                Value::SingleQuotedString(text) | Value::EscapedStringLiteral(text) => {
-                    Some(text.clone())
-                }
-                _ => None,
-            },
-            _ => None,
+            value => string_literal(value).map(str::to_owned),
         })
         .collect()
 }
@@ -87,15 +90,9 @@ pub(crate) fn path_entries(values: &[Expr]) -> Option<Vec<PathEntry>> {
 /// The single name a `search_path` value list spells with a comma inside
 /// quotes, as several schemas written as one.
 pub(crate) fn misquoted_path(values: &[Expr]) -> Option<&str> {
-    let [value] = values else {
-        return None;
-    };
-    let name = match value {
-        Expr::Identifier(ident) if ident.quote_style.is_some() => ident.value.as_str(),
-        Expr::Value(literal) => match &literal.value {
-            Value::SingleQuotedString(text) | Value::EscapedStringLiteral(text) => text.as_str(),
-            _ => return None,
-        },
+    let name = match values {
+        [Expr::Identifier(ident)] if ident.quote_style.is_some() => ident.value.as_str(),
+        [value] => string_literal(value)?,
         _ => return None,
     };
     name.contains(',').then_some(name)
@@ -147,15 +144,7 @@ fn routine_path_trusted(params: &[FunctionDefinitionSetParam], state: &ScriptSta
 /// call of a routine in `language`, or `None` for a body written in another
 /// language or that does not parse.
 fn deferred_body(body: &Expr, language: Option<&Ident>) -> Option<Vec<Statement>> {
-    let Expr::Value(literal) = body else {
-        return None;
-    };
-    let body = match &literal.value {
-        Value::SingleQuotedString(body) | Value::EscapedStringLiteral(body) => body.as_str(),
-        Value::DollarQuotedString(body) => body.value.as_str(),
-        _ => return None,
-    };
-    parse_body(body, language.map(fold).as_deref())
+    parse_body(string_literal(body)?, language.map(fold).as_deref())
 }
 
 /// The string body of `function`, which PostgreSQL resolves at each call.
@@ -632,9 +621,10 @@ impl ScriptState {
                 chain,
                 savepoint: None,
             } if self.in_transaction => {
-                if let Some(start) = self.frames.first() {
-                    self.session_trusted = start.session;
-                }
+                self.session_trusted = self
+                    .frames
+                    .first()
+                    .map_or(self.session_trusted, |start| start.session);
                 self.end_transaction(*chain);
             }
             Statement::Rollback {
@@ -718,37 +708,26 @@ impl ScriptState {
 /// Applies each `set_config('search_path', ...)` call a statement makes.
 struct SetConfigCalls<'state>(&'state mut ScriptState);
 
-/// The string literal `argument` holds.
-fn string_argument(argument: &FunctionArg) -> Option<&str> {
-    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(literal))) = argument else {
-        return None;
-    };
-    match &literal.value {
-        Value::SingleQuotedString(text) | Value::EscapedStringLiteral(text) => Some(text),
-        _ => None,
-    }
-}
-
 impl Visitor for SetConfigCalls<'_> {
     type Break = ();
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
-        let Expr::Function(function) = expression else {
-            return ControlFlow::Continue(());
-        };
-        let named = folded_parts(&function.name).is_some_and(|parts| match parts.as_slice() {
-            [name] => name == "set_config",
-            [schema, name] => schema == "pg_catalog" && name == "set_config",
-            _ => false,
-        });
-        let FunctionArguments::List(list) = &function.args else {
-            return ControlFlow::Continue(());
-        };
-        if let (true, [name, value, local]) = (named, list.args.as_slice())
-            && string_argument(name).is_some_and(|name| name.eq_ignore_ascii_case("search_path"))
+        if let Expr::Function(function) = expression
+            && folded_parts(&function.name).is_some_and(|parts| {
+                matches!(parts.as_slice(), [name] if name == "set_config")
+                    || matches!(parts.as_slice(), [schema, name]
+                        if schema == "pg_catalog" && name == "set_config")
+            })
+            && let FunctionArguments::List(list) = &function.args
+            && let [
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(name)),
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(value)),
+                local,
+            ] = list.args.as_slice()
+            && string_literal(name).is_some_and(|name| name.eq_ignore_ascii_case("search_path"))
         {
             let trusted =
-                string_argument(value).is_some_and(|value| self.0.trusted(&split_path(value)));
+                string_literal(value).is_some_and(|value| self.0.trusted(&split_path(value)));
             let local = matches!(local,
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(literal)))
                     if literal.value == Value::Boolean(true));

@@ -237,10 +237,9 @@ impl Visitor for UnqualifiedNames {
             Expr::IsDistinctFrom(..) | Expr::IsNotDistinctFrom(..) => {
                 Some("= in IS DISTINCT FROM".to_owned())
             }
-            Expr::AnyOp { compare_op, .. } | Expr::AllOp { compare_op, .. } => match compare_op {
-                BinaryOperator::PGCustomBinaryOperator(parts) if parts.len() > 1 => None,
-                op => Some(op.to_string()),
-            },
+            Expr::AnyOp { compare_op, .. } | Expr::AllOp { compare_op, .. } => {
+                Some(compare_op.to_string())
+            }
             Expr::Cast { data_type, .. } => unqualified_type(data_type),
             _ => None,
         };
