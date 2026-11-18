@@ -1,0 +1,342 @@
+//! Walks a PL/pgSQL body in the order it can run, carrying what a rule tracks
+//! along every path through branches, loops, exits and handlers.
+
+use sql_traits::traits::FunctionLike;
+use sqlparser::ast::{Query, Statement};
+use sqlparser_plpgsql::{
+    embedded::{
+        Block, BoundCursor, Case, DeclarationKind, Dynamic, Exit, ExitKind, Fetch, If, Indirection,
+        Loop, LoopControl, Node, Open, RaiseLevel, ReturnQuery,
+    },
+    embedded_sql,
+};
+
+/// The body of a PL/pgSQL function, `None` for another language or a body
+/// that does not parse.
+pub(crate) fn plpgsql_block<F: FunctionLike>(function: &F) -> Option<Block> {
+    if function.stored_language().as_deref() != Some("plpgsql") {
+        return None;
+    }
+    embedded_sql(function.body()?).ok()
+}
+
+/// What a rule knows at one point of a body, merged where paths meet.
+pub(crate) trait FlowState: Clone {
+    /// Merges what another path reaching the same point knows.
+    fn join(&mut self, other: Self);
+}
+
+/// The steps a rule reads, each seen with the state of a path reaching it.
+pub(crate) trait FlowVisitor {
+    /// What the rule carries along each path.
+    type State: FlowState;
+
+    /// Reads a query the body evaluates, such as a condition, a loop bound,
+    /// a declaration default or an assigned value.
+    fn query(&mut self, query: &Query, state: &mut Self::State);
+
+    /// Reads an SQL statement the body runs, the query of a `PERFORM`, an
+    /// `OPEN`, a `RETURN QUERY` or a `FOR` loop and the query a cursor is
+    /// bound to included.
+    fn statement(&mut self, statement: &Statement, state: &mut Self::State);
+
+    /// Reads a step that holds no other step, after the SQL it evaluates
+    /// and runs.
+    fn step(&mut self, _node: &Node, _state: &mut Self::State) {}
+
+    /// Narrows a path that goes on only when `condition` evaluated to
+    /// `holds`, as a branch taken or passed over, a loop entered or left
+    /// and a passing `ASSERT` do.
+    fn assume(&mut self, _condition: &Query, _holds: bool, _state: &mut Self::State) {}
+}
+
+/// Walks `block` from `state`, answering the state of the paths that run off
+/// its end, `None` when every path leaves through a `RETURN` or an error.
+///
+/// A loop body is walked twice, so a step sees what an earlier iteration
+/// left behind.
+pub(crate) fn walk_block<V: FlowVisitor>(
+    visitor: &mut V,
+    block: &Block,
+    state: V::State,
+) -> Option<V::State> {
+    Walker {
+        visitor,
+        frames: Vec::new(),
+    }
+    .block(block, state)
+}
+
+/// A block or loop enclosing the step being walked, and the paths an `EXIT`
+/// or a `CONTINUE` hands it.
+struct Frame<'b, S> {
+    /// The `<<label>>` an `EXIT` or a `CONTINUE` names it by.
+    label: Option<&'b str>,
+    /// Whether it is a loop, which an `EXIT` without a label reaches.
+    repeats: bool,
+    /// The state of every path an `EXIT` takes past its end.
+    exits: Option<S>,
+    /// The state of every path a `CONTINUE` takes to the next iteration.
+    continues: Option<S>,
+}
+
+impl<'b, S> Frame<'b, S> {
+    const fn new(label: Option<&'b str>, repeats: bool) -> Self {
+        Self {
+            label,
+            repeats,
+            exits: None,
+            continues: None,
+        }
+    }
+}
+
+struct Walker<'v, 'b, V: FlowVisitor> {
+    visitor: &'v mut V,
+    frames: Vec<Frame<'b, V::State>>,
+}
+
+/// Merges two optional path states, `None` standing for no path.
+fn joined<S: FlowState>(left: Option<S>, right: Option<S>) -> Option<S> {
+    match (left, right) {
+        (Some(mut left), Some(right)) => {
+            left.join(right);
+            Some(left)
+        }
+        (left, right) => left.or(right),
+    }
+}
+
+impl<'b, V: FlowVisitor> Walker<'_, 'b, V> {
+    fn block(&mut self, block: &'b Block, mut state: V::State) -> Option<V::State> {
+        self.frames.push(Frame::new(block.label.as_deref(), false));
+        for declaration in &block.declarations {
+            if let DeclarationKind::Variable(variable) = &declaration.kind
+                && let Some(default) = &variable.default
+            {
+                self.visitor.query(default, &mut state);
+            }
+        }
+        let entry = state.clone();
+        let mut out = self.nodes(&block.statements, Some(state));
+        // A handler starts once the block's own changes are rolled back.
+        for handler in &block.handlers {
+            out = joined(out, self.nodes(&handler.statements, Some(entry.clone())));
+        }
+        let frame = self.frames.pop().expect("pushed above");
+        joined(out, frame.exits)
+    }
+
+    fn nodes(&mut self, nodes: &'b [Node], mut state: Option<V::State>) -> Option<V::State> {
+        for node in nodes {
+            state = self.node(node, state?);
+        }
+        state
+    }
+
+    fn node(&mut self, node: &'b Node, mut state: V::State) -> Option<V::State> {
+        match node {
+            Node::Block(block) => return self.block(block, state),
+            Node::If(conditional) => return self.conditional(conditional, state),
+            Node::Case(case) => return self.case(case, state),
+            Node::Loop(repeated) => return self.repeated(repeated, state),
+            Node::Exit(exit) => return self.exit(exit, state),
+            Node::Return { value: Some(value) } | Node::ReturnNext { value: Some(value) } => {
+                self.visitor.query(value, &mut state);
+            }
+            Node::Raise(raise) => {
+                let options = raise.options.iter().map(|option| &option.value);
+                for query in raise.arguments.iter().chain(options) {
+                    self.visitor.query(query, &mut state);
+                }
+            }
+            Node::Assert(assert) => self.visitor.query(&assert.condition, &mut state),
+            Node::Assignment(assignment) => {
+                for indirection in &assignment.target.indirection {
+                    match indirection {
+                        Indirection::Field(_) => {}
+                        Indirection::Index(index) => self.visitor.query(index, &mut state),
+                        Indirection::Slice { lower, upper } => {
+                            for bound in [lower, upper].into_iter().flatten() {
+                                self.visitor.query(bound, &mut state);
+                            }
+                        }
+                    }
+                }
+                self.visitor.query(&assignment.value, &mut state);
+            }
+            Node::Dynamic { dynamic, .. }
+            | Node::Open(Open::Dynamic { dynamic, .. })
+            | Node::ReturnQuery(ReturnQuery::Dynamic(dynamic)) => {
+                self.dynamic(dynamic, &mut state);
+            }
+            Node::Open(Open::Bound(cursor)) => self.cursor(cursor, &mut state),
+            Node::Statement { statement, .. }
+            | Node::Perform { query: statement }
+            | Node::Open(Open::Query {
+                query: statement, ..
+            })
+            | Node::ReturnQuery(ReturnQuery::Query(statement)) => {
+                self.visitor.statement(statement, &mut state);
+            }
+            Node::Fetch(Fetch { direction, .. }) | Node::Move { direction, .. } => {
+                if let Some(count) = direction.expression() {
+                    self.visitor.query(count, &mut state);
+                }
+            }
+            Node::Return { value: None }
+            | Node::ReturnNext { value: None }
+            | Node::Close { .. }
+            | Node::Commit { .. }
+            | Node::Rollback { .. }
+            | Node::Diagnostics(_) => {}
+        }
+        self.visitor.step(node, &mut state);
+        match node {
+            Node::Return { .. } => None,
+            Node::Raise(raise) if raise.level == RaiseLevel::Exception => None,
+            Node::Assert(assert) => {
+                self.visitor.assume(&assert.condition, true, &mut state);
+                Some(state)
+            }
+            _ => Some(state),
+        }
+    }
+
+    /// Walks each branch an `IF` can take, a later branch on the paths every
+    /// earlier condition failed.
+    fn conditional(&mut self, conditional: &'b If, mut state: V::State) -> Option<V::State> {
+        let mut out = None;
+        for branch in &conditional.branches {
+            self.visitor.query(&branch.condition, &mut state);
+            let mut taken = state.clone();
+            self.visitor.assume(&branch.condition, true, &mut taken);
+            out = joined(out, self.nodes(&branch.statements, Some(taken)));
+            self.visitor.assume(&branch.condition, false, &mut state);
+        }
+        joined(out, self.nodes(&conditional.otherwise, Some(state)))
+    }
+
+    /// Walks each branch a `CASE` can take, narrowing only a searched
+    /// `CASE`, which tests each condition as a boolean.
+    fn case(&mut self, case: &'b Case, mut state: V::State) -> Option<V::State> {
+        if let Some(subject) = &case.subject {
+            self.visitor.query(subject, &mut state);
+        }
+        let mut out = None;
+        for branch in &case.branches {
+            self.visitor.query(&branch.condition, &mut state);
+            let mut taken = state.clone();
+            if case.subject.is_none() {
+                self.visitor.assume(&branch.condition, true, &mut taken);
+                self.visitor.assume(&branch.condition, false, &mut state);
+            }
+            out = joined(out, self.nodes(&branch.statements, Some(taken)));
+        }
+        joined(out, self.nodes(&case.otherwise, Some(state)))
+    }
+
+    /// Walks a loop body twice, so the second pass sees what the first
+    /// carried around the loop.
+    fn repeated(&mut self, repeated: &'b Loop, mut head: V::State) -> Option<V::State> {
+        self.control(&repeated.control, &mut head);
+        let condition = match &repeated.control {
+            LoopControl::While(condition) => Some(condition.as_ref()),
+            _ => None,
+        };
+        let mut exits = None;
+        for _ in 0..2 {
+            let mut entry = head.clone();
+            if let Some(condition) = condition {
+                self.visitor.query(condition, &mut entry);
+                self.visitor.assume(condition, true, &mut entry);
+            }
+            self.frames
+                .push(Frame::new(repeated.label.as_deref(), true));
+            let body = self.nodes(&repeated.statements, Some(entry));
+            let frame = self.frames.pop().expect("pushed above");
+            exits = joined(exits, frame.exits);
+            if let Some(again) = joined(body, frame.continues) {
+                head.join(again);
+            }
+        }
+        let ended = match &repeated.control {
+            LoopControl::Unconditional => None,
+            LoopControl::While(condition) => {
+                self.visitor.query(condition, &mut head);
+                self.visitor.assume(condition, false, &mut head);
+                Some(head)
+            }
+            _ => Some(head),
+        };
+        joined(ended, exits)
+    }
+
+    /// Hands the path to the block or loop the `EXIT` or `CONTINUE` reaches,
+    /// answering the path that goes on past it.
+    fn exit(&mut self, exit: &Exit, mut state: V::State) -> Option<V::State> {
+        let (leaving, staying) = if let Some(condition) = &exit.condition {
+            self.visitor.query(condition, &mut state);
+            let mut leaving = state.clone();
+            self.visitor.assume(condition, true, &mut leaving);
+            self.visitor.assume(condition, false, &mut state);
+            (leaving, Some(state))
+        } else {
+            (state, None)
+        };
+        let reached = match &exit.label {
+            None => self.frames.iter().rposition(|frame| frame.repeats),
+            Some(label) => self
+                .frames
+                .iter()
+                .rposition(|frame| frame.label == Some(label.as_str())),
+        };
+        // A label no enclosing block or loop carries is the function's name,
+        // which labels the level holding the whole body. An `EXIT` without a
+        // label outside every loop, which PostgreSQL refuses, reaches it too.
+        let frame = &mut self.frames[reached.unwrap_or(0)];
+        let paths = match exit.kind {
+            ExitKind::Exit => &mut frame.exits,
+            ExitKind::Continue => &mut frame.continues,
+        };
+        *paths = joined(paths.take(), Some(leaving));
+        staying
+    }
+
+    /// Reads the SQL a loop runs once, before its first iteration.
+    fn control(&mut self, control: &LoopControl, state: &mut V::State) {
+        match control {
+            LoopControl::Unconditional | LoopControl::While(_) => {}
+            LoopControl::Query { query, .. } => self.visitor.statement(query, state),
+            LoopControl::Array { array, .. } => self.visitor.query(array, state),
+            LoopControl::Range {
+                lower, upper, step, ..
+            } => {
+                for bound in [Some(lower), Some(upper), step.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    self.visitor.query(bound, state);
+                }
+            }
+            LoopControl::Cursor { cursor, .. } => self.cursor(cursor, state),
+            LoopControl::Dynamic { dynamic, .. } => self.dynamic(dynamic, state),
+        }
+    }
+
+    /// Reads the arguments a bound cursor opens with and the query it runs.
+    fn cursor(&mut self, cursor: &BoundCursor, state: &mut V::State) {
+        for argument in &cursor.arguments {
+            self.visitor.query(argument, state);
+        }
+        self.visitor.statement(&cursor.query, state);
+    }
+
+    /// Reads the command text and the `USING` arguments of a dynamic command.
+    fn dynamic(&mut self, dynamic: &Dynamic, state: &mut V::State) {
+        self.visitor.query(&dynamic.command, state);
+        for argument in &dynamic.arguments {
+            self.visitor.query(argument, state);
+        }
+    }
+}

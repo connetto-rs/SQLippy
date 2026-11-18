@@ -7,9 +7,10 @@ use crate::{
     lint::Level,
     rules::{
         AddressStoredAsText, AliasShadowedByColumn, ArrayMembershipPolicy, AssignmentConjunction,
-        AuthorityAttributeWritableBelowThreshold, AutovacuumDisabledTable, BinarySendFailure,
-        BlankPaddedCharacter, BooleanStateWithoutTime, CascadeIntoRowLevelSecurityTable,
-        CaseSensitiveEmail, CatalogNameAsText, ChildWithoutRowLevelSecurity, ClientChosenTimestamp,
+        AuthorityAttributeWritableBelowThreshold, AuthorizationInTrigger, AutovacuumDisabledTable,
+        BeforeTriggerWritesOtherTable, BinarySendFailure, BlankPaddedCharacter,
+        BooleanStateWithoutTime, CascadeIntoRowLevelSecurityTable, CaseSensitiveEmail,
+        CatalogNameAsText, ChildWithoutRowLevelSecurity, ClientChosenTimestamp,
         ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
         ClosedSetAsText, ConstantColumnNotGenerated, CopiedColumnThroughSuperkey,
         CorrelatedPolicySubquery, CredentialFreeWrite, CredentialPatternPolicy,
@@ -46,18 +47,19 @@ use crate::{
         SecurityDefinerFunctionExposed, SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite,
         SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
         SingularTableName, SubjectSettableAttribute, SuperkeyPrimaryKey,
-        SurrogatePrimaryKeyInExtension, TableInheritance, TautologicalCheck, TautologicalPolicy,
-        TautologicalWithCheck, TimeDependentCheck, TimeWithTimeZone, TimestampBetween,
-        TimestampWithoutTimeZone, TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole,
-        TruncatedIdentifier, TruncatingIntegerDivision, TypeNameCaseCollision,
-        UnauditedAuthorityTable, UnboundedTextColumn, UncachedHelperQuery, UncachedPolicyCall,
-        UndeletableReference, UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect,
-        UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin,
-        UnknownBinarySend, UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn, UnorderedLimit,
-        UnreadOuterJoin, UnsatisfiableCheck, UnsatisfiablePolicy,
-        UnscopedUniqueConstraintOnRowLevelSecurityTable, UnseededPolicySet, UnusedCte,
-        UnvalidatedConstraint, UuidStoredAsText, WildcardView, WritingNonVolatileFunction,
-        ZeroPrecisionTimestamp,
+        SurrogatePrimaryKeyInExtension, TableInheritance, TableNameDispatch, TautologicalCheck,
+        TautologicalPolicy, TautologicalWithCheck, TimeDependentCheck, TimeWithTimeZone,
+        TimestampBetween, TimestampWithoutTimeZone, TriggerFilterInBody,
+        TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
+        TruncatingIntegerDivision, TypeNameCaseCollision, UnauditedAuthorityTable,
+        UnboundedTextColumn, UncachedHelperQuery, UncachedPolicyCall, UndeletableReference,
+        UnfilteredChangeTrigger, UnfilteredWrite, UnforcedRowLevelSecurity,
+        UnindexedCorrelatedSelect, UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter,
+        UnindexedRecursiveJoin, UnknownBinarySend, UnlinkedFromItem, UnloggedTable,
+        UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin, UnsatisfiableCheck,
+        UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable, UnseededPolicySet,
+        UnusedCte, UnvalidatedConstraint, UuidStoredAsText, WildcardView,
+        WritingNonVolatileFunction, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -146,7 +148,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
         register_schema_rules(&mut constrainer);
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 10] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 11] = [
             Box::new(ImpureImmutableFunction::default()),
             Box::new(WritingNonVolatileFunction::default()),
             Box::new(DefinerWithoutSearchPath::default()),
@@ -157,6 +159,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(ExposedDefinerOverProtectedTable::default()),
             Box::new(GrantOptionToClientRole::default()),
             Box::new(DynamicSqlInjection::default()),
+            Box::new(TableNameDispatch::default()),
         ];
         for rule in function_rules {
             constrainer.register_function_rule_with_floor(rule, Level::Allow);
@@ -268,7 +271,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 67] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 71] = [
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
@@ -336,6 +339,10 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(RepeatedRecursionBound::default()),
         Box::new(OrderedSetAsDisjunction::default()),
         Box::new(TypeNameCaseCollision::default()),
+        Box::new(BeforeTriggerWritesOtherTable::default()),
+        Box::new(UnfilteredChangeTrigger::default()),
+        Box::new(AuthorizationInTrigger::default()),
+        Box::new(TriggerFilterInBody::default()),
     ];
     for rule in schema_rules {
         constrainer.register_schema_rule_with_floor(rule, Level::Allow);
