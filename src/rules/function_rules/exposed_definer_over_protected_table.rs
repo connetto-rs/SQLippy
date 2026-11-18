@@ -33,7 +33,7 @@ use crate::{
 ///     "CREATE TABLE docs (id INT, owner TEXT);
 ///      ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ///      CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER
-///        SET search_path = '' AS 'SELECT count(*) FROM public.docs';",
+///        SET search_path = pg_catalog, pg_temp AS 'SELECT count(*) FROM public.docs';",
 /// )
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&exposed).is_err());
@@ -42,7 +42,7 @@ use crate::{
 ///     "CREATE TABLE docs (id INT, owner TEXT);
 ///      ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ///      CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER
-///        SET search_path = '' AS 'SELECT count(*) FROM public.docs';
+///        SET search_path = pg_catalog, pg_temp AS 'SELECT count(*) FROM public.docs';
 ///      REVOKE EXECUTE ON FUNCTION doc_count() FROM PUBLIC;",
 /// )
 /// .unwrap();
@@ -77,10 +77,10 @@ impl<DB> Rule for ExposedDefinerOverProtectedTable<DB> {
             example: RuleExample {
                 bad: "CREATE TABLE docs (id INT, owner TEXT);\n\
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS 'SELECT count(*) FROM public.docs';",
+CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS 'SELECT count(*) FROM public.docs';",
                 good: "CREATE TABLE docs (id INT, owner TEXT);\n\
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS 'SELECT count(*) FROM public.docs';\n\
+CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS 'SELECT count(*) FROM public.docs';\n\
 REVOKE EXECUTE ON FUNCTION doc_count() FROM PUBLIC;",
             },
         };

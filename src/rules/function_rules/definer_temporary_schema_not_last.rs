@@ -9,12 +9,12 @@ use crate::{
 };
 
 /// Struct defining a rule that reports a `SECURITY DEFINER` function whose own
-/// `search_path` names a schema but leaves `pg_temp` out or before the end.
+/// `search_path` leaves `pg_temp` out or before the end.
 ///
-/// PostgreSQL searches the temporary schema first for relations unless the
-/// path places it, so a caller's temporary table shadows a table the body
-/// names without a schema. A path that names no schema, as `SET search_path =
-/// ''` writes it, is left to the body's qualified names and is not reported.
+/// PostgreSQL searches the temporary schema first for relations and types
+/// unless the path places it, so a caller's temporary table shadows a table
+/// the body names without a schema. A path that names no schema, as `SET
+/// search_path = ''` writes it, searches `pg_temp` even before `pg_catalog`.
 ///
 /// # Example
 ///

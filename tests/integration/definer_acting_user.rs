@@ -54,7 +54,7 @@ fn reported(sql: &str) -> Vec<String> {
 
 fn definer(signature: &str, body: &str) -> String {
     format!(
-        "CREATE FUNCTION {signature} LANGUAGE sql SECURITY DEFINER SET search_path = ''
+        "CREATE FUNCTION {signature} LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp
            AS $$ {body} $$;"
     )
 }
@@ -160,7 +160,7 @@ fn a_client_role_granted_execute_is_named() {
 fn a_return_body_is_read() {
     let found = reported(
         "CREATE FUNCTION owns(who TEXT) RETURNS BOOLEAN LANGUAGE sql SECURITY DEFINER
-           SET search_path = ''
+           SET search_path = pg_catalog, pg_temp
            RETURN EXISTS (SELECT 1 FROM public.docs WHERE owner = who);",
     );
     assert_eq!(found.len(), 1, "{found:?}");

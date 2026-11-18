@@ -104,7 +104,29 @@ fn a_definer_path_leaving_the_temporary_schema_implicit_or_early_is_reported() {
                    AS 'SELECT count(*) FROM docs';"
             ),
         ),
-        ["early()", "implicit()"]
+        ["early()", "emptied()", "implicit()"]
+    );
+}
+
+#[test]
+fn an_empty_definer_path_is_fixed_by_naming_pg_temp_after_pg_catalog() {
+    let database = ParserDB::parse::<PostgreSqlDialect>(
+        "CREATE FUNCTION role_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER
+           SET search_path = '' AS 'SELECT count(*) FROM pg_roles';",
+    )
+    .expect("schema parses");
+    let constrainer: GenericConstrainer<ParserDB> = DefinerTemporarySchemaNotLast::default().into();
+    let diagnostics = constrainer.diagnostics(&database);
+    let [Error::Violation(violation)] = diagnostics.as_slice() else {
+        panic!("expected one violation");
+    };
+    assert_eq!(
+        violation.message(),
+        "`SECURITY DEFINER` function 'role_count()' sets `search_path = ''` and leaves `pg_temp` out, so it is searched first."
+    );
+    assert_eq!(
+        violation.resolution(),
+        "ALTER FUNCTION role_count() SET search_path = pg_catalog, pg_temp;"
     );
 }
 
@@ -130,13 +152,13 @@ fn a_definer_over_a_protected_table_that_public_can_execute_is_reported() {
         exposed(
             Deployment::default(),
             "CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER
-               SET search_path = '' AS 'SELECT count(*) FROM public.docs';
+               SET search_path = pg_catalog, pg_temp AS 'SELECT count(*) FROM public.docs';
              CREATE FUNCTION wipe_docs() RETURNS VOID LANGUAGE sql SECURITY DEFINER
-               SET search_path = '' AS 'DELETE FROM public.docs';
+               SET search_path = pg_catalog, pg_temp AS 'DELETE FROM public.docs';
              CREATE FUNCTION note_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER
-               SET search_path = '' AS 'SELECT count(*) FROM public.open_notes';
+               SET search_path = pg_catalog, pg_temp AS 'SELECT count(*) FROM public.open_notes';
              CREATE FUNCTION invoker_count() RETURNS BIGINT LANGUAGE sql
-               SET search_path = '' AS 'SELECT count(*) FROM public.docs';",
+               SET search_path = pg_catalog, pg_temp AS 'SELECT count(*) FROM public.docs';",
         ),
         ["doc_count()", "wipe_docs()"]
     );
@@ -145,7 +167,7 @@ fn a_definer_over_a_protected_table_that_public_can_execute_is_reported() {
 #[test]
 fn revoking_from_public_clears_it_unless_an_anonymous_role_still_executes() {
     let revoked = "CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER
-                     SET search_path = '' AS 'SELECT count(*) FROM public.docs';
+                     SET search_path = pg_catalog, pg_temp AS 'SELECT count(*) FROM public.docs';
                    REVOKE EXECUTE ON FUNCTION doc_count() FROM PUBLIC;";
     assert_eq!(
         exposed(Deployment::default(), revoked),
@@ -175,9 +197,9 @@ fn a_plpgsql_definer_is_reported_only_when_its_body_touches_a_protected_table() 
         exposed(
             Deployment::default(),
             "CREATE FUNCTION set_state(p_id INT) RETURNS INT LANGUAGE plpgsql SECURITY DEFINER
-               SET search_path TO '' AS $$ BEGIN UPDATE public.docs SET owner = 'x' WHERE id = p_id; RETURN p_id; END; $$;
+               SET search_path TO pg_catalog, pg_temp AS $$ BEGIN UPDATE public.docs SET owner = 'x' WHERE id = p_id; RETURN p_id; END; $$;
              CREATE FUNCTION count_notes() RETURNS BIGINT LANGUAGE plpgsql SECURITY DEFINER
-               SET search_path TO '' AS $$ BEGIN RETURN (SELECT count(*) FROM public.open_notes); END; $$;",
+               SET search_path TO pg_catalog, pg_temp AS $$ BEGIN RETURN (SELECT count(*) FROM public.open_notes); END; $$;",
         ),
         ["set_state(INT)"]
     );
@@ -189,7 +211,7 @@ fn a_definer_body_whose_tables_cannot_be_read_is_reported() {
         exposed(
             Deployment::default(),
             "CREATE FUNCTION wipe(t TEXT) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER
-               SET search_path TO '' AS $$ BEGIN EXECUTE 'DELETE FROM public.' || quote_ident(t); END; $$;
+               SET search_path TO pg_catalog, pg_temp AS $$ BEGIN EXECUTE 'DELETE FROM public.' || quote_ident(t); END; $$;
              CREATE FUNCTION native() RETURNS INT LANGUAGE c SECURITY DEFINER
                AS 'library', 'symbol';",
         ),

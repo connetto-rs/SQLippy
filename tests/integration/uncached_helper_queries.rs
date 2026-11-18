@@ -14,9 +14,9 @@ const SCHEMA: &str = "
     CREATE TABLE teams (id UUID PRIMARY KEY);
     CREATE TABLE team_members (team_id UUID NOT NULL REFERENCES teams (id), user_id UUID NOT NULL, PRIMARY KEY (team_id, user_id));
     CREATE TABLE docs (id UUID PRIMARY KEY, team_id UUID NOT NULL REFERENCES teams (id), archived BOOLEAN NOT NULL DEFAULT FALSE);
-    CREATE FUNCTION authz.caller_id() RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ''
+    CREATE FUNCTION authz.caller_id() RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp
       AS $$ SELECT NULLIF(current_setting('app.user_id', true), '')::uuid $$;
-    CREATE FUNCTION authz.member_teams() RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+    CREATE FUNCTION authz.member_teams() RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
       SELECT member.team_id FROM public.team_members member WHERE member.user_id = authz.caller_id()
     $$;
     ALTER TABLE docs ENABLE ROW LEVEL SECURITY;";
@@ -49,15 +49,15 @@ fn reported(policy: &str, call: &str, function: &str, part: &str) -> String {
 fn helpers_recomputing_a_set_per_row_are_reported_and_argument_filtered_ones_are_not() {
     assert_eq!(
         messages(
-            "CREATE FUNCTION authz.can_read(doc_team UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+            "CREATE FUNCTION authz.can_read(doc_team UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
                SELECT doc_team IN (SELECT authz.member_teams())
              $$;
-             CREATE FUNCTION authz.can_edit(doc_team UUID) RETURNS BOOLEAN LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = '' AS $$
+             CREATE FUNCTION authz.can_edit(doc_team UUID) RETURNS BOOLEAN LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
              BEGIN
                RETURN doc_team = ANY (ARRAY(SELECT authz.member_teams()));
              END
              $$;
-             CREATE FUNCTION authz.is_archived(doc UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+             CREATE FUNCTION authz.is_archived(doc UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
                SELECT EXISTS (SELECT 1 FROM public.docs archived WHERE archived.id = doc AND archived.archived)
              $$;
              CREATE POLICY docs_select ON docs FOR SELECT USING (authz.can_read(team_id));

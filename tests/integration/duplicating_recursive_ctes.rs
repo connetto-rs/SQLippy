@@ -152,7 +152,7 @@ fn a_function_body_resolves_the_walked_table_on_its_own_search_path() {
                WITH RECURSIVE r(id) AS (SELECT root UNION ALL SELECT e.child FROM dag_edges e JOIN r ON e.parent = r.id) SELECT id FROM r $$;
              CREATE FUNCTION aps_below(root INT) RETURNS SETOF INT LANGUAGE sql STABLE SET search_path = aps AS $$
                WITH RECURSIVE r(id) AS (SELECT root UNION ALL SELECT e.child FROM dag_edges e JOIN r ON e.parent = r.id) SELECT id FROM r $$;
-             CREATE FUNCTION plpgsql_below(root INT) RETURNS SETOF INT LANGUAGE plpgsql STABLE SET search_path = '' AS $$
+             CREATE FUNCTION plpgsql_below(root INT) RETURNS SETOF INT LANGUAGE plpgsql STABLE SET search_path = pg_catalog, pg_temp AS $$
              BEGIN
                RETURN QUERY WITH RECURSIVE r(id) AS (SELECT root UNION ALL SELECT e.child FROM public.dag_edges e JOIN r ON e.parent = r.id) SELECT id FROM r;
              END $$;"

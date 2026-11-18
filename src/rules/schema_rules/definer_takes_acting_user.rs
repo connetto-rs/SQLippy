@@ -108,14 +108,14 @@ impl Visitor for BodyReads<'_> {
 ///
 /// let acting = ParserDB::parse::<PostgreSqlDialect>(&format!(
 ///     "{schema} CREATE FUNCTION user_docs(who TEXT) RETURNS SETOF TEXT LANGUAGE sql SECURITY DEFINER
-///        SET search_path = '' AS $$ SELECT body FROM public.docs WHERE owner = who $$;"
+///        SET search_path = pg_catalog, pg_temp AS $$ SELECT body FROM public.docs WHERE owner = who $$;"
 /// ))
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&acting).is_err());
 ///
 /// let own = ParserDB::parse::<PostgreSqlDialect>(&format!(
 ///     "{schema} CREATE FUNCTION my_docs() RETURNS SETOF TEXT LANGUAGE sql SECURITY DEFINER
-///        SET search_path = '' AS $$ SELECT body FROM public.docs
+///        SET search_path = pg_catalog, pg_temp AS $$ SELECT body FROM public.docs
 ///        WHERE owner = current_setting('app.user_id', true) $$;"
 /// ))
 /// .unwrap();
@@ -149,11 +149,11 @@ impl<DB> Rule for DefinerTakesActingUser<DB> {
                 bad: "CREATE TABLE docs (owner TEXT, body TEXT);\n\
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
 CREATE POLICY own ON docs USING (owner = current_setting('app.user_id', true));\n\
-CREATE FUNCTION user_docs(who TEXT) RETURNS SETOF TEXT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$ SELECT body FROM public.docs WHERE owner = who $$;",
+CREATE FUNCTION user_docs(who TEXT) RETURNS SETOF TEXT LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT body FROM public.docs WHERE owner = who $$;",
                 good: "CREATE TABLE docs (owner TEXT, body TEXT);\n\
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
 CREATE POLICY own ON docs USING (owner = current_setting('app.user_id', true));\n\
-CREATE FUNCTION user_docs() RETURNS SETOF TEXT LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$ SELECT body FROM public.docs WHERE owner = current_setting('app.user_id', true) $$;",
+CREATE FUNCTION user_docs() RETURNS SETOF TEXT LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT body FROM public.docs WHERE owner = current_setting('app.user_id', true) $$;",
             },
         };
         &METADATA

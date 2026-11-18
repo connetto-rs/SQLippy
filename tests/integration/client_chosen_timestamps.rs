@@ -12,7 +12,7 @@ const RESOURCES: &str = "
 
 /// The stamping trigger function `connetto-schema` ships for `archived_at`.
 const STAMP_ARCHIVED_AT: &str = "
-    CREATE FUNCTION stamp_archived_at() RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
+    CREATE FUNCTION stamp_archived_at() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
     BEGIN
       IF NEW.archived_at IS NOT NULL THEN
         IF TG_OP = 'UPDATE' AND OLD.archived_at IS NOT NULL THEN

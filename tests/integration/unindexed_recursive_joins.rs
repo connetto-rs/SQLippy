@@ -92,7 +92,7 @@ fn a_function_body_resolves_the_walked_table_on_its_own_search_path() {
                WITH RECURSIVE r(id) AS (SELECT root UNION SELECT g.id FROM groups g JOIN r ON g.parent_id = r.id) SELECT id FROM r $$;
              CREATE FUNCTION authz_below(root INT) RETURNS SETOF INT LANGUAGE sql STABLE SET search_path = authz AS $$
                WITH RECURSIVE r(id) AS (SELECT root UNION SELECT g.id FROM groups g JOIN r ON g.parent_id = r.id) SELECT id FROM r $$;
-             CREATE FUNCTION plpgsql_below(root INT) RETURNS SETOF INT LANGUAGE plpgsql STABLE SET search_path = '' AS $$
+             CREATE FUNCTION plpgsql_below(root INT) RETURNS SETOF INT LANGUAGE plpgsql STABLE SET search_path = pg_catalog, pg_temp AS $$
              BEGIN
                RETURN QUERY WITH RECURSIVE r(id) AS (SELECT root UNION SELECT g.id FROM public.groups g JOIN r ON g.parent_id = r.id) SELECT id FROM r;
              END $$;"

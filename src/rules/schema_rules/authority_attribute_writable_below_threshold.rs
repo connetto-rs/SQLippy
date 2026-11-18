@@ -538,10 +538,10 @@ const BAD: &str = "CREATE ROLE authenticated;
 CREATE TYPE role AS ENUM ('reader', 'writer', 'admin');
 CREATE TABLE docs (id UUID PRIMARY KEY, writers_can_share BOOLEAN NOT NULL DEFAULT FALSE);
 CREATE TABLE doc_grants (doc_id UUID NOT NULL REFERENCES docs (id), user_id UUID NOT NULL, role role NOT NULL, PRIMARY KEY (doc_id, user_id));
-CREATE FUNCTION docs_with(min_role role) RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+CREATE FUNCTION docs_with(min_role role) RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
  SELECT g.doc_id FROM public.doc_grants g WHERE g.user_id = current_setting('app.user_id', true)::uuid AND g.role >= min_role
 $$;
-CREATE FUNCTION sharable_docs() RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+CREATE FUNCTION sharable_docs() RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
  SELECT id FROM public.docs_with('admin') AS id
  UNION
  SELECT d.id FROM public.docs d WHERE d.writers_can_share AND d.id IN (SELECT public.docs_with('writer'))
@@ -558,10 +558,10 @@ const GOOD: &str = "CREATE ROLE authenticated;
 CREATE TYPE role AS ENUM ('reader', 'writer', 'admin');
 CREATE TABLE docs (id UUID PRIMARY KEY, writers_can_share BOOLEAN NOT NULL DEFAULT FALSE);
 CREATE TABLE doc_grants (doc_id UUID NOT NULL REFERENCES docs (id), user_id UUID NOT NULL, role role NOT NULL, PRIMARY KEY (doc_id, user_id));
-CREATE FUNCTION docs_with(min_role role) RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+CREATE FUNCTION docs_with(min_role role) RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
  SELECT g.doc_id FROM public.doc_grants g WHERE g.user_id = current_setting('app.user_id', true)::uuid AND g.role >= min_role
 $$;
-CREATE FUNCTION sharable_docs() RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+CREATE FUNCTION sharable_docs() RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
  SELECT id FROM public.docs_with('admin') AS id
  UNION
  SELECT d.id FROM public.docs d WHERE d.writers_can_share AND d.id IN (SELECT public.docs_with('writer'))

@@ -40,7 +40,6 @@ fn every_kind_of_body_without_a_path_is_reported() {
 #[test]
 fn a_trusted_fixed_path_is_not_reported() {
     for function in [
-        "CREATE FUNCTION f(x TEXT) RETURNS TEXT LANGUAGE sql SET search_path = '' AS 'SELECT pg_catalog.lower(x)';",
         "CREATE FUNCTION f(x TEXT) RETURNS TEXT LANGUAGE sql SET search_path = pg_catalog, pg_temp AS 'SELECT lower(x)';",
         "CREATE SCHEMA app; CREATE FUNCTION app.f(x TEXT) RETURNS TEXT LANGUAGE sql SET search_path = app, pg_temp AS 'SELECT lower(x)';",
         "CREATE FUNCTION f(x TEXT) RETURNS TEXT LANGUAGE sql AS 'SELECT lower(x)'; ALTER FUNCTION f(TEXT) SET search_path = pg_catalog, pg_temp;",
@@ -51,7 +50,7 @@ fn a_trusted_fixed_path_is_not_reported() {
 
 #[test]
 fn a_path_searching_the_temporary_schema_before_its_end_is_reported() {
-    for path in ["pg_temp, pg_catalog", "pg_catalog", "app"] {
+    for path in ["pg_temp, pg_catalog", "pg_catalog", "app", "''"] {
         assert_eq!(
             unsafe_paths(&format!(
                 "CREATE SCHEMA app;

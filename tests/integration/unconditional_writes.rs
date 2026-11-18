@@ -94,7 +94,7 @@ fn minting(columns: &str, clause: &str, body: &str, rest: &str) -> String {
          ALTER TABLE users ENABLE ROW LEVEL SECURITY;
          GRANT INSERT ON users TO authenticated;
          CREATE FUNCTION insert_grantee() RETURNS TRIGGER
-         LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+         LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
          BEGIN
            {body}
            RETURN NULL;
