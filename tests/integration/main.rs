@@ -73,6 +73,7 @@ mod role_memberships;
 mod schema_allowances;
 mod self_asserted_claims;
 mod self_granting_writes;
+mod snapshots_before_locks;
 mod statement_bindings;
 mod statement_indexes;
 mod statement_keys;

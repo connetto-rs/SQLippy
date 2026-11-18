@@ -232,6 +232,7 @@ rule_icons! {
     "authorization_in_trigger" => FaUserCheck,
     "table_name_dispatch" => FaTags,
     "trigger_filter_in_body" => FaFilter,
+    "snapshot_before_lock" => FaLockOpen,
 }
 #[cfg(test)]
 mod tests {

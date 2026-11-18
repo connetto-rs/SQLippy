@@ -46,7 +46,7 @@ use crate::{
         RustKeywordTableName, ScaledNumeric, SecurityBarrierMissingOnFilteringView,
         SecurityDefinerFunctionExposed, SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite,
         SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
-        SingularTableName, SubjectSettableAttribute, SuperkeyPrimaryKey,
+        SingularTableName, SnapshotBeforeLock, SubjectSettableAttribute, SuperkeyPrimaryKey,
         SurrogatePrimaryKeyInExtension, TableInheritance, TableNameDispatch, TautologicalCheck,
         TautologicalPolicy, TautologicalWithCheck, TimeDependentCheck, TimeWithTimeZone,
         TimestampBetween, TimestampWithoutTimeZone, TriggerFilterInBody,
@@ -148,7 +148,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
         register_schema_rules(&mut constrainer);
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 11] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 12] = [
             Box::new(ImpureImmutableFunction::default()),
             Box::new(WritingNonVolatileFunction::default()),
             Box::new(DefinerWithoutSearchPath::default()),
@@ -160,6 +160,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(GrantOptionToClientRole::default()),
             Box::new(DynamicSqlInjection::default()),
             Box::new(TableNameDispatch::default()),
+            Box::new(SnapshotBeforeLock::default()),
         ];
         for rule in function_rules {
             constrainer.register_function_rule_with_floor(rule, Level::Allow);
