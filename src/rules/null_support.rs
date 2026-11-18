@@ -31,6 +31,16 @@ pub(crate) fn rejects_null<DB: DatabaseLike>(
                 _ => null_when(inner, bound, database, types)?,
             }
         }
+        Expr::Nested(inner) => rejects_null(inner, bound, database, types)?,
+        // A `NULL` left operand makes the comparison `NULL`, or `false` over
+        // no element, and neither is true.
+        Expr::AnyOp {
+            left, compare_op, ..
+        } => {
+            (strictness(database, types, filter, compare_op)?.0
+                && null_when(left, bound, database, types)?)
+                || null_when(filter, bound, database, types)?
+        }
         _ => null_when(filter, bound, database, types)?,
     })
 }
@@ -60,15 +70,20 @@ pub(crate) fn null_when<DB: DatabaseLike>(
             left,
             op: operator,
             right,
+        } => {
+            let (left_strict, right_strict) = strictness(database, types, expression, operator)?;
+            (left_strict && null(left)?) || (right_strict && null(right)?)
         }
-        | Expr::AnyOp {
+        Expr::AnyOp {
             left,
             compare_op: operator,
             right,
             ..
         } => {
             let (left_strict, right_strict) = strictness(database, types, expression, operator)?;
-            (left_strict && null(left)?) || (right_strict && null(right)?)
+            let has_elements =
+                matches!(right.as_ref(), Expr::Array(array) if !array.elem.is_empty());
+            (left_strict && has_elements && null(left)?) || (right_strict && null(right)?)
         }
         Expr::Like { expr, pattern, .. }
         | Expr::ILike { expr, pattern, .. }
@@ -130,5 +145,42 @@ fn is_strict_operator(operator: &BinaryOperator) -> bool {
             | BinaryOperator::PGRegexNotIMatch
             | BinaryOperator::Arrow
             | BinaryOperator::LongArrow
+    )
+}
+
+/// Operators whose every overload yields a value when both operands hold one.
+pub(crate) fn yields_value_for_values(operator: &BinaryOperator) -> bool {
+    matches!(
+        operator,
+        BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Lt
+            | BinaryOperator::LtEq
+            | BinaryOperator::Gt
+            | BinaryOperator::GtEq
+            | BinaryOperator::Plus
+            | BinaryOperator::Minus
+            | BinaryOperator::Multiply
+            | BinaryOperator::Divide
+            | BinaryOperator::Modulo
+            | BinaryOperator::PGRegexMatch
+            | BinaryOperator::PGRegexIMatch
+            | BinaryOperator::PGRegexNotMatch
+            | BinaryOperator::PGRegexNotIMatch
+            | BinaryOperator::StringConcat
+            | BinaryOperator::And
+            | BinaryOperator::Or
+    )
+}
+
+/// Operators reading a key, an element or a path of their left operand,
+/// which yield `NULL` where the operand lacks it.
+pub(crate) fn extracts_part(operator: &BinaryOperator) -> bool {
+    matches!(
+        operator,
+        BinaryOperator::Arrow
+            | BinaryOperator::LongArrow
+            | BinaryOperator::HashArrow
+            | BinaryOperator::HashLongArrow
     )
 }

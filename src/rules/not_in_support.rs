@@ -5,8 +5,11 @@ use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ColumnDefinition, ExpressionContext, IdentifierCase, RangeTableEntry, TargetName},
-    traits::{ColumnLike, DatabaseLike, TableLike},
+    structs::{
+        CallResolution, ColumnDefinition, ExpressionContext, IdentifierCase, RangeTableEntry,
+        TargetName,
+    },
+    traits::{ColumnLike, DatabaseLike, FunctionLike, TableLike},
     utils::identifier_resolution::identifiers_match,
 };
 use sqlparser::ast::{
@@ -18,7 +21,7 @@ use sqlparser::ast::{
 
 use crate::rules::{
     expression_site_support::{ExpressionFinder, is_null_literal},
-    null_support::{rejects_null, strictness},
+    null_support::{extracts_part, rejects_null, strictness, yields_value_for_values},
     policy_support::conjuncts,
     walk_support::walk,
 };
@@ -286,7 +289,12 @@ impl<'scope, 'query: 'scope, 'database: 'scope, DB: DatabaseLike>
                 ) {
                     (nullable @ Nullability::Nullable(_), _) if left_strict => nullable,
                     (_, nullable @ Nullability::Nullable(_)) if right_strict => nullable,
-                    (Nullability::NotNull, Nullability::NotNull) => Nullability::NotNull,
+                    _ if extracts_part(op) => {
+                        Nullability::Nullable(Culprit::Expression(expression))
+                    }
+                    (Nullability::NotNull, Nullability::NotNull) if yields_value_for_values(op) => {
+                        Nullability::NotNull
+                    }
                     _ => Nullability::Unknown,
                 }
             }
@@ -368,8 +376,33 @@ impl<'scope, 'query: 'scope, 'database: 'scope, DB: DatabaseLike>
                 Nullability::Unknown
             }
         } else {
-            Nullability::Unknown
+            self.selected_call(select, expression)?
         })
+    }
+
+    /// Judges a call through the function PostgreSQL selects, nullable where
+    /// a nullable argument passes a parameter that turns the result `NULL`.
+    fn selected_call(
+        &mut self,
+        select: Option<&'scope Select>,
+        expression: &'scope Expr,
+    ) -> Result<Nullability<'scope>, LookupError> {
+        let Some(application) = self.types.call(expression)? else {
+            return Ok(Nullability::Unknown);
+        };
+        let CallResolution::Selected(selected) = application.resolution() else {
+            return Ok(Nullability::Unknown);
+        };
+        for (&argument, passed) in application.arguments().iter().zip(selected.arguments()) {
+            if selected
+                .function()
+                .returns_null_on_null_argument(self.database, passed.parameter())
+                && let nullable @ Nullability::Nullable(_) = self.expression(select, argument)?
+            {
+                return Ok(nullable);
+            }
+        }
+        Ok(Nullability::Unknown)
     }
 
     /// Follows a bound column through filters, joins and derived projections.
