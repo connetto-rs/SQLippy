@@ -206,6 +206,24 @@ fn clauses_that_require_a_credential_pass() {
         "owner = 'u:' || current_setting('app.user_id', true)",
         "(owner || current_setting('app.user_id', true)) IS NOT NULL",
         "(jsonb_build_object('a', 1) || current_setting('app.user_id', true)::jsonb) IS NOT NULL",
+        "(owner = current_setting('app.user_id', true)) IS TRUE",
+        "team IN (SELECT team FROM members WHERE member = current_setting('app.user_id', true)) IS TRUE",
+        "coalesce(owner = current_setting('app.user_id', true), false)",
+        "owner = coalesce(current_setting('app.user_id', true), current_setting('app.subjects', true))",
+        "CASE WHEN is_public THEN owner = current_setting('app.user_id', true)
+           ELSE team IN (SELECT team FROM members WHERE member = current_setting('app.user_id', true)) END",
+        "CASE WHEN is_public THEN owner = current_setting('app.user_id', true) END",
+        "owner = nullif(current_setting('app.user_id', true), '')",
+        "(team, owner) = (1, current_setting('app.user_id', true))",
+        "owner = current_setting('app.user_id', true) COLLATE \"C\"",
+        "owner = trim(current_setting('app.user_id', true))",
+        "owner = trim(current_setting('app.user_id', true) FROM owner)",
+        "owner = ANY (ARRAY[current_setting('app.user_id', true)])",
+        "team IN (SELECT team FROM members WHERE member = ANY (ARRAY[current_setting('app.user_id', true)]))",
+        "owner IN (SELECT current_setting('app.user_id', true))",
+        "owner = ANY (SELECT current_setting('app.user_id', true) FROM members)",
+        "CASE WHEN is_public
+           THEN team IN (SELECT team FROM members WHERE member = current_setting('app.user_id', true)) END",
     ] {
         assert_eq!(delete_policy(using), [], "{using}");
     }
@@ -235,8 +253,72 @@ fn clauses_a_caller_without_a_credential_can_pass_are_reported() {
         "owner = (SELECT member FROM members UNION SELECT 'x' LIMIT 1)",
         "EXISTS (SELECT 1 FROM members WHERE member = current_setting('app.user_id', true) UNION SELECT 1)",
         "CASE WHEN current_setting('app.user_id', true) IS NULL THEN true ELSE false END",
+        "CASE WHEN is_public THEN true ELSE owner = current_setting('app.user_id', true) END",
+        "owner = coalesce(current_setting('app.user_id', true), 'anon')",
+        "owner = nullif('x', current_setting('app.user_id', true))",
+        "(owner = current_setting('app.user_id', true)) IS NOT FALSE",
+        "team IN (SELECT team FROM members WHERE member = current_setting('app.user_id', true)) IS NOT TRUE",
+        "(owner, team) <> (current_setting('app.user_id', true), 1)",
+        "owner = ANY (ARRAY[current_setting('app.user_id', true), 'x'])",
+        "owner = trim(owner) OR owner = current_setting('app.user_id', true)",
+        "coalesce(items.*, current_setting('app.user_id', true)::items) IS NOT NULL",
     ] {
         assert_eq!(delete_policy(using), [finding("items.d")], "{using}");
+    }
+}
+
+/// Helpers taking the credential as an argument.
+const TAKING_THE_CREDENTIAL: &str = "
+    CREATE FUNCTION teams_of(who TEXT) RETURNS SETOF INT LANGUAGE sql STABLE
+      AS 'SELECT team FROM members WHERE member = who';
+    CREATE FUNCTION teams_named(who TEXT) RETURNS SETOF INT LANGUAGE sql STABLE
+      AS 'SELECT team FROM members WHERE member = teams_named.who';
+    CREATE FUNCTION teams_by_position(TEXT) RETURNS SETOF INT LANGUAGE sql STABLE
+      AS 'SELECT team FROM members WHERE member = $1';
+    CREATE FUNCTION strict_teams(who TEXT) RETURNS SETOF INT LANGUAGE sql STABLE STRICT
+      AS 'SELECT team FROM members';
+    CREATE FUNCTION teams_or_all(who TEXT) RETURNS SETOF INT LANGUAGE sql STABLE
+      AS 'SELECT team FROM members WHERE member = who OR who IS NULL';
+    CREATE FUNCTION shadowed(member TEXT) RETURNS SETOF INT LANGUAGE sql STABLE
+      AS 'SELECT team FROM members WHERE member = member';
+    CREATE FUNCTION kept_teams(who TEXT) RETURNS SETOF INT LANGUAGE sql STABLE
+      AS 'SELECT team FROM members WHERE team > 0 AND member = who';
+    CREATE FUNCTION quoted_named(who TEXT) RETURNS SETOF INT LANGUAGE sql STABLE
+      AS 'SELECT team FROM members WHERE member = \"quoted_named\".who';";
+
+#[test]
+fn a_helper_requiring_the_credential_it_is_handed_passes() {
+    for using in [
+        "team IN (SELECT teams_of(current_setting('app.user_id', true)))",
+        "team IN (SELECT t FROM teams_of(current_setting('app.user_id', true)) t)",
+        "team IN (SELECT teams_named(current_setting('app.user_id', true)))",
+        "team IN (SELECT teams_by_position(current_setting('app.user_id', true)))",
+        "team IN (SELECT strict_teams(current_setting('app.user_id', true)))",
+        "team IN (SELECT t FROM strict_teams(current_setting('app.user_id', true)) t)",
+        "team IN (SELECT kept_teams(current_setting('app.user_id', true)))",
+        "team IN (SELECT quoted_named(current_setting('app.user_id', true)))",
+    ] {
+        assert_eq!(
+            delete_policy_after(TAKING_THE_CREDENTIAL, using),
+            [],
+            "{using}"
+        );
+    }
+}
+
+#[test]
+fn a_helper_returning_rows_for_a_missing_credential_it_is_handed_is_reported() {
+    for using in [
+        "team IN (SELECT teams_or_all(current_setting('app.user_id', true)))",
+        "team IN (SELECT t FROM teams_or_all(current_setting('app.user_id', true)) t)",
+        "team IN (SELECT shadowed(current_setting('app.user_id', true)))",
+        "team IN (SELECT teams_of('x'))",
+    ] {
+        assert_eq!(
+            delete_policy_after(TAKING_THE_CREDENTIAL, using),
+            [finding("items.d")],
+            "{using}"
+        );
     }
 }
 

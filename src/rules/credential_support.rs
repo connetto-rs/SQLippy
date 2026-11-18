@@ -1,7 +1,7 @@
 //! Whether a policy expression can be true for a caller holding no
 //! credential, judged conservatively with every declared credential `NULL`.
 
-use std::{cell::RefCell, ops::ControlFlow, ptr};
+use std::{borrow::Cow, cell::RefCell, ops::ControlFlow, ptr};
 
 use sql_traits::{
     errors::LookupError,
@@ -12,10 +12,10 @@ use sql_traits::{
     utils::identifier_resolution::SearchPath,
 };
 use sqlparser::ast::{
-    BinaryOperator, Cte, Distinct, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-    GroupByExpr, InTarget, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, OrderBy,
-    Query, Select, SelectItem, SetExpr, SetOperator, TableFactor, TableWithJoins, UnaryOperator,
-    Value, Visitor, With,
+    ArgMode, BinaryOperator, Cte, Distinct, Expr, Function, FunctionArg, FunctionArgExpr,
+    FunctionArguments, GroupByExpr, Ident, InTarget, JoinConstraint, JoinOperator, ObjectName,
+    ObjectNamePart, OrderBy, Query, Select, SelectItem, SetExpr, SetOperator, TableFactor,
+    TableFunctionArgs, TableWithJoins, UnaryOperator, Value, Visitor, With,
 };
 
 use crate::rules::walk_support::walk;
@@ -113,6 +113,9 @@ struct Reading<'a, F> {
     function: Option<&'a F>,
     /// The search path the function sets.
     path: Option<SearchPath<'a>>,
+    /// The positions of the input parameters the call passes a `NULL`
+    /// credential to.
+    null_arguments: Vec<usize>,
 }
 
 /// Judges the expressions of one policy against the declared credentials.
@@ -168,12 +171,15 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         expression: &Expr,
         scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
-        if self.deployment.is_credential(expression) {
+        if self.deployment.is_credential(expression)
+            || self.reads_null_argument(expression, scope)?
+        {
             return Ok(true);
         }
         Ok(match expression {
             Expr::Nested(inner)
             | Expr::Cast { expr: inner, .. }
+            | Expr::Collate { expr: inner, .. }
             | Expr::UnaryOp {
                 op: UnaryOperator::Minus | UnaryOperator::Plus | UnaryOperator::Not,
                 expr: inner,
@@ -189,34 +195,65 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
             | Expr::SimilarTo { expr, pattern, .. } => {
                 self.is_null(expr, scope)? || self.is_null(pattern, scope)?
             }
-            Expr::AnyOp { right, .. } => {
-                !matches!(right.as_ref(), Expr::Subquery(_)) && self.is_null(right, scope)?
+            Expr::Trim {
+                expr, trim_what, ..
+            } => {
+                self.is_null(expr, scope)?
+                    || match trim_what {
+                        Some(characters) => self.is_null(characters, scope)?,
+                        None => false,
+                    }
             }
+            Expr::AnyOp {
+                right, compare_op, ..
+            } => match right.as_ref() {
+                Expr::Subquery(_) => false,
+                Expr::Array(array) => {
+                    self.strictness(expression, compare_op, scope)?.1
+                        && self.all_null(&array.elem, scope)?
+                }
+                _ => self.is_null(right, scope)?,
+            },
             Expr::In {
                 expr,
                 target: InTarget::List(_),
                 ..
             } => self.is_null(expr, scope)?,
-            Expr::Function(call) => self.call_is_null(call, scope)?,
-            Expr::Subquery(query) => scope.within(query, |scope| match single_select(query) {
-                Some(select)
-                    if !self.may_yield_row_from_no_input(
-                        select,
-                        query.order_by.as_ref(),
-                        scope,
-                    )? =>
-                {
-                    Ok(self.select_returns_no_row(select, scope)?
-                        || match select.projection.as_slice() {
-                            [
-                                SelectItem::UnnamedExpr(item)
-                                | SelectItem::ExprWithAlias { expr: item, .. },
-                            ] => self.is_null(item, scope)?,
-                            _ => false,
-                        })
+            Expr::Case {
+                conditions,
+                else_result,
+                ..
+            } => {
+                self.all_null(conditions.iter().map(|arm| &arm.result), scope)?
+                    && match else_result {
+                        Some(otherwise) => self.is_null(otherwise, scope)?,
+                        None => true,
+                    }
+            }
+            Expr::Function(call) => {
+                if let Some(arguments) = keyword_arguments(call, "nullif") {
+                    self.all_null(arguments.take(1), scope)?
+                } else if let Some(arguments) = keyword_arguments(call, "coalesce") {
+                    self.all_null(arguments, scope)?
+                } else {
+                    self.call_is_null(call, scope)?
                 }
-                _ => Ok(false),
-            })?,
+            }
+            Expr::Subquery(query) => {
+                self.projects_null(query, scope)?
+                    || scope.within(query, |scope| match single_select(query) {
+                        Some(select)
+                            if !self.may_yield_row_from_no_input(
+                                select,
+                                query.order_by.as_ref(),
+                                scope,
+                            )? =>
+                        {
+                            self.select_returns_no_row(select, scope)
+                        }
+                        _ => Ok(false),
+                    })?
+            }
             _ => false,
         })
     }
@@ -232,7 +269,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
             return Ok(true);
         }
         Ok(match expression {
-            Expr::Nested(inner) => self.requires_within(inner, scope)?,
+            Expr::Nested(inner) | Expr::IsTrue(inner) => self.requires_within(inner, scope)?,
             Expr::BinaryOp {
                 left,
                 op: BinaryOperator::And,
@@ -243,6 +280,23 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                 op: BinaryOperator::Or,
                 right,
             } => self.requires_within(left, scope)? && self.requires_within(right, scope)?,
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Eq,
+                right,
+            } => match (left.as_ref(), right.as_ref()) {
+                (Expr::Tuple(left), Expr::Tuple(right)) if left.len() == right.len() => {
+                    let mut paired_with_null = false;
+                    for (left, right) in left.iter().zip(right) {
+                        if self.is_null(left, scope)? || self.is_null(right, scope)? {
+                            paired_with_null = true;
+                            break;
+                        }
+                    }
+                    paired_with_null
+                }
+                _ => false,
+            },
             Expr::IsNotNull(inner) => self.is_null(inner, scope)?,
             Expr::Value(literal) => matches!(literal.value, Value::Boolean(false)),
             Expr::IsDistinctFrom(left, right) => {
@@ -262,8 +316,12 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                             .is_some_and(|ident| ident.value.eq_ignore_ascii_case("array")) =>
                         {
                             self.subquery_requires(subquery, scope)?
+                                || self.projects_null(subquery, scope)?
                         }
-                        Expr::Subquery(subquery) => self.subquery_requires(subquery, scope)?,
+                        Expr::Subquery(subquery) => {
+                            self.subquery_requires(subquery, scope)?
+                                || self.projects_null(subquery, scope)?
+                        }
                         _ => false,
                     }
             }
@@ -280,7 +338,26 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                 target: InTarget::Subquery(subquery),
                 negated: false,
                 ..
-            } => self.is_null(expr, scope)? || self.subquery_requires(subquery, scope)?,
+            } => {
+                self.is_null(expr, scope)?
+                    || self.subquery_requires(subquery, scope)?
+                    || self.projects_null(subquery, scope)?
+            }
+            Expr::Case {
+                conditions,
+                else_result,
+                ..
+            } => {
+                self.all_require(conditions.iter().map(|arm| &arm.result), scope)?
+                    && match else_result {
+                        Some(otherwise) => self.requires_within(otherwise, scope)?,
+                        None => true,
+                    }
+            }
+            Expr::Function(call) => match keyword_arguments(call, "coalesce") {
+                Some(arguments) => self.all_require(arguments, scope)?,
+                None => false,
+            },
             _ => false,
         })
     }
@@ -333,17 +410,111 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         }
     }
 
-    fn all_null(
+    /// Whether there is at least one of `expressions` and each is `NULL`
+    /// when every credential is `NULL`.
+    fn all_null<'e>(
         &self,
-        expressions: &[Expr],
+        expressions: impl IntoIterator<Item = &'e Expr>,
         scope: &Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
+        let mut any = false;
         for expression in expressions {
             if !self.is_null(expression, scope)? {
                 return Ok(false);
             }
+            any = true;
         }
-        Ok(!expressions.is_empty())
+        Ok(any)
+    }
+
+    /// Whether there is at least one of `expressions` and none can be true
+    /// when every credential is `NULL`.
+    fn all_require<'e>(
+        &self,
+        expressions: impl IntoIterator<Item = &'e Expr>,
+        scope: &Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
+        let mut any = false;
+        for expression in expressions {
+            if !self.requires_within(expression, scope)? {
+                return Ok(false);
+            }
+            any = true;
+        }
+        Ok(any)
+    }
+
+    /// The positions of the positional `arguments` that are `NULL` when
+    /// every credential is `NULL`.
+    fn null_arguments(
+        &self,
+        arguments: &[FunctionArg],
+        scope: &Scope<'_, '_, 'a, DB>,
+    ) -> Result<Vec<usize>, LookupError> {
+        let mut positions = Vec::new();
+        for (index, argument) in arguments.iter().enumerate() {
+            if let FunctionArg::Unnamed(FunctionArgExpr::Expr(argument)) = argument
+                && self.is_null(argument, scope)?
+            {
+                positions.push(index);
+            }
+        }
+        Ok(positions)
+    }
+
+    /// Whether `expression` reads an input parameter of the function whose
+    /// body is read that the call passes a `NULL` credential to, by its
+    /// position, its name or its name qualified by the function's, where no
+    /// column of the body's relations takes the name first.
+    fn reads_null_argument(
+        &self,
+        expression: &Expr,
+        scope: &Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
+        let reading = self.reading.borrow();
+        let Some(Reading {
+            function: Some(function),
+            null_arguments,
+            ..
+        }) = reading.last()
+        else {
+            return Ok(false);
+        };
+        if null_arguments.is_empty() {
+            return Ok(false);
+        }
+        let position = match expression {
+            Expr::Value(literal) => match &literal.value {
+                Value::Placeholder(placeholder) => placeholder
+                    .strip_prefix('$')
+                    .and_then(|number| number.parse::<usize>().ok())
+                    .and_then(|number| number.checked_sub(1)),
+                _ => None,
+            },
+            Expr::Identifier(name) if scope.types.reference(expression)?.is_none() => {
+                self.input_position(function, name)
+            }
+            Expr::CompoundIdentifier(parts)
+                if let [qualifier, name] = parts.as_slice()
+                    && folded(qualifier) == function.stored_name()
+                    && scope.types.reference(expression)?.is_none() =>
+            {
+                self.input_position(function, name)
+            }
+            _ => None,
+        };
+        Ok(position.is_some_and(|position| null_arguments.contains(&position)))
+    }
+
+    /// The position among the input parameters of `function` of the one
+    /// named `name`.
+    fn input_position(&self, function: &'a DB::Function, name: &Ident) -> Option<usize> {
+        let name = folded(name);
+        function
+            .argument_modes()
+            .zip(function.stored_argument_names(self.database))
+            .filter(|(mode, _)| !matches!(mode, ArgMode::Out))
+            .position(|(_, stored)| stored.as_deref() == Some(name.as_ref()))
     }
 
     /// Whether every function the call may reach returns `NULL` for a
@@ -356,21 +527,14 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         let FunctionArguments::List(list) = &call.args else {
             return Ok(false);
         };
-        let mut null_positions = Vec::new();
-        for (index, argument) in list.args.iter().enumerate() {
-            if let FunctionArg::Unnamed(FunctionArgExpr::Expr(argument)) = argument
-                && self.is_null(argument, scope)?
-            {
-                null_positions.push(index);
-            }
-        }
-        if null_positions.is_empty() {
+        let null_arguments = self.null_arguments(&list.args, scope)?;
+        if null_arguments.is_empty() {
             return Ok(false);
         }
         let mut reached_any = false;
         for function in self.reached(call)? {
             reached_any = true;
-            if !null_positions
+            if !null_arguments
                 .iter()
                 .any(|&index| function.returns_null_on_null_argument(self.database, index))
             {
@@ -378,6 +542,26 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
             }
         }
         Ok(reached_any)
+    }
+
+    /// Whether every row the query returns holds `NULL` in its one column
+    /// when every credential is `NULL`.
+    fn projects_null(
+        &self,
+        query: &Query,
+        scope: &Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
+        scope.within(query, |scope| {
+            match single_select(query).map(|select| select.projection.as_slice()) {
+                Some(
+                    [
+                        SelectItem::UnnamedExpr(item)
+                        | SelectItem::ExprWithAlias { expr: item, .. },
+                    ],
+                ) => self.is_null(item, scope),
+                _ => Ok(false),
+            }
+        })
     }
 
     /// Whether the operator a binary `expression` applies returns `NULL`
@@ -431,7 +615,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
             SetExpr::Select(select) => {
                 !self.may_yield_row_from_no_input(select, order_by, scope)?
                     && (self.select_returns_no_row(select, scope)?
-                        || self.projects_no_row(select)?)
+                        || self.projects_no_row(select, scope)?)
             }
             SetExpr::Query(query) => self.subquery_requires(query, scope)?,
             SetExpr::SetOperation {
@@ -457,31 +641,55 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
 
     /// Whether a `SELECT` projects one set-returning call that returns no row
     /// when every credential is `NULL`, so no row survives.
-    fn projects_no_row(&self, select: &Select) -> Result<bool, LookupError> {
+    fn projects_no_row(
+        &self,
+        select: &Select,
+        scope: &Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
         let [
-            SelectItem::UnnamedExpr(Expr::Function(call))
+            SelectItem::UnnamedExpr(Expr::Function(
+                call @ Function {
+                    args: FunctionArguments::List(list),
+                    ..
+                },
+            ))
             | SelectItem::ExprWithAlias {
-                expr: Expr::Function(call),
+                expr:
+                    Expr::Function(
+                        call @ Function {
+                            args: FunctionArguments::List(list),
+                            ..
+                        },
+                    ),
                 ..
             },
         ] = select.projection.as_slice()
         else {
             return Ok(false);
         };
-        self.call_returns_no_row(call)
+        let null_arguments = self.null_arguments(&list.args, scope)?;
+        self.call_returns_no_row(call, &null_arguments)
     }
 
-    /// Whether a call reaches a function and every function it may reach is
-    /// a set-returning `LANGUAGE sql` one returning no row when every
-    /// credential is `NULL`.
+    /// Whether a call reaches a function and every function it may reach
+    /// returns no row when every credential is `NULL`, given the positions
+    /// of the arguments that are `NULL` then. A strict set-returning
+    /// function returns none for a `NULL` argument, and a set-returning
+    /// `LANGUAGE sql` one none when its body returns none with those
+    /// parameters `NULL`.
     fn call_returns_no_row<'c>(
         &self,
         call: impl Into<WrittenCall<'c>>,
+        null_arguments: &[usize],
     ) -> Result<bool, LookupError> {
         let mut reached = false;
         for function in self.reached(call)? {
             reached = true;
-            if !self.body_returns_no_row(function)? {
+            let strict_on_null = function.returns_set()
+                && null_arguments
+                    .iter()
+                    .any(|&index| function.returns_null_on_null_argument(self.database, index));
+            if !strict_on_null && !self.body_returns_no_row(function, null_arguments)? {
                 return Ok(false);
             }
         }
@@ -516,8 +724,13 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     }
 
     /// Whether a set-returning `LANGUAGE sql` function's body, one query,
-    /// returns no row when every credential is `NULL`.
-    fn body_returns_no_row(&self, function: &'a DB::Function) -> Result<bool, LookupError> {
+    /// returns no row when every credential is `NULL`, as are the input
+    /// parameters at `null_arguments`.
+    fn body_returns_no_row(
+        &self,
+        function: &'a DB::Function,
+        null_arguments: &[usize],
+    ) -> Result<bool, LookupError> {
         let reading = self
             .reading
             .borrow()
@@ -534,6 +747,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         self.reading.borrow_mut().push(Reading {
             function: Some(function),
             path,
+            null_arguments: null_arguments.to_vec(),
         });
         let requires = self.subquery_requires(
             &query,
@@ -661,6 +875,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                         self.reading.borrow_mut().push(Reading {
                             function: None,
                             path: None,
+                            null_arguments: Vec::new(),
                         });
                         let requires = self.defined_returns_no_row(
                             definition,
@@ -675,10 +890,22 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                     _ => Ok(false),
                 }
             }
-            _ => match WrittenCall::relation(factor) {
-                Some(call) => self.call_returns_no_row(call),
-                None => Ok(false),
-            },
+            TableFactor::Table {
+                args:
+                    Some(TableFunctionArgs {
+                        args: arguments, ..
+                    }),
+                ..
+            }
+            | TableFactor::Function {
+                args: arguments, ..
+            } => {
+                let null_arguments = self.null_arguments(arguments, scope)?;
+                WrittenCall::relation(factor).map_or(Ok(false), |call| {
+                    self.call_returns_no_row(call, &null_arguments)
+                })
+            }
+            _ => Ok(false),
         }
     }
 
@@ -827,6 +1054,48 @@ fn single_select(query: &Query) -> Option<&Select> {
     match query.body.as_ref() {
         SetExpr::Select(select) => Some(select),
         _ => None,
+    }
+}
+
+/// The arguments of `call` when PostgreSQL's grammar reads it as the
+/// expression `keyword`, which it does for a bare unquoted name such as
+/// `coalesce` or `nullif`, rather than as a call to a function. `None` when
+/// an argument is no plain expression, as a whole row `t.*` is.
+fn keyword_arguments<'c>(
+    call: &'c Function,
+    keyword: &str,
+) -> Option<impl Iterator<Item = &'c Expr>> {
+    let [
+        ObjectNamePart::Identifier(Ident {
+            value,
+            quote_style: None,
+            ..
+        }),
+    ] = call.name.0.as_slice()
+    else {
+        return None;
+    };
+    let FunctionArguments::List(list) = &call.args else {
+        return None;
+    };
+    let readable = |argument: &'c FunctionArg| match argument {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(argument)) => Some(argument),
+        _ => None,
+    };
+    (value.eq_ignore_ascii_case(keyword)
+        && list
+            .args
+            .iter()
+            .all(|argument| readable(argument).is_some()))
+    .then(|| list.args.iter().filter_map(readable))
+}
+
+/// The name PostgreSQL stores for `name`, folded to lowercase unless
+/// quoted.
+fn folded(name: &Ident) -> Cow<'_, str> {
+    match name.quote_style {
+        Some(_) => Cow::Borrowed(&name.value),
+        None => Cow::Owned(name.value.to_lowercase()),
     }
 }
 
