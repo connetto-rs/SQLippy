@@ -5,11 +5,8 @@ use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
-    structs::{
-        CallResolution, ColumnDefinition, ExpressionContext, IdentifierCase, RangeTableEntry,
-        TargetName,
-    },
-    traits::{ColumnLike, DatabaseLike, FunctionLike, TableLike},
+    structs::{ColumnDefinition, ExpressionContext, IdentifierCase, RangeTableEntry, TargetName},
+    traits::{ColumnLike, DatabaseLike, TableLike},
     utils::identifier_resolution::identifiers_match,
 };
 use sqlparser::ast::{
@@ -21,7 +18,10 @@ use sqlparser::ast::{
 
 use crate::rules::{
     expression_site_support::{ExpressionFinder, is_null_literal},
-    null_support::{extracts_part, rejects_null, strictness, yields_value_for_values},
+    null_support::{
+        extracts_part, find_null_passing_argument, rejects_null, strictness,
+        yields_value_for_values,
+    },
     policy_support::conjuncts,
     walk_support::walk,
 };
@@ -365,8 +365,10 @@ impl<'scope, 'query: 'scope, 'database: 'scope, DB: DatabaseLike>
             let ungrouped = select.is_none_or(|select| {
                 matches!(&select.group_by, GroupByExpr::Expressions(expressions, _) if expressions.is_empty())
             });
-            if call.filter.is_some() || ungrouped {
+            if call.filter.is_some() || call.over.is_some() || ungrouped {
                 Nullability::Nullable(Culprit::Expression(expression))
+            } else if named("array_agg") || named("json_agg") || named("jsonb_agg") {
+                Nullability::NotNull
             } else if let FunctionArguments::List(arguments) = &call.args
                 && let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(argument))) =
                     arguments.args.first()
@@ -376,33 +378,15 @@ impl<'scope, 'query: 'scope, 'database: 'scope, DB: DatabaseLike>
                 Nullability::Unknown
             }
         } else {
-            self.selected_call(select, expression)?
+            let (database, types) = (self.database, self.types);
+            find_null_passing_argument(database, types, expression, |argument| {
+                Ok(match self.expression(select, argument)? {
+                    nullable @ Nullability::Nullable(_) => Some(nullable),
+                    Nullability::NotNull | Nullability::Unknown => None,
+                })
+            })?
+            .unwrap_or(Nullability::Unknown)
         })
-    }
-
-    /// Judges a call through the function PostgreSQL selects, nullable where
-    /// a nullable argument passes a parameter that turns the result `NULL`.
-    fn selected_call(
-        &mut self,
-        select: Option<&'scope Select>,
-        expression: &'scope Expr,
-    ) -> Result<Nullability<'scope>, LookupError> {
-        let Some(application) = self.types.call(expression)? else {
-            return Ok(Nullability::Unknown);
-        };
-        let CallResolution::Selected(selected) = application.resolution() else {
-            return Ok(Nullability::Unknown);
-        };
-        for (&argument, passed) in application.arguments().iter().zip(selected.arguments()) {
-            if selected
-                .function()
-                .returns_null_on_null_argument(self.database, passed.parameter())
-                && let nullable @ Nullability::Nullable(_) = self.expression(select, argument)?
-            {
-                return Ok(nullable);
-            }
-        }
-        Ok(Nullability::Unknown)
     }
 
     /// Follows a bound column through filters, joins and derived projections.

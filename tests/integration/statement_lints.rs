@@ -291,6 +291,44 @@ const NOT_IN_OUTPUTS: &[(&str, bool)] = &[
     ("SELECT ((data -> 'k') ->> 'y')::int FROM j", true),
     ("SELECT abs(a_id) FROM b", true),
     ("SELECT abs(id) FROM c", false),
+    ("SELECT a_id FROM b WHERE abs(a_id) > 0", false),
+    (
+        "SELECT a_id FROM b WHERE lower(a_id::text) IS NOT NULL",
+        false,
+    ),
+    ("SELECT a_id FROM b WHERE upper(a_id::text) = '5'", false),
+    (
+        "SELECT a_id FROM b WHERE concat(a_id, 'x') IS NOT NULL",
+        true,
+    ),
+    (
+        "SELECT array_length(array_agg(a_id), 1) FROM pairs GROUP BY team",
+        false,
+    ),
+    (
+        "SELECT json_array_length(json_agg(a_id)) FROM pairs GROUP BY team",
+        false,
+    ),
+    (
+        "SELECT jsonb_array_length(jsonb_agg(a_id)) FROM pairs GROUP BY team",
+        false,
+    ),
+    (
+        "SELECT array_length(array_agg(a_id), 1) FROM pairs WHERE false",
+        true,
+    ),
+    (
+        "SELECT array_length(array_agg(a_id) FILTER (WHERE a_id > 0), 1) FROM pairs GROUP BY team",
+        true,
+    ),
+    (
+        "SELECT max(team) OVER (ORDER BY team ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) FROM pairs GROUP BY team",
+        true,
+    ),
+    (
+        "SELECT array_length(array_agg(team) OVER (ORDER BY team ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING), 1) FROM pairs GROUP BY team",
+        true,
+    ),
 ];
 
 #[test]

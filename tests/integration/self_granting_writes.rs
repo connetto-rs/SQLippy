@@ -415,6 +415,9 @@ fn a_composite_key_binds_its_columns_to_a_constrained_one() {
         "person = CRED AND NOT (pass_id = ANY (ARRAY[0]))
            AND coalesce(pass_id, 0) IN (SELECT id FROM passes WHERE invitee = CRED)"
             .to_owned(),
+        "person = CRED AND abs(pass_id) IS NOT NULL
+           AND coalesce(pass_id, 0) IN (SELECT id FROM passes WHERE invitee = CRED)"
+            .to_owned(),
     ] {
         let sql = format!(
             "{} CREATE POLICY w ON seats FOR INSERT WITH CHECK ({check});",
