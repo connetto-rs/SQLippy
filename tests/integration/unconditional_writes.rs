@@ -1,6 +1,6 @@
 //! Write policies through which a client role writes every row.
 
-use crate::common::{finding, findings, supabase};
+use crate::common::{ROLES, finding, findings, parse, supabase};
 use sqlippy::prelude::*;
 
 const PROTECTED: &str =
@@ -75,5 +75,163 @@ fn a_declared_credential_leaves_anonymous_writes_to_credential_free_write() {
             &sql
         ),
         []
+    );
+}
+
+/// A `users` table whose key an `AFTER INSERT` trigger mints into
+/// `grantees`, with `columns` after its key, the trigger's `clause` before
+/// `EXECUTE`, `body` as the trigger function's statements before `RETURN
+/// NULL` and `rest` after it.
+fn minting(columns: &str, clause: &str, body: &str, rest: &str) -> String {
+    format!(
+        "CREATE TYPE grantee_kind AS ENUM ('user', 'team');
+         CREATE TABLE grantees (id UUID PRIMARY KEY, kind grantee_kind NOT NULL, UNIQUE (id, kind));
+         CREATE TABLE users (
+           id UUID PRIMARY KEY,
+           kind grantee_kind GENERATED ALWAYS AS ('user'::grantee_kind) STORED NOT NULL,{columns}
+           FOREIGN KEY (id, kind) REFERENCES grantees (id, kind) DEFERRABLE INITIALLY DEFERRED
+         );
+         ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+         GRANT INSERT ON users TO authenticated;
+         CREATE FUNCTION insert_grantee() RETURNS TRIGGER
+         LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+         BEGIN
+           {body}
+           RETURN NULL;
+         END
+         $$;
+         CREATE TRIGGER users_grantee {clause} EXECUTE FUNCTION insert_grantee();
+         {rest}"
+    )
+}
+
+const AFTER: &str = "AFTER INSERT ON users FOR EACH ROW";
+
+const MINT: &str = "INSERT INTO public.grantees (id, kind) VALUES (NEW.id, NEW.kind);";
+
+const OPEN_INSERT: &str = "CREATE POLICY i ON users FOR INSERT TO authenticated WITH CHECK (true);";
+
+fn reported(sql: &str) -> Vec<String> {
+    findings(UnconditionalClientWritePolicy::default(), supabase(), sql)
+        .into_iter()
+        .map(|(_, _, object)| object)
+        .collect()
+}
+
+#[test]
+fn an_insert_minting_every_column_of_a_new_principal_is_not_reported() {
+    for (clause, body) in [
+        (AFTER, MINT),
+        ("AFTER INSERT OR UPDATE ON users FOR EACH ROW", MINT),
+        (
+            AFTER,
+            "INSERT INTO public.grantees VALUES ((NEW.id), NEW.kind);",
+        ),
+        (
+            AFTER,
+            "INSERT INTO public.grantees (kind, id) VALUES (NEW.kind, NEW.id) RETURNING id;",
+        ),
+        (
+            AFTER,
+            "BEGIN INSERT INTO public.grantees (id, kind) VALUES (NEW.id, NEW.kind);
+             EXCEPTION WHEN unique_violation THEN RAISE; END;",
+        ),
+        (
+            AFTER,
+            "IF NEW.id IS NULL THEN RAISE EXCEPTION 'no id'; END IF;
+             INSERT INTO public.grantees (id, kind) VALUES (NEW.id, NEW.kind);",
+        ),
+    ] {
+        assert_eq!(
+            reported(&minting("", clause, body, OPEN_INSERT)),
+            Vec::<String>::new(),
+            "{clause} {body}"
+        );
+    }
+}
+
+#[test]
+fn an_insert_whose_key_may_name_an_existing_row_is_reported() {
+    for (columns, clause, rest) in [
+        ("", "AFTER INSERT ON users FOR EACH ROW WHEN (NEW.id IS NOT NULL)", ""),
+        (" display_name TEXT,", AFTER, ""),
+        (" created_by_id UUID REFERENCES users (id),", AFTER, ""),
+        ("", "BEFORE INSERT ON users FOR EACH ROW", ""),
+        ("", "AFTER UPDATE ON users FOR EACH ROW", ""),
+        ("", AFTER, "ALTER TABLE users DISABLE TRIGGER users_grantee;"),
+        (
+            "",
+            AFTER,
+            "CREATE FUNCTION skip() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+             CREATE TRIGGER skip BEFORE INSERT ON grantees FOR EACH ROW EXECUTE FUNCTION skip();",
+        ),
+    ] {
+        let sql = minting(columns, clause, MINT, &format!("{rest}{OPEN_INSERT}"));
+        assert_eq!(reported(&sql), ["users.i"], "{columns} {clause} {rest}");
+    }
+    assert_eq!(
+        reported(
+            "CREATE TABLE tags (id INT PRIMARY KEY, name TEXT);
+             ALTER TABLE tags ENABLE ROW LEVEL SECURITY;
+             GRANT INSERT ON tags TO authenticated;
+             CREATE POLICY i ON tags FOR INSERT TO authenticated WITH CHECK (true);"
+        ),
+        ["tags.i"]
+    );
+}
+
+#[test]
+fn a_trigger_function_that_may_not_mint_the_new_key_is_reported() {
+    for body in [
+        "",
+        "INSERT INTO public.grantees (id, kind) VALUES (NEW.id, NEW.kind) ON CONFLICT DO NOTHING;",
+        "IF NEW.id IS NOT NULL THEN INSERT INTO public.grantees (id, kind) VALUES (NEW.id, NEW.kind); END IF;",
+        "INSERT INTO public.grantees (id, kind) VALUES (gen_random_uuid(), NEW.kind);",
+        "BEGIN INSERT INTO public.grantees (id, kind) VALUES (NEW.id, NEW.kind);
+         EXCEPTION WHEN unique_violation THEN NULL; END;",
+        "INSERT INTO public.grantees (id, kind) SELECT NEW.id, NEW.kind;",
+        "INSERT INTO public.grantees (id, kind) VALUES (NEW.id, NEW.kind), (NEW.id, NEW.kind);",
+        "INSERT INTO public.grantees (id) VALUES (NEW.id);",
+        "INSERT INTO public.users (id, kind) VALUES (NEW.id, NEW.kind);",
+        &format!("NEW.id := gen_random_uuid(); {MINT}"),
+        &format!("DECLARE new RECORD; BEGIN {MINT} END;"),
+        &format!("DECLARE fresh ALIAS FOR NEW; BEGIN fresh.id := gen_random_uuid(); {MINT} END;"),
+        &format!("SELECT gen_random_uuid() INTO NEW.id; {MINT}"),
+        &format!("EXECUTE 'SELECT gen_random_uuid()' INTO NEW.id; {MINT}"),
+        &format!(
+            "DECLARE c CURSOR FOR SELECT gen_random_uuid();
+             BEGIN OPEN c; FETCH c INTO NEW.id; {MINT} END;"
+        ),
+        &format!("GET DIAGNOSTICS NEW.id = ROW_COUNT; {MINT}"),
+    ] {
+        let sql = minting("", AFTER, body, OPEN_INSERT);
+        assert_eq!(reported(&sql), ["users.i"], "{body}");
+    }
+}
+
+#[test]
+fn a_minting_table_stays_reported_for_updates_and_deletes() {
+    let sql = minting(
+        "",
+        AFTER,
+        MINT,
+        "CREATE POLICY a ON users FOR ALL TO authenticated USING (true);",
+    );
+    let mut constrainer: GenericConstrainer<ParserDB> =
+        UnconditionalClientWritePolicy::default().into();
+    constrainer.set_deployment(supabase());
+    let messages: Vec<String> = constrainer
+        .diagnostics(&parse(&format!("{ROLES}{sql}")))
+        .into_iter()
+        .map(|error| match error {
+            Error::Violation(violation) => violation.message().to_owned(),
+            other => panic!("unexpected failure: {other}"),
+        })
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "Policy 'a' on 'users' lets role 'authenticated' UPDATE, DELETE every row, since its clause is true whatever the row holds."
+        ]
     );
 }
