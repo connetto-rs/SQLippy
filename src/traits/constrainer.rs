@@ -10,7 +10,9 @@ use crate::{
     deployment::Deployment,
     error::{AllowedObject, Error, InactiveRule},
     lint::{Level, LintGroup, RegisteredRule},
-    traits::{ColumnRule, ForeignKeyRule, FunctionRule, QueryRule, SchemaRule, TableRule},
+    traits::{
+        ColumnRule, ForeignKeyRule, FunctionRule, QueryRule, SchemaRule, ScriptRule, TableRule,
+    },
 };
 
 pub mod generic_constrainer;
@@ -72,6 +74,14 @@ pub trait Constrainer: Default {
     fn register_query_rule(&mut self, rule: Box<dyn QueryRule<Database = Self::Database>>) {
         self.constrainer_mut()
             .register_query_rule_with_floor(rule, Level::Warn);
+    }
+
+    /// Registers a script rule, which checks the statements passed to
+    /// [`Constrainer::visit_script`] in order and never runs on the schema
+    /// alone.
+    fn register_script_rule(&mut self, rule: Box<dyn ScriptRule<Database = Self::Database>>) {
+        self.constrainer_mut()
+            .register_script_rule_with_floor(rule, Level::Warn);
     }
 
     /// Excuses the violations of a rule reported on the given table itself.
@@ -386,5 +396,47 @@ pub trait Constrainer: Default {
             ControlFlow::Break(())
         });
         first.map_or(Ok(()), Err)
+    }
+
+    /// Passes every violation and lookup failure the script rules raise on
+    /// `statements`, read in order, to `sink` until it breaks.
+    ///
+    /// `statements` are the script `database` was built from. Only script
+    /// rules run, and statement allowances excuse their violations.
+    fn visit_script(
+        &self,
+        database: &Self::Database,
+        statements: &[Statement],
+        sink: &mut dyn FnMut(Error<Self::Database>) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        self.constrainer().visit_script(database, statements, sink)
+    }
+
+    /// Returns every violation raised at `warn` or `deny` and every lookup
+    /// failure the script rules raise on `statements`, in rule order.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlippy::prelude::*;
+    /// use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+    ///
+    /// let sql = "SET search_path = \"pg_catalog, pg_temp\";";
+    /// let database = ParserDB::parse::<PostgreSqlDialect>(sql).unwrap();
+    /// let statements = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap();
+    /// let constrainer = DefaultConstrainer::<ParserDB>::default();
+    /// assert_eq!(constrainer.script_diagnostics(&database, &statements).len(), 1);
+    /// ```
+    fn script_diagnostics(
+        &self,
+        database: &Self::Database,
+        statements: &[Statement],
+    ) -> Vec<Error<Self::Database>> {
+        let mut diagnostics = Vec::new();
+        let _ = self.visit_script(database, statements, &mut |error| {
+            diagnostics.push(error);
+            ControlFlow::Continue(())
+        });
+        diagnostics
     }
 }

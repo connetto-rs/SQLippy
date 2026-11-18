@@ -1,0 +1,15 @@
+//! Submodule providing the rules that read a script's statements in the order
+//! they run.
+
+mod conditional_creation_without_trusted_schema;
+pub use conditional_creation_without_trusted_schema::ConditionalCreationWithoutTrustedSchema;
+mod misquoted_search_path;
+pub use misquoted_search_path::MisquotedSearchPath;
+mod repeated_function_search_path;
+pub use repeated_function_search_path::RepeatedFunctionSearchPath;
+mod replacement_without_trusted_creation;
+pub use replacement_without_trusted_creation::ReplacementWithoutTrustedCreation;
+mod simple_case_under_unsafe_search_path;
+pub use simple_case_under_unsafe_search_path::SimpleCaseUnderUnsafeSearchPath;
+mod unqualified_name_under_unsafe_search_path;
+pub use unqualified_name_under_unsafe_search_path::UnqualifiedNameUnderUnsafeSearchPath;

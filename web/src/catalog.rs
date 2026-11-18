@@ -65,5 +65,6 @@ pub fn kind_phrase(kind: RuleKind) -> &'static str {
         RuleKind::Schema => "the whole schema",
         RuleKind::Function => "each function",
         RuleKind::Query => "each application statement",
+        RuleKind::Script => "the script, statement by statement",
     }
 }

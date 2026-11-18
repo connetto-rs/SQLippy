@@ -81,6 +81,7 @@ fn reports(
         }
     };
     let mut errors = constrainer.diagnostics(&database);
+    errors.extend(constrainer.script_diagnostics(&database, &statements));
     for statement in statements
         .iter()
         .filter(|statement| is_application_statement(statement))

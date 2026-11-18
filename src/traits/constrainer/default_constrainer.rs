@@ -12,10 +12,10 @@ use crate::{
         BooleanStateWithoutTime, CascadeIntoRowLevelSecurityTable, CaseSensitiveEmail,
         CatalogNameAsText, ChildWithoutRowLevelSecurity, ClientChosenTimestamp,
         ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
-        ClosedSetAsText, ConstantColumnNotGenerated, CopiedColumnThroughSuperkey,
-        CorrelatedPolicySubquery, CredentialFreeWrite, CredentialPatternPolicy,
-        CredentialSettingWrite, CrossTenantCap, CteShadowsRelation, DeadPermissivePolicy,
-        DefinerMaintainedColumnClientWritable, DefinerPathCreatableSchema,
+        ClosedSetAsText, ConditionalCreationWithoutTrustedSchema, ConstantColumnNotGenerated,
+        CopiedColumnThroughSuperkey, CorrelatedPolicySubquery, CredentialFreeWrite,
+        CredentialPatternPolicy, CredentialSettingWrite, CrossTenantCap, CteShadowsRelation,
+        DeadPermissivePolicy, DefinerMaintainedColumnClientWritable, DefinerPathCreatableSchema,
         DefinerSchemaWithoutDefaultRevoke, DefinerTakesActingUser, DefinerTemporarySchemaNotLast,
         DefinerWithoutSearchPath, DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck,
         DuplicateColumnAssignment, DuplicateColumnNameInExtensionGraph, DuplicateForeignKey,
@@ -26,9 +26,9 @@ use crate::{
         FunctionMediatedPolicyCycle, FunctionWithoutSafeSearchPath, GrantOptionToClientRole,
         ImpureImmutableFunction, IncompatibleForeignKey, InvokerWithoutSearchPath,
         JsonStoredAsText, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
-        LeakproofUserFunction, MaterializedViewExposed, MissingPrimaryKey, MixedCaseColumnName,
-        MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText, MoneyType,
-        MonotonicFlagReset, MultiplePermissivePolicies, NarrowIntegerKey,
+        LeakproofUserFunction, MaterializedViewExposed, MisquotedSearchPath, MissingPrimaryKey,
+        MixedCaseColumnName, MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText,
+        MoneyType, MonotonicFlagReset, MultiplePermissivePolicies, NarrowIntegerKey,
         NarrowerReferencingColumn, NestedPolicySubquery, NilUuidSentinel, NonSnakeCaseColumnName,
         NonSnakeCaseTableName, NonterminatingRecursiveCte, NotInNullList, NotInNullableSubquery,
         NotInSubquery, NullComparison, NullCredentialRead, NullableCompositeForeignKey,
@@ -41,31 +41,33 @@ use crate::{
         RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
         ReachableTableWithoutRowLevelSecurity, RecursiveStepOverUnion, RedundantExtensionEdge,
         ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole, RegColumnType,
-        RepeatedIndexColumn, RepeatedPolicyCall, RepeatedRecursionBound, RepeatedSettingRead,
+        RepeatedFunctionSearchPath, RepeatedIndexColumn, RepeatedPolicyCall,
+        RepeatedRecursionBound, RepeatedSettingRead, ReplacementWithoutTrustedCreation,
         ReservedKeywordIdentifier, RestrictiveWithoutPermissive, RoleDefinedInSchema,
         RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
         RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
         SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
         SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SensitiveColumnsExposed,
         SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
-        SingularTableName, SnapshotBeforeLock, SubjectSettableAttribute, SuperkeyPrimaryKey,
-        SurrogatePrimaryKeyInExtension, TableInheritance, TableNameDispatch, TautologicalCheck,
-        TautologicalPolicy, TautologicalWithCheck, TimeDependentCheck, TimeWithTimeZone,
-        TimestampBetween, TimestampWithoutTimeZone, TriggerFilterInBody,
-        TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
-        TruncatingIntegerDivision, TypeNameCaseCollision, UnauditedAuthorityTable,
-        UnboundedTextColumn, UncachedHelperQuery, UncachedPolicyCall,
-        UnconditionalClientWritePolicy, UndeletableReference, UnfilteredChangeTrigger,
-        UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
-        UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin, UnknownBinarySend,
-        UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn, UnorderedLimit, UnreadOuterJoin,
+        SimpleCaseUnderUnsafeSearchPath, SingularTableName, SnapshotBeforeLock,
+        SubjectSettableAttribute, SuperkeyPrimaryKey, SurrogatePrimaryKeyInExtension,
+        TableInheritance, TableNameDispatch, TautologicalCheck, TautologicalPolicy,
+        TautologicalWithCheck, TimeDependentCheck, TimeWithTimeZone, TimestampBetween,
+        TimestampWithoutTimeZone, TriggerFilterInBody, TruncateGrantedToAnonymousRole,
+        TruncateGrantedToAppRole, TruncatedIdentifier, TruncatingIntegerDivision,
+        TypeNameCaseCollision, UnauditedAuthorityTable, UnboundedTextColumn, UncachedHelperQuery,
+        UncachedPolicyCall, UnconditionalClientWritePolicy, UndeletableReference,
+        UnfilteredChangeTrigger, UnfilteredWrite, UnforcedRowLevelSecurity,
+        UnindexedCorrelatedSelect, UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter,
+        UnindexedRecursiveJoin, UnknownBinarySend, UnlinkedFromItem, UnloggedTable,
+        UnorderedDistinctOn, UnorderedLimit, UnqualifiedNameUnderUnsafeSearchPath, UnreadOuterJoin,
         UnsatisfiableCheck, UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
         UnseededPolicySet, UnusedCte, UnvalidatedConstraint, UuidStoredAsText, WildcardView,
         WritingNonVolatileFunction, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
-        SchemaRule, TableRule,
+        SchemaRule, ScriptRule, TableRule,
     },
 };
 
@@ -170,6 +172,17 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_function_rule_with_floor(rule, Level::Allow);
         }
         register_query_rules(&mut constrainer);
+        let script_rules: [Box<dyn ScriptRule<Database = DB>>; 6] = [
+            Box::new(UnqualifiedNameUnderUnsafeSearchPath::default()),
+            Box::new(SimpleCaseUnderUnsafeSearchPath::default()),
+            Box::new(ReplacementWithoutTrustedCreation::default()),
+            Box::new(ConditionalCreationWithoutTrustedSchema::default()),
+            Box::new(MisquotedSearchPath::default()),
+            Box::new(RepeatedFunctionSearchPath::default()),
+        ];
+        for rule in script_rules {
+            constrainer.register_script_rule_with_floor(rule, Level::Allow);
+        }
         Self { constrainer }
     }
 }
