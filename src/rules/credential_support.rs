@@ -5,15 +5,17 @@ use std::{cell::RefCell, ops::ControlFlow, ptr};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{IdentifierCase, WrittenCall},
-    traits::{DatabaseLike, FunctionLike, PolicyLike, Relation, ViewLike},
+    structs::{
+        ExpressionContext, ExpressionScope, IdentifierCase, OperatorResolution, WrittenCall,
+    },
+    traits::{DatabaseLike, FunctionLike, OperatorLike, PolicyLike, Relation, ViewLike},
     utils::identifier_resolution::SearchPath,
 };
 use sqlparser::ast::{
-    BinaryOperator, Cte, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-    GroupByExpr, InTarget, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, Query, Select,
-    SelectItem, SetExpr, SetOperator, TableFactor, TableWithJoins, UnaryOperator, Value, Visitor,
-    With,
+    BinaryOperator, Cte, Distinct, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
+    GroupByExpr, InTarget, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, OrderBy,
+    Query, Select, SelectItem, SetExpr, SetOperator, TableFactor, TableWithJoins, UnaryOperator,
+    Value, Visitor, With,
 };
 
 use crate::rules::walk_support::walk;
@@ -44,26 +46,48 @@ struct Items<'s> {
     clause: &'s With,
     /// How many items, from the first, the query sees.
     visible: usize,
-    outer: Scope<'s>,
+    outer: Option<&'s Items<'s>>,
 }
 
-/// The `WITH` items in reach, `None` outside every `WITH`.
-type Scope<'s> = Option<&'s Items<'s>>;
+/// Where a judged node is read: the `WITH` items in reach, `None` outside
+/// every `WITH`, and the context typing the nodes of the policy expression,
+/// function body or view definition holding it.
+struct Scope<'s, 'q, 'a, DB: DatabaseLike> {
+    items: Option<&'s Items<'s>>,
+    types: &'s ExpressionContext<'q, 'a, DB>,
+}
 
-impl<'s> Items<'s> {
+#[expect(
+    clippy::expl_impl_clone_on_copy,
+    reason = "deriving would bound the database type by `Copy`"
+)]
+impl<DB: DatabaseLike> Clone for Scope<'_, '_, '_, DB> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<DB: DatabaseLike> Copy for Scope<'_, '_, '_, DB> {}
+
+impl<'s, 'q, 'a, DB: DatabaseLike> Scope<'s, 'q, 'a, DB> {
     /// Calls `judge` with the scope of `query`, which sees its own `WITH`
-    /// items before those of `outer`.
-    fn within<R>(query: &'s Query, outer: Scope<'s>, judge: impl FnOnce(Scope<'_>) -> R) -> R {
+    /// items before those in reach here.
+    fn within<R>(self, query: &'s Query, judge: impl FnOnce(Scope<'_, 'q, 'a, DB>) -> R) -> R {
         match &query.with {
-            Some(clause) => judge(Some(&Items {
-                clause,
-                visible: clause.cte_tables.len(),
-                outer,
-            })),
-            None => judge(outer),
+            Some(clause) => judge(Scope {
+                items: Some(&Items {
+                    clause,
+                    visible: clause.cte_tables.len(),
+                    outer: self.items,
+                }),
+                types: self.types,
+            }),
+            None => judge(self),
         }
     }
+}
 
+impl<'s> Items<'s> {
     /// The item `name` reads and the scope of its body, which sees the items
     /// before it, or every item under `WITH RECURSIVE`, as PostgreSQL scopes
     /// them. A schema-qualified name never reads an item.
@@ -134,11 +158,28 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     /// Whether the expression cannot be true when every credential is
     /// `NULL`.
     pub(crate) fn requires(&self, expression: &Expr) -> Result<bool, LookupError> {
-        self.requires_within(expression, None)
+        let table = ExpressionScope::Table(self.policy.table(self.database)?);
+        let types = ExpressionContext::for_expression(
+            expression,
+            &table,
+            self.database,
+            IdentifierCase::Folded,
+        )?;
+        self.requires_within(
+            expression,
+            Scope {
+                items: None,
+                types: &types,
+            },
+        )
     }
 
     /// Whether the expression is `NULL` when every credential is `NULL`.
-    fn is_null(&self, expression: &Expr, scope: Scope<'_>) -> Result<bool, LookupError> {
+    fn is_null(
+        &self,
+        expression: &Expr,
+        scope: Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
         if self.deployment.is_credential(expression) {
             return Ok(true);
         }
@@ -151,8 +192,9 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
             } => self.is_null(inner, scope)?,
             Expr::Value(literal) => matches!(literal.value, Value::Null),
             Expr::BinaryOp { left, op, right } => {
-                is_strict_operator(op)
-                    && (self.is_null(left, scope)? || self.is_null(right, scope)?)
+                let (left_strict, right_strict) = self.strictness(expression, op, scope)?;
+                (left_strict && self.is_null(left, scope)?)
+                    || (right_strict && self.is_null(right, scope)?)
             }
             Expr::Like { expr, pattern, .. }
             | Expr::ILike { expr, pattern, .. }
@@ -168,27 +210,36 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                 ..
             } => self.is_null(expr, scope)?,
             Expr::Function(call) => self.call_is_null(call, scope)?,
-            Expr::Subquery(query) => {
-                Items::within(query, scope, |scope| match single_select(query) {
-                    Some(select) if !self.may_yield_row_from_no_input(select)? => Ok(self
-                        .select_returns_no_row(select, scope)?
+            Expr::Subquery(query) => scope.within(query, |scope| match single_select(query) {
+                Some(select)
+                    if !self.may_yield_row_from_no_input(
+                        select,
+                        query.order_by.as_ref(),
+                        scope,
+                    )? =>
+                {
+                    Ok(self.select_returns_no_row(select, scope)?
                         || match select.projection.as_slice() {
                             [
                                 SelectItem::UnnamedExpr(item)
                                 | SelectItem::ExprWithAlias { expr: item, .. },
                             ] => self.is_null(item, scope)?,
                             _ => false,
-                        }),
-                    _ => Ok(false),
-                })?
-            }
+                        })
+                }
+                _ => Ok(false),
+            })?,
             _ => false,
         })
     }
 
     /// Whether the expression cannot be true when every credential is
     /// `NULL`, read where `scope` is in reach.
-    fn requires_within(&self, expression: &Expr, scope: Scope<'_>) -> Result<bool, LookupError> {
+    fn requires_within(
+        &self,
+        expression: &Expr,
+        scope: Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
         if self.is_null(expression, scope)? {
             return Ok(true);
         }
@@ -294,7 +345,11 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         }
     }
 
-    fn all_null(&self, expressions: &[Expr], scope: Scope<'_>) -> Result<bool, LookupError> {
+    fn all_null(
+        &self,
+        expressions: &[Expr],
+        scope: Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
         for expression in expressions {
             if !self.is_null(expression, scope)? {
                 return Ok(false);
@@ -305,7 +360,11 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
 
     /// Whether every function the call may reach returns `NULL` for a
     /// positional argument that is `NULL`.
-    fn call_is_null(&self, call: &Function, scope: Scope<'_>) -> Result<bool, LookupError> {
+    fn call_is_null(
+        &self,
+        call: &Function,
+        scope: Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
         let FunctionArguments::List(list) = &call.args else {
             return Ok(false);
         };
@@ -333,18 +392,56 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         Ok(reached_any)
     }
 
-    /// Whether a subquery returns no row when every credential is `NULL`.
-    fn subquery_requires(&self, query: &Query, scope: Scope<'_>) -> Result<bool, LookupError> {
-        Items::within(query, scope, |scope| self.set_requires(&query.body, scope))
+    /// Whether the operator a binary `expression` applies returns `NULL`
+    /// for a `NULL` left operand and for a `NULL` right one, as the function
+    /// implementing the operator PostgreSQL selects declares. Where the
+    /// selection is undetermined, each overload of a comparison or an
+    /// arithmetic operator is strict, unlike those of `||`, which appends to
+    /// an array whatever the other operand holds.
+    fn strictness(
+        &self,
+        expression: &Expr,
+        operator: &BinaryOperator,
+        scope: Scope<'_, '_, 'a, DB>,
+    ) -> Result<(bool, bool), LookupError> {
+        if let Some(applications) = scope.types.operators(expression)?
+            && let [application] = applications.as_slice()
+            && let OperatorResolution::Selected(selected) = application.resolution()
+            && let Some(function) = selected.operator().implementation(self.database)
+        {
+            return Ok((
+                function.returns_null_on_null_argument(self.database, 0),
+                function.returns_null_on_null_argument(self.database, 1),
+            ));
+        }
+        let strict = *operator != BinaryOperator::StringConcat && is_strict_operator(operator);
+        Ok((strict, strict))
     }
 
-    /// Whether a query body returns no row when every credential is `NULL`,
-    /// which a `UNION` does when every arm does, an `INTERSECT` when one arm
-    /// does and an `EXCEPT` when its left arm does.
-    fn set_requires(&self, body: &SetExpr, scope: Scope<'_>) -> Result<bool, LookupError> {
+    /// Whether a subquery returns no row when every credential is `NULL`.
+    fn subquery_requires(
+        &self,
+        query: &Query,
+        scope: Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
+        scope.within(query, |scope| {
+            self.set_requires(&query.body, query.order_by.as_ref(), scope)
+        })
+    }
+
+    /// Whether a query body, ordered by `order_by`, returns no row when
+    /// every credential is `NULL`, which a `UNION` does when every arm does,
+    /// an `INTERSECT` when one arm does and an `EXCEPT` when its left arm
+    /// does.
+    fn set_requires(
+        &self,
+        body: &SetExpr,
+        order_by: Option<&OrderBy>,
+        scope: Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
         Ok(match body {
             SetExpr::Select(select) => {
-                !self.may_yield_row_from_no_input(select)?
+                !self.may_yield_row_from_no_input(select, order_by, scope)?
                     && (self.select_returns_no_row(select, scope)?
                         || self.projects_no_row(select)?)
             }
@@ -354,18 +451,18 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                 left,
                 right,
                 ..
-            } => self.set_requires(left, scope)? && self.set_requires(right, scope)?,
+            } => self.set_requires(left, None, scope)? && self.set_requires(right, None, scope)?,
             SetExpr::SetOperation {
                 op: SetOperator::Intersect,
                 left,
                 right,
                 ..
-            } => self.set_requires(left, scope)? || self.set_requires(right, scope)?,
+            } => self.set_requires(left, None, scope)? || self.set_requires(right, None, scope)?,
             SetExpr::SetOperation {
                 op: SetOperator::Except,
                 left,
                 ..
-            } => self.set_requires(left, scope)?,
+            } => self.set_requires(left, None, scope)?,
             _ => false,
         })
     }
@@ -444,12 +541,19 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
         let Some(query) = sql_set_body(self.database, function)? else {
             return Ok(false);
         };
+        let types = ExpressionContext::new(&query, self.database, IdentifierCase::Folded)?;
         let path = function.search_path(self.database)?;
         self.reading.borrow_mut().push(Reading {
             function: Some(function),
             path,
         });
-        let requires = self.subquery_requires(&query, None);
+        let requires = self.subquery_requires(
+            &query,
+            Scope {
+                items: None,
+                types: &types,
+            },
+        );
         self.reading.borrow_mut().pop();
         requires
     }
@@ -459,14 +563,18 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn select_returns_no_row(
         &self,
         select: &Select,
-        scope: Scope<'_>,
+        scope: Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         Ok(self.filter_requires(select, scope)? || self.reads_no_row(select, scope)?)
     }
 
     /// Whether the `WHERE` or the `ON` of an inner join requires a
     /// credential, so no row survives.
-    fn filter_requires(&self, select: &Select, scope: Scope<'_>) -> Result<bool, LookupError> {
+    fn filter_requires(
+        &self,
+        select: &Select,
+        scope: Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
         if let Some(selection) = &select.selection
             && self.requires_within(selection, scope)?
         {
@@ -487,7 +595,11 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
 
     /// Whether one of a `SELECT`'s `FROM` items returns no row when every
     /// credential is `NULL`.
-    fn reads_no_row(&self, select: &Select, scope: Scope<'_>) -> Result<bool, LookupError> {
+    fn reads_no_row(
+        &self,
+        select: &Select,
+        scope: Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
         for table in &select.from {
             if self.joined_returns_no_row(table, scope)? {
                 return Ok(true);
@@ -502,7 +614,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn joined_returns_no_row(
         &self,
         table: &TableWithJoins,
-        scope: Scope<'_>,
+        scope: Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         let mut empty = self.relation_returns_no_row(&table.relation, scope)?;
         for join in &table.joins {
@@ -526,7 +638,7 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     fn relation_returns_no_row(
         &self,
         factor: &TableFactor,
-        scope: Scope<'_>,
+        scope: Scope<'_, '_, 'a, DB>,
     ) -> Result<bool, LookupError> {
         match factor {
             TableFactor::Derived { subquery, .. } => self.subquery_requires(subquery, scope),
@@ -536,8 +648,14 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
             TableFactor::Table {
                 name, args: None, ..
             } => {
-                if let Some((item, body)) = scope.and_then(|items| items.read_by(name)) {
-                    return self.defined_returns_no_row(&item.query, Some(&body));
+                if let Some((item, body)) = scope.items.and_then(|items| items.read_by(name)) {
+                    return self.defined_returns_no_row(
+                        &item.query,
+                        Scope {
+                            items: Some(&body),
+                            types: scope.types,
+                        },
+                    );
                 }
                 let relation = {
                     let reading = self.reading.borrow();
@@ -546,11 +664,23 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
                 };
                 match relation {
                     Some(Relation::View(view)) => {
+                        let definition = view.definition();
+                        let types = ExpressionContext::new(
+                            definition,
+                            self.database,
+                            IdentifierCase::Folded,
+                        )?;
                         self.reading.borrow_mut().push(Reading {
                             function: None,
                             path: None,
                         });
-                        let requires = self.defined_returns_no_row(view.definition(), None);
+                        let requires = self.defined_returns_no_row(
+                            definition,
+                            Scope {
+                                items: None,
+                                types: &types,
+                            },
+                        );
                         self.reading.borrow_mut().pop();
                         requires
                     }
@@ -570,7 +700,11 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     /// A query read inside itself counts as returning none, which judges a
     /// recursive item by its non-recursive term, since PostgreSQL feeds the
     /// recursive term only the rows the non-recursive term returns.
-    fn defined_returns_no_row(&self, query: &Query, scope: Scope<'_>) -> Result<bool, LookupError> {
+    fn defined_returns_no_row(
+        &self,
+        query: &Query,
+        scope: Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
         if self
             .judging
             .borrow()
@@ -586,40 +720,79 @@ impl<'a, DB: DatabaseLike> CredentialJudge<'a, DB> {
     }
 
     /// Whether the query can return a row though its filter removes every
-    /// input row, which an aggregate without `GROUP BY` does.
+    /// input row, which an aggregating query does when its grouping sets
+    /// include the empty one and its `HAVING` can pass. A query without
+    /// `GROUP BY` groups by the empty set alone, and aggregates when it has a
+    /// `HAVING` or calls an aggregate in its projection, its `DISTINCT ON`,
+    /// its named windows or its `ORDER BY`, here `order_by`.
     ///
-    /// A projection call without `OVER` counts as an aggregate when a
-    /// function it may reach is one, or when it reaches no known function,
-    /// unless the call is a declared credential.
-    fn may_yield_row_from_no_input(&self, select: &Select) -> Result<bool, LookupError> {
-        let grouped = !matches!(
-            &select.group_by,
-            GroupByExpr::Expressions(expressions, _) if expressions.is_empty()
-        );
-        if grouped {
+    /// A call without `OVER` counts as an aggregate when a function it may
+    /// reach is one, or when it reaches no known function, unless the call
+    /// is a declared credential.
+    fn may_yield_row_from_no_input(
+        &self,
+        select: &Select,
+        order_by: Option<&OrderBy>,
+        scope: Scope<'_, '_, 'a, DB>,
+    ) -> Result<bool, LookupError> {
+        let GroupByExpr::Expressions(grouping, _) = &select.group_by else {
             return Ok(false);
+        };
+        if !grouping.iter().all(may_group_by_nothing) {
+            return Ok(false);
+        }
+        if let Some(having) = &select.having {
+            return Ok(!self.requires_within(having, scope)?);
+        }
+        if !grouping.is_empty() {
+            return Ok(true);
         }
         let mut finder = AggregateCall {
             judge: self,
             depth: 0,
         };
-        for item in &select.projection {
-            let (SelectItem::UnnamedExpr(expression)
+        let projected = select.projection.iter().filter_map(|item| match item {
+            SelectItem::UnnamedExpr(expression)
             | SelectItem::ExprWithAlias {
                 expr: expression, ..
-            }) = item
-            else {
-                continue;
-            };
-            if let ControlFlow::Break(outcome) = walk(expression, &mut finder) {
-                return outcome.map(|()| true);
-            }
+            } => Some(expression),
+            _ => None,
+        });
+        let distinct_on = match &select.distinct {
+            Some(Distinct::On(expressions)) => expressions.as_slice(),
+            _ => &[],
+        };
+        let mut found = projected
+            .chain(distinct_on)
+            .try_for_each(|expression| walk(expression, &mut finder));
+        if found.is_continue() {
+            found = walk(&select.named_window, &mut finder);
         }
-        Ok(false)
+        if found.is_continue()
+            && let Some(order_by) = order_by
+        {
+            found = walk(order_by, &mut finder);
+        }
+        match found {
+            ControlFlow::Break(outcome) => outcome.map(|()| true),
+            ControlFlow::Continue(()) => Ok(false),
+        }
     }
 }
 
-/// Finds an aggregate call in a projection, outside nested subqueries.
+/// Whether a `GROUP BY` item can add no column to a grouping set, as `()`,
+/// `ROLLUP`, `CUBE` and a `GROUPING SETS` listing such a set can.
+fn may_group_by_nothing(item: &Expr) -> bool {
+    match item {
+        Expr::Tuple(columns) => columns.is_empty(),
+        Expr::Rollup(_) | Expr::Cube(_) => true,
+        Expr::GroupingSets(sets) => sets.iter().any(|set| set.iter().all(may_group_by_nothing)),
+        _ => false,
+    }
+}
+
+/// Finds an aggregate call in the clauses of one query level, outside
+/// nested subqueries.
 struct AggregateCall<'j, 'a, DB: DatabaseLike> {
     judge: &'j CredentialJudge<'a, DB>,
     depth: usize,

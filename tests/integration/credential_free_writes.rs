@@ -147,6 +147,8 @@ fn a_platform_credential_the_schema_never_creates_still_counts() {
              ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
              CREATE POLICY notes_delete ON notes FOR DELETE TO anon
                USING (owner = (SELECT auth.uid()));
+             CREATE POLICY notes_appended ON notes FOR DELETE TO anon
+               USING (owner = ANY (ARRAY[owner] || auth.uid()));
              CREATE POLICY notes_open ON notes FOR UPDATE TO anon USING (owner IS NOT NULL);",
         )
         .expect("schema parses");
@@ -160,7 +162,7 @@ fn a_platform_credential_the_schema_never_creates_still_counts() {
             other => panic!("unexpected failure: {other}"),
         })
         .collect();
-    assert_eq!(objects, ["notes.notes_open"]);
+    assert_eq!(objects, ["notes.notes_appended", "notes.notes_open"]);
 }
 
 #[test]
@@ -200,6 +202,10 @@ fn clauses_that_require_a_credential_pass() {
         "(current_setting('app.user_id', true) IS NOT NULL)",
         "owner LIKE current_setting('app.user_id', true)",
         "current_setting('app.user_id', true) = ANY(ARRAY['a', 'b'])",
+        "owner LIKE current_setting('app.user_id', true) || '%'",
+        "owner = 'u:' || current_setting('app.user_id', true)",
+        "(owner || current_setting('app.user_id', true)) IS NOT NULL",
+        "(jsonb_build_object('a', 1) || current_setting('app.user_id', true)::jsonb) IS NOT NULL",
     ] {
         assert_eq!(delete_policy(using), [], "{using}");
     }
@@ -231,6 +237,90 @@ fn clauses_a_caller_without_a_credential_can_pass_are_reported() {
         "CASE WHEN current_setting('app.user_id', true) IS NULL THEN true ELSE false END",
     ] {
         assert_eq!(delete_policy(using), [finding("items.d")], "{using}");
+    }
+}
+
+/// A helper and a view appending the credential to an array.
+const APPENDING: &str = "
+    CREATE FUNCTION appended_teams() RETURNS SETOF INT LANGUAGE sql STABLE AS $$
+      SELECT team FROM members WHERE member = ANY (ARRAY['x'] || current_setting('app.user_id', true)) $$;
+    CREATE VIEW appended_view AS
+      SELECT team FROM members WHERE member = ANY (ARRAY['x'] || current_setting('app.user_id', true));";
+
+#[test]
+fn an_array_concatenated_with_a_missing_credential_keeps_its_elements() {
+    for using in [
+        "owner = ANY (ARRAY['x'] || current_setting('app.user_id', true))",
+        "owner = ANY (current_setting('app.user_id', true) || ARRAY['x'])",
+        "owner = ANY (string_to_array('x', ',') || current_setting('app.user_id', true))",
+        "owner = ANY (ARRAY['x'] || string_to_array(current_setting('app.user_id', true), ','))",
+        "team IN (WITH a AS (SELECT team FROM members
+           WHERE member = ANY (ARRAY['x'] || current_setting('app.user_id', true))) SELECT team FROM a)",
+        "team IN (SELECT team FROM members m
+           WHERE m.member = ANY (ARRAY[m.member] || current_setting('app.user_id', true)))",
+        "team IN (SELECT appended_teams())",
+        "team IN (SELECT team FROM appended_view)",
+    ] {
+        assert_eq!(
+            delete_policy_after(APPENDING, using),
+            [finding("items.d")],
+            "{using}"
+        );
+    }
+}
+
+/// A `members` query whose filter requires a credential, ending in `clause`.
+fn grouped_members(clause: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM members WHERE member = current_setting('app.user_id', true) {clause})"
+    )
+}
+
+#[test]
+fn an_aggregation_over_the_empty_grouping_set_is_reported() {
+    for clause in [
+        "HAVING count(*) < 5",
+        "HAVING true",
+        "HAVING count(*) < 5 ORDER BY 1",
+        "ORDER BY count(*)",
+        "WINDOW w AS (ORDER BY count(*))",
+        "GROUP BY ()",
+        "GROUP BY (), ()",
+        "GROUP BY ROLLUP (team)",
+        "GROUP BY ROLLUP ((team, member))",
+        "GROUP BY CUBE (team)",
+        "GROUP BY ROLLUP (team), CUBE (member)",
+        "GROUP BY GROUPING SETS (())",
+        "GROUP BY GROUPING SETS ((team), ())",
+        "GROUP BY GROUPING SETS (team, ())",
+    ] {
+        assert_eq!(
+            delete_policy(&grouped_members(clause)),
+            [finding("items.d")],
+            "{clause}"
+        );
+    }
+    assert_eq!(
+        delete_policy(
+            "EXISTS (SELECT DISTINCT ON (count(*)) 1 FROM members
+               WHERE member = current_setting('app.user_id', true))"
+        ),
+        [finding("items.d")]
+    );
+}
+
+#[test]
+fn an_aggregation_without_the_empty_grouping_set_passes() {
+    for clause in [
+        "GROUP BY GROUPING SETS ((team))",
+        "GROUP BY GROUPING SETS (team, member)",
+        "GROUP BY team, ROLLUP (member)",
+        "GROUP BY GROUPING SETS (team), ROLLUP (member)",
+        "GROUP BY team HAVING true",
+        "GROUP BY ROLLUP (team) HAVING false",
+        "GROUP BY () HAVING max(member) = current_setting('app.user_id', true)",
+    ] {
+        assert_eq!(delete_policy(&grouped_members(clause)), [], "{clause}");
     }
 }
 
