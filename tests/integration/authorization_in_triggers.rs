@@ -188,13 +188,19 @@ fn auditing(events: &str, declared: &str, body: &str) -> String {
 fn a_helper_stored_as_a_value_is_not_reported() {
     for (declared, body) in [
         // The result of the call is stored in the row the trigger inserts.
-        ("", "INSERT INTO note_events (id, own) VALUES (NEW.id, owns_note(NEW.owner_id));"),
+        (
+            "",
+            "INSERT INTO note_events (id, own) VALUES (NEW.id, owns_note(NEW.owner_id));",
+        ),
         // ...assigned to a variable the body never tests.
         ("DECLARE own BOOLEAN;", "own := owns_note(NEW.owner_id);"),
         // ...passed as a value to a function that stores it.
         ("", "PERFORM record_own(owns_note(NEW.owner_id));"),
         // ...set as the value a change assigns.
-        ("", "UPDATE notes SET body = owns_note(NEW.owner_id) WHERE id = NEW.id;"),
+        (
+            "",
+            "UPDATE notes SET body = owns_note(NEW.owner_id) WHERE id = NEW.id;",
+        ),
     ] {
         let found = findings(&format!(
             "{SECURED} CREATE POLICY guard ON notes FOR INSERT WITH CHECK (owns_note(owner_id)); {}",
@@ -208,25 +214,46 @@ fn a_helper_stored_as_a_value_is_not_reported() {
 fn a_helper_reaching_a_condition_of_the_body_is_reported() {
     for (declared, body) in [
         // An `ELSIF` condition.
-        ("", "IF NEW.id > 0 THEN RETURN NEW; ELSIF owns_note(NEW.owner_id) THEN RAISE EXCEPTION 'no'; END IF;"),
+        (
+            "",
+            "IF NEW.id > 0 THEN RETURN NEW; ELSIF owns_note(NEW.owner_id) THEN RAISE EXCEPTION 'no'; END IF;",
+        ),
         // A `CASE` condition.
-        ("", "CASE WHEN owns_note(NEW.owner_id) THEN RETURN NEW; ELSE RAISE EXCEPTION 'no'; END CASE;"),
+        (
+            "",
+            "CASE WHEN owns_note(NEW.owner_id) THEN RETURN NEW; ELSE RAISE EXCEPTION 'no'; END CASE;",
+        ),
         // A `WHILE` condition.
-        ("", "WHILE owns_note(NEW.owner_id) LOOP PERFORM 1; END LOOP;"),
+        (
+            "",
+            "WHILE owns_note(NEW.owner_id) LOOP PERFORM 1; END LOOP;",
+        ),
         // An `EXIT WHEN` condition.
-        ("", "LOOP PERFORM 1; EXIT WHEN owns_note(NEW.owner_id); END LOOP;"),
+        (
+            "",
+            "LOOP PERFORM 1; EXIT WHEN owns_note(NEW.owner_id); END LOOP;",
+        ),
         // An `ASSERT` condition.
         ("", "ASSERT owns_note(NEW.owner_id), 'no';"),
         // The `WHERE` of a query the body runs.
-        ("", "PERFORM 1 FROM note_events WHERE own = owns_note(NEW.owner_id);"),
+        (
+            "",
+            "PERFORM 1 FROM note_events WHERE own = owns_note(NEW.owner_id);",
+        ),
         // The `HAVING` of a query the body runs.
-        ("", "PERFORM count(*) FROM note_events GROUP BY own HAVING owns_note(NEW.owner_id);"),
+        (
+            "",
+            "PERFORM count(*) FROM note_events GROUP BY own HAVING owns_note(NEW.owner_id);",
+        ),
         // The `ON` of a join the body runs.
-        ("", "PERFORM 1 FROM note_events JOIN notes ON note_events.own = owns_note(notes.owner_id);"),
+        (
+            "",
+            "PERFORM 1 FROM note_events JOIN notes ON note_events.own = owns_note(notes.owner_id);",
+        ),
         // A variable the body declares, assigns the result to, then tests in a condition.
         (
             "DECLARE own BOOLEAN;",
-            "own := owns_note(NEW.owner_id); IF own THEN RAISE EXCEPTION 'no'; END IF;"
+            "own := owns_note(NEW.owner_id); IF own THEN RAISE EXCEPTION 'no'; END IF;",
         ),
         // A function the body calls, deciding with the result in its own condition.
         ("", "PERFORM guard_note();"),

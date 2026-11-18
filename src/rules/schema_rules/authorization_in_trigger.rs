@@ -12,14 +12,14 @@ use sql_traits::{
     traits::{DatabaseLike, FunctionLike, PolicyLike, TableLike, TriggerLike},
 };
 use sqlparser::ast::{
-    Expr, FromTable, JoinConstraint, JoinOperator, ObjectName, Query, SetExpr, Select, Statement,
+    Expr, FromTable, JoinConstraint, JoinOperator, ObjectName, Query, Select, SetExpr, Statement,
     TableFactor, TableWithJoins, TriggerEvent, UpdateTableFromKind, Visitor,
 };
 use sqlparser_plpgsql::{
     condition::errcode,
     embedded::{
-        expression, Block, Condition, DeclarationKind, LoopControl, Node, NodeKind, Open, Raise,
-        RaiseOptionKind, ReturnQuery,
+        Block, Condition, DeclarationKind, LoopControl, Node, NodeKind, Open, Raise,
+        RaiseOptionKind, ReturnQuery, expression,
     },
 };
 use sqlstate::pg::INSUFFICIENT_PRIVILEGE;
@@ -33,7 +33,7 @@ use crate::{
         plpgsql_flow_support::plpgsql_block,
         policy_support::{Command, applied, sql_query_body},
         trigger_support::{evaluated, triggers_with_functions},
-        walk_support::{walk, stopped},
+        walk_support::{stopped, walk},
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
@@ -211,7 +211,9 @@ fn block_readings<'b>(block: &'b Block, readings: &mut Readings<'b>) {
         if let DeclarationKind::Variable(variable) = &declaration.kind
             && let Some(default) = &variable.default
         {
-            readings.assignments.push((declaration.name.clone(), default));
+            readings
+                .assignments
+                .push((declaration.name.clone(), default));
         }
     }
     for node in &block.statements {
@@ -258,7 +260,10 @@ fn node_readings<'b>(node: &'b Node, readings: &mut Readings<'b>) {
         }
         NodeKind::Loop(repeated) => {
             match &repeated.control {
-                LoopControl::While(condition) | LoopControl::Array { array: condition, .. } => {
+                LoopControl::While(condition)
+                | LoopControl::Array {
+                    array: condition, ..
+                } => {
                     readings.conditions.push(condition);
                 }
                 LoopControl::Query { query, .. } => readings.statements.push(query),
@@ -292,8 +297,9 @@ fn node_readings<'b>(node: &'b Node, readings: &mut Readings<'b>) {
                 readings.assignments.push((name, &assignment.value));
             }
         }
-        NodeKind::Return { value: Some(value) }
-        | NodeKind::ReturnNext { value: Some(value) } => readings.returns.push(value),
+        NodeKind::Return { value: Some(value) } | NodeKind::ReturnNext { value: Some(value) } => {
+            readings.returns.push(value);
+        }
         NodeKind::Return { value: None }
         | NodeKind::ReturnNext { value: None }
         | NodeKind::ReturnQuery(ReturnQuery::Dynamic(_))
@@ -437,7 +443,9 @@ fn from_conditions(joined: &TableWithJoins) -> Vec<&Expr> {
 fn factor_conditions(factor: &TableFactor) -> Vec<&Expr> {
     match factor {
         TableFactor::Derived { subquery, .. } => query_conditions(subquery),
-        TableFactor::NestedJoin { table_with_joins, .. } => from_conditions(table_with_joins),
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => from_conditions(table_with_joins),
         _ => Vec::new(),
     }
 }
@@ -485,7 +493,10 @@ impl<DB: DatabaseLike> Visitor for ReachingCalls<'_, '_, DB> {
         let Expr::Function(call) = expression else {
             return ControlFlow::Continue(());
         };
-        let reached = match self.database.functions_reached_by(call, IdentifierCase::Folded) {
+        let reached = match self
+            .database
+            .functions_reached_by(call, IdentifierCase::Folded)
+        {
             Ok(reached) => reached,
             Err(error) => return ControlFlow::Break(Some(error)),
         };
@@ -499,11 +510,11 @@ impl<DB: DatabaseLike> Visitor for ReachingCalls<'_, '_, DB> {
             if !self.carrying.insert(function) {
                 continue;
             }
-            let carries = match function_carries(self.database, function, self.helper, self.carrying)
-            {
-                Ok(carries) => carries,
-                Err(error) => return ControlFlow::Break(Some(error)),
-            };
+            let carries =
+                match function_carries(self.database, function, self.helper, self.carrying) {
+                    Ok(carries) => carries,
+                    Err(error) => return ControlFlow::Break(Some(error)),
+                };
             if carries {
                 return ControlFlow::Break(None);
             }
@@ -520,7 +531,11 @@ fn value_reaches<'db, DB: DatabaseLike>(
     helper: &'db DB::Function,
     carrying: &mut HashSet<&'db DB::Function>,
 ) -> Result<bool, LookupError> {
-    let mut calls = ReachingCalls { database, helper, carrying };
+    let mut calls = ReachingCalls {
+        database,
+        helper,
+        carrying,
+    };
     stopped(walk(expression, &mut calls))
 }
 
@@ -577,15 +592,21 @@ fn sql_carries<'db, DB: DatabaseLike>(
         queries.push(query);
     } else if let Some(statements) = &atomic {
         let statements: &[Statement] = statements;
-        if let Some(statement) =
-            statements.iter().rev().find(|statement| matches!(statement, Statement::Query(_)))
+        if let Some(statement) = statements
+            .iter()
+            .rev()
+            .find(|statement| matches!(statement, Statement::Query(_)))
             && let Statement::Query(query) = statement
         {
             queries.push(query);
         }
     }
     for query in queries {
-        let mut calls = ReachingCalls { database, helper, carrying };
+        let mut calls = ReachingCalls {
+            database,
+            helper,
+            carrying,
+        };
         if stopped(walk(query, &mut calls))? {
             return Ok(true);
         }
@@ -716,7 +737,9 @@ fn decides_with<'db, DB: DatabaseLike>(
     when: Option<&'db Expr>,
 ) -> Result<bool, LookupError> {
     let mut carrying: HashSet<&'db DB::Function> = HashSet::new();
-    if let Some(condition) = when && value_reaches(database, condition, helper, &mut carrying)? {
+    if let Some(condition) = when
+        && value_reaches(database, condition, helper, &mut carrying)?
+    {
         return Ok(true);
     }
     for function in reachable_functions(database, function)? {
