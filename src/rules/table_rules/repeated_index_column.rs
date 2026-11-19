@@ -2,7 +2,7 @@
 
 use sql_traits::{
     errors::LookupError,
-    traits::{ColumnLike, DatabaseLike, IndexLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, TableIndexLike, TableLike},
     utils::columns_in_expression,
 };
 use sqlparser::ast::{Expr, IndexType};
@@ -93,9 +93,9 @@ CREATE INDEX t_a ON t (a);",
 /// The name of an index, or its columns when it has none, and the first key
 /// column it names more than once, for a btree index over plain columns.
 ///
-/// Each key is resolved on its own because [`IndexLike::columns`] lists every
-/// column once, however many keys name it.
-fn repeated<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
+/// Each key is resolved on its own because [`TableIndexLike::columns`] lists
+/// every column once, however many keys name it.
+fn repeated<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     database: &'db DB,
     index: &'db I,
 ) -> Result<Option<(String, &'db DB::Column)>, LookupError> {
@@ -110,7 +110,7 @@ fn repeated<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
     {
         return Ok(None);
     }
-    let table = IndexLike::table(index, database);
+    let table = TableIndexLike::table(index, database);
     let declared: Vec<&DB::Column> = table.columns(database)?.collect();
     let target = index_target::<DB>(table);
     let keys: Vec<&DB::Column> = elements

@@ -3,7 +3,7 @@
 
 use sql_traits::{
     errors::LookupError,
-    traits::{ColumnLike, DatabaseLike, IndexLike, TableLike, UniqueIndexLike},
+    traits::{ColumnLike, DatabaseLike, IndexLike, TableIndexLike, TableLike, UniqueIndexLike},
 };
 
 use crate::{
@@ -16,7 +16,7 @@ use crate::{
 
 /// Whether an index's columns include one of `subjects`, the subject columns
 /// of its table.
-fn scoped<DB: DatabaseLike, I: IndexLike<DB = DB>>(
+fn scoped<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     database: &DB,
     index: &I,
     subjects: &[&str],
@@ -31,7 +31,7 @@ fn scoped<DB: DatabaseLike, I: IndexLike<DB = DB>>(
 ///
 /// A role the schema never creates may hold the privileges from outside it,
 /// and a deployment declaring no client role proves nothing.
-fn client_writable<DB: DatabaseLike, I: IndexLike<DB = DB>>(
+fn client_writable<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     database: &DB,
     deployment: &Deployment,
     table: &DB::Table,
@@ -63,7 +63,7 @@ fn client_writable<DB: DatabaseLike, I: IndexLike<DB = DB>>(
 
 /// The name an index goes by in a finding: the one an allowance takes, else
 /// its columns.
-fn label<DB: DatabaseLike, I: IndexLike<DB = DB>>(
+fn label<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     database: &DB,
     index: &I,
 ) -> Result<String, LookupError> {

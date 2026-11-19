@@ -5,7 +5,9 @@ use std::borrow::Cow;
 
 use sql_traits::{
     errors::LookupError,
-    traits::{CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, IndexLike, TableLike},
+    traits::{
+        CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, TableIndexLike, TableLike,
+    },
 };
 use sqlparser::ast::{BinaryOperator, Expr};
 
@@ -188,7 +190,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for NullableCompositeForeignKey<DB> {
 /// The distinct `columns` an index leads with, in any order, each a bare
 /// column rather than an expression over it, up to its first entry that is
 /// none of them. An index with a predicate leads with none.
-fn leading<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
+fn leading<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     database: &'db DB,
     index: &'db I,
     columns: &[&DB::Column],

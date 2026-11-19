@@ -155,6 +155,37 @@ fn a_unique_index_repeating_a_key_constraint_is_reported() {
     assert_eq!(found, ["accounts_email", "accounts_identifier"]);
 }
 
+/// Indexes on a materialized view, two of which repeat one before them.
+const TITLE_INDEXES: &str = "
+    CREATE TABLE documents (identifier INT PRIMARY KEY, title TEXT, body TEXT);
+    CREATE MATERIALIZED VIEW titles AS SELECT identifier, title, body FROM documents;
+    CREATE UNIQUE INDEX titles_identifier ON titles (identifier);
+    CREATE INDEX titles_lower ON titles ((lower(title))) INCLUDE (body) WHERE title IS NOT NULL;
+    CREATE INDEX titles_lower_descending ON titles ((lower(title)) DESC) INCLUDE (body) WHERE title IS NOT NULL;
+    CREATE INDEX titles_lower_again ON titles ((LOWER(Title))) INCLUDE (Body) WHERE title IS NOT NULL;
+    CREATE INDEX titles_body ON titles (body);
+    CREATE INDEX titles_body_again ON titles (body);
+    CREATE MATERIALIZED VIEW bodies AS SELECT identifier, body FROM documents;
+    CREATE INDEX bodies_body ON bodies (body);
+";
+
+#[test]
+fn an_index_repeating_another_on_a_materialized_view_is_reported() {
+    let mut found = named_by("duplicate_index", TITLE_INDEXES);
+    found.sort_unstable();
+    assert_eq!(found, ["titles_body_again", "titles_lower_again"]);
+}
+
+#[test]
+fn a_live_index_repeating_another_on_a_materialized_view_is_reported() {
+    let (_container, database) = crate::live_catalog::catalog("public", TITLE_INDEXES);
+    let constrainer: GenericConstrainer<pg_diesel::PgDieselDatabase> =
+        DuplicateIndex::default().into();
+    let mut found = first_names(&constrainer, &database, "duplicate_index");
+    found.sort_unstable();
+    assert_eq!(found, ["titles_body_again", "titles_lower_again"]);
+}
+
 #[test]
 fn duplicates_another_rule_reports_are_left_to_it() {
     let sql = "CREATE TABLE t (a INT, b INT, UNIQUE (a), UNIQUE (a));

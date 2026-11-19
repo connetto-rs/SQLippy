@@ -2,7 +2,7 @@
 
 use sql_traits::{
     errors::LookupError,
-    traits::{ColumnLike, DatabaseLike, IndexLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, IndexLike, TableIndexLike, TableLike},
 };
 use sqlparser::ast::{Expr, IndexType};
 
@@ -26,7 +26,7 @@ struct Shape<'db, DB: DatabaseLike> {
 impl<'db, DB: DatabaseLike> Shape<'db, DB> {
     /// The shape of an index over plain columns, or `None` for an index over
     /// expressions.
-    fn of<I: IndexLike<DB = DB>>(
+    fn of<I: TableIndexLike<DB = DB>>(
         database: &'db DB,
         index: &'db I,
         unique: bool,

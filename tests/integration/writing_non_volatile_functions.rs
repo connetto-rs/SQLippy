@@ -99,11 +99,14 @@ fn atomic_writes_are_reported() {
     assert!(found[0].contains("runs INSERT"));
 }
 
+/// Every row-locking strength PostgreSQL accepts after `FOR`.
+const STRENGTHS: [&str; 4] = ["UPDATE", "NO KEY UPDATE", "SHARE", "KEY SHARE"];
+
 #[test]
 fn sql_locking_reads_are_reported() {
-    // PostgreSQL 18 rejects calls with either locking strength in a non-volatile SQL body.
+    // PostgreSQL 18 rejects calls with any locking strength in a non-volatile SQL body.
     for volatility in ["STABLE", "IMMUTABLE"] {
-        for strength in ["UPDATE", "SHARE"] {
+        for strength in STRENGTHS {
             let function = format!(
                 "CREATE FUNCTION f() RETURNS INT LANGUAGE sql {volatility} AS 'SELECT n FROM audit FOR {strength}';"
             );
@@ -116,19 +119,30 @@ fn sql_locking_reads_are_reported() {
 
 #[test]
 fn strongest_lock_names_the_statement() {
-    // PostgreSQL 18 names `SELECT FOR UPDATE` when the same table has both strengths.
-    let found = findings(
-        "CREATE FUNCTION f() RETURNS INT LANGUAGE sql STABLE AS 'SELECT n FROM audit FOR SHARE FOR UPDATE';",
-    );
-    assert_eq!(found.len(), 1);
-    assert!(found[0].contains("runs SELECT FOR UPDATE"));
+    // PostgreSQL 18 names the strongest lock when the same table has several.
+    for (locks, strongest) in [
+        ("FOR SHARE FOR UPDATE", "UPDATE"),
+        ("FOR NO KEY UPDATE FOR UPDATE", "UPDATE"),
+        ("FOR KEY SHARE FOR SHARE", "SHARE"),
+        ("FOR SHARE FOR NO KEY UPDATE", "NO KEY UPDATE"),
+    ] {
+        let function = format!(
+            "CREATE FUNCTION f() RETURNS INT LANGUAGE sql STABLE AS 'SELECT n FROM audit {locks}';"
+        );
+        let found = findings(&function);
+        assert_eq!(found.len(), 1, "{function}");
+        assert!(
+            found[0].contains(&format!("runs SELECT FOR {strongest}")),
+            "{function}"
+        );
+    }
 }
 
 #[test]
 fn atomic_locking_reads_are_reported() {
     // PostgreSQL 18 rejects locking reads when calling a non-volatile atomic body.
     for volatility in ["STABLE", "IMMUTABLE"] {
-        for strength in ["UPDATE", "SHARE"] {
+        for strength in STRENGTHS {
             let function = format!(
                 "CREATE FUNCTION f() RETURNS INT LANGUAGE sql {volatility} BEGIN ATOMIC SELECT n FROM audit FOR {strength}; END;"
             );
@@ -143,7 +157,7 @@ fn atomic_locking_reads_are_reported() {
 fn plpgsql_locking_reads_are_reported() {
     // PostgreSQL 18 rejects `SELECT INTO` with row locks when the statement is reached.
     for volatility in ["STABLE", "IMMUTABLE"] {
-        for strength in ["UPDATE", "SHARE"] {
+        for strength in STRENGTHS {
             let function = format!(
                 "CREATE FUNCTION f() RETURNS INT LANGUAGE plpgsql {volatility} AS $$ DECLARE selected INT; BEGIN SELECT n INTO selected FROM audit FOR {strength}; RETURN selected; END $$;"
             );

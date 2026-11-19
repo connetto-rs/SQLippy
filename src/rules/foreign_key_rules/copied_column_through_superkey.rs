@@ -5,7 +5,10 @@ use std::ops::ControlFlow;
 use sql_traits::{
     errors::LookupError,
     structs::IdentifierCase,
-    traits::{CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, IndexLike, TableLike},
+    traits::{
+        CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, IndexLike, TableIndexLike,
+        TableLike,
+    },
 };
 use sqlparser::ast::{Expr, Ident, ReferentialAction, visit_expressions_mut};
 

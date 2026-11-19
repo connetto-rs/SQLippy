@@ -292,7 +292,8 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 73] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 74] = [
+        Box::new(DuplicateIndex::default()),
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),

@@ -4,8 +4,8 @@
 use sql_traits::{
     errors::LookupError,
     traits::{
-        ColumnLike, DataTypeLike, DatabaseLike, ForeignKeyLike, IndexLike, TableLike,
-        UniqueIndexLike,
+        ColumnLike, DataTypeLike, DatabaseLike, ForeignKeyLike, IndexLike, TableIndexLike,
+        TableLike, UniqueIndexLike,
     },
     utils::scalar_family::ScalarFamily,
 };
@@ -96,7 +96,7 @@ impl<DB> Rule for KeyWithoutExactEquality<DB> {
 
 /// Columns an index names directly, leaving out those only inside an
 /// expression.
-fn named_columns<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
+fn named_columns<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     index: &'db I,
     database: &'db DB,
 ) -> Result<Vec<&'db DB::Column>, LookupError> {

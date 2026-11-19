@@ -2,7 +2,8 @@
 
 use sql_traits::{
     errors::LookupError,
-    traits::{ColumnLike, DatabaseLike, IndexLike, TableLike},
+    traits::{DatabaseLike, IndexLike, TableLike, ViewLike},
+    utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{IndexType, ObjectName, ObjectNamePart, OrderBySort};
 
@@ -13,7 +14,7 @@ use crate::{
         index_support::shape,
         policy_support::{is_column_reference, unnested},
     },
-    traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
+    traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, TableRule},
 };
 
 /// One key of an index as PostgreSQL compares it, the defaults a statement
@@ -67,8 +68,8 @@ impl Entry {
             })
             .collect::<Vec<_>>();
         let mut includes = index
-            .include_columns(database)?
-            .map(|column| column.column_name().to_owned())
+            .include_column_names()
+            .map(|(name, quoted)| normalize_identifier(name, quoted).into_owned())
             .collect::<Vec<_>>();
         includes.sort_unstable();
         let name = index.name().map_or_else(
@@ -123,7 +124,7 @@ fn folded(name: &ObjectName) -> String {
 }
 
 /// Struct defining a rule that reports an index identical to another index
-/// of the same relation.
+/// of the same table or materialized view.
 ///
 /// Two indexes are identical when they agree on every key, with its
 /// expression, collation, direction, null ordering and operator class, and
@@ -134,7 +135,8 @@ fn folded(name: &ObjectName) -> String {
 /// naming none. Of two identical indexes the later one is reported, and an
 /// index never stands in for a key constraint, which only
 /// `duplicate_unique_index` compares with another. Identical plain
-/// indexes over columns alone are left to `prefix_redundant_index`.
+/// indexes over columns alone on a table are left to
+/// `prefix_redundant_index`.
 ///
 /// # Example
 ///
@@ -164,9 +166,10 @@ impl<DB> Default for DuplicateIndex<DB> {
 }
 
 impl<DB: DatabaseLike + 'static> From<DuplicateIndex<DB>> for GenericConstrainer<DB> {
-    fn from(rule: DuplicateIndex<DB>) -> Self {
+    fn from(_: DuplicateIndex<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
-        constrainer.register_table_rule(Box::new(rule));
+        constrainer.register_table_rule(Box::new(DuplicateIndex::default()));
+        constrainer.register_schema_rule(Box::new(DuplicateIndex::default()));
         constrainer
     }
 }
@@ -193,6 +196,40 @@ CREATE INDEX documents_title_first ON public.documents ((lower(title))) WHERE ti
     }
 }
 
+/// Calls `report` with each index of `entries` identical to an earlier one
+/// and that earlier index, unless another rule reports the pair, which only
+/// happens on a table.
+fn duplicates(
+    entries: &[Entry],
+    on_table: bool,
+    mut report: impl FnMut(&Entry, &Entry) -> Result<(), Interruption>,
+) -> Result<(), Interruption> {
+    for (position, entry) in entries.iter().enumerate() {
+        let Some(earlier) = entries[..position]
+            .iter()
+            .find(|earlier| earlier.definition == entry.definition)
+        else {
+            continue;
+        };
+        if !(on_table && entry.reported_elsewhere(earlier)) {
+            report(entry, earlier)?;
+        }
+    }
+    Ok(())
+}
+
+/// The message and the resolution for `entry`, identical to `earlier`, on
+/// the relation named `relation`.
+fn finding(entry: &Entry, earlier: &Entry, relation: &str) -> (String, String) {
+    (
+        format!(
+            "Index '{}' on '{relation}' repeats index '{}' in every key, predicate, method, uniqueness and included column, so '{}' serves every lookup it does.",
+            entry.name, earlier.name, earlier.name
+        ),
+        format!("DROP INDEX {};", entry.name),
+    )
+}
+
 impl<DB: DatabaseLike> TableRule for DuplicateIndex<DB> {
     type Database = DB;
 
@@ -209,27 +246,30 @@ impl<DB: DatabaseLike> TableRule for DuplicateIndex<DB> {
         for index in table.indices(database)? {
             entries.push(Entry::of(database, index, false)?);
         }
-        for (position, entry) in entries.iter().enumerate() {
-            let Some(earlier) = entries[..position]
-                .iter()
-                .find(|earlier| earlier.definition == entry.definition)
-            else {
-                continue;
-            };
-            if entry.reported_elsewhere(earlier) {
-                continue;
-            }
-            reporter.table(
-                table,
-                format!(
-                    "Index '{}' on '{}' repeats index '{}' in every key, predicate, method, uniqueness and included column, so '{}' serves every lookup it does.",
-                    entry.name,
-                    table.table_name(),
-                    earlier.name,
-                    earlier.name
-                ),
-                format!("DROP INDEX {};", entry.name),
-            )?;
+        duplicates(&entries, true, |entry, earlier| {
+            let (message, resolution) = finding(entry, earlier, table.table_name());
+            reporter.table(table, message, resolution)
+        })
+    }
+}
+
+impl<DB: DatabaseLike> SchemaRule for DuplicateIndex<DB> {
+    type Database = DB;
+
+    fn check_schema(
+        &self,
+        database: &Self::Database,
+        reporter: &mut Reporter<'_, Self::Database>,
+    ) -> Result<(), Interruption> {
+        for view in database.materialized_views() {
+            let entries = database
+                .indexes_on_materialized_view(view)?
+                .map(|index| Entry::of(database, index, false))
+                .collect::<Result<Vec<_>, _>>()?;
+            duplicates(&entries, false, |entry, earlier| {
+                let (message, resolution) = finding(entry, earlier, view.view_name());
+                reporter.materialized_view(view, message, resolution)
+            })?;
         }
         Ok(())
     }

@@ -7,8 +7,8 @@ use sql_traits::{
     structs::RoleSetting,
     traits::{
         ColumnLike, DatabaseLike, DomainLike, ExtensionLike, ForeignKeyLike, FunctionLike,
-        IndexLike, PolicyLike, RoleLike, RoleMembershipLike, SequenceLike, TableLike,
-        UserDefinedTypeLike, ViewLike,
+        IndexLike, PolicyLike, RoleLike, RoleMembershipLike, SequenceLike, TableIndexLike,
+        TableLike, UserDefinedTypeLike, ViewLike,
     },
 };
 use sqlparser::ast::Statement;
@@ -295,7 +295,7 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
 
     /// Reports a violation on `index`, named by [`index_name`] or else by its
     /// columns, unless an allowance for this rule names it.
-    fn indexed<I: IndexLike<DB = DB>>(
+    fn indexed<I: TableIndexLike<DB = DB>>(
         &mut self,
         index: &I,
         location: impl FnOnce(&I) -> Location<DB>,
