@@ -4,8 +4,8 @@ use std::ops::ControlFlow;
 
 use sql_traits::{errors::LookupError, traits::DatabaseLike};
 use sqlparser::ast::{
-    BinaryOperator, Cte, DataType, Expr, Function, Ident, ObjectNamePart, Query, Statement, Value,
-    Visit, Visitor,
+    BinaryOperator, Cte, DataType, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
+    Ident, ObjectNamePart, Query, Statement, Value, Visit, Visitor,
 };
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
     rules::{
         cte_support::{RecursiveItem, same_name},
         expression_site_support::{ExpressionFinder, check_schema, check_statement},
-        policy_support::unnested,
+        policy_support::{conjuncts, unnested},
         walk_support::walk,
     },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule},
@@ -49,7 +49,7 @@ impl Visitor for Unending {
 /// Why a cycle keeps `item` producing rows, or `None` when it stops.
 fn unending(item: &Cte) -> Option<String> {
     let recursive = RecursiveItem::split(item)?;
-    if bounded(&recursive) {
+    if bounded(&recursive) || consumed(&recursive) {
         return None;
     }
     if recursive.keeps_duplicates {
@@ -91,6 +91,155 @@ fn bounded(recursive: &RecursiveItem<'_>) -> bool {
     })
 }
 
+/// Whether a condition of the recursive term rejects a NULL in a working
+/// table column the term replaces on each step by NULL or by its part past a
+/// separator found in it, so the column's length falls until the walk stops.
+fn consumed(recursive: &RecursiveItem<'_>) -> bool {
+    recursive.conditions().into_iter().any(|condition| {
+        let rejected = match unnested(condition) {
+            Expr::IsNotNull(operand) => recursive.working_column(operand),
+            Expr::BinaryOp {
+                left,
+                op:
+                    BinaryOperator::Eq
+                    | BinaryOperator::NotEq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq,
+                right,
+            } => recursive
+                .working_column(left)
+                .or_else(|| recursive.working_column(right)),
+            _ => None,
+        };
+        rejected.is_some_and(|column| shrinks(recursive, column))
+    })
+}
+
+/// Whether the recursive term puts in `column`'s place only NULL or a
+/// `substr` of `column` starting past a position its `CASE` branch found.
+fn shrinks(recursive: &RecursiveItem<'_>, column: &Ident) -> bool {
+    let Some(output) = recursive.outputs().and_then(|outputs| {
+        recursive
+            .position(column)
+            .and_then(|position| outputs.get(position).copied())
+    }) else {
+        return false;
+    };
+    match unnested(output) {
+        Expr::Case {
+            operand: None,
+            conditions,
+            else_result,
+            ..
+        } => {
+            conditions.iter().all(|branch| {
+                null(&branch.result) || cut(recursive, column, &branch.condition, &branch.result)
+            }) && else_result.as_deref().is_none_or(null)
+        }
+        other => null(other),
+    }
+}
+
+/// Whether `expression` is the NULL literal.
+fn null(expression: &Expr) -> bool {
+    matches!(unnested(expression), Expr::Value(value) if value.value == Value::Null)
+}
+
+/// Whether `result` is `substr(column, found + k)` with `k` a whole number
+/// above zero and `found` a separator position that `guard` holds at least 1.
+fn cut(recursive: &RecursiveItem<'_>, column: &Ident, guard: &Expr, result: &Expr) -> bool {
+    let Expr::Substring {
+        expr,
+        substring_from: Some(start),
+        substring_for: None,
+        ..
+    } = unnested(result)
+    else {
+        return false;
+    };
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Plus,
+        right,
+    } = unnested(start)
+    else {
+        return false;
+    };
+    let past = |found: &Expr, offset: &Expr| {
+        whole_at_least(offset, 1)
+            && searches(recursive, column, found)
+            && conjuncts(guard)
+                .into_iter()
+                .any(|condition| holds_found(condition, found))
+    };
+    recursive
+        .working_column(expr)
+        .is_some_and(|read| same_name(read, column))
+        && (past(left, right) || past(right, left))
+}
+
+/// Whether `found` is `instr(column, separator)`, `strpos(column, separator)`
+/// or `position(separator IN column)` with a string literal separator.
+fn searches(recursive: &RecursiveItem<'_>, column: &Ident, found: &Expr) -> bool {
+    let (text, separator) = match unnested(found) {
+        Expr::Position { expr, r#in } => (r#in.as_ref(), expr.as_ref()),
+        Expr::Function(function)
+            if ["instr", "strpos"]
+                .iter()
+                .any(|known| called(function, known)) =>
+        {
+            let FunctionArguments::List(list) = &function.args else {
+                return false;
+            };
+            let [
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(text)),
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(separator)),
+            ] = list.args.as_slice()
+            else {
+                return false;
+            };
+            (text, separator)
+        }
+        _ => return false,
+    };
+    recursive
+        .working_column(text)
+        .is_some_and(|read| same_name(read, column))
+        && matches!(
+            unnested(separator),
+            Expr::Value(value) if matches!(value.value, Value::SingleQuotedString(_))
+        )
+}
+
+/// Whether `condition` holds `found` at least 1, as `found > 0` or
+/// `found >= 1` does.
+fn holds_found(condition: &Expr, found: &Expr) -> bool {
+    let Expr::BinaryOp { left, op, right } = unnested(condition) else {
+        return false;
+    };
+    let (position, bound, least) = match op {
+        BinaryOperator::Gt => (left, right, 0),
+        BinaryOperator::GtEq => (left, right, 1),
+        BinaryOperator::Lt => (right, left, 0),
+        BinaryOperator::LtEq => (right, left, 1),
+        _ => return false,
+    };
+    unnested(position) == unnested(found) && whole_at_least(bound, least)
+}
+
+/// Whether `expression` is a whole number literal of at least `least`.
+fn whole_at_least(expression: &Expr, least: u64) -> bool {
+    matches!(
+        unnested(expression),
+        Expr::Value(value) if matches!(
+            &value.value,
+            Value::Number(number, _) if number.parse::<u64>().is_ok_and(|number| number >= least)
+        )
+    )
+}
+
 /// Whether an output of the recursive term computes a new value from the
 /// working table on each step, as a counter or a path does.
 fn grows(recursive: &RecursiveItem<'_>, output: &Expr) -> bool {
@@ -111,13 +260,20 @@ fn grows(recursive: &RecursiveItem<'_>, output: &Expr) -> bool {
 
 /// Whether `function` is a built-in that appends to an array or a string.
 fn accumulates(function: &Function) -> bool {
-    const ACCUMULATING: [&str; 5] = [
+    [
         "array_append",
         "array_prepend",
         "array_cat",
         "concat",
         "concat_ws",
-    ];
+    ]
+    .iter()
+    .any(|known| called(function, known))
+}
+
+/// Whether `function` calls the catalog function `known`, unqualified or in
+/// `pg_catalog`.
+fn called(function: &Function, known: &str) -> bool {
     let named = match function.name.0.as_slice() {
         [ObjectNamePart::Identifier(named)] => named,
         [
@@ -126,7 +282,7 @@ fn accumulates(function: &Function) -> bool {
         ] if spelled(schema, "pg_catalog") => named,
         _ => return false,
     };
-    ACCUMULATING.iter().any(|known| spelled(named, known))
+    spelled(named, known)
 }
 
 /// Whether `identifier` names the lowercase catalog name `known`.
@@ -243,9 +399,12 @@ impl ExpressionFinder for UnendingItems {
 /// array, makes every row differ, so once the walked rows hold a cycle the
 /// walk never ends. A condition in the term's `WHERE` or inner join `ON`
 /// that caps a counter the term moves toward the cap by a positive constant
-/// or interval on each step stops it on any data. The rule reads views,
-/// materialized views, policies, SQL and PL/pgSQL function bodies and, as a
-/// query rule, statements.
+/// or interval on each step stops it on any data. So does one rejecting
+/// NULL in a text column the term replaces by NULL or by its part past a
+/// separator `instr`, `strpos` or `position` found in it, as splitting a
+/// delimited string does. The rule reads views, materialized views,
+/// policies, SQL and PL/pgSQL function bodies and, as a query rule,
+/// statements.
 ///
 /// # Example
 ///
