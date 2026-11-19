@@ -7,7 +7,7 @@ use std::ops::ControlFlow;
 use sql_traits::{
     errors::LookupError,
     structs::{IdentifierCase, TargetName},
-    traits::{ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableLike},
+    traits::{ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableIndexLike, TableLike},
     utils::columns_in_expression,
 };
 use sqlparser::ast::{
@@ -31,11 +31,11 @@ pub(crate) fn index_target<DB: DatabaseLike>(table: &DB::Table) -> TargetName<'_
 
 /// The columns `index` reads in its key and its predicate, or `None` when
 /// either names a column its table does not declare.
-pub(crate) fn read_columns<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
+pub(crate) fn read_columns<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     database: &'db DB,
     index: &'db I,
 ) -> Result<Option<Vec<&'db DB::Column>>, LookupError> {
-    let table = IndexLike::table(index, database);
+    let table = TableIndexLike::table(index, database);
     let declared: Vec<&DB::Column> = table.columns(database)?.collect();
     let target = index_target::<DB>(table);
     let mut read = Vec::new();
@@ -115,7 +115,7 @@ pub(crate) fn leading(expression: &Expr) -> &Expr {
 /// The column each entry of `index` names bare, in key order, and `None` for
 /// an entry over an expression. Parentheses keep a column bare, since
 /// PostgreSQL stores `((a))` as the key column `a`.
-pub(crate) fn entry_columns<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
+pub(crate) fn entry_columns<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     database: &'db DB,
     index: &'db I,
 ) -> Result<Vec<Option<&'db DB::Column>>, LookupError> {
@@ -145,7 +145,7 @@ pub(crate) fn entry_columns<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
 }
 
 /// Whether an index without a predicate leads with `column`.
-fn leads<DB: DatabaseLike, I: IndexLike<DB = DB>>(
+fn leads<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     database: &DB,
     index: &I,
     column: &DB::Column,

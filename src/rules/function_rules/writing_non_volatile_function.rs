@@ -79,6 +79,17 @@ impl<DB> Rule for WritingNonVolatileFunction<DB> {
 /// its command, or quoting a statement without a fixed name.
 struct FirstRefused;
 
+/// The rank PostgreSQL gives `lock_type` when one table is locked more than
+/// once, naming the statement after the strongest.
+fn strength(lock_type: LockType) -> u8 {
+    match lock_type {
+        LockType::KeyShare => 0,
+        LockType::Share => 1,
+        LockType::NoKeyUpdate => 2,
+        LockType::Update => 3,
+    }
+}
+
 impl Visitor for FirstRefused {
     type Break = Cow<'static, str>;
 
@@ -86,9 +97,13 @@ impl Visitor for FirstRefused {
         if matches!(query.body.as_ref(), SetExpr::Select(select) if select.into.is_some()) {
             return ControlFlow::Break(Cow::Borrowed("SELECT INTO"));
         }
-        match query.locks.iter().map(|lock| lock.lock_type).max() {
-            Some(LockType::Update) => ControlFlow::Break(Cow::Borrowed("SELECT FOR UPDATE")),
-            Some(LockType::Share) => ControlFlow::Break(Cow::Borrowed("SELECT FOR SHARE")),
+        match query
+            .locks
+            .iter()
+            .map(|lock| lock.lock_type)
+            .max_by_key(|lock_type| strength(*lock_type))
+        {
+            Some(lock_type) => ControlFlow::Break(Cow::Owned(format!("SELECT FOR {lock_type}"))),
             None => ControlFlow::Continue(()),
         }
     }

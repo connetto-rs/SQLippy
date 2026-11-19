@@ -6,7 +6,7 @@ use std::{iter, ops::ControlFlow};
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinitionScope, ColumnScope, IdentifierCase, TargetName},
-    traits::{ColumnLike, DatabaseLike, ForeignKeyLike, IndexLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, ForeignKeyLike, IndexLike, TableIndexLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{
@@ -155,7 +155,7 @@ fn plain_unique_keys<'db, DB: DatabaseLike>(
     database: &'db DB,
     table: &'db DB::Table,
 ) -> Result<Vec<(Key<'db, DB>, bool)>, LookupError> {
-    fn usable<'db, DB: DatabaseLike, I: IndexLike<DB = DB>>(
+    fn usable<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
         database: &'db DB,
         index: &'db I,
     ) -> Result<Option<(Key<'db, DB>, bool)>, LookupError> {

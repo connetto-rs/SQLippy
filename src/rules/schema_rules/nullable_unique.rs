@@ -2,7 +2,7 @@
 
 use sql_traits::{
     errors::LookupError,
-    traits::{ColumnLike, DatabaseLike, IndexLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, IndexLike, TableIndexLike, TableLike},
 };
 
 use crate::{
@@ -28,7 +28,7 @@ fn is_optional_reference<DB: DatabaseLike>(
 
 /// The nullable columns of a unique index that treats nulls as distinct,
 /// other than optional references.
-fn nullable_columns<DB: DatabaseLike, I: IndexLike<DB = DB>>(
+fn nullable_columns<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     database: &DB,
     index: &I,
 ) -> Result<Vec<String>, LookupError> {

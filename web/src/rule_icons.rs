@@ -174,6 +174,7 @@ rule_icons! {
     "recursive_step_over_union" => FaMagnifyingGlass,
     "unseeded_policy_set" => FaGlobe,
     "prefix_redundant_index" => FaTags,
+    "duplicate_index" => FaClone,
     "repeated_index_column" => FaClone,
     "uncached_policy_call" => FaBolt,
     "uncached_helper_query" => FaBolt,
