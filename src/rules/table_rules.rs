@@ -92,6 +92,8 @@ mod policy_expression_defeats_index;
 pub use policy_expression_defeats_index::PolicyExpressionDefeatsIndex;
 mod prefix_redundant_index;
 pub use prefix_redundant_index::PrefixRedundantIndex;
+mod duplicate_index;
+pub use duplicate_index::DuplicateIndex;
 mod repeated_index_column;
 pub use repeated_index_column::RepeatedIndexColumn;
 mod time_dependent_check;

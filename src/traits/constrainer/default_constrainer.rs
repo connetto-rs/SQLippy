@@ -19,10 +19,10 @@ use crate::{
         DefinerSchemaWithoutDefaultRevoke, DefinerTakesActingUser, DefinerTemporarySchemaNotLast,
         DefinerWithoutSearchPath, DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck,
         DuplicateColumnAssignment, DuplicateColumnNameInExtensionGraph, DuplicateForeignKey,
-        DuplicatePolicy, DuplicateUniqueIndex, DuplicatingRecursiveCte, DynamicSqlInjection,
-        EmptyTextAllowed, ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
-        ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, FlagNotBoolean,
-        FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
+        DuplicateIndex, DuplicatePolicy, DuplicateUniqueIndex, DuplicatingRecursiveCte,
+        DynamicSqlInjection, EmptyTextAllowed, ExposedDefinerOverProtectedTable,
+        ExpressionDefeatsIndex, ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema,
+        FlagNotBoolean, FloatingPointMoney, ForbiddenColumnInExtension, FractionalCount,
         FunctionMediatedPolicyCycle, FunctionWithoutSafeSearchPath, GrantOptionToClientRole,
         ImpureImmutableFunction, IncompatibleForeignKey, InvokerWithoutSearchPath,
         JsonStoredAsText, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
@@ -189,9 +189,10 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 52] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 53] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
+        Box::new(DuplicateIndex::default()),
         Box::new(RepeatedIndexColumn::default()),
         Box::new(MissingPrimaryKey::default()),
         Box::new(KeyWithoutExactEquality::default()),

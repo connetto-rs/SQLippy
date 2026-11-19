@@ -4,13 +4,14 @@
 use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
-const RULES: [&str; 8] = [
+const RULES: [&str; 9] = [
     "nullable_composite_foreign_key",
     "unindexed_foreign_key",
     "serial_column",
     "narrow_integer_key",
     "client_written_counter_key",
     "prefix_redundant_index",
+    "duplicate_index",
     "repeated_index_column",
     "scaled_numeric",
 ];
@@ -52,19 +53,121 @@ fn of(rule: &str, sql: &str) -> Vec<String> {
         .collect()
 }
 
-/// The first quoted name of every `prefix_redundant_index` message.
-fn redundant(sql: &str) -> Vec<String> {
+/// The first quoted name of every `rule` message.
+fn named_by(rule: &str, sql: &str) -> Vec<String> {
     let database = ParserDB::parse::<PostgreSqlDialect>(sql).expect("schema parses");
-    every_rule()
-        .diagnostics(&database)
+    first_names(&every_rule(), &database, rule)
+}
+
+/// The first quoted name of every `rule` message `constrainer` reports on
+/// `database`.
+fn first_names<C: Constrainer>(constrainer: &C, database: &C::Database, rule: &str) -> Vec<String> {
+    constrainer
+        .diagnostics(database)
         .into_iter()
         .filter_map(|error| match error {
-            Error::Violation(violation) if violation.rule().name == "prefix_redundant_index" => {
+            Error::Violation(violation) if violation.rule().name == rule => {
                 violation.message().split('\'').nth(1).map(str::to_owned)
             }
             _ => None,
         })
         .collect()
+}
+
+/// The first quoted name of every `prefix_redundant_index` message.
+fn redundant(sql: &str) -> Vec<String> {
+    named_by("prefix_redundant_index", sql)
+}
+
+/// Indexes that each differ from `documents_base` in one fact PostgreSQL
+/// keeps, and indexes that repeat one before them in another spelling.
+const DOCUMENT_INDEXES: &str = "
+    CREATE TABLE documents (identifier INT PRIMARY KEY, title TEXT, body TEXT, rank INT);
+    CREATE INDEX documents_base ON documents ((lower(title)), rank) INCLUDE (body) WHERE title IS NOT NULL;
+    CREATE INDEX documents_descending ON documents ((lower(title)) DESC, rank) INCLUDE (body) WHERE title IS NOT NULL;
+    CREATE INDEX documents_nulls_first ON documents ((lower(title)) NULLS FIRST, rank) INCLUDE (body) WHERE title IS NOT NULL;
+    CREATE INDEX documents_pattern ON documents ((lower(title)) text_pattern_ops, rank) INCLUDE (body) WHERE title IS NOT NULL;
+    CREATE INDEX documents_collated ON documents ((lower(title)) COLLATE \"C\", rank) INCLUDE (body) WHERE title IS NOT NULL;
+    CREATE INDEX documents_other_predicate ON documents ((lower(title)), rank) INCLUDE (body) WHERE rank > 0;
+    CREATE INDEX documents_total ON documents ((lower(title)), rank) INCLUDE (body);
+    CREATE INDEX documents_hash ON documents USING hash ((lower(title))) WHERE title IS NOT NULL;
+    CREATE INDEX documents_btree ON documents ((lower(title))) WHERE title IS NOT NULL;
+    CREATE UNIQUE INDEX documents_unique ON documents ((lower(title)), rank) INCLUDE (body) WHERE title IS NOT NULL;
+    CREATE INDEX documents_no_include ON documents ((lower(title)), rank) WHERE title IS NOT NULL;
+    CREATE INDEX documents_other_include ON documents ((lower(title)), rank) INCLUDE (identifier) WHERE title IS NOT NULL;
+    CREATE INDEX documents_reordered ON documents (rank, (lower(title))) INCLUDE (body) WHERE title IS NOT NULL;
+    CREATE INDEX documents_ascending ON documents ((lower(title)) ASC NULLS LAST, rank ASC) INCLUDE (body) WHERE title IS NOT NULL;
+    CREATE INDEX documents_spelled ON documents ((LOWER(Title)), Rank) INCLUDE (Body) WHERE Title IS NOT NULL;
+    CREATE UNIQUE INDEX documents_unique_again ON documents ((lower(title)), rank) INCLUDE (body) WHERE title IS NOT NULL;
+    CREATE INDEX documents_descending_again ON documents ((lower(title)) DESC NULLS FIRST, rank) INCLUDE (body) WHERE title IS NOT NULL;
+";
+
+/// What `duplicate_index` reports on [`DOCUMENT_INDEXES`].
+const DOCUMENT_DUPLICATES: [&str; 4] = [
+    "documents_ascending",
+    "documents_spelled",
+    "documents_unique_again",
+    "documents_descending_again",
+];
+
+#[test]
+fn an_index_repeating_another_is_reported() {
+    let found = named_by(
+        "duplicate_index",
+        "CREATE TABLE public.documents (identifier integer PRIMARY KEY, title text);
+         CREATE INDEX documents_title_first ON public.documents ((lower(title))) WHERE title IS NOT NULL;
+         CREATE INDEX documents_title_second ON public.documents ((lower(title))) WHERE title IS NOT NULL;",
+    );
+    assert_eq!(found, ["documents_title_second"]);
+}
+
+#[test]
+fn an_index_differing_in_any_fact_postgresql_keeps_is_not_a_duplicate() {
+    assert_eq!(
+        named_by("duplicate_index", DOCUMENT_INDEXES),
+        DOCUMENT_DUPLICATES
+    );
+}
+
+#[test]
+fn live_indexes_differing_in_any_fact_postgresql_keeps_are_not_duplicates() {
+    let (_container, database) = crate::live_catalog::catalog("public", DOCUMENT_INDEXES);
+    let constrainer: GenericConstrainer<pg_diesel::PgDieselDatabase> =
+        DuplicateIndex::default().into();
+    let mut found = first_names(&constrainer, &database, "duplicate_index");
+    found.sort_unstable();
+    let mut expected = DOCUMENT_DUPLICATES;
+    expected.sort_unstable();
+    assert_eq!(found, expected);
+}
+
+#[test]
+fn a_unique_index_repeating_a_key_constraint_is_reported() {
+    let found = named_by(
+        "duplicate_index",
+        "CREATE TABLE accounts (identifier INT PRIMARY KEY, email TEXT UNIQUE, handle TEXT,
+           UNIQUE NULLS NOT DISTINCT (handle));
+         CREATE UNIQUE INDEX accounts_email ON accounts (email);
+         CREATE UNIQUE INDEX accounts_identifier ON accounts (identifier);
+         CREATE UNIQUE INDEX accounts_handle ON accounts (handle);
+         CREATE INDEX accounts_email_plain ON accounts (email);",
+    );
+    assert_eq!(found, ["accounts_email", "accounts_identifier"]);
+}
+
+#[test]
+fn duplicates_another_rule_reports_are_left_to_it() {
+    let sql = "CREATE TABLE t (a INT, b INT, UNIQUE (a), UNIQUE (a));
+         CREATE INDEX t_b ON t (b);
+         CREATE INDEX t_b_again ON t (b);";
+    assert_eq!(named_by("duplicate_index", sql), Vec::<String>::new());
+    assert_eq!(redundant(sql), ["t_b_again"]);
+    let database = ParserDB::parse::<PostgreSqlDialect>(sql).expect("schema parses");
+    let unique = GenericConstrainer::from(DuplicateUniqueIndex::default());
+    assert_eq!(
+        first_names(&unique, &database, "duplicate_unique_index"),
+        ["t"]
+    );
 }
 
 const PARENT: &str = "CREATE TABLE p (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b));";
