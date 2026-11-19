@@ -591,7 +591,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1541,7 +1541,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "pg_diesel"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#17b66a4cd9dfe447d1570b5f4e01e97db03d2e6f"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#78dd86c5f0a7cbe5003dd0d3db835d4f1ec5c6b9"
 dependencies = [
  "diesel",
  "pg_diesel_core",
@@ -1555,7 +1555,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_core"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#17b66a4cd9dfe447d1570b5f4e01e97db03d2e6f"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#78dd86c5f0a7cbe5003dd0d3db835d4f1ec5c6b9"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1569,7 +1569,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg14"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#17b66a4cd9dfe447d1570b5f4e01e97db03d2e6f"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#78dd86c5f0a7cbe5003dd0d3db835d4f1ec5c6b9"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1580,7 +1580,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg15"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#17b66a4cd9dfe447d1570b5f4e01e97db03d2e6f"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#78dd86c5f0a7cbe5003dd0d3db835d4f1ec5c6b9"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1591,7 +1591,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg16"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#17b66a4cd9dfe447d1570b5f4e01e97db03d2e6f"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#78dd86c5f0a7cbe5003dd0d3db835d4f1ec5c6b9"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1602,7 +1602,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg17"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#17b66a4cd9dfe447d1570b5f4e01e97db03d2e6f"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#78dd86c5f0a7cbe5003dd0d3db835d4f1ec5c6b9"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1613,7 +1613,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg18"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#17b66a4cd9dfe447d1570b5f4e01e97db03d2e6f"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#78dd86c5f0a7cbe5003dd0d3db835d4f1ec5c6b9"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1931,7 +1931,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2220,7 +2220,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#e25b1845c46c65481d558ee43cfef0dc18d7b210"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#e441ea4720e2af0244e990a592a63ba70c14e9f7"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -2262,7 +2262,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#658fd76c2012e93b76c00dc16cb7cc6fdfcabf14"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#2dce93fcd6e5d7b44d10761160539e2137d3716a"
 dependencies = [
  "log",
  "recursive",
@@ -2294,7 +2294,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#658fd76c2012e93b76c00dc16cb7cc6fdfcabf14"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#2dce93fcd6e5d7b44d10761160539e2137d3716a"
 dependencies = [
  "proc-macro2",
  "quote",
