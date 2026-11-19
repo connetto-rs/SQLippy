@@ -155,6 +155,18 @@ fn a_unique_index_repeating_a_key_constraint_is_reported() {
     assert_eq!(found, ["accounts_email", "accounts_identifier"]);
 }
 
+#[test]
+fn a_quoted_operator_class_names_the_class_it_quotes() {
+    let found = named_by(
+        "duplicate_index",
+        "CREATE TABLE documents (identifier INT PRIMARY KEY, title TEXT);
+         CREATE INDEX documents_pattern ON documents (title text_pattern_ops) WHERE title IS NOT NULL;
+         CREATE INDEX documents_pattern_quoted ON documents (title \"text_pattern_ops\") WHERE title IS NOT NULL;
+         CREATE INDEX documents_pattern_qualified ON documents (title pg_catalog.\"text_pattern_ops\") WHERE title IS NOT NULL;",
+    );
+    assert_eq!(found, ["documents_pattern_quoted"]);
+}
+
 /// Indexes on a materialized view, two of which repeat one before them.
 const TITLE_INDEXES: &str = "
     CREATE TABLE documents (identifier INT PRIMARY KEY, title TEXT, body TEXT);

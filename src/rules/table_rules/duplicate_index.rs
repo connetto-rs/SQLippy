@@ -108,17 +108,14 @@ impl Entry {
     }
 }
 
-/// `name` with each unquoted part folded to lower case, as PostgreSQL
-/// resolves it.
+/// `name` with each part resolved as PostgreSQL resolves it, unquoted parts
+/// folded to lower case and quoted parts kept as written. An operator class
+/// name is built from identifiers alone.
 fn folded(name: &ObjectName) -> String {
     name.0
         .iter()
-        .map(|part| match part {
-            ObjectNamePart::Identifier(ident) if ident.quote_style.is_none() => {
-                ident.value.to_lowercase()
-            }
-            other => other.to_string(),
-        })
+        .filter_map(ObjectNamePart::as_ident)
+        .map(|ident| normalize_identifier(&ident.value, ident.quote_style.is_some()))
         .collect::<Vec<_>>()
         .join(".")
 }
@@ -262,10 +259,10 @@ impl<DB: DatabaseLike> SchemaRule for DuplicateIndex<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         for view in database.materialized_views() {
-            let entries = database
-                .indexes_on_materialized_view(view)?
-                .map(|index| Entry::of(database, index, false))
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut entries = Vec::new();
+            for index in database.indexes_on_materialized_view(view)? {
+                entries.push(Entry::of(database, index, false)?);
+            }
             duplicates(&entries, false, |entry, earlier| {
                 let (message, resolution) = finding(entry, earlier, view.view_name());
                 reporter.materialized_view(view, message, resolution)
