@@ -42,6 +42,7 @@ mod engine_schema_types;
 mod engines;
 mod expressions_and_functions;
 mod extension_column_names;
+mod extension_versions;
 mod foreign_key_hierarchies;
 mod function_search_paths;
 mod generated_keys;

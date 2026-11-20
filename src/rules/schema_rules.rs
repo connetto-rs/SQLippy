@@ -20,6 +20,8 @@ mod reachable_foreign_table;
 pub use reachable_foreign_table::ReachableForeignTable;
 mod catalogue_rules;
 mod exposure_rules;
+mod extension_without_version;
+pub use extension_without_version::ExtensionWithoutVersion;
 mod nil_uuid_sentinel;
 mod not_in_null_list;
 mod not_in_nullable_subquery;
