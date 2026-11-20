@@ -33,7 +33,9 @@ rule_definition!(
     /// `use_variable` it binds the name to one of the two without a word.
     /// A `RETURNS TABLE` column is an output parameter, so it collides with
     /// a column of the same name in an `ON CONFLICT` target as well. A
-    /// column named `new` or `old` collides only in a trigger function.
+    /// column named `new` or `old` collides only in a trigger function. A
+    /// name that only a relation of unknown columns could hold, such as a
+    /// function in `FROM` sql-traits cannot describe, is not reported.
     ///
     /// # Example
     ///
@@ -151,7 +153,10 @@ struct Collisions<'c, 'b, 'db, DB: DatabaseLike> {
 }
 
 impl<DB: DatabaseLike> Collisions<'_, '_, '_, DB> {
-    /// The collision of a column reference that also names a variable.
+    /// The collision of a column reference that also names a variable. A
+    /// binding that exposes no column name reached a relation whose columns
+    /// are unknown, which may not hold the name at all, so it collides with
+    /// nothing.
     fn reference(&self, expression: &Expr) -> Result<Option<Collision>, LookupError> {
         if !matches!(
             expression,
@@ -162,13 +167,14 @@ impl<DB: DatabaseLike> Collisions<'_, '_, '_, DB> {
         let column = self
             .context
             .reference(expression)?
-            .is_some_and(|(definition, _)| {
-                !matches!(
-                    definition,
-                    ColumnDefinition::Variable(_)
-                        | ColumnDefinition::VariableField(_)
-                        | ColumnDefinition::Parameter { .. }
-                )
+            .is_some_and(|(definition, binding)| {
+                binding.exposed().is_some()
+                    && !matches!(
+                        definition,
+                        ColumnDefinition::Variable(_)
+                            | ColumnDefinition::VariableField(_)
+                            | ColumnDefinition::Parameter { .. }
+                    )
             });
         if !column {
             return Ok(None);
