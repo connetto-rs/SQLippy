@@ -96,6 +96,11 @@ fn every_collision_postgres_refuses_is_reported() {
              DECLARE r notes; c BIGINT; BEGIN SELECT count(*) INTO c FROM (SELECT r.* FROM (notes r JOIN audit a ON true)) x; RETURN c; END $$;",
             "variable 'r'",
         ),
+        (
+            "CREATE FUNCTION merged(id INT) RETURNS VOID LANGUAGE plpgsql AS $$
+             BEGIN PERFORM 1 FROM notes a JOIN notes b USING (id) WHERE id = 1; END $$;",
+            "parameter 'id'",
+        ),
     ] {
         let found = findings(sql);
         assert_eq!(found.len(), 1, "{sql}: {found:?}");
@@ -137,6 +142,21 @@ fn qualified_references_and_unshared_names_are_not_reported() {
         "CREATE FUNCTION unparsable() RETURNS INT LANGUAGE plpgsql AS $$ BEGIN RETURN id $$;",
         "CREATE FUNCTION native() RETURNS INT LANGUAGE c AS 'library', 'symbol';",
         "CREATE FUNCTION find_note(id INT) RETURNS INT LANGUAGE sql AS $$ SELECT notes.id FROM notes WHERE notes.id = $1 $$;",
+        "CREATE FUNCTION held_notes() RETURNS TABLE (note_id INT, label TEXT) LANGUAGE sql AS $$ SELECT id, label FROM notes $$;
+         CREATE FUNCTION probe(affected_ids INT[]) RETURNS VOID LANGUAGE plpgsql AS $$ DECLARE checked INT;
+         BEGIN FOR checked IN SELECT notes.id FROM notes WHERE notes.id IN (SELECT held.note_id FROM held_notes() held WHERE held.note_id = ANY (affected_ids)) LOOP END LOOP; END $$;",
+        "CREATE FUNCTION held_notes() RETURNS TABLE (note_id INT, label TEXT) LANGUAGE sql AS $$ SELECT id, label FROM notes $$;
+         CREATE FUNCTION probe(affected_ids INT[]) RETURNS VOID LANGUAGE plpgsql AS $$ DECLARE checked INT;
+         BEGIN FOR checked IN SELECT held.note_id FROM held_notes() held WHERE held.note_id = ANY (affected_ids) LOOP END LOOP; END $$;",
+        "CREATE FUNCTION held_notes() RETURNS TABLE (note_id INT, label TEXT) LANGUAGE sql AS $$ SELECT id, label FROM notes $$;
+         CREATE FUNCTION probe(affected_ids INT[]) RETURNS VOID LANGUAGE plpgsql AS $$
+         BEGIN PERFORM 1 FROM held_notes() held WHERE held.note_id = affected_ids[1]; END $$;",
+        "CREATE FUNCTION held_notes() RETURNS TABLE (note_id INT, label TEXT) LANGUAGE sql AS $$ SELECT id, label FROM notes $$;
+         CREATE FUNCTION probe(note_id INT) RETURNS VOID LANGUAGE plpgsql AS $$
+         BEGIN PERFORM 1 FROM held_notes() held(renamed_id, renamed_label) WHERE held.renamed_id = note_id; END $$;",
+        "CREATE FUNCTION held_rows() RETURNS SETOF record LANGUAGE sql AS $$ SELECT id FROM notes $$;
+         CREATE FUNCTION probe(affected_id INT) RETURNS VOID LANGUAGE plpgsql AS $$
+         BEGIN PERFORM 1 FROM held_rows() held WHERE held.id = affected_id; END $$;",
     ] {
         assert_eq!(findings(sql), Vec::<String>::new(), "{sql}");
     }
