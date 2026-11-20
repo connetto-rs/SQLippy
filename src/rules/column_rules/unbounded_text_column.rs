@@ -57,16 +57,14 @@ fn rejects_non_json(expression: &Expr, column: &str) -> bool {
             ..
         }
         | Expr::IsNull(expr) => names_column(expr, column),
-        Expr::Function(function) if calls(function, "json_valid") => {
-            let FunctionArguments::List(list) = &function.args else {
-                return false;
-            };
-            matches!(
+        Expr::Function(function) if calls(function, "json_valid") => matches!(
+            &function.args,
+            FunctionArguments::List(list) if matches!(
                 list.args.first(),
                 Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(document)))
                     if names_column(document, column)
             )
-        }
+        ),
         _ => false,
     }
 }
