@@ -4,8 +4,9 @@ use sql_traits::traits::{BinarySend, ColumnLike, DataTypeLike, DatabaseLike, Tab
 
 use crate::{
     deployment::Deployment,
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::schema_of,
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -21,6 +22,8 @@ fn selected<DB: DatabaseLike>(database: &DB, column: &DB::Column, deployment: &D
 
 rule_definition!(
     /// Reports a selected column whose binary send function reaches a type without one.
+    ///
+    /// The rule does not run on SQLite, which has no PostgreSQL binary send protocol.
     ///
     /// [`Deployment::with_binary_replication_table`] or [`Deployment::with_binary_replication_all_tables`] selects the tables to check.
     ///
@@ -49,7 +52,9 @@ rule_definition!(
     RuleExample {
         bad: "CREATE TABLE events (id INT PRIMARY KEY, grants ACLITEM[]);",
         good: "CREATE TABLE events (id INT PRIMARY KEY, grants TEXT[]);",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> ColumnRule for BinarySendFailure<DB> {
@@ -85,6 +90,8 @@ impl<DB: DatabaseLike> ColumnRule for BinarySendFailure<DB> {
 rule_definition!(
     /// Reports a selected column whose binary sendability cannot be determined.
     ///
+    /// The rule does not run on SQLite, which has no PostgreSQL binary send protocol.
+    ///
     /// [`DefaultConstrainer`](crate::traits::DefaultConstrainer) enables this warning alongside [`BinarySendFailure`] when the deployment selects binary-replicated tables.
     UnknownBinarySend,
     register_column_rule,
@@ -94,7 +101,9 @@ rule_definition!(
     RuleExample {
         bad: "CREATE EXTENSION postgis;\nCREATE TABLE events (id INT PRIMARY KEY, area BOX2D);",
         good: "CREATE TABLE events (id INT PRIMARY KEY, area BOX);",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> ColumnRule for UnknownBinarySend<DB> {

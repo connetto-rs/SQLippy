@@ -9,6 +9,7 @@ use sqlparser::ast::{
 
 use crate::rules::walk_support::walk;
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::statement_support::{is_random, row_limit},
@@ -99,7 +100,7 @@ query_rule!(
     /// ```
     RandomOrderLimit,
     LintGroup::Pedantic,
-    "ORDER BY random() with a LIMIT sorts every row to keep a few, and the faster TABLESAMPLE methods do not draw a fair sample.",
+    "ORDER BY random() with a LIMIT sorts every row to keep a few, and no faster form in SQL draws a fair sample.",
     Some("https://www.postgresql.org/docs/current/sql-select.html"),
     RuleExample {
         bad: "CREATE TABLE items (id INT PRIMARY KEY);\n\
@@ -114,16 +115,26 @@ impl<DB: DatabaseLike> QueryRule for RandomOrderLimit<DB> {
 
     fn check_statement(
         &self,
-        _database: &Self::Database,
+        database: &Self::Database,
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
+        let resolution = match Engine::of(database) {
+            Engine::PostgreSql => {
+                "Keep it for small tables. For large ones, TABLESAMPLE SYSTEM reads a few pages but keeps whole pages, and TABLESAMPLE BERNOULLI with a LIMIT stops at the first sampled rows, which come from the start of the table, so neither is a fair sample."
+            }
+            Engine::Sqlite => {
+                "Keep it for small tables. For large ones, SQLite has no sampling clause, so draw random rowids in the application and read those rows."
+            }
+        };
         for found in queries(statement, random_pick) {
             reporter.statement(
                 statement,
                 found.clone(),
-                format!("The statement uses `{found}`, which reads and sorts every row to keep a few."),
-                "Keep it for small tables. For large ones, TABLESAMPLE SYSTEM reads a few pages but keeps whole pages, and TABLESAMPLE BERNOULLI with a LIMIT stops at the first sampled rows, which come from the start of the table, so neither is a fair sample.".to_owned(),
+                format!(
+                    "The statement uses `{found}`, which reads and sorts every row to keep a few."
+                ),
+                resolution.to_owned(),
             )?;
         }
         Ok(())

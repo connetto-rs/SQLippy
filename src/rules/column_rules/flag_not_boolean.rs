@@ -3,6 +3,7 @@
 use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::name_support::{NameHint, names_flag},
@@ -42,7 +43,7 @@ rule_definition!(
     FlagNotBoolean,
     register_column_rule,
     LintGroup::Pedantic,
-    "An integer or text column stores any number of values, so a yes or no state kept in one can hold 2, -1 or 'maybe', which a boolean column refuses.",
+    "A yes or no state kept in an integer or text column can hold 2, -1 or 'maybe' unless a check refuses them.",
     Some("https://www.postgresql.org/docs/current/datatype-boolean.html"),
     RuleExample {
         bad: "CREATE TABLE t (is_active SMALLINT);",
@@ -60,6 +61,13 @@ impl<DB: DatabaseLike> ColumnRule for FlagNotBoolean<DB> {
         column: &<Self::Database as DatabaseLike>::Column,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        HINT.check(database, column, reporter)
+        match Engine::of(database) {
+            Engine::PostgreSql => HINT.check(database, column, reporter),
+            Engine::Sqlite => NameHint {
+                resolution: "Use `INTEGER` with `CHECK (col IN (0, 1))`, replacing `col` with this column name.",
+                ..HINT
+            }
+            .check_unless_constrained(database, column, reporter),
+        }
     }
 }

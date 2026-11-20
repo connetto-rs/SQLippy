@@ -3,6 +3,7 @@
 use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::name_support::{NameHint, names_address},
@@ -27,6 +28,9 @@ rule_definition!(
     /// vocabularies, English unless it selects others, and the type is read
     /// through arrays and domains.
     ///
+    /// The rule does not run on SQLite, which has no address type and no
+    /// practical check that refuses an impossible address.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -48,7 +52,8 @@ rule_definition!(
         bad: "CREATE TABLE t (client_ip TEXT);",
         good: "CREATE TABLE t (client_ip INET);",
     },
-    Basis::Names
+    Basis::Names,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> ColumnRule for AddressStoredAsText<DB> {

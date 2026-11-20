@@ -21,6 +21,8 @@ pub struct CatalogEntry {
     pub kinds: Vec<RuleKind>,
     /// Deployment declarations the rule cannot run without.
     pub requires: &'static [Declaration],
+    /// Engines the rule runs on.
+    pub engines: &'static [Engine],
     /// SQL the rule reports and its corrected form.
     pub example: RuleExample,
 }
@@ -42,6 +44,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
                 source: metadata.source,
                 kinds: vec![rule.kind()],
                 requires: rule.requires(),
+                engines: rule.engines(),
                 example: metadata.example,
             }),
         }

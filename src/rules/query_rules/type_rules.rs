@@ -12,8 +12,9 @@ use sqlparser::ast::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         policy_support::unnested,
         statement_support::{Finding, check_select_expressions, report},
@@ -231,7 +232,7 @@ impl<DB: DatabaseLike> QueryRule for TimestampBetween<DB> {
     }
 }
 
-query_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a time result that depends on the
     /// session's `TimeZone` setting.
     ///
@@ -244,6 +245,7 @@ query_rule!(
     /// `TIMESTAMP '2026-01-02 05:00' < TIMESTAMPTZ '2026-01-02 00:00+00'`
     /// flipped between the two zones. `AT TIME ZONE` and the three-argument
     /// `date_trunc` gave the same answer under both and are not reported.
+    /// The rule does not run on SQLite, which has no session time zone.
     ///
     /// # Example
     ///
@@ -262,6 +264,7 @@ query_rule!(
     /// assert!(check("SELECT (at AT TIME ZONE 'UTC')::date FROM t").is_ok());
     /// ```
     SessionTimeZoneDependence,
+    register_query_rule,
     LintGroup::Suspicious,
     "PostgreSQL converts between timestamp with and without time zone in the session's TimeZone, so the result changes with that setting.",
     Some("https://www.postgresql.org/docs/current/datatype-datetime.html"),
@@ -270,7 +273,9 @@ query_rule!(
 SELECT occurred_at::date FROM events;",
         good: "CREATE TABLE events (occurred_at TIMESTAMPTZ);\n\
 SELECT (occurred_at AT TIME ZONE 'UTC')::date FROM events;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> QueryRule for SessionTimeZoneDependence<DB> {

@@ -20,6 +20,7 @@ use sqlparser_plpgsql::{
 use super::{flag_not_boolean, moment_stored_as_text};
 use crate::{
     deployment::Deployment,
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -68,6 +69,9 @@ use crate::{
 /// A column [`MomentStoredAsText`](crate::rules::MomentStoredAsText) or
 /// [`FlagNotBoolean`](crate::rules::FlagNotBoolean) reports is left to that
 /// rule, since its type comes first.
+///
+/// The rule does not run on SQLite, whose trigger bodies it cannot read, so
+/// it could not see the trigger that stamps or bounds the column.
 ///
 /// # Example
 ///
@@ -118,6 +122,10 @@ impl<DB: DatabaseLike + 'static> From<ClientChosenTimestamp<DB>> for GenericCons
 }
 
 impl<DB> Rule for ClientChosenTimestamp<DB> {
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
+    }
+
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(ClientChosenTimestamp),

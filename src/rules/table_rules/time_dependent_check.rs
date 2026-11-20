@@ -113,7 +113,7 @@ impl<DB> Rule for TimeDependentCheck<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(TimeDependentCheck),
             group: LintGroup::Suspicious,
-            rationale: "PostgreSQL assumes a CHECK is immutable and tests it only when a row is written, so a check that turns false as time passes leaves stored rows that fail it, and a dump of them fails to restore.",
+            rationale: "A CHECK is tested only when a row is written, so a check that turns false as time passes leaves stored rows that fail it, and a dump of them fails to restore.",
             source: Some("https://www.postgresql.org/docs/current/ddl-constraints.html"),
             basis: Basis::Declared,
             example: RuleExample {

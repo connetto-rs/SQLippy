@@ -8,8 +8,9 @@ use sql_traits::{
 use sqlparser::ast::Expr;
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::is_client_written,
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -64,6 +65,8 @@ rule_definition!(
     /// Struct defining a rule that reports a `serial`, `smallserial` or
     /// `bigserial` column outside client-written tables.
     ///
+    /// The rule does not run on SQLite, which stores integers in 64 bits and has no PostgreSQL sequences.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -87,7 +90,9 @@ rule_definition!(
     RuleExample {
         bad: "CREATE TABLE t (id BIGSERIAL);",
         good: "CREATE TABLE t (id BIGINT GENERATED ALWAYS AS IDENTITY);",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> ColumnRule for SerialColumn<DB> {
@@ -118,6 +123,8 @@ rule_definition!(
     /// Struct defining a rule that reports an `integer` or `smallint` primary
     /// key or identity column outside client-written tables.
     ///
+    /// The rule does not run on SQLite, which stores integers in 64 bits and has no PostgreSQL sequences.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -138,7 +145,9 @@ rule_definition!(
     RuleExample {
         bad: "CREATE TABLE t (id INT PRIMARY KEY);",
         good: "CREATE TABLE t (id BIGINT PRIMARY KEY);",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> ColumnRule for NarrowIntegerKey<DB> {
@@ -229,7 +238,10 @@ impl<DB: DatabaseLike> ColumnRule for ClientWrittenCounterKey<DB> {
         reporter.column(
             column,
             format!("Key column '{}.{name}' is minted by a counter on a client-written table, so two offline clients can mint the same key.", table.table_name()),
-            format!("Let clients mint '{name}' as a UUID, for example `uuid PRIMARY KEY DEFAULT gen_random_uuid()`."),
+            match Engine::of(database) {
+                Engine::PostgreSql => format!("Let clients mint '{name}' as a UUID, for example `uuid PRIMARY KEY DEFAULT gen_random_uuid()`."),
+                Engine::Sqlite => format!("Let clients mint '{name}' as a UUID and write it with the row, for example `TEXT NOT NULL PRIMARY KEY CHECK (length({name}) = 36)`."),
+            },
         )?;
         Ok(())
     }

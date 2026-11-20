@@ -183,4 +183,19 @@ impl NameHint {
         )?;
         Ok(())
     }
+
+    /// Reports `column` like [`check`](Self::check) unless a check
+    /// constraint covers it, which is how a SQLite schema validates a value
+    /// it has no column type for.
+    pub(crate) fn check_unless_constrained<DB: DatabaseLike>(
+        &self,
+        database: &DB,
+        column: &DB::Column,
+        reporter: &mut Reporter<'_, DB>,
+    ) -> Result<(), Interruption> {
+        if column.check_constraints(database)?.next().is_some() {
+            return Ok(());
+        }
+        self.check(database, column, reporter)
+    }
 }

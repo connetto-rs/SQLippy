@@ -87,7 +87,8 @@ pub trait Constrainer: Default {
     /// Excuses the violations of a rule reported on the given table itself.
     ///
     /// An allowance that excuses nothing, because the finding was fixed, the
-    /// names do not match or the rule is at [`Level::Allow`], is reported as
+    /// names do not match, the rule is at [`Level::Allow`] or the rule does
+    /// not run on the schema's [`Engine`](crate::engine::Engine), is reported as
     /// [`Error::UnusedAllowance`].
     ///
     /// # Example
@@ -167,7 +168,8 @@ pub trait Constrainer: Default {
     /// Excuses the violations of a rule that list the given policy.
     ///
     /// An allowance that excuses nothing, because the policy was fixed, the
-    /// names do not match or the rule is at [`Level::Allow`], is reported as
+    /// names do not match, the rule is at [`Level::Allow`] or the rule does
+    /// not run on the schema's [`Engine`](crate::engine::Engine), is reported as
     /// [`Error::UnusedAllowance`].
     fn allow_policy(&mut self, rule: &str, table: TargetName<'_>, policy: &str) {
         self.constrainer_mut()
@@ -206,8 +208,9 @@ pub trait Constrainer: Default {
     /// [`Constrainer::visit_schema`] runs the rule on the allowance's own
     /// statement and reports an allowance as [`Error::UnusedAllowance`] when
     /// the rule finds nothing there, because the schema was fixed, the rule
-    /// name does not match, the rule is at [`Level::Allow`] or `statement`
-    /// is not one PostgreSQL statement. An application that stops sending
+    /// name does not match, the rule is at [`Level::Allow`], the rule does
+    /// not run on the schema's [`Engine`](crate::engine::Engine) or `statement` is not one
+    /// PostgreSQL statement. An application that stops sending
     /// the statement leaves the allowance unreported.
     fn allow_statement(&mut self, rule: &str, statement: &str) {
         self.constrainer_mut().allow_statement(rule, statement);
@@ -249,7 +252,8 @@ pub trait Constrainer: Default {
     }
 
     /// Returns every registered rule with what it runs on, the level it runs
-    /// at here and the declarations it needs, in registration order.
+    /// at here, the declarations it needs and the engines it checks, in
+    /// registration order.
     ///
     /// # Example
     ///

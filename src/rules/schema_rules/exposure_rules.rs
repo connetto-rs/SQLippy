@@ -12,8 +12,9 @@ use sqlparser::ast::{Action, FunctionSecurity, SetExpr};
 
 use crate::{
     deployment::Deployment,
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::{ClientRoles, grantee_list, grants_privilege, schema_of},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
@@ -358,9 +359,11 @@ impl<DB: DatabaseLike> SchemaRule for ReachableSequence<DB> {
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a view a client role reaches that
     /// filters rows in its own `WHERE` without `security_barrier`.
+    ///
+    /// The rule does not run on SQLite, which has no `security_barrier` view option.
     ///
     /// # Example
     ///
@@ -386,6 +389,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&barrier).is_ok());
     /// ```
     SecurityBarrierMissingOnFilteringView,
+    register_schema_rule,
     LintGroup::Pedantic,
     "A view without security_barrier cannot reliably conceal the rows its WHERE hides, since a caller's leaky function or an index scan can run before the view's filter.",
     Some("https://www.postgresql.org/docs/current/rules-privileges.html"),
@@ -394,7 +398,9 @@ schema_rule!(
 CREATE VIEW visible AS SELECT person FROM phones WHERE phone NOT LIKE '412%';",
         good: "CREATE TABLE phones (person TEXT, phone TEXT);\n\
 CREATE VIEW visible WITH (security_barrier = true) AS SELECT person FROM phones WHERE phone NOT LIKE '412%';",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for SecurityBarrierMissingOnFilteringView<DB> {
@@ -437,10 +443,12 @@ impl<DB: DatabaseLike> SchemaRule for SecurityBarrierMissingOnFilteringView<DB> 
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a view without `security_invoker`
     /// that a client role reaches, through an exposed schema or a `SELECT`
     /// grant, whatever its sources.
+    ///
+    /// The rule does not run on SQLite, which has no `security_invoker` view option.
     ///
     /// The view reads its sources with its owner's privileges and row-level
     /// security, so a client reads through it what the owner may read.
@@ -470,6 +478,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&invoker).is_ok());
     /// ```
     OwnerRightsViewExposed,
+    register_schema_rule,
     LintGroup::Restriction,
     "A view without `security_invoker` reads its sources with its owner's privileges and policies, so a client reaching the view reads data its own grants on those sources would refuse.",
     Some("https://github.com/supabase/splinter/blob/main/lints/0010_security_definer_view.sql"),
@@ -481,7 +490,9 @@ GRANT SELECT ON public.document_identifiers TO PUBLIC;",
 CREATE VIEW public.document_identifiers WITH (security_invoker = true)\n\
 AS SELECT identifier FROM public.documents;\n\
 GRANT SELECT ON public.document_identifiers TO PUBLIC;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for OwnerRightsViewExposed<DB> {

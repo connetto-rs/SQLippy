@@ -4,12 +4,15 @@
 use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
 /// Struct defining a constraint that enforces that table names are lowercase.
+///
+/// The rule does not run on SQLite, which resolves identifiers without case sensitivity.
 ///
 /// # Example
 ///
@@ -45,6 +48,10 @@ impl<DB: DatabaseLike + 'static> From<MixedCaseTableName<DB>> for GenericConstra
 }
 
 impl<DB> Rule for MixedCaseTableName<DB> {
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
+    }
+
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(MixedCaseTableName),

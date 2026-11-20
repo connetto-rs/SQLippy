@@ -11,25 +11,36 @@ use sql_traits::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::index_support::entry_columns,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
-/// How a type with inexact equality compares, completing a sentence about it.
-fn inexact_equality<T: DataTypeLike>(data_type: &T, database: &T::DB) -> Option<&'static str> {
+/// How a type with inexact equality compares on `engine`, completing a
+/// sentence about it. SQLite stores a value declared `interval` as an
+/// ordinary number or text, compared exactly, and stores `real` and `double
+/// precision` alike.
+fn inexact_equality<T: DataTypeLike>(
+    data_type: &T,
+    database: &T::DB,
+    engine: Engine,
+) -> Option<&'static str> {
     let data_type = data_type.base_type(database).unwrap_or(data_type);
-    match data_type.scalar_family(database) {
-        Some(ScalarFamily::Interval) => Some(
+    match (data_type.scalar_family(database), engine) {
+        (Some(ScalarFamily::Interval), Engine::PostgreSql) => Some(
             "compares intervals by total length with a month as 30 days, so '1 mon' and '30 days' are one key value",
         ),
-        Some(ScalarFamily::Float) => Some(
+        (Some(ScalarFamily::Float), Engine::PostgreSql) => Some(
             "stores rounded binary fractions, so a value computed as 0.1 + 0.2 is not found by 0.3 and a `real` key is not found by a `double precision` value",
+        ),
+        (Some(ScalarFamily::Float), Engine::Sqlite) => Some(
+            "stores rounded binary fractions, so a value computed as 0.1 + 0.2 is not found by 0.3",
         ),
         _ => data_type
             .array_element(database)
-            .and_then(|element| inexact_equality(element, database)),
+            .and_then(|element| inexact_equality(element, database, engine)),
     }
 }
 
@@ -37,6 +48,9 @@ fn inexact_equality<T: DataTypeLike>(data_type: &T, database: &T::DB) -> Option<
 /// unique index or foreign key over a column of a type without exact
 /// equality: `interval`, `real`, `double precision`, an array of them, or a
 /// domain over any of these.
+///
+/// On SQLite, which compares a value declared `interval` exactly, only
+/// `real` and `double precision` are reported.
 ///
 /// A unique index over an expression of such a column compares the
 /// expression, so it is not reported.
@@ -131,10 +145,15 @@ impl<DB: DatabaseLike> TableRule for KeyWithoutExactEquality<DB> {
         for foreign_key in table.foreign_keys(database)? {
             keys.push(("foreign key", foreign_key.host_columns(database)?.collect()));
         }
+        let engine = Engine::of(database);
+        let exact_types = match engine {
+            Engine::PostgreSql => "an integer, text or uuid column",
+            Engine::Sqlite => "an integer or text column",
+        };
         for (key, columns) in keys {
             for column in columns {
                 let data_type = column.data_type(database);
-                let Some(comparison) = inexact_equality(data_type, database) else {
+                let Some(comparison) = inexact_equality(data_type, database, engine) else {
                     continue;
                 };
                 let name = column.column_name();
@@ -146,7 +165,7 @@ impl<DB: DatabaseLike> TableRule for KeyWithoutExactEquality<DB> {
                         table.table_name()
                     ),
                     format!(
-                        "Key '{}' on an integer, text or uuid column and keep '{name}' as an ordinary column.",
+                        "Key '{}' on {exact_types} and keep '{name}' as an ordinary column.",
                         table.table_name()
                     ),
                 )?;

@@ -4,8 +4,9 @@
 use sql_traits::traits::{ColumnLike, DatabaseLike, DomainLike, PolicyLike, TableLike, ViewLike};
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicySite},
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::type_support::{TypeFlaw, TypeSite, type_uses},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
@@ -139,7 +140,8 @@ macro_rules! type_rule {
         $wording:expr
     ) => {
         rule_definition!(
-            $(#[$doc])* $name, register_schema_rule, $group, $rationale, $source, $example
+            $(#[$doc])* $name, register_schema_rule, $group, $rationale, $source, $example,
+            Basis::Declared, &[Engine::PostgreSql]
         );
 
         impl<DB: DatabaseLike> SchemaRule for $name<DB> {
@@ -161,6 +163,8 @@ const WIKI: Option<&str> = Some("https://wiki.postgresql.org/wiki/Don%27t_Do_Thi
 type_rule!(
     /// Struct defining a rule that reports `timestamp` without time zone,
     /// in column, domain and function types and in casts.
+    ///
+    /// The rule does not run on SQLite, which stores timestamp text without time-zone conversion.
     ///
     /// # Example
     ///
@@ -195,6 +199,8 @@ type_rule!(
     /// Struct defining a rule that reports `time with time zone`, and
     /// `CURRENT_TIME`, which returns it.
     ///
+    /// The rule does not run on SQLite, which stores `timetz` text without interpreting its offset.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -227,6 +233,8 @@ type_rule!(
 type_rule!(
     /// Struct defining a rule that reports `timestamp(0)` and
     /// `timestamptz(0)`.
+    ///
+    /// The rule does not run on SQLite, which does not round timestamps to their declared precision.
     ///
     /// # Example
     ///
@@ -262,6 +270,8 @@ type_rule!(
 type_rule!(
     /// Struct defining a rule that reports `char(n)`.
     ///
+    /// The rule does not run on SQLite, which does not pad `char(n)` values.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -296,6 +306,8 @@ type_rule!(
 type_rule!(
     /// Struct defining a rule that reports `money`.
     ///
+    /// The rule does not run on SQLite, which does not round `money` to currency fractions.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -327,6 +339,8 @@ type_rule!(
 
 type_rule!(
     /// Struct defining a rule that reports `json` where `jsonb` serves.
+    ///
+    /// The rule does not run on SQLite, which does not convert `jsonb` column input to a binary representation.
     ///
     /// # Example
     ///
@@ -363,6 +377,8 @@ type_rule!(
     /// Struct defining a rule that reports `numeric(p, s)` outside
     /// client-written tables.
     ///
+    /// The rule does not run on SQLite, which does not round numbers to their declared scale.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -398,6 +414,8 @@ type_rule!(
 type_rule!(
     /// Struct defining a rule that reports `numeric(p, s)` on a table the
     /// deployment declares client-written.
+    ///
+    /// The rule does not run on SQLite, which does not round numbers to their declared scale.
     ///
     /// # Example
     ///

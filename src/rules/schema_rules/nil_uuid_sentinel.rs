@@ -9,6 +9,7 @@ use sqlparser::ast::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -325,7 +326,7 @@ fn sentinel_tests<V: Visit + ?Sized>(node: &V, exempt: Vec<&Expr>) -> Vec<(Strin
 }
 
 /// Finds and explains tests against the nil UUID.
-struct Finder;
+struct Finder(Engine);
 
 impl ExpressionFinder for Finder {
     fn find<DB: DatabaseLike, V: Visit + ?Sized>(
@@ -355,7 +356,12 @@ impl ExpressionFinder for Finder {
     }
 
     fn resolution(&self) -> &'static str {
-        "Leave a missing value NULL and test it with IS NULL or IS NOT NULL, reading an unset setting as NULL with NULLIF(current_setting(name, true), '')."
+        match self.0 {
+            Engine::PostgreSql => {
+                "Leave a missing value NULL and test it with IS NULL or IS NOT NULL, reading an unset setting as NULL with NULLIF(current_setting(name, true), '')."
+            }
+            Engine::Sqlite => "Leave a missing value NULL and test it with IS NULL or IS NOT NULL.",
+        }
     }
 }
 
@@ -367,7 +373,7 @@ impl<DB: DatabaseLike> SchemaRule for NilUuidSentinel<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        check_schema(&Finder, database, reporter)
+        check_schema(&Finder(Engine::of(database)), database, reporter)
     }
 }
 
@@ -380,6 +386,6 @@ impl<DB: DatabaseLike> QueryRule for NilUuidSentinel<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        check_statement(&Finder, database, statement, reporter)
+        check_statement(&Finder(Engine::of(database)), database, statement, reporter)
     }
 }

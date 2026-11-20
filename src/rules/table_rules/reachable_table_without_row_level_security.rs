@@ -3,6 +3,7 @@
 use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::client_reach,
@@ -15,7 +16,8 @@ use crate::{
 /// Client roles are `PUBLIC` and the anonymous and app roles of the
 /// [`Deployment`](crate::deployment::Deployment), together with the roles they
 /// inherit. A missing grant never excuses a table, since default privileges
-/// live outside the schema.
+/// live outside the schema. The rule does not run on SQLite, which has no
+/// row-level security.
 ///
 /// # Example
 ///
@@ -76,6 +78,10 @@ ALTER TABLE public.notes ENABLE ROW LEVEL SECURITY;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

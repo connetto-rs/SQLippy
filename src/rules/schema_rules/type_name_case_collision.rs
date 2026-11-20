@@ -5,14 +5,17 @@ use std::{borrow::Cow, collections::BTreeMap};
 use sql_traits::traits::{DatabaseLike, DomainLike, TableLike, UserDefinedTypeLike, ViewLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports two objects of one schema whose
     /// names come from its pool of type names and differ only by case.
+    ///
+    /// The rule does not run on SQLite, which rejects table names differing only by case.
     ///
     /// The pool holds every user-defined type, of any kind, every domain and
     /// the row type of every table, view and materialized view. A name
@@ -38,13 +41,16 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&apart).is_ok());
     /// ```
     TypeNameCaseCollision,
+    register_schema_rule,
     LintGroup::Correctness,
     "PostgreSQL keeps the case of a quoted name and folds an unquoted one, so two types whose names differ only by case are told apart by quoting alone, and every tool that maps names without case merges them.",
     Some("https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS"),
     RuleExample {
         bad: "CREATE TYPE \"Mood\" AS ENUM ('sad'); CREATE TYPE mood AS ENUM ('happy');",
         good: "CREATE TYPE mood AS ENUM ('sad', 'happy');",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// An object whose name PostgreSQL takes from its schema's pool of type

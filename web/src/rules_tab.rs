@@ -10,7 +10,7 @@ use dioxus_free_icons::icons::fa_solid_icons::{
     FaBan, FaBook, FaBug, FaCircleCheck, FaDiagramProject, FaEye, FaGaugeHigh, FaGlasses,
     FaLayerGroup, FaPaintbrush, FaTriangleExclamation, FaWrench,
 };
-use sqlippy::prelude::{Basis, DefaultConstrainer, LintGroup, ParserDB};
+use sqlippy::prelude::{Basis, DefaultConstrainer, Engine, LintGroup, ParserDB};
 
 use crate::analysis::analyze;
 use crate::catalog::{CatalogEntry, catalog, kind_phrase};
@@ -173,6 +173,12 @@ fn RulePage(rule: CatalogEntry) -> Element {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(" and ");
+    let engines = rule
+        .engines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" and ");
 
     rsx! {
         section { class: "panel rule-page {tone}",
@@ -200,6 +206,9 @@ fn RulePage(rule: CatalogEntry) -> Element {
                 "Runs on {kinds}."
                 if !rule.requires.is_empty() {
                     " Needs the deployment to declare {requires}."
+                }
+                if rule.engines != Engine::ALL {
+                    " Checks only schemas that run on {engines}."
                 }
             }
             if let Some(source) = rule.source {

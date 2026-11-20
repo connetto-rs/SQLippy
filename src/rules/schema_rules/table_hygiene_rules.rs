@@ -8,8 +8,9 @@ use sql_traits::traits::{ColumnLike, DataTypeLike, DatabaseLike, PolicyLike, Tab
 use sqlparser::ast::CreatePolicyType;
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{Command, held_by_name, policy_roles},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
@@ -203,9 +204,11 @@ const UNSUPPORTED_REG_TYPES: [&str; 8] = [
     "regprocedure",
 ];
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a column of a `reg*` type that
     /// `pg_upgrade` does not support.
+    ///
+    /// The rule does not run on SQLite, which stores `regnamespace` input without resolving object identifiers.
     ///
     /// # Example
     ///
@@ -220,13 +223,16 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&text).is_ok());
     /// ```
     RegColumnType,
+    register_schema_rule,
     LintGroup::Suspicious,
     "A column of a reg* type stores object identifiers that pg_upgrade cannot carry over, so it blocks an in-place upgrade.",
     Some("https://www.postgresql.org/docs/current/pgupgrade.html"),
     RuleExample {
         bad: "CREATE TABLE namespaces (name REGNAMESPACE);",
         good: "CREATE TABLE namespaces (name TEXT);",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for RegColumnType<DB> {

@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod deployment;
+pub mod engine;
 pub mod error;
 pub mod lint;
 pub mod rules;
@@ -13,6 +14,7 @@ pub mod prelude {
 
     pub use crate::{
         deployment::{Declaration, Deployment, WriteEvent},
+        engine::Engine,
         error::{
             Allowance, AllowedObject, Error, FunctionAllowance, InactiveRule, Interruption,
             Location, PolicyClause, PolicySite, SchemaAllowance, StatementAllowance, StatementSite,

@@ -3,6 +3,7 @@
 use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::name_support::{NameHint, names_money},
@@ -59,6 +60,13 @@ impl<DB: DatabaseLike> ColumnRule for FloatingPointMoney<DB> {
         column: &<Self::Database as DatabaseLike>::Column,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        HINT.check(database, column, reporter)
+        let hint = match Engine::of(database) {
+            Engine::PostgreSql => HINT,
+            Engine::Sqlite => NameHint {
+                resolution: "Store integer minor units with the currency alongside them, since SQLite `NUMERIC` does not provide exact decimal storage.",
+                ..HINT
+            },
+        };
+        hint.check(database, column, reporter)
     }
 }
