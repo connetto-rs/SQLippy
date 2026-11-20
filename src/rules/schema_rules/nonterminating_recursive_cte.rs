@@ -185,14 +185,15 @@ fn cut(recursive: &RecursiveItem<'_>, column: &Ident, guard: &Expr, result: &Exp
 fn searches(recursive: &RecursiveItem<'_>, column: &Ident, found: &Expr) -> bool {
     let (text, separator) = match unnested(found) {
         Expr::Position { expr, r#in } => (r#in.as_ref(), expr.as_ref()),
-        Expr::Function(function)
-            if ["instr", "strpos"]
-                .iter()
-                .any(|known| called(function, known)) =>
+        Expr::Function(
+            function @ Function {
+                args: FunctionArguments::List(list),
+                ..
+            },
+        ) if ["instr", "strpos"]
+            .iter()
+            .any(|known| called(function, known)) =>
         {
-            let FunctionArguments::List(list) = &function.args else {
-                return false;
-            };
             let [
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(text)),
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(separator)),

@@ -91,6 +91,8 @@ fn a_walk_that_consumes_a_string_passes() {
         // 4 rows each, the remaining text cut past the separator it holds.
         "WITH RECURSIVE s(element, rest) AS (SELECT NULL, '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') > 0 THEN substr(rest, 1, strpos(rest, ',') - 1) ELSE rest END, CASE WHEN strpos(rest, ',') > 0 THEN substr(rest, strpos(rest, ',') + 1) ELSE NULL END FROM s WHERE s.rest <> '') SELECT element FROM s",
         "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN position(',' IN rest) >= 1 THEN substr(rest, 1 + position(',' IN rest)) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN 0 < pg_catalog.strpos(rest, ',') THEN substr(rest, pg_catalog.strpos(rest, ',') + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN 1 <= position(',' IN rest) THEN substr(rest, position(',' IN rest) + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
     ] {
         assert_eq!(unending(sql), Vec::<String>::new(), "{sql}");
     }
@@ -106,6 +108,15 @@ fn a_string_walk_that_does_not_shrink_its_text_is_reported() {
         "WITH RECURSIVE s(rest) AS (SELECT '1;2' UNION ALL SELECT CASE WHEN strpos(rest, ';') > 0 THEN substr(rest, strpos(rest, ',') + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
         "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') > 0 THEN substr(rest, strpos(rest, ',') + 0) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
         "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT rest || ',' FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') > 0 THEN substr(rest, strpos(rest, ',') + 1) END FROM s WHERE rest IS NULL OR rest <> '') SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT s.* FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') > 0 THEN rest END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') > 0 THEN substr(rest, 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN true THEN substr(rest, 1 + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') IS NOT NULL THEN substr(rest, strpos(rest, ',') + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '123' UNION ALL SELECT CASE WHEN strpos(rest, ',') = 0 THEN substr(rest, strpos(rest, ',') + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        // Oracle's `instr` takes a start position, which PostgreSQL and SQLite lack.
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN instr(rest, ',', 1) > 0 THEN substr(rest, instr(rest, ',', 1) + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
     ] {
         assert_eq!(unending(sql).len(), 1, "{sql}");
     }
