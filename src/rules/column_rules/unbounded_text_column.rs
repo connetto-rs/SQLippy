@@ -3,13 +3,17 @@
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::key_support::holds_through_references,
+    rules::{
+        closed_set_support::names_column, function_reach_support::calls,
+        key_support::holds_through_references,
+    },
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
 use sql_traits::{
     errors::LookupError,
     traits::{CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, TableLike},
 };
+use sqlparser::ast::{BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments};
 
 /// Whether `column` declares an enforced length or checks an upper bound on
 /// its length.
@@ -29,9 +33,65 @@ fn is_bounded<DB: DatabaseLike>(database: &DB, column: &DB::Column) -> Result<bo
     Ok(false)
 }
 
+/// Whether `expression` is false for every value of the column whose stored
+/// name is `column` that is neither `NULL` nor a JSON document. It holds for
+/// `json_valid(column)`, `column IS JSON` and `column IS NULL`, for an `AND`
+/// with one operand where it holds, and for an `OR` whose operands all hold.
+fn rejects_non_json(expression: &Expr, column: &str) -> bool {
+    match expression {
+        Expr::Nested(inner) => rejects_non_json(inner, column),
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => rejects_non_json(left, column) || rejects_non_json(right, column),
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Or,
+            right,
+        } => rejects_non_json(left, column) && rejects_non_json(right, column),
+        Expr::IsJson {
+            expr,
+            negated: false,
+            ..
+        }
+        | Expr::IsNull(expr) => names_column(expr, column),
+        Expr::Function(function) if calls(function, "json_valid") => {
+            let FunctionArguments::List(list) = &function.args else {
+                return false;
+            };
+            matches!(
+                list.args.first(),
+                Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(document)))
+                    if names_column(document, column)
+            )
+        }
+        _ => false,
+    }
+}
+
+/// Whether a check of `column` holds it to a JSON document, the text a
+/// `json` or `jsonb` column would store.
+fn holds_json_document<DB: DatabaseLike>(
+    database: &DB,
+    column: &DB::Column,
+) -> Result<bool, LookupError> {
+    let stored = column.stored_column_name();
+    for check in column.check_constraints(database)? {
+        if rejects_non_json(check.expression(database), &stored) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Struct defining a rule that requires every textual column to have an upper
 /// length bound, either an enforced declared length or a length check, its
 /// own or that of a column a foreign key forces its values to equal.
+///
+/// A textual column a check holds to a JSON document, with `json_valid` or
+/// `IS JSON`, stores what a `json` or `jsonb` column would, and passes as
+/// those do.
 ///
 /// # Example
 ///
@@ -68,6 +128,10 @@ fn is_bounded<DB: DatabaseLike>(database: &DB, column: &DB::Column) -> Result<bo
 /// )
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&referencing).is_ok());
+///
+/// // Valid: a JSON document, as SQLite stores one
+/// let document = ParserDB::parse::<GenericDialect>("CREATE TABLE events (payload TEXT CHECK (json_valid(payload)));").unwrap();
+/// assert!(constrainer.validate_schema(&document).is_ok());
 /// ```
 pub struct UnboundedTextColumn<DB>(std::marker::PhantomData<DB>);
 
@@ -112,7 +176,9 @@ impl<DB: DatabaseLike> ColumnRule for UnboundedTextColumn<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         if !column.data_type(database).is_textual(database)
-            || holds_through_references(database, column, |source| is_bounded(database, source))?
+            || holds_through_references(database, column, |source| {
+                Ok(is_bounded(database, source)? || holds_json_document(database, source)?)
+            })?
         {
             return Ok(());
         }
