@@ -56,6 +56,31 @@ fn unread_cte_message_names_its_engine() {
 }
 
 #[test]
+fn data_modifying_cte_is_reported_as_unsupported_on_sqlite() {
+    let constrainer: GenericConstrainer<ParserDB> = UnusedCte::default().into();
+    let database = ParseOptions::default()
+        .with_identifier_case(IdentifierCase::Folded)
+        .parse::<SQLiteDialect>("CREATE TABLE docs (id TEXT);")
+        .unwrap();
+    let statement = sqlparser::parser::Parser::parse_sql(
+        &SQLiteDialect {},
+        "WITH removed AS (DELETE FROM docs RETURNING id) SELECT 1",
+    )
+    .unwrap()
+    .remove(0);
+    let found = constrainer.statement_diagnostics(&database, &statement);
+    let [Error::Violation(violation)] = found.as_slice() else {
+        panic!("expected one finding, got {found:?}");
+    };
+    assert!(
+        violation
+            .message()
+            .contains("which SQLite does not support")
+    );
+    assert!(violation.resolution().contains("separate statement"));
+}
+
+#[test]
 fn catalog_name_advice_uses_explicit_migration_on_sqlite() {
     let constrainer = CatalogNameAsText::default().into();
     let schema = "CREATE TABLE documents (id INT); CREATE TABLE grants (relation_name TEXT); CREATE VIEW document_grants AS SELECT relation_name FROM grants WHERE relation_name = 'documents';";
@@ -90,6 +115,17 @@ fn ordered_set_advice_uses_ranks_on_sqlite() {
     let sqlite = advice(&constrainer, schema, Engine::Sqlite);
     assert!(sqlite.contains("CASE"));
     assert!(!sqlite.contains("CREATE TYPE"));
+}
+
+#[test]
+fn ordered_set_null_advice_names_only_a_not_null_column_on_sqlite() {
+    let constrainer = OrderedSetAsDisjunction::default().into();
+    let schema = "CREATE TABLE permissions (actual TEXT NOT NULL CHECK (actual IN ('read', 'write')), required TEXT CHECK (required IN ('read', 'write'))); CREATE VIEW sufficient AS SELECT actual FROM permissions WHERE actual = required OR actual = 'write';";
+    let postgres = advice(&constrainer, schema, Engine::PostgreSql);
+    assert!(postgres.contains("STRICT"), "{postgres}");
+    let sqlite = advice(&constrainer, schema, Engine::Sqlite);
+    assert!(sqlite.contains("declare the column NOT NULL"), "{sqlite}");
+    assert!(!sqlite.contains("STRICT"), "{sqlite}");
 }
 
 #[test]

@@ -534,9 +534,10 @@ impl<DB: DatabaseLike> SchemaRule for ReservedKeywordIdentifier<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let (reserved, engine): (&[&str], &str) = match Engine::of(database) {
-            Engine::PostgreSql => (&RESERVED, "PostgreSQL"),
-            Engine::Sqlite => (&SQLITE_RESERVED, "SQLite"),
+        let engine = Engine::of(database);
+        let reserved: &[&str] = match engine {
+            Engine::PostgreSql => &RESERVED,
+            Engine::Sqlite => &SQLITE_RESERVED,
         };
         for object in named(database)? {
             let name = object.name();
