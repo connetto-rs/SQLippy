@@ -23,8 +23,8 @@ use dioxus_free_icons::icons::fa_solid_icons::{
     FaRulerVertical, FaScissors, FaServer, FaShareNodes, FaShield, FaShieldHalved, FaShuffle,
     FaSignature, FaSignsPost, FaSitemap, FaSkull, FaSliders, FaSnowflake, FaSort, FaSpellCheck,
     FaSquareMinus, FaSquareRootVariable, FaStopwatch, FaSyringe, FaTable, FaTableList, FaTag,
-    FaTags, FaTextHeight, FaTextWidth, FaToggleOff, FaTrashCan, FaTriangleExclamation, FaUnderline,
-    FaUserCheck, FaUserGear, FaUserNinja, FaUserPen, FaUserSlash, FaUserTag, FaUsers,
+    FaTags, FaTextHeight, FaTextWidth, FaThumbtack, FaToggleOff, FaTrashCan, FaTriangleExclamation,
+    FaUnderline, FaUserCheck, FaUserGear, FaUserNinja, FaUserPen, FaUserSlash, FaUserTag, FaUsers,
     FaWandMagicSparkles, FaWater, FaWaterLadder,
 };
 
@@ -89,6 +89,7 @@ rule_icons! {
     "exposed_definer_over_protected_table" => FaUserNinja,
     "extension_foreign_key_on_delete_cascade" => FaAnglesDown,
     "extension_in_exposed_schema" => FaPlug,
+    "extension_without_version" => FaThumbtack,
     "floating_point_money" => FaCoins,
     "function_mediated_policy_cycle" => FaArrowsSpin,
     "grant_option_to_client_role" => FaShareNodes,
