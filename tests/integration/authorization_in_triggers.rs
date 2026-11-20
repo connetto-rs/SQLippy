@@ -157,6 +157,28 @@ fn other_commands_tables_without_row_security_and_other_checks_are_not_reported(
     }
 }
 
+/// A view has no row level security of its own, so neither the `INSTEAD OF`
+/// trigger that makes it writable nor a statement trigger on it repeats a
+/// policy, even one of the table below it.
+#[test]
+fn triggers_on_a_view_over_a_secured_table_are_not_reported() {
+    let found = findings(&format!(
+        "{SECURED} CREATE POLICY guard ON notes FOR INSERT WITH CHECK (owns_note(owner_id));
+         CREATE VIEW my_notes AS SELECT id, owner_id, body FROM notes;
+         CREATE FUNCTION write_note() RETURNS trigger LANGUAGE plpgsql AS
+           $$ BEGIN
+                IF NOT owns_note(NEW.owner_id) THEN RAISE insufficient_privilege; END IF;
+                INSERT INTO notes VALUES (NEW.id, NEW.owner_id, NEW.body);
+                RETURN NEW;
+              END $$;
+         CREATE TRIGGER write_note INSTEAD OF INSERT ON my_notes FOR EACH ROW EXECUTE FUNCTION write_note();
+         CREATE FUNCTION check_writer() RETURNS trigger LANGUAGE plpgsql AS
+           $$ BEGIN RAISE insufficient_privilege; END $$;
+         CREATE TRIGGER check_writer BEFORE INSERT ON my_notes FOR EACH STATEMENT EXECUTE FUNCTION check_writer();"
+    ));
+    assert!(found.is_empty(), "{found:?}");
+}
+
 #[test]
 fn a_policy_helper_that_cannot_be_resolved_is_a_lookup_failure() {
     let database = schema(&format!(

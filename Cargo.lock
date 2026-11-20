@@ -1541,7 +1541,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "pg_diesel"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#1fc5a6e844f51ae94d786262244d9f51de194f56"
 dependencies = [
  "diesel",
  "pg_diesel_core",
@@ -1555,7 +1555,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_core"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#1fc5a6e844f51ae94d786262244d9f51de194f56"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1569,7 +1569,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg14"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#1fc5a6e844f51ae94d786262244d9f51de194f56"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1580,7 +1580,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg15"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#1fc5a6e844f51ae94d786262244d9f51de194f56"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1591,7 +1591,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg16"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#1fc5a6e844f51ae94d786262244d9f51de194f56"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1602,7 +1602,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg17"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#1fc5a6e844f51ae94d786262244d9f51de194f56"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -1613,7 +1613,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg18"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#1fc5a6e844f51ae94d786262244d9f51de194f56"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -2220,7 +2220,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#d1715fc3cf04664287f14178c1539784120b96c2"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#b7e8a175b3a1cdebc32b6d89b610a353e8cc9bc0"
 dependencies = [
  "geometric-traits",
  "once_cell",

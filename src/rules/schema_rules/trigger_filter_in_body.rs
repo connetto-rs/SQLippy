@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 
 use sql_traits::{
     structs::IdentifierCase,
-    traits::{DatabaseLike, FunctionLike, TableLike, TriggerLike},
+    traits::{DatabaseLike, FunctionLike, Relation, TableLike, TriggerLike},
 };
 use sqlparser::ast::{
     Expr, Function, FunctionBehavior, Ident, ObjectNamePart, TriggerEvent, TriggerPeriod, Visitor,
@@ -224,7 +224,11 @@ impl<DB: DatabaseLike> SchemaRule for TriggerFilterInBody<DB> {
             let when = negated(condition);
             let called = signature(function, database);
             for trigger in triggers {
-                let table = trigger.table(database)?;
+                let (Relation::Table(table) | Relation::ForeignTable(table)) =
+                    trigger.relation(database)?
+                else {
+                    continue;
+                };
                 reporter.table(
                     table,
                     format!(
