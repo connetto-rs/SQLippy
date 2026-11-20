@@ -4,7 +4,7 @@
 
 use crate::rule_findings::{findings, statement_findings};
 use sqlippy::prelude::*;
-use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::dialect::{PostgreSqlDialect, SQLiteDialect};
 
 const SCHEMA: &str =
     "CREATE TABLE groups (id INT PRIMARY KEY, parent_id INT, owner TEXT, active BOOLEAN);
@@ -83,6 +83,64 @@ fn a_walk_that_stops_on_any_data_passes() {
     ] {
         assert_eq!(unending(sql), Vec::<String>::new(), "{sql}");
     }
+}
+
+#[test]
+fn a_walk_that_consumes_a_string_passes() {
+    for sql in [
+        // 4 rows each, the remaining text cut past the separator it holds.
+        "WITH RECURSIVE s(element, rest) AS (SELECT NULL, '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') > 0 THEN substr(rest, 1, strpos(rest, ',') - 1) ELSE rest END, CASE WHEN strpos(rest, ',') > 0 THEN substr(rest, strpos(rest, ',') + 1) ELSE NULL END FROM s WHERE s.rest <> '') SELECT element FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN position(',' IN rest) >= 1 THEN substr(rest, 1 + position(',' IN rest)) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN 0 < pg_catalog.strpos(rest, ',') THEN substr(rest, pg_catalog.strpos(rest, ',') + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN 1 <= position(',' IN rest) THEN substr(rest, position(',' IN rest) + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+    ] {
+        assert_eq!(unending(sql), Vec::<String>::new(), "{sql}");
+    }
+}
+
+#[test]
+fn a_string_walk_that_does_not_shrink_its_text_is_reported() {
+    // Each canceled by a 2 second statement timeout.
+    for sql in [
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT substr(rest, strpos(rest, ',') + 1) FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') > 0 THEN substr(rest, strpos(rest, ',') + 1) ELSE rest END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') > 0 THEN substr(rest, strpos(rest, ',') + 1) END FROM s) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1;2' UNION ALL SELECT CASE WHEN strpos(rest, ';') > 0 THEN substr(rest, strpos(rest, ',') + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') > 0 THEN substr(rest, strpos(rest, ',') + 0) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT rest || ',' FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') > 0 THEN substr(rest, strpos(rest, ',') + 1) END FROM s WHERE rest IS NULL OR rest <> '') SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT s.* FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') > 0 THEN rest END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') > 0 THEN substr(rest, 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN true THEN substr(rest, 1 + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN strpos(rest, ',') IS NOT NULL THEN substr(rest, strpos(rest, ',') + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        "WITH RECURSIVE s(rest) AS (SELECT '123' UNION ALL SELECT CASE WHEN strpos(rest, ',') = 0 THEN substr(rest, strpos(rest, ',') + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+        // Oracle's `instr` takes a start position, which PostgreSQL and SQLite lack.
+        "WITH RECURSIVE s(rest) AS (SELECT '1,2,3' UNION ALL SELECT CASE WHEN instr(rest, ',', 1) > 0 THEN substr(rest, instr(rest, ',', 1) + 1) END FROM s WHERE rest IS NOT NULL) SELECT rest FROM s",
+    ] {
+        assert_eq!(unending(sql).len(), 1, "{sql}");
+    }
+}
+
+#[test]
+fn a_split_of_a_delimited_setting_in_a_sqlite_view_passes() {
+    // SQLite answers 1, 2 and 3 with `links` holding 1 to 4.
+    let constrainer: GenericConstrainer<ParserDB> = NonterminatingRecursiveCte::default().into();
+    let database = ParserDB::parse::<SQLiteDialect>(
+        "CREATE TABLE links (id TEXT PRIMARY KEY CHECK (length(id) <= 36));
+        CREATE VIEW visible_links AS SELECT id FROM links WHERE id IN (
+          WITH RECURSIVE pg2sqlite_split (pg2sqlite_element, pg2sqlite_rest) AS (
+            SELECT NULL, '1,2,3'
+            UNION ALL
+            SELECT CASE WHEN instr(pg2sqlite_rest, ',') > 0 THEN SUBSTR(pg2sqlite_rest, 1, instr(pg2sqlite_rest, ',') - 1) ELSE pg2sqlite_rest END,
+                   CASE WHEN instr(pg2sqlite_rest, ',') > 0 THEN SUBSTR(pg2sqlite_rest, instr(pg2sqlite_rest, ',') + 1) END
+            FROM pg2sqlite_split WHERE pg2sqlite_rest IS NOT NULL
+          )
+          SELECT pg2sqlite_element FROM pg2sqlite_split WHERE pg2sqlite_element IS NOT NULL
+        );",
+    )
+    .expect("schema parses");
+    assert!(constrainer.validate_schema(&database).is_ok());
 }
 
 #[test]
