@@ -6,6 +6,7 @@ use sql_traits::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -32,8 +33,7 @@ rule_definition!(
     /// The name's last words are matched against the deployment's
     /// vocabularies, English unless it selects others, and a name holding an
     /// average word such as `avg_count` is skipped. The type is read through
-    /// arrays and domains, and `numeric` with scale 0, such as `numeric(10)`,
-    /// is skipped since it rounds every value to a whole number.
+    /// arrays and domains, and PostgreSQL `numeric` with scale 0 is skipped because it rounds to whole numbers.
     ///
     /// # Example
     ///
@@ -50,7 +50,7 @@ rule_definition!(
     FractionalCount,
     register_column_rule,
     LintGroup::Pedantic,
-    "A count of things is a whole number, while a floating-point or numeric column stores 2.5 items, and ten float counts of 0.1 sum to 1.0000001.",
+    "A count of things is a whole number, while a floating-point or numeric column can hold fractional counts such as 2.5.",
     Some("https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-INT"),
     RuleExample {
         bad: "CREATE TABLE t (item_count REAL);",
@@ -68,10 +68,19 @@ impl<DB: DatabaseLike> ColumnRule for FractionalCount<DB> {
         column: &<Self::Database as DatabaseLike>::Column,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let stored = underlying_type(database, column.data_type(database));
-        if stored.numeric_scale(database) == Some(0) {
+        if Engine::of(database) == Engine::PostgreSql
+            && underlying_type(database, column.data_type(database)).numeric_scale(database)
+                == Some(0)
+        {
             return Ok(());
         }
-        HINT.check(database, column, reporter)
+        let hint = match Engine::of(database) {
+            Engine::PostgreSql => HINT,
+            Engine::Sqlite => NameHint {
+                resolution: "Use `INTEGER` with `CHECK (typeof(col) IN ('integer', 'null'))`, replacing `col` with this column name, since SQLite otherwise stores `2.5` as `REAL` even in an `INTEGER` column.",
+                ..HINT
+            },
+        };
+        hint.check(database, column, reporter)
     }
 }

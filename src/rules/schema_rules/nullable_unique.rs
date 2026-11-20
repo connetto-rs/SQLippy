@@ -6,6 +6,7 @@ use sql_traits::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::key_support::nullable_host_columns,
@@ -104,7 +105,10 @@ impl<DB: DatabaseLike> SchemaRule for NullableUniqueColumn<DB> {
                 reporter.table(
                     table,
                     format!("Unique constraint {index} on '{name}' covers nullable {columns} and treats NULLs as distinct, so rows with a NULL there can repeat the rest."),
-                    "Add NULLS NOT DISTINCT, or declare the columns NOT NULL, unless repeated NULLs are intended.".to_owned(),
+                    match Engine::of(database) {
+                        Engine::PostgreSql => "Add NULLS NOT DISTINCT, or declare the columns NOT NULL, unless repeated NULLs are intended.",
+                        Engine::Sqlite => "Declare the columns NOT NULL, unless repeated NULLs are intended.",
+                    }.to_owned(),
                 )?;
             }
         }

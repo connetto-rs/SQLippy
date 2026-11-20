@@ -12,6 +12,7 @@ use sql_traits::{
 use sqlparser::ast::{BinaryOperator, Expr};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -104,6 +105,8 @@ fn null_together<DB: DatabaseLike>(
 /// under `FOREIGN KEY (previous_id, name, previous_version)` with `name`
 /// `NOT NULL`.
 ///
+/// SQLite applies `MATCH SIMPLE` semantics even to a declared `MATCH FULL`.
+///
 /// # Example
 ///
 /// ```rust
@@ -167,7 +170,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for NullableCompositeForeignKey<DB> {
         foreign_key: &<Self::Database as DatabaseLike>::ForeignKey,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        if foreign_key.match_full(database) {
+        if Engine::of(database) == Engine::PostgreSql && foreign_key.match_full(database) {
             return Ok(());
         }
         let nullable = nullable_host_columns(database, foreign_key)?;
@@ -178,10 +181,18 @@ impl<DB: DatabaseLike> ForeignKeyRule for NullableCompositeForeignKey<DB> {
             return Ok(());
         }
         let host = foreign_key.host_table(database).table_name();
+        let resolution = match Engine::of(database) {
+            Engine::PostgreSql => {
+                "Declare all but one key column NOT NULL, add MATCH FULL so a key is either complete or entirely NULL, or add checks such as (a IS NULL) = (b IS NULL) that keep the nullable key columns NULL together."
+            }
+            Engine::Sqlite => {
+                "Declare all but one key column NOT NULL, or add checks such as (a IS NULL) = (b IS NULL) that keep the nullable key columns NULL together."
+            }
+        };
         reporter.foreign_key(
             foreign_key,
             format!("A composite foreign key of '{host}' has more than one nullable column under MATCH SIMPLE, so a row with one key column NULL and another set references nothing."),
-            "Declare all but one key column NOT NULL, add MATCH FULL so a key is either complete or entirely NULL, or add checks such as (a IS NULL) = (b IS NULL) that keep the nullable key columns NULL together.".to_owned(),
+            resolution.to_owned(),
         )?;
         Ok(())
     }

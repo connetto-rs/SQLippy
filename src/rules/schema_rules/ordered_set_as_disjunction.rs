@@ -13,6 +13,7 @@ use sqlparser::ast::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -563,20 +564,28 @@ impl<DB: DatabaseLike> Disjunctions<'_, '_, '_, DB> {
         let filter = self.filters.contains(&std::ptr::from_ref(expression));
         let changed = changed_by_null(&formula, &operands, filter, labels);
         let order = quoted(&comparison.order, " < ");
-        let mut resolution = match &domain.declared {
-            Some(type_name) => format!(
+        let mut resolution = match (Engine::of(self.database), &domain.declared) {
+            (Engine::Sqlite, _) => format!(
+                "Map both operands to integer ranks with `CASE` in the order {order}, preserving NULL, and apply `{}` to those ranks.",
+                comparison.written
+            ),
+            (Engine::PostgreSql, Some(type_name)) => format!(
                 "Write `{}`, which reads the order enum '{type_name}' declares.",
                 comparison.written
             ),
-            None => format!(
+            (Engine::PostgreSql, None) => format!(
                 "Declare the set as `CREATE TYPE ... AS ENUM ({})`, type both operands with it and write `{}`.",
                 quoted(&comparison.order, ", "),
                 comparison.written
             ),
         };
         if !changed.is_empty() {
+            let required = match Engine::of(self.database) {
+                Engine::PostgreSql => "declare the function STRICT or the column NOT NULL",
+                Engine::Sqlite => "declare the column NOT NULL",
+            };
             resolution = format!(
-                "{resolution} The comparison answers NULL where the disjunction does not when {} is NULL, so declare the function STRICT or the column NOT NULL first.",
+                "{resolution} The comparison answers NULL where the disjunction does not when {} is NULL, so {required} first.",
                 changed
                     .iter()
                     .map(|operand| format!("'{operand}'"))

@@ -3,6 +3,7 @@
 use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::closed_set_support::closed_set,
@@ -12,6 +13,8 @@ use crate::{
 rule_definition!(
     /// Struct defining a rule that reports a text column a check restricts
     /// to a fixed list of string literals.
+    ///
+    /// The rule does not run on SQLite, which has no PostgreSQL enum types.
     ///
     /// A top-level conjunct of a check of the column listing at least two
     /// distinct literals is reported, written `column IN ('a', 'b')`,
@@ -48,7 +51,8 @@ rule_definition!(
         good: "CREATE TYPE job_state AS ENUM ('queued', 'ready');\n\
 CREATE TABLE jobs (id INT PRIMARY KEY, state job_state NOT NULL);",
     },
-    Basis::Declared
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> ColumnRule for ClosedSetAsText<DB> {

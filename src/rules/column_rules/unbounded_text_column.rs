@@ -1,6 +1,7 @@
 //! Submodule providing the `UnboundedTextColumn` rule.
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::key_support::holds_through_references,
@@ -30,8 +31,12 @@ fn is_bounded<DB: DatabaseLike>(database: &DB, column: &DB::Column) -> Result<bo
 }
 
 /// Struct defining a rule that requires every textual column to have an upper
-/// length bound, either an enforced declared length or a length check, its
-/// own or that of a column a foreign key forces its values to equal.
+/// length bound, either a declared length the engine enforces or a length
+/// check, its own or that of a column a foreign key forces its values to
+/// equal.
+///
+/// SQLite enforces no declared length, so there only a check bounds a
+/// column.
 ///
 /// # Example
 ///
@@ -119,12 +124,17 @@ impl<DB: DatabaseLike> ColumnRule for UnboundedTextColumn<DB> {
 
         let table_name = column.table(database).table_name();
         let column_name = column.column_name();
+        let check = format!("`CHECK (LENGTH({column_name}) <= n)`");
+        let bound = match Engine::of(database) {
+            Engine::PostgreSql => {
+                format!("Declare an enforced length such as `VARCHAR(n)`, or add {check}")
+            }
+            Engine::Sqlite => format!("Add {check}"),
+        };
         reporter.column(
             column,
             format!("Textual column '{table_name}.{column_name}' has no upper length bound."),
-            format!(
-                "Declare an enforced length such as `VARCHAR(n)`, or add `CHECK (LENGTH({column_name}) <= n)`, with n fitting the data and large if the domain needs it."
-            ),
+            format!("{bound}, with n fitting the data and large if the domain needs it."),
         )?;
         Ok(())
     }

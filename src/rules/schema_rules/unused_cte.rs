@@ -6,6 +6,7 @@ use sql_traits::{errors::LookupError, traits::DatabaseLike};
 use sqlparser::ast::{ObjectName, Query, Statement, Visit, Visitor};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -16,13 +17,15 @@ use crate::{
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule},
 };
 
-/// Finds the `WITH` items nothing outside their own body reads.
-struct UnusedItems;
+/// Finds the `WITH` items nothing outside their own body reads, on the
+/// engine the schema runs on.
+struct UnusedItems(Engine);
 
 /// Collects the unread items of every `WITH` clause a node holds, reported
 /// once the walk leaves the query carrying the clause.
 #[derive(Default)]
 struct Unread {
+    sqlite: bool,
     scopes: WithScopes,
     read: Vec<ItemBinding>,
     found: Vec<(String, String)>,
@@ -48,15 +51,21 @@ impl Visitor for Unread {
                 }) {
                     continue;
                 }
-                let described = if modifies_data(item) {
+                let described = if self.sqlite && modifies_data(item) {
+                    format!(
+                        "the data-modifying `WITH` item '{}', which SQLite does not support",
+                        item.alias.name
+                    )
+                } else if modifies_data(item) {
                     format!(
                         "the data-modifying `WITH` item '{}' that nothing reads, which PostgreSQL still runs",
                         item.alias.name
                     )
                 } else {
                     format!(
-                        "the `WITH` item '{}' that nothing reads, which PostgreSQL never evaluates",
-                        item.alias.name
+                        "the `WITH` item '{}' that nothing reads, which {} never evaluates",
+                        item.alias.name,
+                        if self.sqlite { "SQLite" } else { "PostgreSQL" }
                     )
                 };
                 self.found.push((described, item.to_string()));
@@ -78,7 +87,10 @@ impl ExpressionFinder for UnusedItems {
         _database: &DB,
         node: &V,
     ) -> Result<Vec<(String, String)>, LookupError> {
-        let mut unread = Unread::default();
+        let mut unread = Unread {
+            sqlite: self.0 == Engine::Sqlite,
+            ..Unread::default()
+        };
         let _ = walk(node, &mut unread);
         Ok(unread.found)
     }
@@ -88,7 +100,14 @@ impl ExpressionFinder for UnusedItems {
     }
 
     fn resolution(&self) -> &'static str {
-        "Remove the item, or read it where the statement is meant to use it."
+        match self.0 {
+            Engine::PostgreSql => {
+                "Remove the item, or read it where the statement is meant to use it."
+            }
+            Engine::Sqlite => {
+                "Remove the item, read a `SELECT` item where the statement is meant to use it, or move a write into a separate statement."
+            }
+        }
     }
 }
 
@@ -142,7 +161,7 @@ impl<DB> Rule for UnusedCte<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(UnusedCte),
             group: LintGroup::Suspicious,
-            rationale: "PostgreSQL never evaluates a WITH item nothing reads unless it modifies data, and then always runs it, so the item either does nothing or writes where the text reads as dead code.",
+            rationale: "An unread WITH item obscures which operations contribute to the statement's result.",
             source: Some("https://www.postgresql.org/docs/18/queries-with.html"),
             basis: Basis::Declared,
             example: RuleExample {
@@ -164,7 +183,7 @@ impl<DB: DatabaseLike> SchemaRule for UnusedCte<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        check_schema(&UnusedItems, database, reporter)
+        check_schema(&UnusedItems(Engine::of(database)), database, reporter)
     }
 }
 
@@ -177,6 +196,11 @@ impl<DB: DatabaseLike> QueryRule for UnusedCte<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        check_statement(&UnusedItems, database, statement, reporter)
+        check_statement(
+            &UnusedItems(Engine::of(database)),
+            database,
+            statement,
+            reporter,
+        )
     }
 }

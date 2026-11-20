@@ -111,7 +111,7 @@ impl<C> Rule for ExtensionForeignKeyOnDeleteCascade<C> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(ExtensionForeignKeyOnDeleteCascade),
             group: LintGroup::Suspicious,
-            rationale: "PostgreSQL's default `NO ACTION` refuses to delete a parent row while extension rows reference it, so extension rows have to follow their parent with `ON DELETE CASCADE`.",
+            rationale: "The default `NO ACTION` refuses to delete a parent row while extension rows reference it, so extension rows have to follow their parent with `ON DELETE CASCADE`.",
             source: Some(
                 "https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-FK",
             ),

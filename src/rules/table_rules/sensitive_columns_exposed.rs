@@ -3,6 +3,7 @@
 use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::client_reach,
@@ -90,7 +91,8 @@ rule_definition!(
     ///
     /// A column name matches when it equals one of Splinter's sensitive names
     /// ignoring ASCII case, with `-` read as `_`. The finding lists every
-    /// matched column of the table.
+    /// matched column of the table. The rule does not run on SQLite, which
+    /// has no row-level security.
     ///
     /// # Example
     ///
@@ -127,7 +129,8 @@ GRANT SELECT ON public.credentials TO PUBLIC;",
 REVOKE ALL ON public.credentials FROM PUBLIC;\n\
 ALTER TABLE public.credentials ENABLE ROW LEVEL SECURITY;",
     },
-    Basis::Names
+    Basis::Names,
+    &[Engine::PostgreSql]
 );
 
 /// Whether `column` equals the sensitive `name`, ignoring ASCII case and

@@ -3,6 +3,7 @@
 use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::name_support::{NameHint, names_uuid},
@@ -41,7 +42,7 @@ rule_definition!(
     UuidStoredAsText,
     register_column_rule,
     LintGroup::Pedantic,
-    "Text compares a uuid by its spelling, so upper-case and lower-case forms of one uuid are two values, malformed text is accepted, and each value takes 40 bytes against the 16 of a uuid column.",
+    "Text compares a uuid by its spelling, so upper-case and lower-case forms of one uuid are two values and malformed text is accepted unless a check refuses them.",
     Some("https://www.postgresql.org/docs/current/datatype-uuid.html"),
     RuleExample {
         bad: "CREATE TABLE t (owner_uuid TEXT);",
@@ -59,6 +60,13 @@ impl<DB: DatabaseLike> ColumnRule for UuidStoredAsText<DB> {
         column: &<Self::Database as DatabaseLike>::Column,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        HINT.check(database, column, reporter)
+        match Engine::of(database) {
+            Engine::PostgreSql => HINT.check(database, column, reporter),
+            Engine::Sqlite => NameHint {
+                resolution: "Keep `TEXT` and add `CHECK (length(col) = 36 AND NOT (col GLOB '*[^0-9a-f-]*'))`, replacing `col` with this column name, so every uuid is stored in one lowercase spelling.",
+                ..HINT
+            }
+            .check_unless_constrained(database, column, reporter),
+        }
     }
 }

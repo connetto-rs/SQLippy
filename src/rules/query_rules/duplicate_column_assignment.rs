@@ -11,6 +11,7 @@ use sqlparser::ast::{
 
 use crate::rules::walk_support::walk;
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
@@ -160,7 +161,7 @@ query_rule!(
     /// ```
     DuplicateColumnAssignment,
     LintGroup::Correctness,
-    "PostgreSQL rejects a statement that assigns or lists the same column twice, unless every assignment names a field of it.",
+    "A statement that assigns or lists the same column twice fails on PostgreSQL and keeps only one of the values on SQLite, unless every assignment names a field of it.",
     Some("https://www.postgresql.org/docs/current/sql-update.html"),
     RuleExample {
         bad: "CREATE TABLE notes (id INT PRIMARY KEY, body TEXT);\n\
@@ -175,17 +176,23 @@ impl<DB: DatabaseLike> QueryRule for DuplicateColumnAssignment<DB> {
 
     fn check_statement(
         &self,
-        _database: &Self::Database,
+        database: &Self::Database,
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         let mut duplicates = Duplicates::default();
         let _ = walk(statement, &mut duplicates);
+        let (consequence, alternative) = match Engine::of(database) {
+            Engine::PostgreSql => (
+                "PostgreSQL rejects the statement",
+                ", or assign only its fields",
+            ),
+            Engine::Sqlite => ("SQLite keeps one of the values and drops the others", ""),
+        };
         for (clause, column) in duplicates.0 {
-            let message = format!(
-                "The {clause} assigns column '{column}' more than once, so PostgreSQL rejects the statement."
-            );
-            let resolution = format!("Assign '{column}' once, or assign only its fields.");
+            let message =
+                format!("The {clause} assigns column '{column}' more than once, so {consequence}.");
+            let resolution = format!("Assign '{column}' once{alternative}.");
             reporter.statement(statement, column, message, resolution)?;
         }
         Ok(())

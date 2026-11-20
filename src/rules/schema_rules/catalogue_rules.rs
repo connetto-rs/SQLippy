@@ -13,8 +13,9 @@ use sql_traits::{
 use sqlparser::ast::Action;
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
 
@@ -265,9 +266,11 @@ fn named<DB: DatabaseLike>(database: &DB) -> Result<Vec<Named<'_, DB>>, LookupEr
 /// Bytes PostgreSQL keeps of an identifier.
 const NAMEDATALEN: usize = 63;
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports an identifier longer than 63
     /// bytes, which PostgreSQL truncates.
+    ///
+    /// The rule does not run on SQLite, which keeps names of any length.
     ///
     /// # Example
     ///
@@ -283,13 +286,16 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&short).is_ok());
     /// ```
     TruncatedIdentifier,
+    register_schema_rule,
     LintGroup::Suspicious,
     "PostgreSQL keeps only the first 63 bytes of an identifier, so two long names can collide and code naming the long form finds nothing.",
     Some("https://www.postgresql.org/docs/current/sql-syntax-lexical.html"),
     RuleExample {
         bad: "CREATE TABLE reports (this_column_name_is_longer_than_the_sixty_three_byte_limit_for_sql INT);",
         good: "CREATE TABLE reports (report_id INT);",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for TruncatedIdentifier<DB> {
@@ -424,6 +430,76 @@ const RESERVED: [&str; 101] = [
     "with",
 ];
 
+/// Keywords SQLite 3.51 rejects as an unquoted table or column name in at
+/// least one statement, and the clock keywords it accepts as names but reads
+/// as the clock wherever they appear unquoted.
+const SQLITE_RESERVED: [&str; 64] = [
+    "add",
+    "all",
+    "alter",
+    "and",
+    "as",
+    "autoincrement",
+    "between",
+    "case",
+    "cast",
+    "check",
+    "collate",
+    "commit",
+    "constraint",
+    "create",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "default",
+    "deferrable",
+    "delete",
+    "distinct",
+    "drop",
+    "else",
+    "escape",
+    "except",
+    "exists",
+    "foreign",
+    "from",
+    "group",
+    "having",
+    "if",
+    "in",
+    "index",
+    "insert",
+    "intersect",
+    "into",
+    "is",
+    "isnull",
+    "join",
+    "limit",
+    "not",
+    "nothing",
+    "notnull",
+    "null",
+    "on",
+    "or",
+    "order",
+    "primary",
+    "raise",
+    "references",
+    "returning",
+    "select",
+    "set",
+    "table",
+    "then",
+    "to",
+    "transaction",
+    "union",
+    "unique",
+    "update",
+    "using",
+    "values",
+    "when",
+    "where",
+];
+
 schema_rule!(
     /// Struct defining a rule that reports a relation, column or role named
     /// by a reserved keyword, which must then be quoted everywhere.
@@ -442,7 +518,7 @@ schema_rule!(
     /// ```
     ReservedKeywordIdentifier,
     LintGroup::Style,
-    "A name that is a reserved keyword is a syntax error unquoted, so every statement naming it must quote it.",
+    "A reserved keyword used as a name requires quoting in statements where the unquoted word is parsed as SQL syntax.",
     Some("https://www.postgresql.org/docs/current/sql-keywords-appendix.html"),
     RuleExample {
         bad: "CREATE TABLE orders (\"order\" INT);",
@@ -458,10 +534,14 @@ impl<DB: DatabaseLike> SchemaRule for ReservedKeywordIdentifier<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
+        let (reserved, engine): (&[&str], &str) = match Engine::of(database) {
+            Engine::PostgreSql => (&RESERVED, "PostgreSQL"),
+            Engine::Sqlite => (&SQLITE_RESERVED, "SQLite"),
+        };
         for object in named(database)? {
             let name = object.name();
             if !object.is_relation_column_or_role()
-                || !RESERVED
+                || !reserved
                     .iter()
                     .any(|keyword| name.eq_ignore_ascii_case(keyword))
             {
@@ -470,7 +550,7 @@ impl<DB: DatabaseLike> SchemaRule for ReservedKeywordIdentifier<DB> {
             object.report(
                 reporter,
                 format!("Identifier '{name}' is a reserved keyword, so it must be quoted wherever it is named."),
-                format!("Rename '{name}' to a word PostgreSQL does not reserve."),
+                format!("Rename '{name}' to a word {engine} does not reserve."),
             )?;
         }
         Ok(())
@@ -654,9 +734,12 @@ impl<DB: DatabaseLike> SchemaRule for UnloggedTable<DB> {
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a view or materialized view
     /// written with `SELECT *`.
+    ///
+    /// The rule does not run on SQLite, which expands the star each time the
+    /// view is read.
     ///
     /// # Example
     ///
@@ -674,6 +757,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&listed).is_ok());
     /// ```
     WildcardView,
+    register_schema_rule,
     LintGroup::Pedantic,
     "PostgreSQL expands the star when the view is created, so columns added to the table later never appear in the view.",
     Some("https://www.postgresql.org/docs/current/sql-createview.html"),
@@ -682,7 +766,9 @@ schema_rule!(
 CREATE VIEW visible AS SELECT * FROM entries;",
         good: "CREATE TABLE entries (id INT, body TEXT);\n\
 CREATE VIEW visible AS SELECT id, body FROM entries;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for WildcardView<DB> {

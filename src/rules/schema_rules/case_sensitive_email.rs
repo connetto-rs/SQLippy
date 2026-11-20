@@ -6,7 +6,8 @@ use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinition, ExpressionContext},
     traits::{
-        CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, FunctionLike, TableLike,
+        CheckConstraintLike, ColumnCollation, ColumnLike, DataTypeLike, DatabaseLike, FunctionLike,
+        TableLike,
     },
 };
 use sqlparser::{
@@ -19,6 +20,7 @@ use sqlparser::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -344,7 +346,13 @@ fn email_column<DB: DatabaseLike>(
                 return Ok(None);
             }
             let insensitive =
-                is_citext(&underlying_type(database, column.data_type(database)).name(database));
+                is_citext(&underlying_type(database, column.data_type(database)).name(database))
+                    || (Engine::of(database) == Engine::Sqlite
+                        && matches!(
+                            column.collation(database)?,
+                            ColumnCollation::Named(collation)
+                                if collation.name().name().eq_ignore_ascii_case("nocase")
+                        ));
             let stored = column.stored_column_name();
             let mut held = None;
             for check in column.check_constraints(database)? {
@@ -408,10 +416,16 @@ impl<DB: DatabaseLike> Visitor for Comparisons<'_, '_, '_, '_, DB> {
                         "`{expression}`, comparing column '{}' with the email in {} case-sensitively",
                         column.name, request.origin
                     ),
-                    resolution: format!(
-                        "Store addresses lowercased under `CHECK ({0} = lower({0}))` and compare them with `lower()` of the request's address, or type the column `citext`.",
-                        column.name.rsplit('.').next().unwrap_or(&column.name)
-                    ),
+                    resolution: match Engine::of(self.database) {
+                        Engine::PostgreSql => format!(
+                            "Store addresses lowercased under `CHECK ({0} = lower({0}))` and compare them with `lower()` of the request's address, or type the column `citext`.",
+                            column.name.rsplit('.').next().unwrap_or(&column.name)
+                        ),
+                        Engine::Sqlite => format!(
+                            "Declare '{0}' `COLLATE NOCASE`, which folds ASCII letters only, or store addresses lowercased under `CHECK ({0} = lower({0}))` and compare them with `lower()` of the request's address.",
+                            column.name.rsplit('.').next().unwrap_or(&column.name)
+                        ),
+                    },
                 });
             }
             break;

@@ -4,8 +4,9 @@ use sql_traits::traits::DatabaseLike;
 use sqlparser::ast::Statement;
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::script_support::{Guard, Object, ScriptState, creation},
     traits::{Constrainer, GenericConstrainer, Reporter, ScriptRule},
 };
@@ -20,7 +21,8 @@ rule_definition!(
     /// in or the object itself. A foreign server lands in no schema, so only
     /// an earlier unconditional `CREATE SERVER` establishes it. `CREATE
     /// SCHEMA IF NOT EXISTS` establishes nothing, since it too accepts a
-    /// schema someone else created.
+    /// schema someone else created. The rule does not run on SQLite, whose
+    /// objects have no owner or grants to adopt.
     ///
     /// # Example
     ///
@@ -54,7 +56,9 @@ CREATE INDEX IF NOT EXISTS document_identifiers ON public.documents (identifier)
 CREATE SEQUENCE IF NOT EXISTS application.ticket_numbers;\n\
 CREATE TABLE IF NOT EXISTS application.documents (identifier INT PRIMARY KEY);\n\
 CREATE INDEX IF NOT EXISTS document_identifiers ON application.documents (identifier);",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> ScriptRule for ConditionalCreationWithoutTrustedSchema<DB> {

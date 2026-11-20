@@ -9,6 +9,7 @@ use crate::rules::{
     policy_support::is_column_reference, volatility_support::runs_volatile, walk_support::walk,
 };
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter},
@@ -122,6 +123,14 @@ impl<DB: DatabaseLike> QueryRule for UnfilteredWrite<DB> {
     ) -> Result<(), Interruption> {
         let mut unfiltered = Unfiltered(database, Vec::new());
         let _ = walk(statement, &mut unfiltered);
+        let resolution = match Engine::of(database) {
+            Engine::PostgreSql => {
+                "Add the WHERE that selects the rows meant, or write WHERE true or TRUNCATE for a deliberate full rewrite."
+            }
+            Engine::Sqlite => {
+                "Add the WHERE that selects the rows meant, or write WHERE true for a deliberate full rewrite."
+            }
+        };
         for (found, filtered) in unfiltered.1 {
             let message = if filtered {
                 format!(
@@ -130,12 +139,7 @@ impl<DB: DatabaseLike> QueryRule for UnfilteredWrite<DB> {
             } else {
                 format!("`{found}` has no WHERE, so it writes every row it reaches.")
             };
-            reporter.statement(
-                statement,
-                found,
-                message,
-                "Add the WHERE that selects the rows meant, or write WHERE true or TRUNCATE for a deliberate full rewrite.".to_owned(),
-            )?;
+            reporter.statement(statement, found, message, resolution.to_owned())?;
         }
         Ok(())
     }

@@ -10,6 +10,7 @@ use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
 
 use crate::{
     deployment::Deployment,
+    engine::Engine,
     error::{
         Allowance, AllowedObject, Error, FunctionAllowance, InactiveRule, Interruption,
         SchemaAllowance, StatementAllowance,
@@ -191,13 +192,17 @@ fn missing_declaration<R: Rule + ?Sized>(
         .find(|declaration| !deployment.declares(*declaration))
 }
 
-/// Registered rules that run: above `allow`, with every declaration they read.
+/// Registered rules that run on `engine`, above `allow` and with every
+/// declaration they read.
 fn enabled<'a, R: Rule + ?Sized>(
     registered: &'a [Registered<R>],
     deployment: &'a Deployment,
+    engine: Engine,
 ) -> impl Iterator<Item = &'a Registered<R>> {
     registered.iter().filter(move |entry| {
-        entry.level > Level::Allow && missing_declaration(entry.rule.as_ref(), deployment).is_none()
+        entry.level > Level::Allow
+            && entry.rule.engines().contains(&engine)
+            && missing_declaration(entry.rule.as_ref(), deployment).is_none()
     })
 }
 
@@ -225,6 +230,7 @@ fn listed<R: Rule + ?Sized>(
     registered.iter().map(move |entry| RegisteredRule {
         metadata: entry.rule.metadata(),
         requires: entry.rule.requires(),
+        engines: entry.rule.engines(),
         kind,
         level: entry.level,
     })
@@ -391,6 +397,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         sink: &mut dyn FnMut(Error<DB>) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
         let deployment = &self.deployment;
+        let engine = Engine::of(database);
         let mut run = Run {
             database,
             deployment,
@@ -412,7 +419,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             functions_used: vec![false; self.function_allowances.len()],
         };
         for table in database.tables() {
-            for entry in enabled(&self.tables, deployment) {
+            for entry in enabled(&self.tables, deployment, engine) {
                 run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
                     entry.rule.check_table(database, table, reporter)
                 })?;
@@ -420,7 +427,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             match table.columns(database) {
                 Ok(columns) => {
                     for column in columns {
-                        for entry in enabled(&self.columns, deployment) {
+                        for entry in enabled(&self.columns, deployment, engine) {
                             run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
                                 entry.rule.check_column(database, column, reporter)
                             })?;
@@ -432,7 +439,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             match table.foreign_keys(database) {
                 Ok(foreign_keys) => {
                     for foreign_key in foreign_keys {
-                        for entry in enabled(&self.foreign_keys, deployment) {
+                        for entry in enabled(&self.foreign_keys, deployment, engine) {
                             run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
                                 entry
                                     .rule
@@ -445,13 +452,13 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             }
         }
         for function in database.functions() {
-            for entry in enabled(&self.functions, deployment) {
+            for entry in enabled(&self.functions, deployment, engine) {
                 run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
                     entry.rule.check_function(database, function, reporter)
                 })?;
             }
         }
-        for entry in enabled(&self.schemas, deployment) {
+        for entry in enabled(&self.schemas, deployment, engine) {
             run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
                 entry.rule.check_schema(database, reporter)
             })?;
@@ -497,9 +504,10 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             return ControlFlow::Continue(false);
         };
         let deployment = &self.deployment;
+        let engine = Engine::of(database);
         let mut run = Run::for_statements(database, deployment, &[]);
         let mut failed = false;
-        for entry in enabled(&self.queries, deployment)
+        for entry in enabled(&self.queries, deployment, engine)
             .filter(|entry| entry.rule.metadata().name == allowance.rule)
         {
             let check = |reporter: &mut Reporter<'_, DB>| {
@@ -509,7 +517,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
                 return ControlFlow::Continue(true);
             }
         }
-        for entry in enabled(&self.scripts, deployment)
+        for entry in enabled(&self.scripts, deployment, engine)
             .filter(|entry| entry.rule.metadata().name == allowance.rule)
         {
             let check = |reporter: &mut Reporter<'_, DB>| {
@@ -531,8 +539,9 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         sink: &mut dyn FnMut(Error<DB>) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
         let deployment = &self.deployment;
+        let engine = Engine::of(database);
         let mut run = Run::for_statements(database, deployment, &self.statement_allowances);
-        for entry in enabled(&self.queries, deployment) {
+        for entry in enabled(&self.queries, deployment, engine) {
             run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
                 entry.rule.check_statement(database, statement, reporter)
             })?;
@@ -547,8 +556,9 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         sink: &mut dyn FnMut(Error<DB>) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
         let deployment = &self.deployment;
+        let engine = Engine::of(database);
         let mut run = Run::for_statements(database, deployment, &self.statement_allowances);
-        for entry in enabled(&self.scripts, deployment) {
+        for entry in enabled(&self.scripts, deployment, engine) {
             run.check(entry.rule.metadata(), entry.level, sink, |reporter| {
                 entry.rule.check_script(database, statements, reporter)
             })?;

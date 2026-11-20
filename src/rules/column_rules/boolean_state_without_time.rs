@@ -6,6 +6,7 @@ use sql_traits::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -94,9 +95,14 @@ impl<DB: DatabaseLike> ColumnRule for BooleanStateWithoutTime<DB> {
                 table.table_name(),
                 column.column_name()
             ),
-            format!(
-                "Store the moment instead, as a nullable `timestamptz` such as `{event}_at` that stays NULL until the event happens."
-            ),
+            match Engine::of(database) {
+                Engine::PostgreSql => format!(
+                    "Store the moment instead, as a nullable `timestamptz` such as `{event}_at` that stays NULL until the event happens."
+                ),
+                Engine::Sqlite => format!(
+                    "Store the moment as canonical UTC `TEXT` such as `{event}_at`, leaving it NULL until the event happens and validating its date and time spelling on write."
+                ),
+            },
         )?;
         Ok(())
     }

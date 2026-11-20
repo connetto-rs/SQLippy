@@ -6,6 +6,7 @@ use sqlparser::ast::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -55,7 +56,7 @@ fn union_factor(factor: &TableFactor) -> bool {
 }
 
 /// Finds recursive items joining duplicate-eliminating derived relations.
-struct UnionSteps;
+struct UnionSteps(Engine);
 
 impl ExpressionFinder for UnionSteps {
     fn find<DB: DatabaseLike, V: Visit + ?Sized>(
@@ -74,17 +75,29 @@ impl ExpressionFinder for UnionSteps {
     }
 
     fn problem(&self) -> &'static str {
-        "which can repeat duplicate elimination over the edge inputs at each step"
+        match self.0 {
+            Engine::PostgreSql => {
+                "which can repeat duplicate elimination over the edge inputs at each step"
+            }
+            Engine::Sqlite => "which requires duplicate elimination over the edge inputs",
+        }
     }
 
     fn resolution(&self) -> &'static str {
-        "Use `UNION ALL` when duplicate edges do not change the result, allowing a flattenable union to use parameterized index scans on each arm."
+        match self.0 {
+            Engine::PostgreSql => {
+                "Use `UNION ALL` when duplicate edges do not change the result, allowing a flattenable union to use parameterized index scans on each arm."
+            }
+            Engine::Sqlite => {
+                "Use `UNION ALL` when duplicate edges do not change the result to avoid duplicate elimination in the edge inputs."
+            }
+        }
     }
 }
 
 /// Reports recursive steps joining a derived `UNION` that eliminates duplicates.
 ///
-/// Walking 1,111 nodes over 200,000 edges took 113.694 ms with `UNION` and 2.365 ms with `UNION ALL` on PostgreSQL 17, and 347.271 ms and 1.983 ms on PostgreSQL 18. A flattenable `UNION ALL` permits parameterized index scans on each arm. Views and non-recursive common table expressions are not followed.
+/// Views and non-recursive common table expressions are not followed.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
@@ -122,7 +135,7 @@ impl<DB> Rule for RecursiveStepOverUnion<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(RecursiveStepOverUnion),
             group: LintGroup::Perf,
-            rationale: "Duplicate elimination in a derived edge union can repeat at every recursive step. A flattenable `UNION ALL` permits parameterized index scans on each arm. Walking 1,111 nodes over 200,000 edges took 113.694 ms with `UNION` and 2.365 ms with `UNION ALL` on PostgreSQL 17, and 347.271 ms and 1.983 ms on PostgreSQL 18.",
+            rationale: "Duplicate elimination in a derived edge union adds work that UNION ALL avoids when duplicate edges do not change the result.",
             source: Some("https://www.postgresql.org/docs/17/queries-union.html"),
             basis: Basis::Declared,
             example: RuleExample {
@@ -141,7 +154,7 @@ impl<DB: DatabaseLike> SchemaRule for RecursiveStepOverUnion<DB> {
         database: &DB,
         reporter: &mut Reporter<'_, DB>,
     ) -> Result<(), Interruption> {
-        check_schema(&UnionSteps, database, reporter)
+        check_schema(&UnionSteps(Engine::of(database)), database, reporter)
     }
 }
 
@@ -153,6 +166,11 @@ impl<DB: DatabaseLike> QueryRule for RecursiveStepOverUnion<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, DB>,
     ) -> Result<(), Interruption> {
-        check_statement(&UnionSteps, database, statement, reporter)
+        check_statement(
+            &UnionSteps(Engine::of(database)),
+            database,
+            statement,
+            reporter,
+        )
     }
 }

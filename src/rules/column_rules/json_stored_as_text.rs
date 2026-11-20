@@ -3,6 +3,7 @@
 use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::name_support::{NameHint, names_json},
@@ -42,7 +43,7 @@ rule_definition!(
     JsonStoredAsText,
     register_column_rule,
     LintGroup::Pedantic,
-    "Text stores any string, so a malformed document is accepted and every read of a key or path needs a cast to json.",
+    "Text stores any string, so a malformed document is accepted unless a check refuses it.",
     Some("https://www.postgresql.org/docs/current/datatype-json.html"),
     RuleExample {
         bad: "CREATE TABLE t (payload_json TEXT);",
@@ -60,6 +61,13 @@ impl<DB: DatabaseLike> ColumnRule for JsonStoredAsText<DB> {
         column: &<Self::Database as DatabaseLike>::Column,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        HINT.check(database, column, reporter)
+        match Engine::of(database) {
+            Engine::PostgreSql => HINT.check(database, column, reporter),
+            Engine::Sqlite => NameHint {
+                resolution: "Keep `TEXT` and add `CHECK (json_valid(col))`, replacing `col` with this column name.",
+                ..HINT
+            }
+            .check_unless_constrained(database, column, reporter),
+        }
     }
 }

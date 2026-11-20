@@ -4,6 +4,7 @@
 use sql_traits::traits::{DatabaseLike, ForeignKeyLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
@@ -11,6 +12,8 @@ use crate::{
 
 /// Struct defining a constraint that enforces that foreign key names are
 /// lowercase.
+///
+/// The rule does not run on SQLite, which compares identifiers without case.
 ///
 /// # Example
 ///
@@ -58,6 +61,10 @@ impl<DB: DatabaseLike + 'static> From<MixedCaseForeignKeyName<DB>> for GenericCo
 }
 
 impl<C> Rule for MixedCaseForeignKeyName<C> {
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
+    }
+
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(MixedCaseForeignKeyName),

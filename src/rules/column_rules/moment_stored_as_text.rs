@@ -3,6 +3,7 @@
 use sql_traits::{traits::DatabaseLike, utils::scalar_family::ScalarFamily};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::name_support::{NameHint, names_moment},
@@ -43,7 +44,7 @@ rule_definition!(
     MomentStoredAsText,
     register_column_rule,
     LintGroup::Pedantic,
-    "Text compares a date by its characters, so impossible dates are stored, `2026-1-9` sorts after `2026-01-10`, and range filters and time arithmetic need a cast on every read.",
+    "Text compares a date by its characters, so impossible dates are stored and `2026-1-9` sorts after `2026-01-10` unless a check holds every value to one canonical spelling.",
     Some("https://www.postgresql.org/docs/current/datatype-datetime.html"),
     RuleExample {
         bad: "CREATE TABLE t (start_date TEXT);",
@@ -61,6 +62,13 @@ impl<DB: DatabaseLike> ColumnRule for MomentStoredAsText<DB> {
         column: &<Self::Database as DatabaseLike>::Column,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        HINT.check(database, column, reporter)
+        match Engine::of(database) {
+            Engine::PostgreSql => HINT.check(database, column, reporter),
+            Engine::Sqlite => NameHint {
+                resolution: "Use canonical UTC `TEXT` with `CHECK (date(col) IS col)` for a day or `CHECK (datetime(col) IS col)` for a moment, replacing `col` with this column name.",
+                ..HINT
+            }
+            .check_unless_constrained(database, column, reporter),
+        }
     }
 }

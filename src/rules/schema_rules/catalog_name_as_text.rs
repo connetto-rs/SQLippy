@@ -10,6 +10,7 @@ use sql_traits::{
 use sqlparser::ast::{BinaryOperator, Expr, InTarget, Visit, Visitor};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -63,7 +64,7 @@ schema_rule!(
     /// ```
     CatalogNameAsText,
     LintGroup::Pedantic,
-    "A relation named by text has no identity, so a rename or a drop leaves the stored names pointing at nothing, where regclass follows the relation.",
+    "A relation named by text has no stable identity, so a rename or a drop can leave stored names pointing at nothing.",
     Some("https://www.postgresql.org/docs/current/datatype-oid.html"),
     RuleExample {
         bad: "CREATE TABLE documents (id INT PRIMARY KEY);\n\
@@ -229,7 +230,10 @@ impl<DB: DatabaseLike> Visitor for Comparisons<'_, '_, '_, DB> {
                 found: format!(
                     "`{expression}`, comparing text column '{column}' with {relation}"
                 ),
-                resolution: "Type the column `regclass`, which keeps the relation's identity through renames and refuses a dropped one, and compare it with `'schema.relation'::regclass` under a controlled `search_path`, or declare an enum when the values are categories rather than relations.".to_owned(),
+                resolution: match Engine::of(self.database) {
+                    Engine::PostgreSql => "Type the column `regclass`, which keeps the relation's identity through renames and refuses a dropped one, and compare it with `'schema.relation'::regclass` under a controlled `search_path`, or declare an enum when the values are categories rather than relations.",
+                    Engine::Sqlite => "Maintain stored relation names explicitly in every rename or drop migration, or use stable application categories rather than relation names.",
+                }.to_owned(),
             });
             break;
         }

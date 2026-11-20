@@ -4,6 +4,7 @@ use sql_traits::traits::DatabaseLike;
 use sqlparser::ast::Statement;
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -25,6 +26,8 @@ const CHECK: NotInCheck = NotInCheck {
 /// Struct defining a rule that reports `NOT IN` over a subquery whose output
 /// is non-null or remains unjudged by
 /// [`NotInNullableSubquery`](crate::rules::NotInNullableSubquery).
+///
+/// The rule does not run on SQLite, which can build a list for a `NOT IN` subquery.
 ///
 /// PostgreSQL never turns `x NOT IN (SELECT c ...)` into an anti-join, even
 /// when `c` is `NOT NULL`. Measured on PostgreSQL 17.11 and 18.6 with
@@ -69,6 +72,10 @@ impl<DB: DatabaseLike + 'static> From<NotInSubquery<DB>> for GenericConstrainer<
 }
 
 impl<DB> Rule for NotInSubquery<DB> {
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
+    }
+
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(NotInSubquery),

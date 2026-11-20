@@ -6,6 +6,7 @@ use sql_traits::traits::{DatabaseLike, FunctionLike, PolicyLike, TableLike, View
 use sqlparser::ast::{BinaryOperator, Expr, Ident, Query, TableFactor, Visit, Visitor};
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -55,7 +56,7 @@ schema_rule!(
     /// ```
     RepeatedRecursionBound,
     LintGroup::Pedantic,
-    "Copies of one traversal limit written at several walks drift apart when one is changed, where an immutable function names the bound once.",
+    "Copies of one traversal limit written at several walks drift apart when one is changed.",
     Some("https://www.postgresql.org/docs/current/queries-with.html#QUERIES-WITH-RECURSIVE"),
     RuleExample {
         bad: "CREATE FUNCTION first_depth() RETURNS INT LANGUAGE sql IMMUTABLE AS $$ WITH RECURSIVE walk(depth) AS (SELECT 0 UNION ALL SELECT depth + 1 FROM walk WHERE depth < 32) SELECT max(depth) FROM walk $$;\n\
@@ -290,9 +291,14 @@ impl<DB: DatabaseLike> SchemaRule for RepeatedRecursionBound<DB> {
                     capitalized(&site.describe(database)),
                     others.join(" and ")
                 );
-                let resolution = format!(
-                    "Name the bound once in an `IMMUTABLE` SQL function returning {value}, such as `depth_limit()`, and compare every walk with it."
-                );
+                let resolution = match Engine::of(database) {
+                    Engine::PostgreSql => format!(
+                        "Name the bound once in an `IMMUTABLE` SQL function returning {value}, such as `depth_limit()`, and compare every walk with it."
+                    ),
+                    Engine::Sqlite => format!(
+                        "Name the bound once with `CREATE VIEW depth_limit AS SELECT {value} AS value` and compare every walk with `(SELECT value FROM depth_limit)`."
+                    ),
+                };
                 match site {
                     Site::View(view) => reporter.view(view, message, resolution)?,
                     Site::MaterializedView(view) => {

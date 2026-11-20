@@ -4,6 +4,7 @@
 use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
@@ -12,6 +13,8 @@ use heck::ToSnakeCase;
 
 /// Struct defining a constraint that enforces that column names follow
 /// `snake_case` style.
+///
+/// The rule does not run on SQLite, which resolves identifiers without case sensitivity.
 ///
 /// # Example
 ///
@@ -61,6 +64,10 @@ impl<DB: DatabaseLike + 'static> From<NonSnakeCaseColumnName<DB>> for GenericCon
 }
 
 impl<DB> Rule for NonSnakeCaseColumnName<DB> {
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
+    }
+
     fn metadata(&self) -> &'static RuleMetadata {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(NonSnakeCaseColumnName),

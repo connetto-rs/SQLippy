@@ -10,7 +10,7 @@
 
 The crates.io and docs.rs badges resolve after the first release.
 
-[Clippy](https://github.com/rust-lang/rust-clippy)-style lints for PostgreSQL schemas and the queries sent to them, built on [sql-traits](https://github.com/connetto-rs/sql-traits). Every finding says what is wrong, why, and how to fix it. Try it in the [browser demo](https://sqlippy.luca.phd/).
+[Clippy](https://github.com/rust-lang/rust-clippy)-style lints for PostgreSQL schemas and the queries sent to them, built on [sql-traits](https://github.com/connetto-rs/sql-traits). A schema parsed in the SQLite dialect is checked as SQLite, where rules about PostgreSQL-only behaviour do not run. Every finding says what is wrong, why, and how to fix it. Try it in the [browser demo](https://sqlippy.luca.phd/).
 
 ```rust
 use sqlippy::prelude::*;

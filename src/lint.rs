@@ -2,7 +2,7 @@
 
 use std::fmt::{self, Display};
 
-use crate::deployment::Declaration;
+use crate::{deployment::Declaration, engine::Engine};
 
 /// Category of a rule, following Clippy's lint groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -203,6 +203,12 @@ pub trait Rule {
     fn requires(&self) -> &'static [Declaration] {
         &[]
     }
+
+    /// Returns the engines the rule runs on. A rule does not run on a schema
+    /// whose engine is not among them.
+    fn engines(&self) -> &'static [Engine] {
+        &Engine::ALL
+    }
 }
 
 /// What a rule is run on.
@@ -229,6 +235,7 @@ pub enum RuleKind {
 pub struct RegisteredRule {
     pub(crate) metadata: &'static RuleMetadata,
     pub(crate) requires: &'static [Declaration],
+    pub(crate) engines: &'static [Engine],
     pub(crate) kind: RuleKind,
     pub(crate) level: Level,
 }
@@ -244,6 +251,12 @@ impl RegisteredRule {
     #[must_use]
     pub fn requires(&self) -> &'static [Declaration] {
         self.requires
+    }
+
+    /// Returns the engines the rule runs on.
+    #[must_use]
+    pub fn engines(&self) -> &'static [Engine] {
+        self.engines
     }
 
     /// Returns what the rule is run on.
