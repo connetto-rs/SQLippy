@@ -9,7 +9,7 @@ use std::{
 use sql_traits::{
     errors::LookupError,
     structs::IdentifierCase,
-    traits::{DatabaseLike, FunctionLike, PolicyLike, TableLike, TriggerLike},
+    traits::{DatabaseLike, FunctionLike, PolicyLike, Relation, TableLike, TriggerLike},
 };
 use sqlparser::ast::{
     Expr, FromTable, JoinConstraint, JoinOperator, ObjectName, Query, Select, SetExpr, Statement,
@@ -767,7 +767,12 @@ impl<DB: DatabaseLike> SchemaRule for AuthorizationInTrigger<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         for (function, trigger) in triggers_with_functions(database) {
-            let table = trigger.table(database)?;
+            // A view has no row level security, so a trigger on one repeats no policy.
+            let (Relation::Table(table) | Relation::ForeignTable(table)) =
+                trigger.relation(database)?
+            else {
+                continue;
+            };
             if !table.has_row_level_security(database)? {
                 continue;
             }

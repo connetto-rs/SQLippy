@@ -2,7 +2,7 @@
 
 use std::ops::ControlFlow;
 
-use sql_traits::traits::{DatabaseLike, TableLike, TriggerLike};
+use sql_traits::traits::{DatabaseLike, Relation, TableLike, TriggerLike};
 use sqlparser::ast::{Expr, Query, Statement, TriggerPeriod, Visitor};
 
 use crate::{
@@ -156,7 +156,11 @@ impl<DB: DatabaseLike> SchemaRule for UnfilteredChangeTrigger<DB> {
             let Some(block) = plpgsql_block(function) else {
                 continue;
             };
-            let table = trigger.table(database)?;
+            let (Relation::Table(table) | Relation::ForeignTable(table)) =
+                trigger.relation(database)?
+            else {
+                continue;
+            };
             let mut reach = Reach::new(database, WritesElsewhere::new(database, table));
             let mut unfiltered = Unfiltered {
                 reach: &mut reach,

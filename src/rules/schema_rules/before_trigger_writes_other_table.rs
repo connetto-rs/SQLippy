@@ -1,6 +1,6 @@
 //! Submodule providing the `BeforeTriggerWritesOtherTable` rule.
 
-use sql_traits::traits::{DatabaseLike, TableLike, TriggerLike};
+use sql_traits::traits::{DatabaseLike, Relation, TableLike, TriggerLike};
 use sqlparser::ast::{Query, Statement, TriggerPeriod};
 use sqlparser_plpgsql::embedded::{Node, NodeKind};
 
@@ -125,7 +125,11 @@ impl<DB: DatabaseLike> SchemaRule for BeforeTriggerWritesOtherTable<DB> {
             let Some(block) = plpgsql_block(function) else {
                 continue;
             };
-            let table = trigger.table(database)?;
+            let (Relation::Table(table) | Relation::ForeignTable(table)) =
+                trigger.relation(database)?
+            else {
+                continue;
+            };
             let mut reach = Reach::new(database, WritesElsewhere::new(database, table));
             let mut returns = Returns {
                 reach: &mut reach,
