@@ -136,6 +136,60 @@ fn a_check_refusing_nan_by_name_is_read() {
 }
 
 #[test]
+fn signed_and_quoted_bounds_are_read() {
+    let raised = admitted(
+        "CREATE TABLE t (
+             negated DOUBLE PRECISION CHECK (negated > -'Infinity'::double precision AND negated < -'-Infinity'::double precision),
+             plus DOUBLE PRECISION CHECK (plus < +'Infinity'::double precision),
+             quoted DOUBLE PRECISION CHECK (quoted >= '0' AND quoted <= '1e3')
+         );",
+    );
+    assert_eq!(raised, vec![found("t.plus", "'-Infinity'")]);
+}
+
+#[test]
+fn is_not_distinct_from_is_not_null_and_all_are_read() {
+    let raised = admitted(
+        "CREATE TABLE t (
+             exact DOUBLE PRECISION CHECK (exact IS NOT DISTINCT FROM 1.5),
+             present DOUBLE PRECISION CHECK (present IS NOT NULL AND present < 'Infinity'),
+             below DOUBLE PRECISION CHECK (below < ALL (ARRAY[1.0, 2.0]))
+         );",
+    );
+    assert_eq!(
+        raised,
+        vec![
+            found("t.below", "'-Infinity'"),
+            found("t.present", "'-Infinity'")
+        ]
+    );
+}
+
+#[test]
+fn a_conjunct_the_rule_cannot_decide_refuses_nothing() {
+    let raised = admitted(
+        "CREATE FUNCTION is_measured(reading DOUBLE PRECISION) RETURNS BOOLEAN
+             LANGUAGE sql IMMUTABLE AS $$ SELECT reading = reading $$;
+         CREATE TABLE t (
+             code TEXT NOT NULL,
+             coded DOUBLE PRECISION CHECK (coded > 0 AND code ~ '^[A-Z]+$'),
+             constant DOUBLE PRECISION CHECK (constant < 'Infinity' AND 2 > 1),
+             listed DOUBLE PRECISION CHECK (listed = ANY ('{1,2}'::double precision[])),
+             called DOUBLE PRECISION CHECK (is_measured(called))
+         );",
+    );
+    assert_eq!(
+        raised,
+        vec![
+            found("t.called", "'NaN', 'Infinity' and '-Infinity'"),
+            found("t.coded", "'NaN' and 'Infinity'"),
+            found("t.constant", "'-Infinity'"),
+            found("t.listed", "'NaN', 'Infinity' and '-Infinity'"),
+        ]
+    );
+}
+
+#[test]
 fn numeric_admits_nan_and_admits_the_infinities_only_without_a_precision() {
     let raised = admitted(
         "CREATE TABLE amounts (

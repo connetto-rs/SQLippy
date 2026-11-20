@@ -115,22 +115,24 @@ fn constant(expression: &Expr) -> Option<Rank> {
     }
 }
 
-/// Whether `left operator right` holds, `None` when the ranks cannot tell,
-/// as between two numbers, or the operator compares nothing.
-fn compare(left: Rank, operator: &BinaryOperator, right: Rank) -> Option<bool> {
-    if left == Rank::Number && right == Rank::Number {
-        return None;
-    }
-    let ordering = left.cmp(&right);
-    match operator {
-        BinaryOperator::Eq => Some(ordering == Ordering::Equal),
-        BinaryOperator::NotEq => Some(ordering != Ordering::Equal),
-        BinaryOperator::Lt => Some(ordering == Ordering::Less),
-        BinaryOperator::LtEq => Some(ordering != Ordering::Greater),
-        BinaryOperator::Gt => Some(ordering == Ordering::Greater),
-        BinaryOperator::GtEq => Some(ordering != Ordering::Less),
-        _ => None,
-    }
+/// The test `operator` puts to the ordering of its operands, `None` for an
+/// operator that compares nothing.
+fn ordering_test(operator: &BinaryOperator) -> Option<fn(Ordering) -> bool> {
+    Some(match operator {
+        BinaryOperator::Eq => Ordering::is_eq,
+        BinaryOperator::NotEq => Ordering::is_ne,
+        BinaryOperator::Lt => Ordering::is_lt,
+        BinaryOperator::LtEq => Ordering::is_le,
+        BinaryOperator::Gt => Ordering::is_gt,
+        BinaryOperator::GtEq => Ordering::is_ge,
+        _ => return None,
+    })
+}
+
+/// Whether the ordering of `left` and `right` passes `test`, `None` when the
+/// ranks cannot tell, as between two numbers.
+fn compare(left: Rank, test: fn(Ordering) -> bool, right: Rank) -> Option<bool> {
+    (left != Rank::Number || right != Rank::Number).then(|| test(left.cmp(&right)))
 }
 
 /// `true` when every answer is, `false` when one is, `None` otherwise.
@@ -173,7 +175,8 @@ fn holds(expression: &Expr, column: &str, value: Rank) -> Option<bool> {
         }
     };
     let compared = |left: &Expr, operator: &BinaryOperator, right: &Expr| {
-        compare(operand(left)?, operator, operand(right)?)
+        let test = ordering_test(operator)?;
+        compare(operand(left)?, test, operand(right)?)
     };
     match expression {
         Expr::Nested(inner) => holds(inner, column, value),
@@ -299,17 +302,10 @@ fn admitted<DB: DatabaseLike>(
 
 /// The literals of `values` joined as a sentence names them.
 fn listed(values: &[NonFinite]) -> String {
-    match values {
-        [] => String::new(),
-        [only] => only.literal().to_owned(),
-        [init @ .., last] => format!(
-            "{} and {}",
-            init.iter()
-                .map(|value| value.literal())
-                .collect::<Vec<_>>()
-                .join(", "),
-            last.literal()
-        ),
+    let literals: Vec<&str> = values.iter().map(|value| value.literal()).collect();
+    match literals.split_last() {
+        Some((last, init)) if !init.is_empty() => format!("{} and {last}", init.join(", ")),
+        _ => literals.concat(),
     }
 }
 
