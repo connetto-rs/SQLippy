@@ -56,6 +56,7 @@ mod monotonic_flag_resets;
 mod name_type_hints;
 mod nested_policy_subqueries;
 mod nil_uuid_sentinels;
+mod non_finite_numbers;
 mod nonterminating_recursive_ctes;
 mod not_in_null_lists;
 mod null_comparisons;

@@ -18,6 +18,8 @@ mod unbounded_text_column;
 pub use unbounded_text_column::UnboundedTextColumn;
 mod empty_text_allowed;
 pub use empty_text_allowed::EmptyTextAllowed;
+mod non_finite_number_allowed;
+pub use non_finite_number_allowed::NonFiniteNumberAllowed;
 mod counter_keys;
 pub use counter_keys::{ClientWrittenCounterKey, NarrowIntegerKey, SerialColumn};
 mod client_chosen_timestamp;
