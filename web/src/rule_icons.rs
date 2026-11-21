@@ -64,6 +64,7 @@ rule_icons! {
     "conditional_creation_without_trusted_schema" => FaCircleQuestion,
     "definer_path_creatable_schema" => FaSignsPost,
     "definer_schema_without_default_revoke" => FaUsers,
+    "public_default_privilege" => FaUsers,
     "leakproof_user_function" => FaFaucetDrip,
     "dynamic_sql_injection" => FaSyringe,
     "unsatisfiable_check" => FaCircleXmark,

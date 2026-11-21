@@ -39,11 +39,11 @@ use crate::{
         PlpgsqlAmbiguousName, PluralColumnName, PolicyExpressionDefeatsIndex, PolicyReadCycle,
         PolicyReadsUnprotectedTable, PolicyTargetsBypassRole, PolicyToCreatingRole,
         PolicyWithoutRowLevelSecurity, PolicyWithoutRowReference, PrefixRedundantIndex,
-        PrimaryKeyNotNamedId, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
-        RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
-        ReachableTableWithoutRowLevelSecurity, RecursiveStepOverUnion, RedundantExtensionEdge,
-        ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole, RegColumnType,
-        RepeatedFunctionSearchPath, RepeatedIndexColumn, RepeatedPolicyCall,
+        PrimaryKeyNotNamedId, PublicDefaultPrivilege, PublicSchemaCreate, QueryRewriteRule,
+        RaisingSettingRead, RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView,
+        ReachableSequence, ReachableTableWithoutRowLevelSecurity, RecursiveStepOverUnion,
+        RedundantExtensionEdge, ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole,
+        RegColumnType, RepeatedFunctionSearchPath, RepeatedIndexColumn, RepeatedPolicyCall,
         RepeatedRecursionBound, RepeatedSettingRead, ReplacementWithoutTrustedCreation,
         ReservedKeywordIdentifier, RestrictiveWithoutPermissive, RoleDefinedInSchema,
         RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
@@ -295,13 +295,14 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 75] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 76] = [
         Box::new(DuplicateIndex::default()),
         Box::new(NullableConcatenation::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
         Box::new(SecurityDefinerFunctionExposed::default()),
         Box::new(DefinerSchemaWithoutDefaultRevoke::default()),
+        Box::new(PublicDefaultPrivilege::default()),
         Box::new(ExtensionInExposedSchema::default()),
         Box::new(ExtensionWithoutVersion::default()),
         Box::new(ReachableSequence::default()),
