@@ -345,6 +345,11 @@ fn a_check_pinning_a_unique_referenced_column_to_a_readable_row_is_clean() {
         ),
         ("resource_id = (SELECT id FROM resources LIMIT 1)", vec![]),
         ("(resource_id, id) IN (SELECT id, 1 FROM resources)", vec![]),
+        // The wildcard expands to three columns, so `resource_id` meets `organization_id`.
+        (
+            "(id, resource_id, id, id) IN (SELECT *, id FROM resources)",
+            vec!["grants.grants_resource"],
+        ),
         (
             "id > 0 AND resource_id IN (SELECT id FROM resources)",
             vec![],

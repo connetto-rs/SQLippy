@@ -291,7 +291,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
 
     /// Whether every row of `query` gives `items` the values of one row of
     /// the referenced table it reads under the writer's policies, over the
-    /// columns of a unique key the key maps them onto.
+    /// columns of a unique key the key maps them onto. Items pair with the
+    /// select list up to its first wildcard, which shifts every later column.
     fn yields_readable_row<'e>(
         &self,
         items: &'e [Expr],
@@ -301,7 +302,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             Ok(items
                 .iter()
                 .zip(&select.projection)
-                .filter_map(|(item, projected)| match projected {
+                .map_while(|(item, projected)| match projected {
                     SelectItem::UnnamedExpr(value)
                     | SelectItem::ExprWithAlias { expr: value, .. } => Some((item, value)),
                     _ => None,
