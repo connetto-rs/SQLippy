@@ -4,7 +4,7 @@ use std::{borrow::Cow, collections::HashSet, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ActingRole, IdentifierCase},
+    structs::IdentifierCase,
     traits::{ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, TableLike, TriggerLike},
 };
 use sqlparser::ast::{
@@ -21,6 +21,7 @@ use crate::{
         expression_site_support::{is_null_literal, parsed_body_statements},
         function_rules::unreadable_body,
         key_support::checks_every_row_of,
+        policy_support::{acting, client_roles},
         walk_support::walk,
     },
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
@@ -318,11 +319,6 @@ fn clears<DB: DatabaseLike>(
     Ok(false)
 }
 
-/// The acting role for a declared role, or `PUBLIC` for `None`.
-fn acting<R>(role: Option<&R>) -> ActingRole<'_, R> {
-    role.map_or(ActingRole::Public, ActingRole::Declared)
-}
-
 /// Whether `role`, `PUBLIC` for `None`, may clear the rows of `child` that
 /// `foreign_key` holds before deleting from `parent`, as far as the source
 /// can tell.
@@ -383,19 +379,8 @@ impl<DB: DatabaseLike> ForeignKeyRule for UndeletableReference<DB> {
         }
         let child = foreign_key.host_table(database);
         let parent = foreign_key.referenced_table(database)?;
-        let deployment = reporter.deployment();
-        let mut roles: Vec<(String, Option<&DB::Role>)> = deployment
-            .app_roles()
-            .chain(deployment.anonymous_roles())
-            .filter_map(|name| {
-                database
-                    .role(name)
-                    .map(|role| (format!("'{name}'"), Some(role)))
-            })
-            .collect();
-        roles.push(("PUBLIC".to_owned(), None));
         let mut deleting = Vec::new();
-        for (name, role) in roles {
+        for (name, role) in client_roles(database, reporter.deployment()) {
             if parent.privileges(acting(role), database)?.delete {
                 deleting.push((name, role));
             }
