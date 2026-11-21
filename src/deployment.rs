@@ -48,6 +48,7 @@ pub struct Deployment {
     exposed_schemas: Vec<String>,
     credentials: Fact<Expr>,
     request_settings: Vec<Expr>,
+    sets_within: Vec<(Expr, Expr)>,
     client_written_tables: Vec<(String, String)>,
     binary_replication_tables: Fact<(String, String)>,
     binary_replication_all_tables: bool,
@@ -618,6 +619,46 @@ impl Deployment {
                 audit.events.as_slice(),
             )
         })
+    }
+
+    /// Declares that every value the expression `narrower` yields is also one
+    /// `wider` yields, such as `authz.resources_with('writer')` within
+    /// `authz.resources_with('reader')` where every writer of a resource may
+    /// read it. The declarations compose, and identical expressions need
+    /// none.
+    ///
+    /// The expressions are matched as written, as the operand of `=` or the
+    /// projection of the subquery a policy compares a column with through
+    /// `IN` or `= ANY (ARRAY(...))`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parser error when either expression is not one PostgreSQL
+    /// SQL expression.
+    pub fn with_set_within(mut self, narrower: &str, wider: &str) -> Result<Self, ParserError> {
+        self.sets_within
+            .push((parse_expression(narrower)?, parse_expression(wider)?));
+        Ok(self)
+    }
+
+    /// Returns whether every value `narrower` yields is one `wider` yields,
+    /// as written, through identical expressions or the declared sets.
+    #[must_use]
+    pub fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> bool {
+        let mut reached = vec![narrower];
+        let mut next = 0;
+        while let Some(&set) = reached.get(next) {
+            if set == wider {
+                return true;
+            }
+            for (inner, outer) in &self.sets_within {
+                if inner == set && !reached.contains(&outer) {
+                    reached.push(outer);
+                }
+            }
+            next += 1;
+        }
+        false
     }
 
     /// Returns whether `expression` is a declared credential, as written.
