@@ -116,8 +116,14 @@ fn repeated<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     let keys: Vec<&DB::Column> = elements
         .into_iter()
         .flat_map(|element| {
-            columns_in_expression(element, database.catalog_name(), &target, &declared)
-                .unwrap_or_default()
+            columns_in_expression(
+                element,
+                database.catalog_name(),
+                &target,
+                &declared,
+                database.identifier_case(),
+            )
+            .unwrap_or_default()
         })
         .collect();
     let Some(column) = keys.iter().enumerate().find_map(|(position, column)| {

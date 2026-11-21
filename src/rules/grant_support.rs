@@ -12,6 +12,7 @@ use sqlparser::ast::{Action, Grantee, GranteeName};
 
 use crate::{
     deployment::Deployment,
+    engine::Engine,
     rules::policy_support::{Command, held_by_name, policy_roles},
 };
 
@@ -147,20 +148,22 @@ pub(crate) fn reaches_any<DB: DatabaseLike>(
     grant.applies_to_public() || names_any(database, grant, roles)
 }
 
-/// The schema a relation sits in: its own, or the first schema on the search
-/// path when it was created unqualified.
+/// The schema a relation sits in: its own, or the one an unqualified creation
+/// puts it in, which is `main` under SQLite and the first schema on the search
+/// path under PostgreSQL.
 pub(crate) fn schema_of<'a, DB: DatabaseLike>(
     database: &'a DB,
     schema: Option<Cow<'a, str>>,
 ) -> Cow<'a, str> {
-    schema
-        .or_else(|| {
-            database
-                .search_path()
-                .next()
-                .map(|(name, quoted)| normalize_identifier(name, quoted))
-        })
-        .unwrap_or_default()
+    schema.unwrap_or_else(|| match Engine::of(database) {
+        Engine::Sqlite => Cow::Borrowed("main"),
+        Engine::PostgreSql => database
+            .search_path()
+            .next()
+            .map_or_else(Cow::default, |(name, quoted)| {
+                normalize_identifier(name, quoted)
+            }),
+    })
 }
 
 /// Whether the deployment declares `table` client-written.

@@ -290,7 +290,8 @@ impl Deployment {
     }
 
     /// Declares a table whose rows clients author in a local replica and
-    /// push later, by the stored names of its schema and table.
+    /// push later, by the stored names of its schema and table. A SQLite table
+    /// created without a database name sits in `main`.
     #[must_use]
     pub fn with_client_written_table(
         mut self,
