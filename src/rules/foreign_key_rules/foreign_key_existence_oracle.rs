@@ -5,25 +5,29 @@ use std::{borrow::Cow, ops::ControlFlow, slice};
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
     structs::{
-        ColumnDefinitionScope, ColumnPrivilege, ColumnScope, IdentifierCase, RowGate, RowSecurity,
-        RowStatement, RowVersion,
+        ColumnDefinitionScope, ColumnPrivilege, ColumnScope, GateTerm, IdentifierCase, RowGate,
+        RowSecurity, RowStatement, RowVersion,
     },
     traits::{ColumnLike, DatabaseLike, ForeignKeyLike, TableLike},
 };
 use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionArguments, InTarget, Query, Select, SelectItem,
-    SetExpr, TableFactor, Visit, visit_expressions,
+    BinaryOperator, Expr, Function, FunctionArguments, Ident, InTarget, Query, Select, SelectItem,
+    SetExpr, Visit, VisitMut, VisitorMut, visit_expressions,
 };
 
 use crate::{
+    deployment::Deployment,
     engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        closed_set_support::names_cast_column,
+        closed_set_support::{names_cast_column, stored_name},
         key_support::{equality_keys, instances, named},
         policy_read_support::sublink_reads,
-        policy_support::{acting, client_roles, conjuncts, disjuncts, is_tautology, unwrapped},
+        policy_support::{
+            acting, client_roles, conjuncts, disjuncts, is_column_reference, is_tautology,
+            unwrapped,
+        },
     },
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
@@ -41,16 +45,21 @@ use crate::{
 /// hides rows when its `SELECT` policies for the role do not admit every row.
 /// A write is excused when the check the referencing table applies to the
 /// written row confines every key column, each in a restrictive policy or in
-/// every permissive one, with `=`, `= ANY` or `IN` to a function call that
-/// reads no column or to a subquery reading the referenced table, or with an
-/// `EXISTS` over the referenced table equating its column with the key column.
-/// Such a subquery runs under the role's own policies and fails alike for a
-/// hidden and a missing key. Confining the key columns that the key maps onto
-/// a unique key of the referenced table is enough when one subquery draws
-/// them all from the same row of that table, which is then the only row the
-/// key can match. A check that forces a key column `NULL` also confines the
-/// key, since PostgreSQL then looks up no row. The rule does not run on
-/// SQLite, which has no row-level security.
+/// every permissive one, with `=`, `= ANY` or `IN` to a subquery reading the
+/// referenced table, or with an `EXISTS` over the referenced table equating
+/// its column with the key column. Such a subquery runs under the role's own
+/// policies and fails alike for a hidden and a missing key. Confining the key
+/// columns that the key maps onto a unique key of the referenced table is
+/// enough when one subquery draws them all from the same row of that table,
+/// which is then the only row the key can match. A check that forces a key
+/// column `NULL` also confines the key, since PostgreSQL then looks up no
+/// row. A write is also excused when the check makes every row the key can
+/// match readable, which holds when every restrictive and at least one
+/// permissive `SELECT` policy of the referenced table tests the columns the
+/// key maps onto as the check tests their key columns, or tests one against a
+/// set the check confines its key column within, as written or declared with
+/// [`Deployment::with_set_within`]. The rule does not run on SQLite, which
+/// has no row-level security.
 ///
 /// # Example
 ///
@@ -137,15 +146,12 @@ fn row_security<'db, DB: DatabaseLike>(
     }
 }
 
-/// Whether the `SELECT` policies `role` meets on `parent` leave some row out.
+/// Whether the `SELECT` policies of `parent` in `security` leave some row out.
 fn hides_rows<DB: DatabaseLike>(
     database: &DB,
     parent: &DB::Table,
-    role: Option<&DB::Role>,
+    security: &RowSecurity<'_, DB::Policy>,
 ) -> Result<bool, LookupError> {
-    let Some(security) = row_security(database, parent, RowStatement::Select, role)? else {
-        return Ok(false);
-    };
     let Some(gates) = security.gates() else {
         // An exempt role reads every row, and a refused read reads none.
         return Ok(security.infinite_recursion().is_some());
@@ -170,11 +176,12 @@ fn hides_rows<DB: DatabaseLike>(
     Ok(false)
 }
 
-/// Decides whether the check on a written row confines every column of the
-/// foreign key to values its writer may point at. A set of key columns is a
-/// bit mask over their positions in the key, which PostgreSQL caps at 32.
+/// Decides whether the check on a written row confines the foreign key to
+/// rows its writer may point at. A set of key columns is a bit mask over
+/// their positions in the key, which PostgreSQL caps at 32.
 struct Confinement<'a, DB: DatabaseLike> {
     database: &'a DB,
+    deployment: &'a Deployment,
     parent: &'a DB::Table,
     key_columns: Vec<Cow<'a, str>>,
     /// The referenced column each key column maps onto, by position.
@@ -187,6 +194,7 @@ struct Confinement<'a, DB: DatabaseLike> {
 impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     fn new(
         database: &'a DB,
+        deployment: &'a Deployment,
         foreign_key: &'a DB::ForeignKey,
         parent: &'a DB::Table,
     ) -> Result<Self, LookupError> {
@@ -212,6 +220,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             .collect();
         Ok(Self {
             database,
+            deployment,
             parent,
             key_columns,
             referenced_columns,
@@ -226,11 +235,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
 
     /// The key columns `expression` names.
     fn key_columns_named(&self, expression: &Expr) -> u64 {
-        self.key_columns
-            .iter()
-            .enumerate()
-            .filter(|(_, column)| names_cast_column(expression, column))
-            .fold(0, |mask, (position, _)| mask | 1 << position)
+        positions(&self.key_columns, expression)
     }
 
     /// The position in the key of the key column `expression` names.
@@ -390,9 +395,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         }
     }
 
-    /// Whether `query` yields only keys its writer may point at: rows of the
-    /// referenced table read under the writer's policies, or values a
-    /// function names without reading the written row.
+    /// Whether `query` yields only rows of the referenced table read under
+    /// the writer's policies.
     fn confining_query(&self, policy: &DB::Policy, query: &Query) -> Result<bool, LookupError> {
         let SetExpr::Select(select) = query.body.as_ref() else {
             return Ok(false);
@@ -403,26 +407,11 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         {
             return self.confining_value(policy, value);
         }
-        let mut functions = select.from.iter().flat_map(|from| {
-            std::iter::once(&from.relation)
-                .chain(from.joins.iter().map(|join| &join.relation))
-                .filter(|factor| {
-                    matches!(
-                        factor,
-                        TableFactor::Function { .. } | TableFactor::Table { args: Some(_), .. }
-                    )
-                })
-        });
-        if let Some(first) = functions.next() {
-            return Ok(std::iter::once(first)
-                .chain(functions)
-                .all(|factor| !references_column(factor)));
-        }
         let (_, reads) = sublink_reads(self.database, policy, Some(query))?;
         Ok(reads.iter().any(|read| read.table == self.parent))
     }
 
-    /// Whether `value` holds only keys its writer may point at.
+    /// Whether `value` holds only keys of rows the writer reads.
     fn confining_value(&self, policy: &DB::Policy, value: &Expr) -> Result<bool, LookupError> {
         match unwrapped(value) {
             Expr::Subquery(query) => self.confining_query(policy, query),
@@ -432,7 +421,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 {
                     self.confining_query(policy, query)
                 }
-                _ => Ok(!references_column(value)),
+                _ => Ok(false),
             },
             _ => Ok(false),
         }
@@ -593,6 +582,131 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         }
         Ok((restricted | permitted) == self.whole_key())
     }
+
+    /// Whether every row of the referenced table the key can match passes
+    /// the `SELECT` policies `read`, for every row `written` admits.
+    fn reads_matched_rows(
+        &self,
+        written: &RowGate<'_, DB::Policy>,
+        read: &RowSecurity<'_, DB::Policy>,
+    ) -> Result<bool, LookupError> {
+        let Some(gates) = read.gates() else {
+            return Ok(false);
+        };
+        for gate in gates {
+            for term in gate.restrictive() {
+                let condition = term.expression().expression();
+                if !is_tautology(self.database, self.parent, condition)?
+                    && !self.gate_implies(written, &self.condition(condition))
+                {
+                    return Ok(false);
+                }
+            }
+            let mut admitted = false;
+            for term in gate.permissive() {
+                let condition = term.expression().expression();
+                if is_tautology(self.database, self.parent, condition)?
+                    || self.gate_implies(written, &self.condition(condition))
+                {
+                    admitted = true;
+                    break;
+                }
+            }
+            if !admitted {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether every row `gate` admits meets `condition`: a restrictive term
+    /// or every permissive one implies it, or each of its conjuncts or one of
+    /// its arms.
+    fn gate_implies(&self, gate: &RowGate<'_, DB::Policy>, condition: &Condition<'_>) -> bool {
+        let implied_by = |term: &GateTerm<'_, DB::Policy>| {
+            self.clause_implies(term.expression().expression(), condition)
+        };
+        gate.restrictive().iter().any(implied_by)
+            || (!gate.permissive().is_empty() && gate.permissive().iter().all(implied_by))
+            || (!condition.parts.is_empty()
+                && condition
+                    .parts
+                    .iter()
+                    .all(|part| self.gate_implies(gate, part)))
+            || condition
+                .arms
+                .iter()
+                .any(|arm| self.gate_implies(gate, arm))
+    }
+
+    /// `condition` on the referenced row as a check on the written row would
+    /// state it of the key columns.
+    fn condition<'e>(&self, condition: &'e Expr) -> Condition<'e> {
+        let condition = without_parentheses(condition);
+        let split = |operands: Vec<&'e Expr>| {
+            if operands.len() > 1 {
+                operands
+                    .into_iter()
+                    .map(|operand| self.condition(operand))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        };
+        Condition {
+            renamed: renamed(condition, |column| {
+                self.referenced_columns
+                    .iter()
+                    .position(|referenced| *referenced == column)
+                    .map(|position| self.key_columns[position].to_string())
+            }),
+            membership: membership(condition)
+                .map(|(column, members)| (positions(&self.referenced_columns, column), members))
+                .filter(|(mapped, _)| *mapped != 0),
+            parts: split(conjuncts(condition)),
+            arms: split(disjuncts(condition)),
+        }
+    }
+
+    /// Whether every row `clause` admits meets `condition`: the clause states
+    /// it, every arm of the clause or one of its conjuncts implies it, or the
+    /// clause implies each conjunct or one arm of `condition`.
+    fn clause_implies(&self, clause: &Expr, condition: &Condition<'_>) -> bool {
+        let clause = without_parentheses(clause);
+        if let Some(stated) = &condition.renamed
+            && renamed(clause, |column| Some(column.into_owned())).as_ref() == Some(stated)
+        {
+            return true;
+        }
+        if let Some((mapped, wider)) = condition.membership
+            && let Some((column, members)) = membership(clause)
+            && self.key_columns_named(column) & mapped != 0
+            && members.within(wider, self.deployment)
+        {
+            return true;
+        }
+        let arms = disjuncts(clause);
+        if arms.len() > 1 && arms.iter().all(|arm| self.clause_implies(arm, condition)) {
+            return true;
+        }
+        if !condition.parts.is_empty()
+            && condition
+                .parts
+                .iter()
+                .all(|part| self.clause_implies(clause, part))
+        {
+            return true;
+        }
+        let parts = conjuncts(clause);
+        (parts.len() > 1
+            && parts
+                .iter()
+                .any(|part| self.clause_implies(part, condition)))
+            || condition
+                .arms
+                .iter()
+                .any(|arm| self.clause_implies(clause, arm))
+    }
 }
 
 /// Whether `expression` is a column reference, bare or qualified.
@@ -616,14 +730,194 @@ fn references_column<V: Visit>(node: &V) -> bool {
     .is_break()
 }
 
+/// The positions among `columns` of the column `expression` names.
+fn positions(columns: &[Cow<'_, str>], expression: &Expr) -> u64 {
+    columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| names_cast_column(expression, column))
+        .fold(0, |mask, (position, _)| mask | 1 << position)
+}
+
+/// Removes parentheses from an expression.
+fn without_parentheses(mut expression: &Expr) -> &Expr {
+    while let Expr::Nested(inner) = expression {
+        expression = inner;
+    }
+    expression
+}
+
+/// A condition of a `SELECT` policy of the referenced table, as a check on
+/// the written row would state it of the key columns.
+struct Condition<'e> {
+    /// The condition with each column it tests named by the key column the
+    /// key maps onto it, when the key maps every one.
+    renamed: Option<Expr>,
+    /// The key columns mapped onto the column the condition tests against a
+    /// set, and the members of the set.
+    membership: Option<(u64, Members<'e>)>,
+    /// The conjuncts of an `AND`, each implied for the whole.
+    parts: Vec<Condition<'e>>,
+    /// The arms of an `OR`, one implied for the whole.
+    arms: Vec<Condition<'e>>,
+}
+
+/// `expression` with every column reference named by `rename` of its stored
+/// name, or `None` when `rename` names none for one or a subquery reads a
+/// column, which may resolve to another table's.
+fn renamed(expression: &Expr, rename: impl Fn(Cow<'_, str>) -> Option<String>) -> Option<Expr> {
+    struct Renamer<F> {
+        rename: F,
+        depth: usize,
+    }
+
+    impl<F: Fn(Cow<'_, str>) -> Option<String>> VisitorMut for Renamer<F> {
+        type Break = ();
+
+        fn pre_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
+            self.depth += 1;
+            ControlFlow::Continue(())
+        }
+
+        fn post_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
+            self.depth -= 1;
+            ControlFlow::Continue(())
+        }
+
+        fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<()> {
+            if !is_column_reference(expression) {
+                return ControlFlow::Continue(());
+            }
+            if self.depth > 0 {
+                return ControlFlow::Break(());
+            }
+            match stored_name(expression).and_then(&self.rename) {
+                Some(name) => {
+                    *expression = Expr::Identifier(Ident::new(name));
+                    ControlFlow::Continue(())
+                }
+                None => ControlFlow::Break(()),
+            }
+        }
+    }
+
+    let mut renamed = expression.clone();
+    VisitMut::visit(&mut renamed, &mut Renamer { rename, depth: 0 })
+        .is_continue()
+        .then_some(renamed)
+}
+
+/// The members of a set a policy tests a column against, by the expression
+/// yielding them, which reads no column.
+#[derive(Clone, Copy)]
+enum Members<'e> {
+    /// The value of `=`, or the rows of a subquery projecting it alone.
+    Rows(&'e Expr),
+    /// The elements of an array.
+    Elements(&'e Expr),
+}
+
+impl<'e> Members<'e> {
+    /// The members of `value` as the operand of `=`.
+    fn of_value(value: &'e Expr) -> Option<Self> {
+        match unwrapped(value) {
+            Expr::Subquery(query) => Self::of_query(query),
+            value => (!references_column(value)).then_some(Self::Rows(value)),
+        }
+    }
+
+    /// The members of `query`, when it projects one expression and reads,
+    /// filters and limits nothing.
+    fn of_query(query: &'e Query) -> Option<Self> {
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            return None;
+        };
+        if query.with.is_some()
+            || query.limit_clause.is_some()
+            || query.fetch.is_some()
+            || !query.pipe_operators.is_empty()
+            || !select.from.is_empty()
+            || select.selection.is_some()
+            || select.having.is_some()
+        {
+            return None;
+        }
+        match select.projection.as_slice() {
+            [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] => {
+                Self::of_value(value)
+            }
+            _ => None,
+        }
+    }
+
+    /// The members of `array` as the operand of `= ANY`.
+    fn of_array(array: &'e Expr) -> Option<Self> {
+        match unwrapped(array) {
+            Expr::Function(function) if function.name.to_string().eq_ignore_ascii_case("array") => {
+                match &function.args {
+                    FunctionArguments::Subquery(query) => Self::of_query(query),
+                    _ => None,
+                }
+            }
+            array => (!references_column(array)).then_some(Self::Elements(array)),
+        }
+    }
+
+    /// Whether every member is one of `wider`, as written or declared.
+    fn within(self, wider: Self, deployment: &Deployment) -> bool {
+        match (self, wider) {
+            (Self::Rows(narrower), Self::Rows(wider))
+            | (Self::Elements(narrower), Self::Elements(wider)) => {
+                deployment.is_set_within(narrower, wider)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The column `condition` tests against a set with `=`, `= ANY` or `IN`,
+/// and the members of the set.
+fn membership(condition: &Expr) -> Option<(&Expr, Members<'_>)> {
+    match unwrapped(condition) {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => [(left, right), (right, left)]
+            .into_iter()
+            .find_map(|(column, value)| {
+                if is_column(column) {
+                    Some((column.as_ref(), Members::of_value(value)?))
+                } else {
+                    None
+                }
+            }),
+        Expr::AnyOp {
+            left,
+            compare_op: BinaryOperator::Eq,
+            right,
+            ..
+        } if is_column(left) => Some((left, Members::of_array(right)?)),
+        Expr::In {
+            expr,
+            target: InTarget::Subquery(query),
+            negated: false,
+            ..
+        } if is_column(expr) => Some((expr, Members::of_query(query)?)),
+        _ => None,
+    }
+}
+
 /// Whether `role` may write a key of its choosing through `statement` on the
-/// referencing table, past its policies and unconfined by them.
+/// referencing table, past its policies and unconfined by them, while `read`
+/// holds the `SELECT` policies it meets on the referenced table.
 fn writes_free_key<DB: DatabaseLike>(
     confinement: &Confinement<'_, DB>,
     child: &DB::Table,
     statement: RowStatement,
     written: RowVersion,
     role: Option<&DB::Role>,
+    read: &RowSecurity<'_, DB::Policy>,
 ) -> Result<bool, LookupError> {
     let Some(security) = row_security(confinement.database, child, statement, role)? else {
         return Ok(false);
@@ -635,7 +929,7 @@ fn writes_free_key<DB: DatabaseLike>(
         return Ok(false);
     }
     for gate in gates.iter().filter(|gate| gate.row() == written) {
-        if confinement.confining_gate(gate)? {
+        if confinement.confining_gate(gate)? || confinement.reads_matched_rows(gate, read)? {
             return Ok(false);
         }
     }
@@ -678,10 +972,13 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
             return Ok(());
         }
         let child = foreign_key.host_table(database);
-        let confinement = Confinement::new(database, foreign_key, parent)?;
+        let confinement = Confinement::new(database, reporter.deployment(), foreign_key, parent)?;
         let mut probes = Vec::new();
         for (name, role) in client_roles(database, reporter.deployment()) {
-            if !hides_rows(database, parent, role)? {
+            let Some(read) = row_security(database, parent, RowStatement::Select, role)? else {
+                continue;
+            };
+            if !hides_rows(database, parent, &read)? {
                 continue;
             }
             let held = child.privileges(acting(role), database)?;
@@ -693,6 +990,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
                     RowStatement::Insert { returning: false },
                     RowVersion::Inserted,
                     role,
+                    &read,
                 )?
             {
                 commands.push("INSERT");
@@ -704,6 +1002,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
                     RowStatement::Update { reads: false },
                     RowVersion::Updated,
                     role,
+                    &read,
                 )?
             {
                 commands.push("UPDATE");
@@ -723,7 +1022,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
                 "A foreign key of '{child_name}' into '{parent_name}' tells {} whether a row of '{parent_name}' it cannot read exists, since the key is checked past row-level security.",
                 probes.join(", ")
             ),
-            format!("Keep the key server-written, confine it in the WITH CHECK of '{child_name}' to rows the writer may point at, such as `IN (SELECT ... FROM {parent_name})`, or let the writer read every row of '{parent_name}'."),
+            format!("Keep the key server-written, confine it in the WITH CHECK of '{child_name}' to rows the writer may point at, such as `IN (SELECT ... FROM {parent_name})` or the set the SELECT policies of '{parent_name}' test the column the key maps onto against, or let the writer read every row of '{parent_name}'."),
         )?;
         Ok(())
     }
