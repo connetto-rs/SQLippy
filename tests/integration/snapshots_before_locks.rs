@@ -78,6 +78,7 @@ fn a_guard_refusing_repeatable_read_before_the_lock_prevents_the_finding() {
         "IF current_setting('transaction_isolation') = 'read committed' AND slot > 0 THEN NULL; ELSE RAISE EXCEPTION 'rc'; END IF;",
         "IF current_setting('transaction_isolation') = 'repeatable read' OR current_setting('transaction_isolation') = 'serializable' THEN RAISE EXCEPTION 'rr'; END IF;",
         "IF current_setting('transaction_isolation') = 'read committed' OR current_setting('transaction_isolation') = 'read uncommitted' THEN NULL; ELSE RAISE EXCEPTION 'rc'; END IF;",
+        "IF current_setting('transaction_isolation') IS NOT DISTINCT FROM 'read committed' THEN NULL; ELSE RAISE EXCEPTION 'rc'; END IF;",
     ] {
         let body = format!(
             "DECLARE level TEXT; BEGIN {guard} PERFORM pg_advisory_xact_lock(1); {CHECK} END"
@@ -103,6 +104,9 @@ fn guards_that_let_repeatable_read_through_or_follow_the_lock_do_not_count() {
         ),
         format!(
             "BEGIN IF current_setting('transaction_isolation') = 'serializable' OR slot > 0 THEN RAISE EXCEPTION 'no'; END IF; PERFORM pg_advisory_xact_lock(1); {CHECK} END"
+        ),
+        format!(
+            "BEGIN IF current_setting('search_path') NOT IN ('read committed', 'serializable') THEN RAISE EXCEPTION 'path'; END IF; PERFORM pg_advisory_xact_lock(1); {CHECK} END"
         ),
     ] {
         assert_eq!(findings(&plpgsql(&body)).len(), 1, "{body}");
@@ -241,6 +245,64 @@ fn lock_on_one_branch_reaches_a_read_after_the_join() {
 }
 
 #[test]
+fn a_lock_taken_in_a_called_function_reaches_a_later_read() {
+    let schema = format!(
+        "CREATE FUNCTION take_lock() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(1); END $$;
+         {}",
+        plpgsql(&format!("BEGIN PERFORM take_lock(); {CHECK} END"))
+    );
+    let found = findings(&schema);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("reserve(INT)' takes a lock through `take_lock()`"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn a_read_in_a_called_function_after_the_lock_is_reported() {
+    let helpers = "CREATE FUNCTION taken() RETURNS BIGINT LANGUAGE sql STABLE AS $$ SELECT count(*) FROM slots $$;
+        CREATE FUNCTION taken_rows() RETURNS SETOF slots LANGUAGE sql STABLE AS $$ SELECT * FROM slots $$;";
+    for (body, through) in [
+        (
+            "BEGIN PERFORM pg_advisory_xact_lock(1); IF taken() >= 10 THEN RAISE EXCEPTION 'full'; END IF; END",
+            "taken()",
+        ),
+        (
+            "DECLARE n INT; BEGIN PERFORM pg_advisory_xact_lock(1); SELECT count(*) INTO n FROM taken_rows(); END",
+            "taken_rows()",
+        ),
+    ] {
+        let found = findings(&format!("{helpers} {}", plpgsql(body)));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains(&format!("reads 'slots' through `{through}`")),
+            "{found:?}"
+        );
+    }
+    let before = format!(
+        "{helpers} {}",
+        plpgsql(
+            "BEGIN IF taken() >= 10 THEN RAISE EXCEPTION 'full'; END IF; PERFORM pg_advisory_xact_lock(1); END"
+        )
+    );
+    assert_eq!(findings(&before), Vec::<String>::new());
+}
+
+#[test]
+fn a_called_function_refusing_repeatable_read_leaves_no_stale_snapshot() {
+    let schema = format!(
+        "CREATE FUNCTION take_lock() RETURNS void LANGUAGE plpgsql AS $$ BEGIN
+           IF current_setting('transaction_isolation') = 'repeatable read' THEN RAISE EXCEPTION 'rr'; END IF;
+           PERFORM pg_advisory_xact_lock(1);
+         END $$;
+         {}",
+        plpgsql(&format!("BEGIN PERFORM take_lock(); {CHECK} END"))
+    );
+    assert_eq!(findings(&schema), Vec::<String>::new());
+}
+
+#[test]
 fn a_read_through_a_derived_table_is_reported() {
     let body = plpgsql(
         "DECLARE n INT; BEGIN PERFORM pg_advisory_xact_lock(1); SELECT count(*) INTO n FROM (SELECT 1 FROM slots) AS taken; END",
@@ -281,16 +343,24 @@ fn sql_bodies_are_followed() {
 
 #[test]
 fn non_volatile_functions_are_reported_despite_a_guard() {
+    let refuse = "CREATE FUNCTION refuse() RETURNS void LANGUAGE plpgsql AS $$ BEGIN
+        IF current_setting('transaction_isolation') <> 'read committed' THEN RAISE EXCEPTION 'rc'; END IF;
+    END $$;";
     for volatility in ["STABLE", "IMMUTABLE"] {
-        let body = format!(
-            "CREATE FUNCTION room() RETURNS BIGINT LANGUAGE plpgsql {volatility} AS $$ BEGIN
-               IF current_setting('transaction_isolation') <> 'read committed' THEN RAISE EXCEPTION 'rc'; END IF;
-               PERFORM pg_advisory_xact_lock_shared(1);
-               RETURN (SELECT count(*) FROM slots);
-             END $$;"
-        );
-        let found = findings(&body);
-        assert_eq!(found.len(), 1, "{volatility}");
-        assert!(found[0].contains("VOLATILE"), "{found:?}");
+        for guard in [
+            "IF current_setting('transaction_isolation') <> 'read committed' THEN RAISE EXCEPTION 'rc'; END IF;",
+            "PERFORM refuse();",
+        ] {
+            let body = format!(
+                "{refuse} CREATE FUNCTION room() RETURNS BIGINT LANGUAGE plpgsql {volatility} AS $$ BEGIN
+                   {guard}
+                   PERFORM pg_advisory_xact_lock_shared(1);
+                   RETURN (SELECT count(*) FROM slots);
+                 END $$;"
+            );
+            let found = findings(&body);
+            assert_eq!(found.len(), 1, "{volatility} {guard}");
+            assert!(found[0].contains("VOLATILE"), "{found:?}");
+        }
     }
 }

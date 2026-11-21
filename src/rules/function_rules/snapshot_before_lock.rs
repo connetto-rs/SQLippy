@@ -7,7 +7,7 @@ use std::{
 };
 
 use sql_traits::{
-    structs::IdentifierCase,
+    structs::{IdentifierCase, WrittenCall},
     traits::{DatabaseLike, FunctionLike},
 };
 use sqlparser::ast::{
@@ -33,8 +33,9 @@ use crate::{
 
 rule_definition!(
     /// Struct defining a rule that reports a function taking an advisory,
-    /// table or row lock and then reading a table, with no check before the
-    /// lock that refuses a transaction-wide snapshot.
+    /// table or row lock and then reading a table, itself or through the
+    /// functions it calls, with no check before the lock that refuses a
+    /// transaction-wide snapshot.
     ///
     /// Under `REPEATABLE READ` and `SERIALIZABLE` the snapshot is taken by
     /// the transaction's first statement, so a read after waiting for the
@@ -112,6 +113,8 @@ enum Held {
         table: String,
         filter: Option<String>,
     },
+    /// A lock a called function may take, as the call is written.
+    Called(String),
 }
 
 impl Held {
@@ -120,6 +123,7 @@ impl Held {
             Self::Advisory(call) => format!("the advisory lock `{call}`"),
             Self::Table(lock) => format!("`{lock}`"),
             Self::Rows { table, .. } => format!("a row lock on '{table}'"),
+            Self::Called(call) => format!("a lock through `{call}`"),
         }
     }
 }
@@ -249,14 +253,49 @@ fn factor_table(factor: &TableFactor) -> Option<&ObjectName> {
     }
 }
 
-/// The locks and table reads of one statement or query, in that order of
-/// interest: reads are judged against the locks taken before it.
+/// A table a statement reads.
+struct Read {
+    table: String,
+    /// The filter of a `SELECT` reading the table alone.
+    filter: Option<String>,
+    /// The call reading it, for a read in a called function.
+    through: Option<String>,
+}
+
+impl Read {
+    fn describe(&self) -> String {
+        match &self.through {
+            Some(call) => format!("'{}' through `{call}`", self.table),
+            None => format!("'{}'", self.table),
+        }
+    }
+}
+
+/// The locks, table reads and calls of one statement or query, in that
+/// order of interest: reads are judged against the locks taken before it.
 struct Fragment<'db, DB: DatabaseLike> {
     database: &'db DB,
     locks: Vec<Held>,
-    /// Each table a `SELECT` reads, with the filter of a `SELECT` reading
-    /// that table alone.
-    reads: Vec<(String, Option<String>)>,
+    reads: Vec<Read>,
+    /// Each function a call may reach, with the call as written.
+    calls: Vec<(String, &'db DB::Function)>,
+}
+
+impl<DB: DatabaseLike> Fragment<'_, DB> {
+    fn called(&mut self, call: WrittenCall<'_>) {
+        let Ok(functions) = self
+            .database
+            .functions_reached_by(call, IdentifierCase::Folded)
+        else {
+            return;
+        };
+        let written = call.to_string();
+        self.calls.extend(
+            functions
+                .filter(|function| function.target_name().schema() != Some("pg_catalog"))
+                .map(|function| (written.clone(), function)),
+        );
+    }
 }
 
 impl<DB: DatabaseLike> Visitor for Fragment<'_, DB> {
@@ -291,11 +330,11 @@ impl<DB: DatabaseLike> Visitor for Fragment<'_, DB> {
             return ControlFlow::Continue(());
         }
         let alone = tables.len() == 1;
-        self.reads.extend(
-            tables
-                .into_iter()
-                .map(|table| (table.to_string(), alone.then(|| filter.clone()).flatten())),
-        );
+        self.reads.extend(tables.into_iter().map(|table| Read {
+            table: table.to_string(),
+            filter: alone.then(|| filter.clone()).flatten(),
+            through: None,
+        }));
         ControlFlow::Continue(())
     }
 
@@ -306,9 +345,18 @@ impl<DB: DatabaseLike> Visitor for Fragment<'_, DB> {
         ControlFlow::Continue(())
     }
 
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<()> {
+        if let Some(call) = WrittenCall::relation(factor) {
+            self.called(call);
+        }
+        ControlFlow::Continue(())
+    }
+
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
         if calls_catalog(expression, &ADVISORY_LOCKS) {
             self.locks.push(Held::Advisory(expression.to_string()));
+        } else if let Expr::Function(call) = expression {
+            self.called(call.into());
         }
         ControlFlow::Continue(())
     }
@@ -317,7 +365,19 @@ impl<DB: DatabaseLike> Visitor for Fragment<'_, DB> {
 /// A read after a lock that the lock does not refresh.
 struct StaleRead {
     lock: String,
-    table: String,
+    read: String,
+}
+
+/// What a call to a function does to its caller's snapshot.
+#[derive(Default)]
+struct Callee {
+    /// Every path returning from it passed a guard, so it raises under
+    /// `REPEATABLE READ`.
+    refuses: bool,
+    /// Whether it may take a lock.
+    locks: bool,
+    /// The tables it may read.
+    reads: Vec<String>,
 }
 
 /// Follows locks and reads along the paths of a body.
@@ -328,20 +388,67 @@ struct Locks<'db, DB: DatabaseLike> {
     found: Option<StaleRead>,
     /// Whether a `RETURN` leaves the body on a path no guard narrowed.
     returns_unguarded: bool,
-    /// Whether each called function read so far refuses `REPEATABLE READ`,
-    /// `false` while its body is being read.
-    refusing: HashMap<&'db DB::Function, bool>,
+    /// Whether the body may take a lock, on any path.
+    takes_lock: bool,
+    /// Every table the body may read, on any path.
+    reads: Vec<String>,
+    /// What each called function read so far does, nothing while its body
+    /// is being read.
+    callees: HashMap<&'db DB::Function, Callee>,
 }
 
 impl<'db, DB: DatabaseLike> Locks<'db, DB> {
-    fn new(database: &'db DB, guards: bool, refusing: HashMap<&'db DB::Function, bool>) -> Self {
+    fn new(database: &'db DB, guards: bool, callees: HashMap<&'db DB::Function, Callee>) -> Self {
         Self {
             database,
             guards,
             found: None,
             returns_unguarded: false,
-            refusing,
+            takes_lock: false,
+            reads: Vec::new(),
+            callees,
         }
+    }
+
+    /// Walks the body of `function`, answering whether every path returning
+    /// from it passed a guard, never for a body in another language than
+    /// PL/pgSQL.
+    fn body(&mut self, function: &DB::Function) -> bool {
+        if let Some(block) = plpgsql_block(function) {
+            let ended = walk_block(self, &block, Snapshot::default());
+            !self.returns_unguarded && ended.is_none_or(|state| state.guarded)
+        } else {
+            let mut state = Snapshot::default();
+            for statement in body_statements(function) {
+                self.statement(&statement, &mut state);
+            }
+            false
+        }
+    }
+
+    /// What a call to `function` does, read from its body once.
+    fn callee(&mut self, function: &'db DB::Function) -> &Callee {
+        if !self.callees.contains_key(function) {
+            self.callees.insert(function, Callee::default());
+            let mut body = Locks::new(self.database, true, std::mem::take(&mut self.callees));
+            let refuses = body.body(function);
+            // A call that raises under `REPEATABLE READ` leaves no stale snapshot.
+            let callee = if refuses {
+                Callee {
+                    refuses,
+                    ..Callee::default()
+                }
+            } else {
+                Callee {
+                    refuses,
+                    locks: body.takes_lock,
+                    reads: body.reads,
+                }
+            };
+            self.callees = body.callees;
+            self.callees.insert(function, callee);
+        }
+        &self.callees[function]
     }
 
     /// Guards `state` when `query` is a call whose every reached function
@@ -360,53 +467,52 @@ impl<'db, DB: DatabaseLike> Locks<'db, DB> {
             return;
         };
         let called: Vec<&'db DB::Function> = called.collect();
-        if !called.is_empty() && called.into_iter().all(|function| self.refuses(function)) {
+        if !called.is_empty()
+            && called
+                .into_iter()
+                .all(|function| self.callee(function).refuses)
+        {
             state.guarded = true;
         }
     }
 
-    /// Whether every path returning from the PL/pgSQL `function` passed a
-    /// guard, so a call to it raises under `REPEATABLE READ`.
-    fn refuses(&mut self, function: &'db DB::Function) -> bool {
-        if let Some(&refuses) = self.refusing.get(function) {
-            return refuses;
-        }
-        let Some(block) = plpgsql_block(function) else {
-            return false;
-        };
-        self.refusing.insert(function, false);
-        let mut body = Locks::new(self.database, true, std::mem::take(&mut self.refusing));
-        let ended = walk_block(&mut body, &block, Snapshot::default());
-        let refuses = !body.returns_unguarded && ended.is_none_or(|state| state.guarded);
-        self.refusing = body.refusing;
-        self.refusing.insert(function, refuses);
-        refuses
-    }
-}
-
-impl<DB: DatabaseLike> Locks<'_, DB> {
     fn fragment<V: Visit + ?Sized>(&mut self, node: &V, state: &mut Snapshot) {
         let mut fragment = Fragment {
             database: self.database,
             locks: Vec::new(),
             reads: Vec::new(),
+            calls: Vec::new(),
         };
         let _ = walk(node, &mut fragment);
+        for (call, function) in fragment.calls {
+            let callee = self.callee(function);
+            fragment.reads.extend(callee.reads.iter().map(|table| Read {
+                table: table.clone(),
+                filter: None,
+                through: Some(call.clone()),
+            }));
+            if callee.locks {
+                fragment.locks.push(Held::Called(call));
+            }
+        }
+        self.takes_lock |= !fragment.locks.is_empty();
         if self.found.is_none() {
-            for (table, filter) in &fragment.reads {
+            for read in &fragment.reads {
                 let exempt = state.held.iter().any(|held| {
                     matches!(held, Held::Rows { table: locked, filter: locked_by }
-                        if locked == table && locked_by.is_some() && locked_by == filter)
+                        if *locked == read.table && locked_by.is_some() && *locked_by == read.filter)
                 });
                 if let (false, Some(held)) = (exempt, state.held.first()) {
                     self.found = Some(StaleRead {
                         lock: held.describe(),
-                        table: table.clone(),
+                        read: read.describe(),
                     });
                     break;
                 }
             }
         }
+        self.reads
+            .extend(fragment.reads.into_iter().map(|read| read.table));
         if !state.guarded {
             for lock in fragment.locks {
                 if !state.held.contains(&lock) {
@@ -482,15 +588,8 @@ impl<DB: DatabaseLike> FunctionRule for SnapshotBeforeLock<DB> {
         let volatility = function.volatility();
         let volatile = volatility == FunctionBehavior::Volatile;
         let mut locks = Locks::new(database, volatile, HashMap::new());
-        if let Some(block) = plpgsql_block(function) {
-            walk_block(&mut locks, &block, Snapshot::default());
-        } else {
-            let mut state = Snapshot::default();
-            for statement in body_statements(function) {
-                locks.statement(&statement, &mut state);
-            }
-        }
-        let Some(StaleRead { lock, table }) = locks.found else {
+        locks.body(function);
+        let Some(StaleRead { lock, read }) = locks.found else {
             return Ok(());
         };
         let signature = signature(function, database);
@@ -498,7 +597,7 @@ impl<DB: DatabaseLike> FunctionRule for SnapshotBeforeLock<DB> {
             reporter.function(
                 function,
                 format!(
-                    "Function '{signature}' takes {lock} and then reads '{table}', but under REPEATABLE READ or SERIALIZABLE the read uses the snapshot taken before the lock was granted, so it misses what the previous holder committed."
+                    "Function '{signature}' takes {lock} and then reads {read}, but under REPEATABLE READ or SERIALIZABLE the read uses the snapshot taken before the lock was granted, so it misses what the previous holder committed."
                 ),
                 "Raise unless current_setting('transaction_isolation') is 'read committed' before taking the lock, or have callers retry the whole transaction on serialization failure."
                     .to_owned(),
@@ -507,7 +606,7 @@ impl<DB: DatabaseLike> FunctionRule for SnapshotBeforeLock<DB> {
             reporter.function(
                 function,
                 format!(
-                    "Function '{signature}' is declared {volatility} and reads '{table}' after taking {lock}, but a non-volatile function reads with its caller's snapshot at every isolation level, so the read misses what the previous holder committed."
+                    "Function '{signature}' is declared {volatility} and reads {read} after taking {lock}, but a non-volatile function reads with its caller's snapshot at every isolation level, so the read misses what the previous holder committed."
                 ),
                 "Declare the function VOLATILE, and raise unless current_setting('transaction_isolation') is 'read committed' before taking the lock."
                     .to_owned(),
