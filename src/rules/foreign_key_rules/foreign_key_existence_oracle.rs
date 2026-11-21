@@ -209,13 +209,11 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         let SetExpr::Select(select) = query.body.as_ref() else {
             return Ok(false);
         };
-        if select.from.is_empty() {
-            return match select.projection.as_slice() {
-                [
-                    SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. },
-                ] => self.confining_value(policy, value),
-                _ => Ok(false),
-            };
+        if select.from.is_empty()
+            && let [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] =
+                select.projection.as_slice()
+        {
+            return self.confining_value(policy, value);
         }
         let mut functions = select.from.iter().flat_map(|from| {
             std::iter::once(&from.relation)
@@ -324,12 +322,30 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 negated: false,
                 ..
             } => {
-                let named = match unwrapped(expr) {
-                    Expr::Tuple(items) => items
-                        .iter()
-                        .fold(0, |mask, item| mask | self.key_columns_named(item)),
-                    _ => self.key_columns_named(expr),
+                let items = match unwrapped(expr) {
+                    Expr::Tuple(items) => items.as_slice(),
+                    item => std::slice::from_ref(item),
                 };
+                if let SetExpr::Select(select) = query.body.as_ref()
+                    && select.from.is_empty()
+                {
+                    // The query yields one row, so each item takes the value in its position.
+                    let mut confined = 0;
+                    for (item, projected) in items.iter().zip(&select.projection) {
+                        let named = self.key_columns_named(item);
+                        if named != 0
+                            && let SelectItem::UnnamedExpr(value)
+                            | SelectItem::ExprWithAlias { expr: value, .. } = projected
+                            && self.confining_value(policy, value)?
+                        {
+                            confined |= named;
+                        }
+                    }
+                    return Ok(confined);
+                }
+                let named = items
+                    .iter()
+                    .fold(0, |mask, item| mask | self.key_columns_named(item));
                 Ok(if named != 0 && self.confining_query(policy, query)? {
                     named
                 } else {

@@ -89,6 +89,33 @@ fn a_referenced_table_the_writer_reads_whole_is_clean() {
         CREATE TABLE refs (shown_id INT CONSTRAINT refs_shown REFERENCES shown (id));
         GRANT INSERT ON refs TO app;";
     assert_eq!(objects(open), Vec::<String>::new());
+    assert_eq!(
+        objects(&format!(
+            "CREATE POLICY secrets_all ON secrets FOR SELECT TO app USING (true);
+             CREATE POLICY secrets_any ON secrets AS RESTRICTIVE FOR SELECT TO app USING (true);
+             {NOTES} GRANT INSERT ON notes TO app;"
+        )),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn an_owner_reads_every_row_and_a_recursive_read_hides_them_all() {
+    assert_eq!(
+        objects(&format!(
+            "ALTER TABLE secrets OWNER TO app;
+             {NOTES} GRANT INSERT ON notes TO app;"
+        )),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        objects(&format!(
+            "CREATE POLICY secrets_self ON secrets FOR SELECT TO app
+               USING (id IN (SELECT id FROM secrets));
+             {NOTES} GRANT INSERT ON notes TO app;"
+        )),
+        ["notes.notes_secret"]
+    );
 }
 
 #[test]
@@ -116,6 +143,18 @@ fn row_security_refusing_the_write_is_clean() {
 }
 
 #[test]
+fn a_write_whose_policies_the_schema_cannot_settle_is_not_reported() {
+    assert_eq!(
+        objects(&format!(
+            "{NOTES} GRANT INSERT ON notes TO app;
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY notes_write ON notes FOR INSERT TO CURRENT_USER WITH CHECK (true);"
+        )),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn a_check_confining_the_key_to_readable_or_named_rows_is_clean() {
     for check in [
         "secret_id IN (SELECT id FROM secrets)",
@@ -125,8 +164,11 @@ fn a_check_confining_the_key_to_readable_or_named_rows_is_clean() {
         "caller_secret() = secret_id",
         "secret_id IN (SELECT s FROM allowed_secrets() AS s)",
         "(secret_id, id) IN (SELECT s, 1 FROM allowed_secrets() AS s)",
+        "(secret_id, id) IN (SELECT caller_secret(), 1)",
         "secret_id IN (SELECT id FROM secrets) OR (id > 0 AND secret_id = caller_secret())",
         "EXISTS (SELECT 1 FROM secrets s WHERE s.id = notes.secret_id)",
+        "(secret_id = caller_secret() OR secret_id IN (SELECT id FROM secrets)) AND id > 0",
+        "EXISTS (SELECT 1 FROM secrets s WHERE s.id = notes.secret_id AND s.id > 0)",
     ] {
         assert_eq!(
             objects(&format!(
@@ -153,6 +195,10 @@ fn a_check_leaving_the_key_free_is_reported() {
            WITH CHECK (secret_id NOT IN (SELECT id FROM secrets));",
         "CREATE POLICY notes_write ON notes FOR INSERT TO app
            WITH CHECK (secret_id IN (SELECT id FROM secrets) OR id > 0);",
+        "CREATE POLICY notes_write ON notes FOR INSERT TO app
+           WITH CHECK (secret_id IN (SELECT id FROM secrets UNION SELECT id FROM notes));",
+        "CREATE POLICY notes_write ON notes FOR INSERT TO app
+           WITH CHECK ((secret_id, id) IN (SELECT secret_id, 1));",
         // A second permissive arm admits the row without confining the key.
         "CREATE POLICY notes_write ON notes FOR INSERT TO app
            WITH CHECK (secret_id IN (SELECT id FROM secrets));
@@ -164,6 +210,10 @@ fn a_check_leaving_the_key_free_is_reported() {
            WITH CHECK (secret_id IN (SELECT s FROM generate_series(secret_id, secret_id) AS s));",
         "CREATE POLICY notes_write ON notes FOR INSERT TO app
            WITH CHECK (EXISTS (SELECT 1 FROM notes n WHERE n.id = notes.secret_id));",
+        "CREATE POLICY notes_write ON notes FOR INSERT TO app
+           WITH CHECK (EXISTS (SELECT 1 FROM secrets));",
+        "CREATE POLICY notes_write ON notes FOR INSERT TO app
+           WITH CHECK (EXISTS (SELECT 1 FROM secrets s WHERE s.id = notes.secret_id UNION SELECT 1));",
     ] {
         assert_eq!(
             objects(&format!(
