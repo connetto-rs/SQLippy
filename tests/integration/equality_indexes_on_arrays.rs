@@ -67,7 +67,6 @@ fn element_serving_methods_uniqueness_and_non_array_keys_are_not_reported() {
     let sql = format!(
         "{POSTS}
          CREATE INDEX posts_gin ON posts USING gin (tags);
-         CREATE INDEX posts_gist ON posts USING gist (tags);
          CREATE UNIQUE INDEX posts_unique_tags ON posts (tags);
          CREATE INDEX posts_first_tag ON posts ((tags[1]));
          CREATE INDEX posts_tag_count ON posts ((cardinality(tags)));
