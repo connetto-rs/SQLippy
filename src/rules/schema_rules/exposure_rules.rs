@@ -4,9 +4,12 @@
 
 use std::{borrow::Cow, cell::LazyCell};
 
-use sql_traits::traits::{
-    ColumnGrantLike, DataStatementLike, DatabaseLike, ExtensionLike, FunctionLike, Relation,
-    RoleLike, SequenceLike, TableGrantLike, TableLike, ViewLike,
+use sql_traits::{
+    structs::{DefaultGrantee, DefaultPrivilegeKind},
+    traits::{
+        ColumnGrantLike, DataStatementLike, DatabaseLike, ExtensionLike, FunctionLike, Relation,
+        RoleLike, SequenceLike, TableGrantLike, TableLike, ViewLike,
+    },
 };
 use sqlparser::ast::{Action, FunctionSecurity, SetExpr};
 
@@ -223,6 +226,108 @@ impl<DB: DatabaseLike> SchemaRule for DefinerSchemaWithoutDefaultRevoke<DB> {
                 )?;
             }
             checked.push((schema, owner));
+        }
+        Ok(())
+    }
+}
+
+rule_definition!(
+    /// Struct defining a rule that reports a standing default privilege
+    /// granting a table or sequence privilege to `PUBLIC`.
+    ///
+    /// The defaults read are the ones the schema leaves in place once it has
+    /// run, so a later `REVOKE` of the same default clears the report. One
+    /// violation is raised per standing default.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sqlippy::prelude::*;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    ///
+    /// let constrainer: GenericConstrainer<ParserDB> = PublicDefaultPrivilege::default().into();
+    /// let open = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC;",
+    /// )
+    /// .unwrap();
+    /// assert!(constrainer.validate_schema(&open).is_err());
+    /// let explicit = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE notes (id INT PRIMARY KEY);
+    ///      ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+    ///      CREATE POLICY notes_read ON notes FOR SELECT USING (true);
+    ///      GRANT SELECT ON notes TO PUBLIC;",
+    /// )
+    /// .unwrap();
+    /// assert!(constrainer.validate_schema(&explicit).is_ok());
+    /// ```
+    PublicDefaultPrivilege,
+    register_schema_rule,
+    LintGroup::Suspicious,
+    "A default privilege granting a table or sequence privilege to PUBLIC hands every table or sequence created later to every role, a table before its author enables row-level security or writes a policy.",
+    Some("https://www.postgresql.org/docs/current/sql-alterdefaultprivileges.html"),
+    RuleExample {
+        bad: "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC;\n\
+CREATE TABLE notes (id INT PRIMARY KEY);",
+        good: "CREATE TABLE notes (id INT PRIMARY KEY);\n\
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
+CREATE POLICY notes_read ON notes FOR SELECT USING (true);\n\
+GRANT SELECT ON notes TO PUBLIC;",
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
+);
+
+impl<DB: DatabaseLike> SchemaRule for PublicDefaultPrivilege<DB> {
+    type Database = DB;
+
+    fn check_schema(
+        &self,
+        database: &Self::Database,
+        reporter: &mut Reporter<'_, Self::Database>,
+    ) -> Result<(), Interruption> {
+        for entry in database.default_privileges().into_iter().flatten() {
+            let (objects, noun, before, explicit) = match entry.kind() {
+                DefaultPrivilegeKind::Tables => (
+                    "TABLES",
+                    "table",
+                    ", before its row-level security or policies exist",
+                    "each table explicitly once its row-level security and policies exist",
+                ),
+                DefaultPrivilegeKind::Sequences => (
+                    "SEQUENCES",
+                    "sequence",
+                    "",
+                    "each sequence explicitly to the roles that need it",
+                ),
+                _ => continue,
+            };
+            let Some(grant) = entry
+                .grant_to(&DefaultGrantee::Public)
+                .filter(|grant| !grant.privileges().is_empty())
+            else {
+                continue;
+            };
+            let privileges = grant
+                .privileges()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let (creator, for_role) = entry.role().map_or_else(
+                || ("the role the schema runs as".to_owned(), String::new()),
+                |role| (format!("role '{role}'"), format!(" FOR ROLE {role}")),
+            );
+            let (place, in_schema) = entry.schema().map_or_else(
+                || ("any schema".to_owned(), String::new()),
+                |schema| (format!("schema '{schema}'"), format!(" IN SCHEMA {schema}")),
+            );
+            let object = format!("DEFAULT PRIVILEGES{for_role}{in_schema} ON {objects}");
+            reporter.default_privilege(
+                &entry,
+                object,
+                format!("Default privileges grant {privileges} to PUBLIC on every {noun} {creator} creates in {place}{before}."),
+                format!("ALTER DEFAULT PRIVILEGES{for_role}{in_schema} REVOKE {privileges} ON {objects} FROM PUBLIC; and grant {explicit}."),
+            )?;
         }
         Ok(())
     }

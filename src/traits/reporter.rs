@@ -4,7 +4,7 @@ use std::{borrow::Cow, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    structs::RoleSetting,
+    structs::{DefaultPrivilege, RoleSetting},
     traits::{
         ColumnLike, DatabaseLike, DomainLike, ExtensionLike, ForeignKeyLike, FunctionLike,
         IndexLike, PolicyLike, RoleLike, RoleMembershipLike, SequenceLike, TableIndexLike,
@@ -423,6 +423,28 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         let object = format!("{} SET {}", setting.role().unwrap_or("ALL"), setting.name());
         self.emit(
             Location::RoleSetting(setting.clone()),
+            object,
+            message,
+            resolution,
+        )
+    }
+
+    /// Reports a violation on a standing `ALTER DEFAULT PRIVILEGES` entry,
+    /// under the name `object` gives it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Halted`] when the caller needs no further
+    /// violations.
+    pub fn default_privilege(
+        &mut self,
+        entry: &DefaultPrivilege<'_>,
+        object: String,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        self.emit(
+            Location::DefaultPrivilege(entry.clone().into_owned()),
             object,
             message,
             resolution,

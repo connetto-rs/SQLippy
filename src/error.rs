@@ -4,7 +4,7 @@ use std::fmt::{self, Display};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{IdentifierCase, RoleSetting, TargetName},
+    structs::{DefaultPrivilege, IdentifierCase, RoleSetting, TargetName},
     traits::{DatabaseLike, PolicyLike, TableLike},
 };
 use sqlparser::ast::Statement;
@@ -39,6 +39,8 @@ pub enum Location<DB: DatabaseLike> {
     RoleMembership(Box<DB::RoleMembership>),
     /// An `ALTER ROLE ... SET` entry.
     RoleSetting(RoleSetting),
+    /// A standing `ALTER DEFAULT PRIVILEGES` entry.
+    DefaultPrivilege(DefaultPrivilege<'static>),
     /// A function.
     Function(Box<DB::Function>),
     /// A domain.
