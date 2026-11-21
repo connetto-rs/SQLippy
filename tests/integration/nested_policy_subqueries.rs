@@ -1,5 +1,5 @@
-//! Policy subqueries reading tables whose own policies hold subqueries,
-//! observed through the public constrainer API.
+//! Policy subqueries joined to the checked row reading tables whose own
+//! policies hold subqueries, observed through the public constrainer API.
 
 use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
@@ -7,7 +7,7 @@ use sqlparser::dialect::PostgreSqlDialect;
 const SCHEMA: &str = "
     CREATE ROLE readers;
     CREATE ROLE admins_role;
-    CREATE TABLE docs (team INT);
+    CREATE TABLE docs (team INT, owner TEXT);
     CREATE TABLE members (team INT, member TEXT);
     CREATE TABLE admins (member TEXT);
     ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -16,7 +16,7 @@ const SCHEMA: &str = "
     CREATE VIEW member_teams AS SELECT team, member FROM members;";
 
 const DOCS: &str = "CREATE POLICY docs_p ON docs TO readers USING (
-    team IN (SELECT team FROM members WHERE member = current_user));";
+    owner IN (SELECT member FROM members WHERE members.team = docs.team));";
 
 /// Level and site of every finding of the rule.
 fn findings<C: Constrainer<Database = ParserDB>>(
@@ -68,10 +68,37 @@ fn a_subquery_reading_a_table_whose_select_policy_holds_a_subquery_is_reported()
             "ALTER TABLE members ENABLE ROW LEVEL SECURITY;
              CREATE POLICY members_p ON members USING (member IN (SELECT member FROM admins));
              CREATE POLICY docs_p ON docs USING (
-               team IN (SELECT team FROM members WHERE member IN (SELECT member FROM admins)));"
+               owner IN (SELECT member FROM members
+                 WHERE members.team = docs.team AND member IN (SELECT member FROM admins)));"
         ),
         ["docs.docs_p"]
     );
+}
+
+/// A subquery that does not reference the checked row runs once per statement,
+/// as a hashed subplan or an initplan, so the read table's policies are not
+/// applied again for each row.
+#[test]
+fn subqueries_not_joined_to_the_checked_row_pass() {
+    for docs in [
+        "CREATE POLICY docs_p ON docs USING (
+           team IN (SELECT team FROM members WHERE member = current_user));",
+        "CREATE POLICY docs_p ON docs USING (team = ANY (ARRAY(SELECT team FROM members)));",
+        "CREATE POLICY docs_p ON docs USING (
+           EXISTS (SELECT 1 FROM members WHERE members.team = team));",
+        "CREATE POLICY docs_p ON docs FOR INSERT WITH CHECK (
+           team IN (SELECT members.team FROM members));",
+    ] {
+        assert_eq!(
+            reported(&format!(
+                "ALTER TABLE members ENABLE ROW LEVEL SECURITY;
+                 CREATE POLICY members_p ON members USING (member IN (SELECT member FROM admins));
+                 {docs}"
+            )),
+            Vec::<String>::new(),
+            "{docs}"
+        );
+    }
 }
 
 #[test]
@@ -93,8 +120,8 @@ fn flat_policies_writes_other_roles_unprotected_tables_and_calls_pass() {
         );
     }
     for docs in [
-        "team IN (SELECT my_teams())",
-        "team IN (SELECT team FROM member_teams)",
+        "team IN (SELECT my_teams() WHERE docs.owner = current_user)",
+        "owner IN (SELECT member FROM member_teams WHERE member_teams.team = docs.team)",
     ] {
         assert_eq!(
             reported(&format!(

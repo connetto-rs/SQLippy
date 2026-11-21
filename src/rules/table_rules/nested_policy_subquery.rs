@@ -12,7 +12,7 @@ use crate::rules::walk_support::walk;
 use crate::{
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::policy_support::{Command, held_by_name, policy_roles, walked_clauses},
+    rules::policy_support::{Command, held_by_name, policy_roles, reads_row, walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -28,16 +28,20 @@ fn holds_subquery(expression: &Expr) -> bool {
     walk(expression, &mut Sublink).is_break()
 }
 
-/// The tables the outermost query of each sublink reads directly, with the
-/// sublink rendered as SQL.
+/// The tables the outermost query of each sublink joined to the row of
+/// `table` reads directly, with the sublink rendered as SQL.
 struct SublinkTables<'db, DB: DatabaseLike> {
     database: &'db DB,
+    table: &'db DB::Table,
     depth: usize,
     reads: Vec<(String, &'db DB::Table)>,
 }
 
 impl<DB: DatabaseLike> SublinkTables<'_, DB> {
     fn query(&mut self, query: &Query) -> Result<(), LookupError> {
+        if !reads_row(self.database, self.table, None, query)? {
+            return Ok(());
+        }
         for relation in DataStatementLike::<DB>::referenced_relations(query, self.database)? {
             if let Relation::Table(table) = relation {
                 self.reads.push((query.to_string(), table));
@@ -100,14 +104,17 @@ fn nested_policy<'db, DB: DatabaseLike>(
     Ok(None)
 }
 
-/// Struct defining a rule that reports a policy subquery reading a table with
-/// row-level security whose own applicable `SELECT` policy holds a subquery.
+/// Struct defining a rule that reports a policy subquery joined to the
+/// checked row that reads a table with row-level security whose own applicable
+/// `SELECT` policy holds a subquery.
 ///
-/// PostgreSQL applies the read table's policies inside the subquery each time
-/// the outer policy is evaluated, so a subquery there expands again, and the
-/// plan grows with every level. A read through a function call is not a direct
-/// read, and a table whose `SELECT` policies compare the row to the caller
-/// without a subquery is cheap to read and is not reported.
+/// PostgreSQL runs a subquery joined to the row again for each candidate row
+/// and applies the read table's policies on each run, so their subquery is
+/// consulted again for every candidate row. A subquery that does not reference
+/// the row runs once per statement and is not reported. A read through a
+/// function call is not a direct read, and a table whose `SELECT` policies
+/// compare the row to the caller without a subquery is cheap to read and is
+/// not reported.
 ///
 /// # Example
 ///
@@ -116,22 +123,24 @@ fn nested_policy<'db, DB: DatabaseLike>(
 /// use sqlparser::dialect::PostgreSqlDialect;
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = NestedPolicySubquery::default().into();
-/// let schema = "CREATE TABLE docs (team INT); CREATE TABLE members (team INT, member TEXT);
+/// let schema = "CREATE TABLE docs (team INT, owner TEXT); CREATE TABLE members (team INT, member TEXT);
 ///     CREATE TABLE admins (member TEXT);
 ///     ALTER TABLE docs ENABLE ROW LEVEL SECURITY; ALTER TABLE members ENABLE ROW LEVEL SECURITY;
-///     CREATE POLICY docs_p ON docs USING (team IN (SELECT team FROM members WHERE member = current_user));";
+///     CREATE POLICY members_p ON members USING (member IN (SELECT member FROM admins));";
 ///
-/// let nested = ParserDB::parse::<PostgreSqlDialect>(&format!(
-///     "{schema} CREATE POLICY members_p ON members USING (member IN (SELECT member FROM admins));"
+/// let joined = ParserDB::parse::<PostgreSqlDialect>(&format!(
+///     "{schema} CREATE POLICY docs_p ON docs USING (
+///        owner IN (SELECT member FROM members WHERE members.team = docs.team));"
 /// ))
 /// .unwrap();
-/// assert!(constrainer.validate_schema(&nested).is_err());
+/// assert!(constrainer.validate_schema(&joined).is_err());
 ///
-/// let flat = ParserDB::parse::<PostgreSqlDialect>(&format!(
-///     "{schema} CREATE POLICY members_p ON members USING (member = current_user);"
+/// let set = ParserDB::parse::<PostgreSqlDialect>(&format!(
+///     "{schema} CREATE POLICY docs_p ON docs USING (
+///        team IN (SELECT team FROM members WHERE member = current_user));"
 /// ))
 /// .unwrap();
-/// assert!(constrainer.validate_schema(&flat).is_ok());
+/// assert!(constrainer.validate_schema(&set).is_ok());
 /// ```
 pub struct NestedPolicySubquery<DB>(std::marker::PhantomData<DB>);
 
@@ -154,25 +163,25 @@ impl<DB> Rule for NestedPolicySubquery<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(NestedPolicySubquery),
             group: LintGroup::Perf,
-            rationale: "PostgreSQL applies a read table's own policies inside a policy subquery, so a subquery in them expands again on every evaluation, while a `SECURITY DEFINER` helper reads the table once without them.",
+            rationale: "PostgreSQL runs a policy subquery joined to the checked row once per candidate row and applies the read table's own policies on each run, so a subquery in them is consulted again for every row, while a `SECURITY DEFINER` helper reads the table without them.",
             source: Some(
                 "https://supabase.com/docs/guides/database/postgres/row-level-security#use-security-definer-functions",
             ),
             basis: Basis::Declared,
             example: RuleExample {
-                bad: "CREATE TABLE docs (team INT);\n\
+                bad: "CREATE TABLE docs (team INT, owner TEXT);\n\
 CREATE TABLE members (team INT, member TEXT);\n\
 CREATE TABLE admins (member TEXT);\n\
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
 ALTER TABLE members ENABLE ROW LEVEL SECURITY;\n\
-CREATE POLICY docs_p ON docs USING (team IN (SELECT team FROM members WHERE member = current_setting('app.user_id', true)));\n\
+CREATE POLICY docs_p ON docs USING (owner IN (SELECT member FROM members WHERE members.team = docs.team));\n\
 CREATE POLICY members_p ON members USING (member IN (SELECT member FROM admins));",
-                good: "CREATE TABLE docs (team INT);\n\
+                good: "CREATE TABLE docs (team INT, owner TEXT);\n\
 CREATE TABLE members (team INT, member TEXT);\n\
 CREATE TABLE admins (member TEXT);\n\
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
 ALTER TABLE members ENABLE ROW LEVEL SECURITY;\n\
-CREATE POLICY docs_p ON docs USING (team IN (SELECT team FROM members WHERE member = current_setting('app.user_id', true)));\n\
+CREATE POLICY docs_p ON docs USING (owner IN (SELECT member FROM members WHERE members.team = docs.team));\n\
 CREATE POLICY members_p ON members USING (member = current_setting('app.user_id', true));",
             },
         };
@@ -197,6 +206,7 @@ impl<DB: DatabaseLike> TableRule for NestedPolicySubquery<DB> {
                 };
                 let mut sublinks = SublinkTables {
                     database,
+                    table,
                     depth: 0,
                     reads: Vec::new(),
                 };
@@ -217,7 +227,7 @@ impl<DB: DatabaseLike> TableRule for NestedPolicySubquery<DB> {
                             expression: subquery,
                         }],
                         format!(
-                            "Policy '{name}' on '{table_name}' reads '{read_name}' in a subquery of its {clause} clause, and policy '{}' on '{read_name}' holds a subquery of its own, so PostgreSQL expands it inside every evaluation.",
+                            "Policy '{name}' on '{table_name}' reads '{read_name}' in a subquery joined to the checked row in its {clause} clause, so PostgreSQL reads '{read_name}' again for every checked row and applies policy '{}' on '{read_name}', which holds a subquery of its own, on each read.",
                             nested.name()
                         ),
                         format!(
