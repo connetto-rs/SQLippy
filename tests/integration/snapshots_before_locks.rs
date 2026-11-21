@@ -178,7 +178,7 @@ fn a_called_function_letting_repeatable_read_return_is_no_guard() {
         assert_eq!(findings(&guarded_by_helper(body)).len(), 1, "{body}");
     }
     let sql = "CREATE FUNCTION refuse() RETURNS void LANGUAGE sql AS $$ SELECT current_setting('transaction_isolation') $$;";
-    let after_lock = "CREATE FUNCTION refuse() RETURNS void LANGUAGE plpgsql AS $$ BEGIN
+    let refusing = "CREATE FUNCTION refuse() RETURNS void LANGUAGE plpgsql AS $$ BEGIN
           IF current_setting('transaction_isolation') = 'repeatable read' THEN RAISE EXCEPTION 'rr'; END IF;
         END $$;";
     for (helper, body) in [
@@ -187,13 +187,19 @@ fn a_called_function_letting_repeatable_read_return_is_no_guard() {
             format!("BEGIN PERFORM refuse(); PERFORM pg_advisory_xact_lock(1); {CHECK} END"),
         ),
         (
-            after_lock,
+            refusing,
             format!("BEGIN PERFORM pg_advisory_xact_lock(1); PERFORM refuse(); {CHECK} END"),
         ),
         (
-            after_lock,
+            refusing,
             format!(
                 "BEGIN PERFORM refuse() FROM quotas; PERFORM pg_advisory_xact_lock(1); {CHECK} END"
+            ),
+        ),
+        (
+            refusing,
+            format!(
+                "BEGIN PERFORM other.public.refuse(); PERFORM pg_advisory_xact_lock(1); {CHECK} END"
             ),
         ),
     ] {
