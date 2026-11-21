@@ -437,6 +437,7 @@ fn a_policy_to_the_creating_role_is_reported_in_any_deployment() {
 fn a_role_keyed_clause_is_reported_only_when_the_deployment_is_pooled() {
     let sql = format!(
         "{DOCS}CREATE POLICY mine ON docs USING (owner = current_user);
+         CREATE POLICY ours ON docs FOR SELECT USING (owner = user);
          CREATE POLICY theirs ON docs FOR UPDATE USING (true) WITH CHECK (owner = session_user);"
     );
     assert_eq!(
@@ -447,6 +448,7 @@ fn a_role_keyed_clause_is_reported_only_when_the_deployment_is_pooled() {
         ),
         [
             finding("role_keyed_policy_when_pooled", Level::Warn, "docs.mine"),
+            finding("role_keyed_policy_when_pooled", Level::Warn, "docs.ours"),
             finding("role_keyed_policy_when_pooled", Level::Warn, "docs.theirs"),
         ]
     );

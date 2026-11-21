@@ -1,6 +1,6 @@
 //! Submodule providing the `ForeignKeyExistenceOracle` rule.
 
-use std::{borrow::Cow, ops::ControlFlow, slice};
+use std::{borrow::Cow, slice};
 
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
@@ -11,8 +11,7 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, ForeignKeyLike, TableLike},
 };
 use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionArguments, Ident, InTarget, Query, Select, SelectItem,
-    SetExpr, Visit, VisitMut, VisitorMut, visit_expressions,
+    BinaryOperator, Expr, Function, FunctionArguments, InTarget, Query, Select, SelectItem, SetExpr,
 };
 
 use crate::{
@@ -21,13 +20,11 @@ use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        closed_set_support::{names_cast_column, stored_name},
+        closed_set_support::names_cast_column,
+        implication_support::{Columns, Condition, admits, clause_implies, is_column},
         key_support::{equality_keys, instances, named},
         policy_read_support::sublink_reads,
-        policy_support::{
-            acting, client_roles, conjuncts, disjuncts, is_column_reference, is_tautology,
-            unwrapped,
-        },
+        policy_support::{acting, client_roles, conjuncts, disjuncts, is_tautology, unwrapped},
     },
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
@@ -594,37 +591,16 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         let Some(gates) = read.gates() else {
             return Ok(false);
         };
-        for gate in gates {
-            for term in gate.restrictive() {
-                let condition = term.expression().expression();
-                if !is_tautology(self.database, self.parent, condition)?
-                    && !self.gate_implies(written, &self.condition(condition))
-                {
-                    return Ok(false);
-                }
-            }
-            let mut admitted = false;
-            for term in gate.permissive() {
-                let condition = term.expression().expression();
-                if is_tautology(self.database, self.parent, condition)?
-                    || self.gate_implies(written, &self.condition(condition))
-                {
-                    admitted = true;
-                    break;
-                }
-            }
-            if !admitted {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        admits(self.database, self.parent, gates, self, |condition| {
+            self.gate_implies(written, condition)
+        })
     }
 
     /// Whether every row `gate` admits meets `condition`: a restrictive term
     /// or every permissive one implies it, or each of its conjuncts.
-    fn gate_implies(&self, gate: &RowGate<'_, DB::Policy>, condition: &Condition<'_>) -> bool {
+    fn gate_implies(&self, gate: &RowGate<'_, DB::Policy>, condition: &Condition<'_, u64>) -> bool {
         let implied_by = |term: &GateTerm<'_, DB::Policy>| {
-            self.clause_implies(term.expression().expression(), condition)
+            clause_implies(self, term.expression().expression(), condition)
         };
         gate.restrictive().iter().any(implied_by)
             || (!gate.permissive().is_empty() && gate.permissive().iter().all(implied_by))
@@ -634,103 +610,37 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                     .iter()
                     .all(|part| self.gate_implies(gate, part)))
     }
-
-    /// `condition` on the referenced row as a check on the written row would
-    /// state it of the key columns.
-    fn condition<'e>(&self, condition: &'e Expr) -> Condition<'e> {
-        let condition = without_parentheses(condition);
-        let split = |operands: Vec<&'e Expr>| {
-            if operands.len() > 1 {
-                operands
-                    .into_iter()
-                    .map(|operand| self.condition(operand))
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        };
-        Condition {
-            renamed: renamed(condition, |column| {
-                self.referenced_columns
-                    .iter()
-                    .position(|referenced| *referenced == column)
-                    .map(|position| self.key_columns[position].to_string())
-            }),
-            membership: membership(condition)
-                .map(|(column, members)| (positions(&self.referenced_columns, column), members))
-                .filter(|(mapped, _)| *mapped != 0),
-            parts: split(conjuncts(condition)),
-            arms: split(disjuncts(condition)),
-        }
-    }
-
-    /// Whether every key PostgreSQL checks for a row `clause` admits meets
-    /// `condition`: the clause leaves a key column `NULL`, which skips the
-    /// check, states the condition, every arm of the clause or one of its
-    /// conjuncts implies it, or the clause implies each conjunct or one arm
-    /// of `condition`.
-    fn clause_implies(&self, clause: &Expr, condition: &Condition<'_>) -> bool {
-        let clause = without_parentheses(clause);
-        if let Expr::IsNull(column) = clause
-            && self.key_columns_named(column) != 0
-        {
-            return true;
-        }
-        if let Some(stated) = &condition.renamed
-            && renamed(clause, |column| Some(column.into_owned())).as_ref() == Some(stated)
-        {
-            return true;
-        }
-        if let Some((mapped, wider)) = condition.membership
-            && let Some((column, members)) = membership(clause)
-            && self.key_columns_named(column) & mapped != 0
-            && self.deployment.is_set_within(members, wider)
-        {
-            return true;
-        }
-        let arms = disjuncts(clause);
-        if arms.len() > 1 && arms.iter().all(|arm| self.clause_implies(arm, condition)) {
-            return true;
-        }
-        if !condition.parts.is_empty()
-            && condition
-                .parts
-                .iter()
-                .all(|part| self.clause_implies(clause, part))
-        {
-            return true;
-        }
-        let parts = conjuncts(clause);
-        (parts.len() > 1
-            && parts
-                .iter()
-                .any(|part| self.clause_implies(part, condition)))
-            || condition
-                .arms
-                .iter()
-                .any(|arm| self.clause_implies(clause, arm))
-    }
 }
 
-/// Whether `expression` is a column reference, bare or qualified.
-fn is_column(expression: &Expr) -> bool {
-    matches!(
-        unwrapped(expression),
-        Expr::Identifier(_) | Expr::CompoundIdentifier(_)
-    )
-}
+/// A check on the written row states a condition of the referenced row
+/// through the key columns the key maps onto the referenced ones, a set of
+/// key columns as a mask.
+impl<DB: DatabaseLike> Columns for Confinement<'_, DB> {
+    type Tested = u64;
 
-/// Whether `node` mentions a column, which in a policy can be one of the
-/// written row's.
-fn references_column<V: Visit>(node: &V) -> bool {
-    visit_expressions(node, |expression| {
-        if is_column(expression) {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    })
-    .is_break()
+    fn deployment(&self) -> &Deployment {
+        self.deployment
+    }
+
+    fn rename(&self, column: Cow<'_, str>) -> Option<String> {
+        self.referenced_columns
+            .iter()
+            .position(|referenced| *referenced == column)
+            .map(|position| self.key_columns[position].to_string())
+    }
+
+    fn tested(&self, column: &Expr) -> Option<u64> {
+        Some(positions(&self.referenced_columns, column)).filter(|mapped| *mapped != 0)
+    }
+
+    fn tests(&self, column: &Expr, tested: &u64) -> bool {
+        self.key_columns_named(column) & tested != 0
+    }
+
+    /// A clause leaving a key column `NULL` skips the check.
+    fn settles(&self, clause: &Expr) -> bool {
+        matches!(clause, Expr::IsNull(column) if self.key_columns_named(column) != 0)
+    }
 }
 
 /// The positions among `columns` of the column `expression` names.
@@ -740,151 +650,6 @@ fn positions(columns: &[Cow<'_, str>], expression: &Expr) -> u64 {
         .enumerate()
         .filter(|(_, column)| names_cast_column(expression, column))
         .fold(0, |mask, (position, _)| mask | 1 << position)
-}
-
-/// Removes parentheses from an expression.
-fn without_parentheses(mut expression: &Expr) -> &Expr {
-    while let Expr::Nested(inner) = expression {
-        expression = inner;
-    }
-    expression
-}
-
-/// A condition of a `SELECT` policy of the referenced table, as a check on
-/// the written row would state it of the key columns.
-struct Condition<'e> {
-    /// The condition with each column it tests named by the key column the
-    /// key maps onto it, when the key maps every one.
-    renamed: Option<Expr>,
-    /// The key columns mapped onto the column the condition tests against a
-    /// set, and the expression yielding the members of the set.
-    membership: Option<(u64, &'e Expr)>,
-    /// The conjuncts of an `AND`, each implied for the whole.
-    parts: Vec<Condition<'e>>,
-    /// The arms of an `OR`, one implied for the whole.
-    arms: Vec<Condition<'e>>,
-}
-
-/// `expression` with every column reference named by `rename` of its stored
-/// name, or `None` when `rename` names none for one or a subquery reads a
-/// column, which may resolve to another table's.
-fn renamed(expression: &Expr, rename: impl Fn(Cow<'_, str>) -> Option<String>) -> Option<Expr> {
-    struct Renamer<F> {
-        rename: F,
-        depth: usize,
-    }
-
-    impl<F: Fn(Cow<'_, str>) -> Option<String>> VisitorMut for Renamer<F> {
-        type Break = ();
-
-        fn pre_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
-            self.depth += 1;
-            ControlFlow::Continue(())
-        }
-
-        fn post_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
-            self.depth -= 1;
-            ControlFlow::Continue(())
-        }
-
-        fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<()> {
-            if !is_column_reference(expression) {
-                return ControlFlow::Continue(());
-            }
-            if self.depth > 0 {
-                return ControlFlow::Break(());
-            }
-            match stored_name(expression).and_then(&self.rename) {
-                Some(name) => {
-                    *expression = Expr::Identifier(Ident::new(name));
-                    ControlFlow::Continue(())
-                }
-                None => ControlFlow::Break(()),
-            }
-        }
-    }
-
-    let mut renamed = expression.clone();
-    VisitMut::visit(&mut renamed, &mut Renamer { rename, depth: 0 })
-        .is_continue()
-        .then_some(renamed)
-}
-
-/// The expression yielding the values `value` holds as the operand of `=`,
-/// when it reads no column.
-fn value_members(value: &Expr) -> Option<&Expr> {
-    match unwrapped(value) {
-        Expr::Subquery(query) => query_members(query),
-        value => (!references_column(value)).then_some(value),
-    }
-}
-
-/// The expression yielding the rows of `query`, when the query projects it
-/// alone and reads, filters and limits nothing.
-fn query_members(query: &Query) -> Option<&Expr> {
-    if let SetExpr::Select(select) = query.body.as_ref()
-        && let [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] =
-            select.projection.as_slice()
-        && query.with.is_none()
-        && query.limit_clause.is_none()
-        && query.fetch.is_none()
-        && query.pipe_operators.is_empty()
-        && select.from.is_empty()
-        && select.selection.is_none()
-        && select.having.is_none()
-    {
-        value_members(value)
-    } else {
-        None
-    }
-}
-
-/// The expression yielding the elements of `array` as the operand of
-/// `= ANY`, when it reads no column.
-fn array_members(array: &Expr) -> Option<&Expr> {
-    let array = unwrapped(array);
-    if let Expr::Function(function) = array
-        && function.name.to_string().eq_ignore_ascii_case("array")
-        && let FunctionArguments::Subquery(query) = &function.args
-    {
-        return query_members(query);
-    }
-    (!references_column(array)).then_some(array)
-}
-
-/// The column `condition` tests against a set with `=`, `= ANY` or `IN`,
-/// and the expression yielding the members of the set. Column types keep
-/// one expression from yielding a value in one spelling and an array in
-/// another.
-fn membership(condition: &Expr) -> Option<(&Expr, &Expr)> {
-    match unwrapped(condition) {
-        Expr::BinaryOp {
-            left,
-            op: BinaryOperator::Eq,
-            right,
-        } => [(left, right), (right, left)]
-            .into_iter()
-            .find_map(|(column, value)| {
-                if is_column(column) {
-                    Some((column.as_ref(), value_members(value)?))
-                } else {
-                    None
-                }
-            }),
-        Expr::AnyOp {
-            left,
-            compare_op: BinaryOperator::Eq,
-            right,
-            ..
-        } if is_column(left) => Some((left, array_members(right)?)),
-        Expr::In {
-            expr,
-            target: InTarget::Subquery(query),
-            negated: false,
-            ..
-        } if is_column(expr) => Some((expr, query_members(query)?)),
-        _ => None,
-    }
 }
 
 /// Whether `role` may write a key of its choosing through `statement` on the

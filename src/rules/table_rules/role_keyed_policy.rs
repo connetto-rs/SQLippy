@@ -40,7 +40,8 @@ use crate::{
 pub struct PolicyToCreatingRole<DB>(std::marker::PhantomData<DB>);
 
 /// Struct defining a rule that reports a policy clause reading
-/// `current_user`, `current_role` or `session_user` in a pooled deployment.
+/// `current_user`, `user`, `current_role` or `session_user` in a pooled
+/// deployment.
 ///
 /// Every caller shares the pooled role, so such a policy admits every caller
 /// or none. The rule is inactive until the deployment declares whether it is

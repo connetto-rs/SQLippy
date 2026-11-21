@@ -62,9 +62,8 @@ pub(crate) fn withheld<DB: DatabaseLike>(
 }
 
 /// The callers that may execute `function`, quoted for messages. They are
-/// `PUBLIC` alone while it holds `EXECUTE`, else each declared anonymous and
-/// app role the schema creates that holds it, by a grant to the role or a
-/// role it inherits, or by default privileges.
+/// `PUBLIC` alone while it holds `EXECUTE`, else the
+/// [granted callers](granted_callers).
 pub(crate) fn function_callers<DB: DatabaseLike>(
     database: &DB,
     deployment: &Deployment,
@@ -73,6 +72,20 @@ pub(crate) fn function_callers<DB: DatabaseLike>(
     if function.is_executable_by_public(database)? {
         return Ok(vec!["PUBLIC".to_owned()]);
     }
+    Ok(granted_callers(database, deployment, function)?
+        .into_iter()
+        .map(|role| format!("'{}'", role.name()))
+        .collect())
+}
+
+/// Each declared anonymous and app role the schema creates that holds
+/// `EXECUTE` on `function`, by a grant to the role or a role it inherits, or
+/// by default privileges.
+pub(crate) fn granted_callers<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    deployment: &Deployment,
+    function: &DB::Function,
+) -> Result<Vec<&'db DB::Role>, LookupError> {
     let mut callers = Vec::new();
     for role in deployment
         .anonymous_roles()
@@ -80,7 +93,7 @@ pub(crate) fn function_callers<DB: DatabaseLike>(
         .filter_map(|name| database.role(name))
     {
         if function.can_execute(role, database)? {
-            callers.push(format!("'{}'", role.name()));
+            callers.push(role);
         }
     }
     Ok(callers)
