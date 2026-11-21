@@ -3,7 +3,7 @@
 use std::ops::ControlFlow;
 
 use sql_traits::{
-    traits::{DatabaseLike, FunctionLike, RoleLike},
+    traits::{DatabaseLike, FunctionLike},
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::{
@@ -17,7 +17,10 @@ use crate::{
     deployment::Declaration,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::{authority_support::authority_columns, function_rules::unreadable_body},
+    rules::{
+        authority_support::authority_columns, function_rules::unreadable_body,
+        grant_support::function_callers,
+    },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
 
@@ -174,11 +177,6 @@ impl<DB: DatabaseLike> SchemaRule for DefinerTakesActingUser<DB> {
     ) -> Result<(), Interruption> {
         let deployment = reporter.deployment();
         let subjects = authority_columns(database, deployment)?.subjects;
-        let clients: Vec<&DB::Role> = deployment
-            .anonymous_roles()
-            .chain(deployment.app_roles())
-            .filter_map(|name| database.role(name))
-            .collect();
         for function in database.functions() {
             if function.security_mode() != FunctionSecurity::Definer
                 || function
@@ -187,16 +185,7 @@ impl<DB: DatabaseLike> SchemaRule for DefinerTakesActingUser<DB> {
             {
                 continue;
             }
-            let mut callers = Vec::new();
-            if function.is_executable_by_public(database)? {
-                callers.push("PUBLIC".to_owned());
-            } else {
-                for role in &clients {
-                    if function.can_execute(role, database)? {
-                        callers.push(format!("'{}'", role.name()));
-                    }
-                }
-            }
+            let callers = function_callers(database, deployment, function)?;
             let Some(tables) = function
                 .referenced_tables(database)
                 .map(Some)
