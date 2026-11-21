@@ -7,7 +7,7 @@ use crate::{
     engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::grant_support::schema_of,
+    rules::grant_support::tenant_column,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -93,17 +93,7 @@ impl<DB: DatabaseLike> TableRule for NullableTenantKey<DB> {
         table: &<Self::Database as DatabaseLike>::Table,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let schema = schema_of(database, table.stored_table_schema());
-        let Some(key) = reporter
-            .deployment()
-            .tenant_key(&schema, &table.stored_table_name())
-        else {
-            return Ok(());
-        };
-        let Some(column) = table
-            .columns(database)?
-            .find(|column| column.stored_column_name() == key)
-        else {
+        let Some(column) = tenant_column(database, reporter.deployment(), table)? else {
             return Ok(());
         };
         if !column.is_nullable(database)? {

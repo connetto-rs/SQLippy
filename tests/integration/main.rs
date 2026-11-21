@@ -102,6 +102,7 @@ mod statement_types;
 mod subject_settable_attributes;
 mod superkey_primary_keys;
 mod table_name_dispatches;
+mod tenant_local_references;
 mod tenant_unique_constraints;
 mod text_references;
 mod trigger_filters_in_body;

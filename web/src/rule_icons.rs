@@ -239,6 +239,7 @@ rule_icons! {
     "undeletable_reference" => FaLinkSlash,
     "foreign_key_existence_oracle" => FaEyeSlash,
     "nullable_tenant_key" => FaPeopleGroup,
+    "tenant_local_reference" => FaPeopleArrowsLeftRight,
     "boolean_state_without_time" => FaToggleOff,
     "closed_set_as_text" => FaListCheck,
     "constant_column_not_generated" => FaGears,
