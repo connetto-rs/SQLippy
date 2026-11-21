@@ -116,6 +116,16 @@ fn an_owner_reads_every_row_and_a_recursive_read_hides_them_all() {
         )),
         ["notes.notes_secret"]
     );
+    assert_eq!(
+        objects(&format!(
+            "CREATE POLICY secrets_self ON secrets FOR SELECT TO app
+               USING (id IN (SELECT id FROM secrets));
+             {NOTES} GRANT INSERT ON notes TO app;
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY notes_write ON notes FOR INSERT TO app WITH CHECK (true);"
+        )),
+        ["notes.notes_secret"]
+    );
 }
 
 #[test]
@@ -494,18 +504,20 @@ fn an_arm_forcing_a_key_column_null_checks_nothing() {
     }
 }
 
-/// A typed template whose slot key reaches slots readable through the
-/// template, after a restrictive policy hiding blocked organizations.
-fn slot_schema(check: &str, key: &str, referenced: &str) -> String {
+const SLOTS_READ: &str = "template_id = ANY (ARRAY(SELECT readable('reader')))";
+
+/// A typed template whose slot key reaches slots `readable` admits, after a
+/// restrictive policy hiding blocked organizations.
+fn slot_schema(readable: &str, check: &str, key: &str, referenced: &str) -> String {
     format!(
         "CREATE ROLE app;
          CREATE FUNCTION readable(level TEXT) RETURNS SETOF INT LANGUAGE sql STABLE AS $$ SELECT 1 $$;
+         CREATE FUNCTION reader_ids() RETURNS INT[] LANGUAGE sql STABLE AS $$ SELECT ARRAY[1] $$;
          CREATE FUNCTION blocking() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ SELECT 1 $$;
          CREATE TABLE slots (id INT PRIMARY KEY, template_id INT NOT NULL, organization_id INT NOT NULL,
              UNIQUE (id, template_id), UNIQUE (id, template_id, organization_id));
          ALTER TABLE slots ENABLE ROW LEVEL SECURITY;
-         CREATE POLICY slots_select ON slots FOR SELECT TO app
-             USING (template_id = ANY (ARRAY(SELECT readable('reader'))));
+         CREATE POLICY slots_select ON slots FOR SELECT TO app USING ({readable});
          CREATE POLICY slots_blocked ON slots AS RESTRICTIVE FOR ALL TO app
              USING (NOT (organization_id = ANY (ARRAY(SELECT blocking()))));
          CREATE TABLE typed_templates (id INT PRIMARY KEY, organization_id INT NOT NULL, slot_id INT NOT NULL,
@@ -534,6 +546,24 @@ fn a_key_column_confined_to_the_set_its_referenced_rows_are_read_through_is_clea
             vec![],
         ),
         ("id IN (SELECT readable('reader'))", whole, false, vec![]),
+        (
+            "id IS NULL OR id = ANY (ARRAY(SELECT readable('reader')))",
+            whole,
+            false,
+            vec![],
+        ),
+        (
+            "slot_id IS NULL OR id = ANY (ARRAY(SELECT readable('reader')))",
+            whole,
+            false,
+            vec![],
+        ),
+        (
+            "id IS NOT NULL OR id = ANY (ARRAY(SELECT readable('reader')))",
+            whole,
+            false,
+            vec!["typed_templates.typed_slot"],
+        ),
         (
             "id = ANY (ARRAY(SELECT readable('writer')))",
             whole,
@@ -579,11 +609,50 @@ fn a_key_column_confined_to_the_set_its_referenced_rows_are_read_through_is_clea
         let objects: Vec<String> = findings(
             &constrainer,
             "foreign_key_existence_oracle",
-            &slot_schema(check, key, referenced),
+            &slot_schema(SLOTS_READ, check, key, referenced),
         )
         .into_iter()
         .map(|(_, object, _)| object)
         .collect();
         assert_eq!(objects, expected, "{check} on ({key})");
+    }
+}
+
+#[test]
+fn a_referenced_policy_implied_through_the_key_part_by_part_is_clean() {
+    let blocked = "NOT (organization_id = ANY (ARRAY(SELECT blocking())))";
+    let both = format!("({SLOTS_READ}) AND ({blocked})");
+    let reader = "id = ANY (ARRAY(SELECT readable('reader')))";
+    for (readable, check, expected) in [
+        (both.as_str(), reader.to_owned(), vec![]),
+        (both.as_str(), format!("{reader} AND {blocked}"), vec![]),
+        (
+            "(template_id = ANY (reader_ids()))",
+            "id = ANY (reader_ids())".to_owned(),
+            vec![],
+        ),
+        (
+            "template_id IN (SELECT readable('reader') LIMIT 1)",
+            "id IN (SELECT readable('reader'))".to_owned(),
+            vec!["typed_templates.typed_slot"],
+        ),
+    ] {
+        let mut constrainer: GenericConstrainer<ParserDB> =
+            ForeignKeyExistenceOracle::default().into();
+        constrainer.set_deployment(Deployment::default().with_app_role("app"));
+        let objects: Vec<String> = findings(
+            &constrainer,
+            "foreign_key_existence_oracle",
+            &slot_schema(
+                readable,
+                &check,
+                "slot_id, id, organization_id",
+                "id, template_id, organization_id",
+            ),
+        )
+        .into_iter()
+        .map(|(_, object, _)| object)
+        .collect();
+        assert_eq!(objects, expected, "{check} into {readable}");
     }
 }

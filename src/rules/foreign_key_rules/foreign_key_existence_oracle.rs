@@ -58,8 +58,9 @@ use crate::{
 /// permissive `SELECT` policy of the referenced table tests the columns the
 /// key maps onto as the check tests their key columns, or tests one against a
 /// set the check confines its key column within, as written or declared with
-/// [`Deployment::with_set_within`]. The rule does not run on SQLite, which
-/// has no row-level security.
+/// [`Deployment::with_set_within`]. An arm of the check that leaves a key
+/// column `NULL` needs neither, since PostgreSQL checks no key holding a
+/// `NULL`. The rule does not run on SQLite, which has no row-level security.
 ///
 /// # Example
 ///
@@ -620,8 +621,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 
     /// Whether every row `gate` admits meets `condition`: a restrictive term
-    /// or every permissive one implies it, or each of its conjuncts or one of
-    /// its arms.
+    /// or every permissive one implies it, or each of its conjuncts.
     fn gate_implies(&self, gate: &RowGate<'_, DB::Policy>, condition: &Condition<'_>) -> bool {
         let implied_by = |term: &GateTerm<'_, DB::Policy>| {
             self.clause_implies(term.expression().expression(), condition)
@@ -633,10 +633,6 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                     .parts
                     .iter()
                     .all(|part| self.gate_implies(gate, part)))
-            || condition
-                .arms
-                .iter()
-                .any(|arm| self.gate_implies(gate, arm))
     }
 
     /// `condition` on the referenced row as a check on the written row would
@@ -668,11 +664,18 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         }
     }
 
-    /// Whether every row `clause` admits meets `condition`: the clause states
-    /// it, every arm of the clause or one of its conjuncts implies it, or the
-    /// clause implies each conjunct or one arm of `condition`.
+    /// Whether every key PostgreSQL checks for a row `clause` admits meets
+    /// `condition`: the clause leaves a key column `NULL`, which skips the
+    /// check, states the condition, every arm of the clause or one of its
+    /// conjuncts implies it, or the clause implies each conjunct or one arm
+    /// of `condition`.
     fn clause_implies(&self, clause: &Expr, condition: &Condition<'_>) -> bool {
         let clause = without_parentheses(clause);
+        if let Expr::IsNull(column) = clause
+            && self.key_columns_named(column) != 0
+        {
+            return true;
+        }
         if let Some(stated) = &condition.renamed
             && renamed(clause, |column| Some(column.into_owned())).as_ref() == Some(stated)
         {
@@ -681,7 +684,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         if let Some((mapped, wider)) = condition.membership
             && let Some((column, members)) = membership(clause)
             && self.key_columns_named(column) & mapped != 0
-            && members.within(wider, self.deployment)
+            && self.deployment.is_set_within(members, wider)
         {
             return true;
         }
@@ -754,8 +757,8 @@ struct Condition<'e> {
     /// key maps onto it, when the key maps every one.
     renamed: Option<Expr>,
     /// The key columns mapped onto the column the condition tests against a
-    /// set, and the members of the set.
-    membership: Option<(u64, Members<'e>)>,
+    /// set, and the expression yielding the members of the set.
+    membership: Option<(u64, &'e Expr)>,
     /// The conjuncts of an `AND`, each implied for the whole.
     parts: Vec<Condition<'e>>,
     /// The arms of an `OR`, one implied for the whole.
@@ -807,77 +810,53 @@ fn renamed(expression: &Expr, rename: impl Fn(Cow<'_, str>) -> Option<String>) -
         .then_some(renamed)
 }
 
-/// The members of a set a policy tests a column against, by the expression
-/// yielding them, which reads no column.
-#[derive(Clone, Copy)]
-enum Members<'e> {
-    /// The value of `=`, or the rows of a subquery projecting it alone.
-    Rows(&'e Expr),
-    /// The elements of an array.
-    Elements(&'e Expr),
+/// The expression yielding the values `value` holds as the operand of `=`,
+/// when it reads no column.
+fn value_members(value: &Expr) -> Option<&Expr> {
+    match unwrapped(value) {
+        Expr::Subquery(query) => query_members(query),
+        value => (!references_column(value)).then_some(value),
+    }
 }
 
-impl<'e> Members<'e> {
-    /// The members of `value` as the operand of `=`.
-    fn of_value(value: &'e Expr) -> Option<Self> {
-        match unwrapped(value) {
-            Expr::Subquery(query) => Self::of_query(query),
-            value => (!references_column(value)).then_some(Self::Rows(value)),
-        }
+/// The expression yielding the rows of `query`, when the query projects it
+/// alone and reads, filters and limits nothing.
+fn query_members(query: &Query) -> Option<&Expr> {
+    if let SetExpr::Select(select) = query.body.as_ref()
+        && let [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] =
+            select.projection.as_slice()
+        && query.with.is_none()
+        && query.limit_clause.is_none()
+        && query.fetch.is_none()
+        && query.pipe_operators.is_empty()
+        && select.from.is_empty()
+        && select.selection.is_none()
+        && select.having.is_none()
+    {
+        value_members(value)
+    } else {
+        None
     }
+}
 
-    /// The members of `query`, when it projects one expression and reads,
-    /// filters and limits nothing.
-    fn of_query(query: &'e Query) -> Option<Self> {
-        let SetExpr::Select(select) = query.body.as_ref() else {
-            return None;
-        };
-        if query.with.is_some()
-            || query.limit_clause.is_some()
-            || query.fetch.is_some()
-            || !query.pipe_operators.is_empty()
-            || !select.from.is_empty()
-            || select.selection.is_some()
-            || select.having.is_some()
-        {
-            return None;
-        }
-        match select.projection.as_slice() {
-            [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] => {
-                Self::of_value(value)
-            }
-            _ => None,
-        }
+/// The expression yielding the elements of `array` as the operand of
+/// `= ANY`, when it reads no column.
+fn array_members(array: &Expr) -> Option<&Expr> {
+    let array = unwrapped(array);
+    if let Expr::Function(function) = array
+        && function.name.to_string().eq_ignore_ascii_case("array")
+        && let FunctionArguments::Subquery(query) = &function.args
+    {
+        return query_members(query);
     }
-
-    /// The members of `array` as the operand of `= ANY`.
-    fn of_array(array: &'e Expr) -> Option<Self> {
-        match unwrapped(array) {
-            Expr::Function(function) if function.name.to_string().eq_ignore_ascii_case("array") => {
-                match &function.args {
-                    FunctionArguments::Subquery(query) => Self::of_query(query),
-                    _ => None,
-                }
-            }
-            array => (!references_column(array)).then_some(Self::Elements(array)),
-        }
-    }
-
-    /// Whether every member is one of `wider`, as written or declared.
-    fn within(self, wider: Self, deployment: &Deployment) -> bool {
-        match (self, wider) {
-            (Self::Rows(narrower), Self::Rows(wider))
-            | (Self::Elements(narrower), Self::Elements(wider)) => {
-                deployment.is_set_within(narrower, wider)
-            }
-            _ => false,
-        }
-    }
+    (!references_column(array)).then_some(array)
 }
 
 /// The column `condition` tests against a set with `=`, `= ANY` or `IN`,
-/// and the members of the set.
-fn membership(condition: &Expr) -> Option<(&Expr, Members<'_>)> {
+/// and the expression yielding the members of the set. Column types keep
+/// one expression from yielding a value in one spelling and an array in
+/// another.
+fn membership(condition: &Expr) -> Option<(&Expr, &Expr)> {
     match unwrapped(condition) {
         Expr::BinaryOp {
             left,
@@ -887,7 +866,7 @@ fn membership(condition: &Expr) -> Option<(&Expr, Members<'_>)> {
             .into_iter()
             .find_map(|(column, value)| {
                 if is_column(column) {
-                    Some((column.as_ref(), Members::of_value(value)?))
+                    Some((column.as_ref(), value_members(value)?))
                 } else {
                     None
                 }
@@ -897,13 +876,13 @@ fn membership(condition: &Expr) -> Option<(&Expr, Members<'_>)> {
             compare_op: BinaryOperator::Eq,
             right,
             ..
-        } if is_column(left) => Some((left, Members::of_array(right)?)),
+        } if is_column(left) => Some((left, array_members(right)?)),
         Expr::In {
             expr,
             target: InTarget::Subquery(query),
             negated: false,
             ..
-        } if is_column(expr) => Some((expr, Members::of_query(query)?)),
+        } if is_column(expr) => Some((expr, query_members(query)?)),
         _ => None,
     }
 }
