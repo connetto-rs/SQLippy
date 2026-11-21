@@ -6,7 +6,8 @@ use std::{borrow::Cow, cell::LazyCell, collections::BTreeSet};
 use sql_traits::{
     errors::LookupError,
     traits::{
-        ColumnGrantLike, DatabaseLike, FunctionLike, GrantLike, Relation, RoleLike, TableLike,
+        ColumnGrantLike, ColumnLike, DatabaseLike, FunctionLike, GrantLike, Relation, RoleLike,
+        TableLike,
     },
     utils::identifier_resolution::normalize_identifier,
 };
@@ -203,6 +204,21 @@ pub(crate) fn is_client_written<DB: DatabaseLike>(
         &schema_of(database, table.stored_table_schema()),
         &table.stored_table_name(),
     )
+}
+
+/// The column of `table` the deployment declares as its tenant key.
+pub(crate) fn tenant_column<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    deployment: &Deployment,
+    table: &'db DB::Table,
+) -> Result<Option<&'db DB::Column>, LookupError> {
+    let schema = schema_of(database, table.stored_table_schema());
+    let Some(key) = deployment.tenant_key(&schema, &table.stored_table_name()) else {
+        return Ok(None);
+    };
+    Ok(table
+        .columns(database)?
+        .find(|column| column.stored_column_name() == key))
 }
 
 /// Whether the deployment selects `table` for binary replication, by its own

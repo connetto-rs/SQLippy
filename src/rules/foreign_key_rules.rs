@@ -22,3 +22,5 @@ mod undeletable_reference;
 pub use undeletable_reference::UndeletableReference;
 mod foreign_key_existence_oracle;
 pub use foreign_key_existence_oracle::ForeignKeyExistenceOracle;
+mod tenant_local_reference;
+pub use tenant_local_reference::TenantLocalReference;

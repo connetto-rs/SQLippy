@@ -54,18 +54,19 @@ use crate::{
         SimpleCaseUnderUnsafeSearchPath, SingularTableName, SnapshotBeforeLock,
         SubjectSettableAttribute, SuperkeyPrimaryKey, SurrogatePrimaryKeyInExtension,
         TableInheritance, TableNameDispatch, TautologicalCheck, TautologicalPolicy,
-        TautologicalWithCheck, TimeDependentCheck, TimeWithTimeZone, TimestampBetween,
-        TimestampWithoutTimeZone, TriggerFilterInBody, TruncateGrantedToAnonymousRole,
-        TruncateGrantedToAppRole, TruncatedIdentifier, TruncatingIntegerDivision,
-        TypeNameCaseCollision, UnauditedAuthorityTable, UnboundedTextColumn, UncachedHelperQuery,
-        UncachedPolicyCall, UnconditionalClientWritePolicy, UndeletableReference,
-        UnfilteredChangeTrigger, UnfilteredWrite, UnforcedRowLevelSecurity,
-        UnindexedCorrelatedSelect, UnindexedFilter, UnindexedForeignKey, UnindexedPolicyFilter,
-        UnindexedRecursiveJoin, UnknownBinarySend, UnlinkedFromItem, UnloggedTable,
-        UnorderedDistinctOn, UnorderedLimit, UnqualifiedNameUnderUnsafeSearchPath, UnreadOuterJoin,
-        UnsatisfiableCheck, UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
-        UnseededPolicySet, UnstreamableReplicaIdentity, UnusedCte, UnvalidatedConstraint,
-        UuidStoredAsText, WildcardView, WritingNonVolatileFunction, ZeroPrecisionTimestamp,
+        TautologicalWithCheck, TenantLocalReference, TimeDependentCheck, TimeWithTimeZone,
+        TimestampBetween, TimestampWithoutTimeZone, TriggerFilterInBody,
+        TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
+        TruncatingIntegerDivision, TypeNameCaseCollision, UnauditedAuthorityTable,
+        UnboundedTextColumn, UncachedHelperQuery, UncachedPolicyCall,
+        UnconditionalClientWritePolicy, UndeletableReference, UnfilteredChangeTrigger,
+        UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
+        UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin, UnknownBinarySend,
+        UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn, UnorderedLimit,
+        UnqualifiedNameUnderUnsafeSearchPath, UnreadOuterJoin, UnsatisfiableCheck,
+        UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable, UnseededPolicySet,
+        UnstreamableReplicaIdentity, UnusedCte, UnvalidatedConstraint, UuidStoredAsText,
+        WildcardView, WritingNonVolatileFunction, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -134,7 +135,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
         for rule in column_rules {
             constrainer.register_column_rule_with_floor(rule, Level::Allow);
         }
-        let foreign_key_rules: [Box<dyn ForeignKeyRule<Database = DB>>; 12] = [
+        let foreign_key_rules: [Box<dyn ForeignKeyRule<Database = DB>>; 13] = [
             Box::new(NullableCompositeForeignKey::default()),
             Box::new(UnindexedForeignKey::default()),
             Box::new(IncompatibleForeignKey::default()),
@@ -147,6 +148,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(CopiedColumnThroughSuperkey::default()),
             Box::new(UndeletableReference::default()),
             Box::new(ForeignKeyExistenceOracle::default()),
+            Box::new(TenantLocalReference::default()),
         ];
         for rule in foreign_key_rules {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
