@@ -1,9 +1,15 @@
 //! Functions that take a lock and then read rows the transaction's snapshot
 //! may predate.
 
-use std::{collections::HashSet, ops::ControlFlow};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::ControlFlow,
+};
 
-use sql_traits::traits::{DatabaseLike, FunctionLike};
+use sql_traits::{
+    structs::IdentifierCase,
+    traits::{DatabaseLike, FunctionLike},
+};
 use sqlparser::ast::{
     BinaryOperator, Expr, FunctionBehavior, InTarget, ObjectName, Query, SetExpr, Statement,
     TableFactor, UnaryOperator, Visit, Visitor,
@@ -34,8 +40,10 @@ rule_definition!(
     /// the transaction's first statement, so a read after waiting for the
     /// lock misses what the previous holder committed. A guard counts when
     /// a condition on `current_setting('transaction_isolation')` before the
-    /// lock leaves every `REPEATABLE READ` path through an error. Re-reading
-    /// the rows a `SELECT ... FOR UPDATE` locked, by the same filter, is
+    /// lock leaves every `REPEATABLE READ` path through an error, written
+    /// in the body or in a PL/pgSQL function called by a statement or an
+    /// expression made of that call alone. Re-reading the rows a
+    /// `SELECT ... FOR UPDATE` locked, by the same filter, is
     /// exempt. A `STABLE` or `IMMUTABLE` function reads with its caller's
     /// snapshot at every level and is reported whatever it checks.
     ///
@@ -318,6 +326,62 @@ struct Locks<'db, DB: DatabaseLike> {
     /// Whether a guard on the isolation level can protect the function.
     guards: bool,
     found: Option<StaleRead>,
+    /// Whether a `RETURN` leaves the body on a path no guard narrowed.
+    returns_unguarded: bool,
+    /// Whether each called function read so far refuses `REPEATABLE READ`,
+    /// `false` while its body is being read.
+    refusing: HashMap<&'db DB::Function, bool>,
+}
+
+impl<'db, DB: DatabaseLike> Locks<'db, DB> {
+    fn new(database: &'db DB, guards: bool, refusing: HashMap<&'db DB::Function, bool>) -> Self {
+        Self {
+            database,
+            guards,
+            found: None,
+            returns_unguarded: false,
+            refusing,
+        }
+    }
+
+    /// Guards `state` when `query` is a call whose every reached function
+    /// refuses `REPEATABLE READ`.
+    fn call(&mut self, query: &Query, state: &mut Snapshot) {
+        if !self.guards || state.guarded {
+            return;
+        }
+        let Some(Expr::Function(call)) = evaluated(query) else {
+            return;
+        };
+        let Ok(called) = self
+            .database
+            .functions_reached_by(call, IdentifierCase::Folded)
+        else {
+            return;
+        };
+        let called: Vec<&'db DB::Function> = called.collect();
+        if !called.is_empty() && called.into_iter().all(|function| self.refuses(function)) {
+            state.guarded = true;
+        }
+    }
+
+    /// Whether every path returning from the PL/pgSQL `function` passed a
+    /// guard, so a call to it raises under `REPEATABLE READ`.
+    fn refuses(&mut self, function: &'db DB::Function) -> bool {
+        if let Some(&refuses) = self.refusing.get(function) {
+            return refuses;
+        }
+        let Some(block) = plpgsql_block(function) else {
+            return false;
+        };
+        self.refusing.insert(function, false);
+        let mut body = Locks::new(self.database, true, std::mem::take(&mut self.refusing));
+        let ended = walk_block(&mut body, &block, Snapshot::default());
+        let refuses = !body.returns_unguarded && ended.is_none_or(|state| state.guarded);
+        self.refusing = body.refusing;
+        self.refusing.insert(function, refuses);
+        refuses
+    }
 }
 
 impl<DB: DatabaseLike> Locks<'_, DB> {
@@ -358,10 +422,14 @@ impl<DB: DatabaseLike> FlowVisitor for Locks<'_, DB> {
 
     fn query(&mut self, query: &Query, state: &mut Snapshot) {
         self.fragment(query, state);
+        self.call(query, state);
     }
 
     fn statement(&mut self, statement: &Statement, state: &mut Snapshot) {
         self.fragment(statement, state);
+        if let Statement::Query(query) = statement {
+            self.call(query, state);
+        }
     }
 
     fn step(&mut self, node: &Node, state: &mut Snapshot) {
@@ -383,6 +451,7 @@ impl<DB: DatabaseLike> FlowVisitor for Locks<'_, DB> {
                 state.held.clear();
                 state.guarded &= *chain;
             }
+            NodeKind::Return { .. } => self.returns_unguarded |= !state.guarded,
             _ => {}
         }
     }
@@ -412,17 +481,13 @@ impl<DB: DatabaseLike> FunctionRule for SnapshotBeforeLock<DB> {
         }
         let volatility = function.volatility();
         let volatile = volatility == FunctionBehavior::Volatile;
-        let mut locks = Locks {
-            database,
-            guards: volatile,
-            found: None,
-        };
+        let mut locks = Locks::new(database, volatile, HashMap::new());
         if let Some(block) = plpgsql_block(function) {
             walk_block(&mut locks, &block, Snapshot::default());
         } else {
             let mut state = Snapshot::default();
             for statement in body_statements(function) {
-                locks.fragment(&statement, &mut state);
+                locks.statement(&statement, &mut state);
             }
         }
         let Some(StaleRead { lock, table }) = locks.found else {

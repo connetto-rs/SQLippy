@@ -109,6 +109,105 @@ fn guards_that_let_repeatable_read_through_or_follow_the_lock_do_not_count() {
     }
 }
 
+/// A PL/pgSQL function `refuse` running `body`, and `reserve` calling it
+/// before the lock and the check.
+fn guarded_by_helper(body: &str) -> String {
+    format!(
+        "CREATE FUNCTION refuse() RETURNS void LANGUAGE plpgsql AS $$ {body} $$;
+         {}",
+        plpgsql(&format!(
+            "BEGIN PERFORM refuse(); PERFORM pg_advisory_xact_lock(1); {CHECK} END"
+        ))
+    )
+}
+
+#[test]
+fn a_called_function_refusing_repeatable_read_is_a_guard() {
+    for body in [
+        "BEGIN IF current_setting('transaction_isolation') = 'repeatable read' THEN RAISE EXCEPTION 'rr'; END IF; END",
+        "BEGIN IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN RAISE EXCEPTION 'rc'; END IF; RETURN; END",
+        "BEGIN IF current_setting('transaction_isolation') = 'read committed' THEN RETURN; END IF; RAISE EXCEPTION 'rc'; END",
+        "BEGIN RAISE EXCEPTION 'never'; END",
+    ] {
+        assert_eq!(
+            findings(&guarded_by_helper(body)),
+            Vec::<String>::new(),
+            "{body}"
+        );
+    }
+    let qualified = "CREATE SCHEMA authz;
+        CREATE FUNCTION authz.refuse_repeatable_read() RETURNS void LANGUAGE plpgsql AS $$ BEGIN
+          IF pg_catalog.current_setting('transaction_isolation') = 'repeatable read' THEN RAISE EXCEPTION 'rr'; END IF;
+        END $$;";
+    let nested = "CREATE FUNCTION refuse_twice() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM refuse(); END $$;
+        CREATE FUNCTION refuse() RETURNS void LANGUAGE plpgsql AS $$ BEGIN
+          IF current_setting('transaction_isolation') = 'repeatable read' THEN RAISE EXCEPTION 'rr'; END IF;
+        END $$;";
+    for (helpers, call) in [
+        (qualified, "PERFORM authz.refuse_repeatable_read();"),
+        (nested, "PERFORM refuse_twice();"),
+    ] {
+        let schema = format!(
+            "{helpers} {}",
+            plpgsql(&format!(
+                "BEGIN {call} PERFORM pg_advisory_xact_lock(1); {CHECK} END"
+            ))
+        );
+        assert_eq!(findings(&schema), Vec::<String>::new(), "{call}");
+    }
+    let sql_body = format!(
+        "{nested} CREATE FUNCTION reserve(slot INT) RETURNS void LANGUAGE sql VOLATILE AS $$
+            SELECT refuse();
+            SELECT pg_advisory_xact_lock(1);
+            INSERT INTO slots SELECT slot, true WHERE (SELECT count(*) FROM slots) < 10;
+        $$;"
+    );
+    assert_eq!(findings(&sql_body), Vec::<String>::new());
+}
+
+#[test]
+fn a_called_function_letting_repeatable_read_return_is_no_guard() {
+    for body in [
+        "DECLARE level TEXT; BEGIN level := current_setting('transaction_isolation'); END",
+        "BEGIN IF current_setting('transaction_isolation') = 'repeatable read' THEN RAISE NOTICE 'rr'; END IF; END",
+        "BEGIN IF current_setting('transaction_isolation') = 'serializable' THEN RAISE EXCEPTION 'no'; END IF; END",
+        "BEGIN IF current_setting('search_path') = 'public' THEN RETURN; END IF; IF current_setting('transaction_isolation') = 'repeatable read' THEN RAISE EXCEPTION 'rr'; END IF; END",
+        "BEGIN IF current_setting('transaction_isolation') = 'repeatable read' THEN RAISE EXCEPTION 'rr'; END IF; EXCEPTION WHEN OTHERS THEN NULL; END",
+        "BEGIN PERFORM refuse(); END",
+    ] {
+        assert_eq!(findings(&guarded_by_helper(body)).len(), 1, "{body}");
+    }
+    let sql = "CREATE FUNCTION refuse() RETURNS void LANGUAGE sql AS $$ SELECT current_setting('transaction_isolation') $$;";
+    let refusing = "CREATE FUNCTION refuse() RETURNS void LANGUAGE plpgsql AS $$ BEGIN
+          IF current_setting('transaction_isolation') = 'repeatable read' THEN RAISE EXCEPTION 'rr'; END IF;
+        END $$;";
+    for (helper, body) in [
+        (
+            sql,
+            format!("BEGIN PERFORM refuse(); PERFORM pg_advisory_xact_lock(1); {CHECK} END"),
+        ),
+        (
+            refusing,
+            format!("BEGIN PERFORM pg_advisory_xact_lock(1); PERFORM refuse(); {CHECK} END"),
+        ),
+        (
+            refusing,
+            format!(
+                "BEGIN PERFORM refuse() FROM quotas; PERFORM pg_advisory_xact_lock(1); {CHECK} END"
+            ),
+        ),
+        (
+            refusing,
+            format!(
+                "BEGIN PERFORM other.public.refuse(); PERFORM pg_advisory_xact_lock(1); {CHECK} END"
+            ),
+        ),
+    ] {
+        let schema = format!("{helper} {}", plpgsql(&body));
+        assert_eq!(findings(&schema).len(), 1, "{body}");
+    }
+}
+
 #[test]
 fn rereading_the_locked_rows_by_the_same_filter_is_exempt() {
     let same = plpgsql(
