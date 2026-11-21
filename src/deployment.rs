@@ -24,6 +24,10 @@ pub(crate) use cluster::{ClusterBootstrap, Membership, RoleAttributes};
 /// unquoted name is written in lowercase. `PUBLIC` is always an anonymous role
 /// and needs no declaration.
 ///
+/// A list-valued fact, such as the app roles, is undeclared until one of its
+/// entries is declared or its `without_` method declares it has none, and a
+/// rule reading an undeclared fact does not run.
+///
 /// # Example
 ///
 /// ```
@@ -35,26 +39,57 @@ pub(crate) use cluster::{ClusterBootstrap, Membership, RoleAttributes};
 ///     .with_exposed_schema("public");
 /// assert!(supabase.declares(Declaration::AppRoles));
 /// assert!(!Deployment::default().declares(Declaration::AppRoles));
+/// assert!(Deployment::default().without_app_roles().declares(Declaration::AppRoles));
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct Deployment {
-    anonymous_roles: Vec<String>,
-    app_roles: Vec<String>,
+    anonymous_roles: Fact<String>,
+    app_roles: Fact<String>,
     exposed_schemas: Vec<String>,
-    credentials: Vec<Expr>,
+    credentials: Fact<Expr>,
     request_settings: Vec<Expr>,
     client_written_tables: Vec<(String, String)>,
-    binary_replication_tables: Vec<(String, String)>,
+    binary_replication_tables: Fact<(String, String)>,
     binary_replication_all_tables: bool,
-    self_asserted_claims: Vec<Expr>,
-    self_asserted_columns: Vec<StoredColumn>,
-    tenant_keys: Vec<StoredColumn>,
-    irreversible_columns: Vec<StoredColumn>,
-    audit_functions: Vec<AuditFunction>,
+    self_asserted_claims: Fact<Expr>,
+    self_asserted_columns: Fact<StoredColumn>,
+    tenant_keys: Fact<StoredColumn>,
+    irreversible_columns: Fact<StoredColumn>,
+    audit_functions: Fact<AuditFunction>,
     pooled: Option<bool>,
     clock_tolerance: Option<Duration>,
     vocabularies: Vec<Vocabulary>,
     cluster_bootstrap: Option<ClusterBootstrap>,
+}
+
+/// The entries of a list-valued fact, undeclared until an entry or the
+/// absence of any is declared.
+#[derive(Debug, Clone)]
+struct Fact<T>(Option<Vec<T>>);
+
+impl<T> Default for Fact<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<T> Fact<T> {
+    fn push(&mut self, entry: T) {
+        self.0.get_or_insert_default().push(entry);
+    }
+
+    /// Declares that the fact has no entry, dropping any declared before.
+    fn declare_none(&mut self) {
+        self.0 = Some(Vec::new());
+    }
+
+    fn is_declared(&self) -> bool {
+        self.0.is_some()
+    }
+
+    fn entries(&self) -> &[T] {
+        self.0.as_deref().unwrap_or_default()
+    }
 }
 
 /// A column, by the stored names of its schema, table and column.
@@ -176,11 +211,27 @@ impl Deployment {
         self
     }
 
+    /// Declares that no role besides `PUBLIC` serves callers holding no
+    /// credential, dropping any anonymous role declared before.
+    #[must_use]
+    pub fn without_anonymous_roles(mut self) -> Self {
+        self.anonymous_roles.declare_none();
+        self
+    }
+
     /// Declares a role the application connects as or switches to for its
     /// callers.
     #[must_use]
     pub fn with_app_role(mut self, role: impl Into<String>) -> Self {
         self.app_roles.push(role.into());
+        self
+    }
+
+    /// Declares that the application has no role of its own, dropping any app
+    /// role declared before.
+    #[must_use]
+    pub fn without_app_roles(mut self) -> Self {
+        self.app_roles.declare_none();
         self
     }
 
@@ -275,12 +326,12 @@ impl Deployment {
 
     /// Returns the declared anonymous roles, `PUBLIC` excluded.
     pub fn anonymous_roles(&self) -> impl Iterator<Item = &str> {
-        self.anonymous_roles.iter().map(String::as_str)
+        self.anonymous_roles.entries().iter().map(String::as_str)
     }
 
     /// Returns the declared app roles.
     pub fn app_roles(&self) -> impl Iterator<Item = &str> {
-        self.app_roles.iter().map(String::as_str)
+        self.app_roles.entries().iter().map(String::as_str)
     }
 
     /// Returns whether a client API serves the schema directly.
@@ -336,16 +387,24 @@ impl Deployment {
         self
     }
 
+    /// Declares that no table is binary-replicated, dropping any selection
+    /// made before.
+    #[must_use]
+    pub fn without_binary_replication_tables(mut self) -> Self {
+        self.binary_replication_tables.declare_none();
+        self.binary_replication_all_tables = false;
+        self
+    }
+
     /// Returns whether the stored schema and table names select a binary-replicated table.
     #[must_use]
     pub fn is_binary_replicated(&self, schema: &str, table: &str) -> bool {
         self.binary_replication_all_tables
-            || self
-                .binary_replication_tables
-                .iter()
-                .any(|(selected_schema, selected_table)| {
+            || self.binary_replication_tables.entries().iter().any(
+                |(selected_schema, selected_table)| {
                     selected_schema == schema && selected_table == table
-                })
+                },
+            )
     }
 
     /// Declares an expression that identifies the caller, such as
@@ -363,6 +422,14 @@ impl Deployment {
     pub fn with_credential(mut self, expression: &str) -> Result<Self, ParserError> {
         self.credentials.push(parse_expression(expression)?);
         Ok(self)
+    }
+
+    /// Declares that nothing identifies the caller, dropping any credential
+    /// declared before.
+    #[must_use]
+    pub fn without_credentials(mut self) -> Self {
+        self.credentials.declare_none();
+        self
     }
 
     /// Declares an expression reading a claim the caller can set, such as
@@ -383,11 +450,20 @@ impl Deployment {
         Ok(self)
     }
 
+    /// Declares that the caller sets no claim or column a policy may read,
+    /// dropping any self-asserted claim or column declared before.
+    #[must_use]
+    pub fn without_self_asserted_sources(mut self) -> Self {
+        self.self_asserted_claims.declare_none();
+        self.self_asserted_columns.declare_none();
+        self
+    }
+
     /// Returns whether `expression` is a declared self-asserted claim, as
     /// written.
     #[must_use]
     pub fn is_self_asserted_claim(&self, expression: &Expr) -> bool {
-        self.self_asserted_claims.contains(expression)
+        self.self_asserted_claims.entries().contains(expression)
     }
 
     /// Declares a column whose value the subject of its row sets, by the
@@ -411,7 +487,10 @@ impl Deployment {
     /// Returns the declared self-asserted columns as stored schema, table and
     /// column names.
     pub fn self_asserted_columns(&self) -> impl Iterator<Item = (&str, &str, &str)> {
-        self.self_asserted_columns.iter().map(StoredColumn::names)
+        self.self_asserted_columns
+            .entries()
+            .iter()
+            .map(StoredColumn::names)
     }
 
     /// Declares an expression reading a setting that selects what a request
@@ -453,11 +532,20 @@ impl Deployment {
         self
     }
 
+    /// Declares that no table belongs to a tenant, dropping any tenant key
+    /// declared before.
+    #[must_use]
+    pub fn without_tenant_keys(mut self) -> Self {
+        self.tenant_keys.declare_none();
+        self
+    }
+
     /// Returns the stored name of the declared tenant key of the table with
     /// these stored schema and table names.
     #[must_use]
     pub fn tenant_key(&self, schema: &str, table: &str) -> Option<&str> {
         self.tenant_keys
+            .entries()
             .iter()
             .find(|key| key.schema == schema && key.table == table)
             .map(|key| key.column.as_str())
@@ -478,10 +566,21 @@ impl Deployment {
         self
     }
 
+    /// Declares that every column may be cleared back to `NULL`, dropping any
+    /// irreversible column declared before.
+    #[must_use]
+    pub fn without_irreversible_columns(mut self) -> Self {
+        self.irreversible_columns.declare_none();
+        self
+    }
+
     /// Returns the declared irreversible columns as stored schema, table and
     /// column names.
     pub fn irreversible_columns(&self) -> impl Iterator<Item = (&str, &str, &str)> {
-        self.irreversible_columns.iter().map(StoredColumn::names)
+        self.irreversible_columns
+            .entries()
+            .iter()
+            .map(StoredColumn::names)
     }
 
     /// Declares a trigger function that records the `events` written to the
@@ -501,10 +600,18 @@ impl Deployment {
         self
     }
 
+    /// Declares that no trigger function records writes, dropping any audit
+    /// function declared before.
+    #[must_use]
+    pub fn without_audit_functions(mut self) -> Self {
+        self.audit_functions.declare_none();
+        self
+    }
+
     /// Returns the declared audit functions as stored schema and function
     /// names with the events each records.
     pub fn audit_functions(&self) -> impl Iterator<Item = (&str, &str, &[WriteEvent])> {
-        self.audit_functions.iter().map(|audit| {
+        self.audit_functions.entries().iter().map(|audit| {
             (
                 audit.schema.as_str(),
                 audit.function.as_str(),
@@ -516,32 +623,32 @@ impl Deployment {
     /// Returns whether `expression` is a declared credential, as written.
     #[must_use]
     pub fn is_credential(&self, expression: &Expr) -> bool {
-        self.credentials.contains(expression)
+        self.credentials.entries().contains(expression)
     }
 
     /// Returns the declared credential expressions.
     pub(crate) fn credentials(&self) -> &[Expr] {
-        &self.credentials
+        self.credentials.entries()
     }
 
     /// Returns whether the deployment makes the given declaration.
     #[must_use]
     pub fn declares(&self, declaration: Declaration) -> bool {
         match declaration {
-            Declaration::AppRoles => !self.app_roles.is_empty(),
+            Declaration::AppRoles => self.app_roles.is_declared(),
             Declaration::ClientRoles => {
-                !self.anonymous_roles.is_empty() || !self.app_roles.is_empty()
+                self.anonymous_roles.is_declared() || self.app_roles.is_declared()
             }
-            Declaration::Credentials => !self.credentials.is_empty(),
+            Declaration::Credentials => self.credentials.is_declared(),
             Declaration::SelfAssertedSources => {
-                !self.self_asserted_claims.is_empty() || !self.self_asserted_columns.is_empty()
+                self.self_asserted_claims.is_declared() || self.self_asserted_columns.is_declared()
             }
-            Declaration::TenantKeys => !self.tenant_keys.is_empty(),
-            Declaration::IrreversibleColumns => !self.irreversible_columns.is_empty(),
-            Declaration::AuditFunctions => !self.audit_functions.is_empty(),
+            Declaration::TenantKeys => self.tenant_keys.is_declared(),
+            Declaration::IrreversibleColumns => self.irreversible_columns.is_declared(),
+            Declaration::AuditFunctions => self.audit_functions.is_declared(),
             Declaration::Pooled => self.pooled.is_some(),
             Declaration::BinaryReplicationTables => {
-                self.binary_replication_all_tables || !self.binary_replication_tables.is_empty()
+                self.binary_replication_all_tables || self.binary_replication_tables.is_declared()
             }
             Declaration::ClusterBootstrap => self.cluster_bootstrap.is_some(),
         }
@@ -551,23 +658,24 @@ impl Deployment {
 /// A part of a [`Deployment`] a rule cannot run without.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Declaration {
-    /// At least one app role.
+    /// The app roles, which may be none.
     AppRoles,
-    /// At least one anonymous or app role besides `PUBLIC`.
+    /// The anonymous roles besides `PUBLIC` or the app roles, which may be
+    /// none.
     ClientRoles,
-    /// At least one credential expression.
+    /// The credential expressions, which may be none.
     Credentials,
-    /// At least one self-asserted claim or column.
+    /// The self-asserted claims or columns, which may be none.
     SelfAssertedSources,
-    /// At least one tenant key.
+    /// The tenant keys, which may be none.
     TenantKeys,
-    /// At least one irreversible column.
+    /// The irreversible columns, which may be none.
     IrreversibleColumns,
-    /// At least one audit function.
+    /// The audit functions, which may be none.
     AuditFunctions,
     /// Whether the deployment is pooled.
     Pooled,
-    /// At least one binary-replicated table.
+    /// The binary-replicated tables, which may be none.
     BinaryReplicationTables,
     /// The cluster bootstrap provisioning the roles databases share.
     ClusterBootstrap,

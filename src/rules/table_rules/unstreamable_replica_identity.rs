@@ -26,7 +26,7 @@ rule_definition!(
     ///
     /// The rule does not run on SQLite, which has no logical replication.
     ///
-    /// [`Deployment::with_binary_replication_table`](crate::deployment::Deployment::with_binary_replication_table) or [`Deployment::with_binary_replication_all_tables`](crate::deployment::Deployment::with_binary_replication_all_tables) selects the tables to check, and the rule is inactive until one of them does.
+    /// [`Deployment::with_binary_replication_table`](crate::deployment::Deployment::with_binary_replication_table) or [`Deployment::with_binary_replication_all_tables`](crate::deployment::Deployment::with_binary_replication_all_tables) selects the tables to check, and the rule is inactive until one of them does or [`Deployment::without_binary_replication_tables`](crate::deployment::Deployment::without_binary_replication_tables) declares that no table is binary-replicated.
     ///
     /// # Example
     ///

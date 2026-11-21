@@ -197,3 +197,22 @@ fn the_rule_waits_for_a_declared_source_and_denies_by_default() {
         "self-asserted claims or columns"
     );
 }
+
+#[test]
+fn a_deployment_declaring_no_source_runs_the_rule_and_finds_nothing() {
+    let mut constrainer = DefaultConstrainer::<ParserDB>::default();
+    constrainer.set_deployment(deployment().without_self_asserted_sources());
+    assert!(
+        constrainer
+            .inactive_rules()
+            .iter()
+            .all(|inactive| inactive.rule().name != "self_asserted_claim_policy")
+    );
+    assert_eq!(
+        outcomes(
+            &constrainer,
+            "CREATE POLICY p ON docs USING (team = auth.jwt() -> 'user_metadata' ->> 'team');"
+        ),
+        Vec::<String>::new()
+    );
+}

@@ -76,10 +76,7 @@ use crate::{
 ///
 /// `correctness` rules deny, `suspicious`, `perf`, `complexity` and `style`
 /// rules warn, and `pedantic` and `restriction` rules stay at `allow` until a
-/// level is set for them or their group. The exceptions are
-/// [`BinarySendFailure`] at `deny` and [`UnknownBinarySend`] at `warn`, which
-/// are inactive until the deployment selects tables for binary replication
-/// and then report only on those tables.
+/// level is set for them or their group.
 ///
 /// # Example
 ///
@@ -106,7 +103,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
     fn default() -> Self {
         let mut constrainer = GenericConstrainer::default();
         register_table_rules(&mut constrainer);
-        let column_rules: [Box<dyn ColumnRule<Database = DB>>; 23] = [
+        let column_rules: [Box<dyn ColumnRule<Database = DB>>; 25] = [
             Box::new(SerialColumn::default()),
             Box::new(NarrowIntegerKey::default()),
             Box::new(ClientWrittenCounterKey::default()),
@@ -130,14 +127,12 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(BooleanStateWithoutTime::default()),
             Box::new(ClosedSetAsText::default()),
             Box::new(ConstantColumnNotGenerated::default()),
+            Box::new(BinarySendFailure::default()),
+            Box::new(UnknownBinarySend::default()),
         ];
         for rule in column_rules {
             constrainer.register_column_rule_with_floor(rule, Level::Allow);
         }
-        constrainer
-            .register_column_rule_with_floor(Box::new(BinarySendFailure::default()), Level::Deny);
-        constrainer
-            .register_column_rule_with_floor(Box::new(UnknownBinarySend::default()), Level::Warn);
         let foreign_key_rules: [Box<dyn ForeignKeyRule<Database = DB>>; 11] = [
             Box::new(NullableCompositeForeignKey::default()),
             Box::new(UnindexedForeignKey::default()),

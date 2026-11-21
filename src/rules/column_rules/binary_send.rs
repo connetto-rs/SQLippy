@@ -16,7 +16,7 @@ rule_definition!(
     ///
     /// The rule does not run on SQLite, which has no PostgreSQL binary send protocol.
     ///
-    /// [`Deployment::with_binary_replication_table`](crate::deployment::Deployment::with_binary_replication_table) or [`Deployment::with_binary_replication_all_tables`](crate::deployment::Deployment::with_binary_replication_all_tables) selects the tables to check, and the rule is inactive until one of them does.
+    /// [`Deployment::with_binary_replication_table`](crate::deployment::Deployment::with_binary_replication_table) or [`Deployment::with_binary_replication_all_tables`](crate::deployment::Deployment::with_binary_replication_all_tables) selects the tables to check, and the rule is inactive until one of them does or [`Deployment::without_binary_replication_tables`](crate::deployment::Deployment::without_binary_replication_tables) declares that no table is binary-replicated.
     ///
     /// # Example
     ///
@@ -37,7 +37,7 @@ rule_definition!(
     /// ```
     BinarySendFailure,
     register_column_rule,
-    LintGroup::Restriction,
+    LintGroup::Correctness,
     "A container's binary send function fails when a nested type has no send function, stopping the replication stream at that record.",
     Some("https://www.postgresql.org/docs/current/protocol-logicalrep-message-formats.html"),
     RuleExample {
@@ -84,10 +84,10 @@ rule_definition!(
     ///
     /// The rule does not run on SQLite, which has no PostgreSQL binary send protocol.
     ///
-    /// [`DefaultConstrainer`](crate::traits::DefaultConstrainer) runs this warning alongside [`BinarySendFailure`], and both are inactive until the deployment selects binary-replicated tables.
+    /// It reads the same selection as [`BinarySendFailure`] and is inactive until the deployment declares it.
     UnknownBinarySend,
     register_column_rule,
-    LintGroup::Restriction,
+    LintGroup::Suspicious,
     "An unknown send function leaves the safety of binary replication unverified.",
     Some("https://www.postgresql.org/docs/current/protocol-logicalrep-message-formats.html"),
     RuleExample {

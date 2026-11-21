@@ -446,3 +446,30 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
         ]
     );
 }
+
+#[test]
+fn a_deployment_declaring_every_fact_empty_leaves_no_rule_inactive() {
+    let mut constrainer = DefaultConstrainer::<ParserDB>::default();
+    constrainer.set_deployment(
+        Deployment::default()
+            .without_anonymous_roles()
+            .without_app_roles()
+            .without_credentials()
+            .without_self_asserted_sources()
+            .without_tenant_keys()
+            .without_irreversible_columns()
+            .without_audit_functions()
+            .without_binary_replication_tables()
+            .with_pooled(false)
+            .with_cluster_bootstrap(&parse("")),
+    );
+    assert!(
+        constrainer.inactive_rules().is_empty(),
+        "{:?}",
+        constrainer
+            .inactive_rules()
+            .iter()
+            .map(|inactive| inactive.rule().name)
+            .collect::<Vec<_>>()
+    );
+}
