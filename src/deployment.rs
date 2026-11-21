@@ -315,6 +315,9 @@ impl Deployment {
     }
 
     /// Selects a binary-replicated table by its stored schema and table names.
+    ///
+    /// A partitioned table selects every partition below it, as a publication
+    /// naming it publishes them.
     #[must_use]
     pub fn with_binary_replication_table(
         mut self,
@@ -537,6 +540,9 @@ impl Deployment {
             Declaration::IrreversibleColumns => !self.irreversible_columns.is_empty(),
             Declaration::AuditFunctions => !self.audit_functions.is_empty(),
             Declaration::Pooled => self.pooled.is_some(),
+            Declaration::BinaryReplicationTables => {
+                self.binary_replication_all_tables || !self.binary_replication_tables.is_empty()
+            }
             Declaration::ClusterBootstrap => self.cluster_bootstrap.is_some(),
         }
     }
@@ -561,6 +567,8 @@ pub enum Declaration {
     AuditFunctions,
     /// Whether the deployment is pooled.
     Pooled,
+    /// At least one binary-replicated table.
+    BinaryReplicationTables,
     /// The cluster bootstrap provisioning the roles databases share.
     ClusterBootstrap,
 }
@@ -576,6 +584,7 @@ impl Display for Declaration {
             Self::IrreversibleColumns => "irreversible columns",
             Self::AuditFunctions => "audit functions",
             Self::Pooled => "whether it is pooled",
+            Self::BinaryReplicationTables => "binary-replicated tables",
             Self::ClusterBootstrap => "its cluster bootstrap",
         })
     }

@@ -63,8 +63,8 @@ use crate::{
         UnindexedRecursiveJoin, UnknownBinarySend, UnlinkedFromItem, UnloggedTable,
         UnorderedDistinctOn, UnorderedLimit, UnqualifiedNameUnderUnsafeSearchPath, UnreadOuterJoin,
         UnsatisfiableCheck, UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
-        UnseededPolicySet, UnusedCte, UnvalidatedConstraint, UuidStoredAsText, WildcardView,
-        WritingNonVolatileFunction, ZeroPrecisionTimestamp,
+        UnseededPolicySet, UnstreamableReplicaIdentity, UnusedCte, UnvalidatedConstraint,
+        UuidStoredAsText, WildcardView, WritingNonVolatileFunction, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -78,7 +78,8 @@ use crate::{
 /// rules warn, and `pedantic` and `restriction` rules stay at `allow` until a
 /// level is set for them or their group. The exceptions are
 /// [`BinarySendFailure`] at `deny` and [`UnknownBinarySend`] at `warn`, which
-/// report only on tables the deployment selects for binary replication.
+/// are inactive until the deployment selects tables for binary replication
+/// and then report only on those tables.
 ///
 /// # Example
 ///
@@ -191,7 +192,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 55] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 56] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(DuplicateIndex::default()),
@@ -247,6 +248,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(NullCredentialRead::default()),
         Box::new(SensitiveColumnsExposed::default()),
         Box::new(UnconditionalClientWritePolicy::default()),
+        Box::new(UnstreamableReplicaIdentity::default()),
     ];
     for rule in table_rules {
         constrainer.register_table_rule_with_floor(rule, Level::Allow);

@@ -124,7 +124,7 @@ fn postgresql(sql: &str) -> ParserDB {
 
 #[test]
 fn rules_on_postgresql_only_behaviour_report_on_postgresql_and_not_on_sqlite() {
-    let cases: [(GenericConstrainer<ParserDB>, &str); 4] = [
+    let cases: [(GenericConstrainer<ParserDB>, &str); 5] = [
         (
             WildcardView::default().into(),
             "CREATE TABLE entries (id INT, body TEXT); CREATE VIEW visible AS SELECT * FROM entries;",
@@ -140,6 +140,10 @@ fn rules_on_postgresql_only_behaviour_report_on_postgresql_and_not_on_sqlite() {
         (
             ExtensionWithoutVersion::default().into(),
             "CREATE EXTENSION pgcrypto;",
+        ),
+        (
+            UnstreamableReplicaIdentity::default().into(),
+            "CREATE TABLE events (id INT);",
         ),
     ];
     for (constrainer, sql) in cases {

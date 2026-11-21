@@ -23,9 +23,9 @@ use dioxus_free_icons::icons::fa_solid_icons::{
     FaRulerVertical, FaScissors, FaServer, FaShareNodes, FaShield, FaShieldHalved, FaShuffle,
     FaSignature, FaSignsPost, FaSitemap, FaSkull, FaSliders, FaSnowflake, FaSort, FaSpellCheck,
     FaSquareMinus, FaSquareRootVariable, FaStopwatch, FaSyringe, FaTable, FaTableList, FaTag,
-    FaTags, FaTextHeight, FaTextWidth, FaThumbtack, FaToggleOff, FaTrashCan, FaTriangleExclamation,
-    FaUnderline, FaUserCheck, FaUserGear, FaUserNinja, FaUserPen, FaUserSlash, FaUserTag, FaUsers,
-    FaWandMagicSparkles, FaWater, FaWaterLadder,
+    FaTags, FaTextHeight, FaTextWidth, FaThumbtack, FaToggleOff, FaTowerBroadcast, FaTrashCan,
+    FaTriangleExclamation, FaUnderline, FaUserCheck, FaUserGear, FaUserNinja, FaUserPen,
+    FaUserSlash, FaUserTag, FaUsers, FaWandMagicSparkles, FaWater, FaWaterLadder,
 };
 
 /// Defines `RuleIcon`, rendering the icon each listed rule name maps to, and
@@ -231,6 +231,7 @@ rule_icons! {
     "rust_keyword_table_name" => FaRust,
     "binary_send_failure" => FaPlugCircleXmark,
     "unknown_binary_send" => FaPlugCircleExclamation,
+    "unstreamable_replica_identity" => FaTowerBroadcast,
     "superkey_primary_key" => FaKey,
     "copied_column_through_superkey" => FaCopy,
     "parallel_tables" => FaTableList,

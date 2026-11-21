@@ -108,3 +108,5 @@ mod sensitive_columns_exposed;
 pub use sensitive_columns_exposed::SensitiveColumnsExposed;
 mod unconditional_client_write_policy;
 pub use unconditional_client_write_policy::UnconditionalClientWritePolicy;
+mod unstreamable_replica_identity;
+pub use unstreamable_replica_identity::UnstreamableReplicaIdentity;
