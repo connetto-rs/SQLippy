@@ -241,7 +241,7 @@ impl<DB: DatabaseLike> SchemaRule for DefinerTakesActingUser<DB> {
                 continue;
             };
             let signature = signature(function, database);
-            reporter.function(
+            reporter.function_privilege(
                 function,
                 format!(
                     "SECURITY DEFINER function '{signature}', executable by {}, matches `{compared}` against a parameter where policies match the credential, and reads no credential itself, so a caller passes another user's identifier and acts as them.",

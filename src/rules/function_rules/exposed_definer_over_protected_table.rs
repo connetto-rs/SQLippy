@@ -138,7 +138,7 @@ impl<DB: DatabaseLike> FunctionRule for ExposedDefinerOverProtectedTable<DB> {
         };
         let signature = signature(function, database);
         let callers = callers.join(", ");
-        reporter.function(
+        reporter.function_privilege(
             function,
             format!(
                 "`SECURITY DEFINER` function '{signature}' {touched} as its owner, and {callers} can execute it."

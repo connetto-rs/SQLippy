@@ -43,6 +43,7 @@ mod engines;
 mod equality_indexes_on_arrays;
 mod expressions_and_functions;
 mod extension_column_names;
+mod extension_members;
 mod extension_versions;
 mod foreign_key_existence_oracles;
 mod foreign_key_hierarchies;
