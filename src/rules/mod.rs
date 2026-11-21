@@ -15,8 +15,9 @@ macro_rules! rule_name {
 
 /// Defines a rule's struct, its `Default`, the constrainer that runs it alone
 /// through `$register`, and its metadata with its `$example`, deciding from
-/// declared structure unless a `$basis` follows, and running on every engine
-/// unless `$engines` follow.
+/// declared structure unless a `$basis` follows, running on every engine
+/// unless `$engines` follow, and requiring no declaration unless `$requires`
+/// follows.
 macro_rules! rule_definition {
     (
         $(#[$doc:meta])*
@@ -42,6 +43,16 @@ macro_rules! rule_definition {
         $(#[$doc:meta])*
         $name:ident, $register:ident, $group:expr, $rationale:literal, $source:expr,
         $example:expr, $basis:expr, $engines:expr
+    ) => {
+        rule_definition!(
+            $(#[$doc])* $name, $register, $group, $rationale, $source, $example, $basis,
+            $engines, &[]
+        );
+    };
+    (
+        $(#[$doc:meta])*
+        $name:ident, $register:ident, $group:expr, $rationale:literal, $source:expr,
+        $example:expr, $basis:expr, $engines:expr, $requires:expr
     ) => {
         $(#[$doc])*
         pub struct $name<DB>(std::marker::PhantomData<DB>);
@@ -75,6 +86,10 @@ macro_rules! rule_definition {
 
             fn engines(&self) -> &'static [$crate::engine::Engine] {
                 $engines
+            }
+
+            fn requires(&self) -> &'static [$crate::deployment::Declaration] {
+                $requires
             }
         }
     };

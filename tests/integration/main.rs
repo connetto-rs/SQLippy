@@ -80,6 +80,7 @@ mod recursive_steps_over_unions;
 mod reference_id_suffixes;
 mod repeated_policy_calls;
 mod repeated_setting_reads;
+mod replica_identities;
 mod restrictive_without_permissive;
 mod role_memberships;
 mod schema_allowances;

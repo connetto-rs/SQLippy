@@ -3,29 +3,20 @@
 use sql_traits::traits::{BinarySend, ColumnLike, DataTypeLike, DatabaseLike, TableLike};
 
 use crate::{
-    deployment::Deployment,
+    deployment::Declaration,
     engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::grant_support::schema_of,
+    rules::grant_support::is_binary_replicated,
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
-
-/// Returns whether the deployment selects this column's table for binary replication.
-fn selected<DB: DatabaseLike>(database: &DB, column: &DB::Column, deployment: &Deployment) -> bool {
-    let table = column.table(database);
-    deployment.is_binary_replicated(
-        &schema_of(database, table.stored_table_schema()),
-        &table.stored_table_name(),
-    )
-}
 
 rule_definition!(
     /// Reports a selected column whose binary send function reaches a type without one.
     ///
     /// The rule does not run on SQLite, which has no PostgreSQL binary send protocol.
     ///
-    /// [`Deployment::with_binary_replication_table`] or [`Deployment::with_binary_replication_all_tables`] selects the tables to check.
+    /// [`Deployment::with_binary_replication_table`](crate::deployment::Deployment::with_binary_replication_table) or [`Deployment::with_binary_replication_all_tables`](crate::deployment::Deployment::with_binary_replication_all_tables) selects the tables to check, and the rule is inactive until one of them does.
     ///
     /// # Example
     ///
@@ -54,7 +45,8 @@ rule_definition!(
         good: "CREATE TABLE events (id INT PRIMARY KEY, grants TEXT[]);",
     },
     Basis::Declared,
-    &[Engine::PostgreSql]
+    &[Engine::PostgreSql],
+    &[Declaration::BinaryReplicationTables]
 );
 
 impl<DB: DatabaseLike> ColumnRule for BinarySendFailure<DB> {
@@ -66,7 +58,7 @@ impl<DB: DatabaseLike> ColumnRule for BinarySendFailure<DB> {
         column: &DB::Column,
         reporter: &mut Reporter<'_, DB>,
     ) -> Result<(), Interruption> {
-        if !selected(database, column, reporter.deployment()) {
+        if !is_binary_replicated(database, reporter.deployment(), column.table(database))? {
             return Ok(());
         }
         let declared = column.data_type(database);
@@ -92,7 +84,7 @@ rule_definition!(
     ///
     /// The rule does not run on SQLite, which has no PostgreSQL binary send protocol.
     ///
-    /// [`DefaultConstrainer`](crate::traits::DefaultConstrainer) enables this warning alongside [`BinarySendFailure`] when the deployment selects binary-replicated tables.
+    /// [`DefaultConstrainer`](crate::traits::DefaultConstrainer) runs this warning alongside [`BinarySendFailure`], and both are inactive until the deployment selects binary-replicated tables.
     UnknownBinarySend,
     register_column_rule,
     LintGroup::Restriction,
@@ -103,7 +95,8 @@ rule_definition!(
         good: "CREATE TABLE events (id INT PRIMARY KEY, area BOX);",
     },
     Basis::Declared,
-    &[Engine::PostgreSql]
+    &[Engine::PostgreSql],
+    &[Declaration::BinaryReplicationTables]
 );
 
 impl<DB: DatabaseLike> ColumnRule for UnknownBinarySend<DB> {
@@ -115,7 +108,7 @@ impl<DB: DatabaseLike> ColumnRule for UnknownBinarySend<DB> {
         column: &DB::Column,
         reporter: &mut Reporter<'_, DB>,
     ) -> Result<(), Interruption> {
-        if !selected(database, column, reporter.deployment()) {
+        if !is_binary_replicated(database, reporter.deployment(), column.table(database))? {
             return Ok(());
         }
         let declared = column.data_type(database);

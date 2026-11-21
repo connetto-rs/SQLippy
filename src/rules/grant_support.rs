@@ -178,6 +178,27 @@ pub(crate) fn is_client_written<DB: DatabaseLike>(
     )
 }
 
+/// Whether the deployment selects `table` for binary replication, by its own
+/// name or through a partitioned table above it, which a publication naming it
+/// publishes along with every partition below.
+pub(crate) fn is_binary_replicated<DB: DatabaseLike>(
+    database: &DB,
+    deployment: &Deployment,
+    table: &DB::Table,
+) -> Result<bool, LookupError> {
+    let mut current = Some(table);
+    while let Some(candidate) = current {
+        if deployment.is_binary_replicated(
+            &schema_of(database, candidate.stored_table_schema()),
+            &candidate.stored_table_name(),
+        ) {
+            return Ok(true);
+        }
+        current = candidate.partition_root(database)?;
+    }
+    Ok(false)
+}
+
 /// Grantees of a grant as written, for messages.
 pub(crate) fn grantee_list<DB: DatabaseLike>(
     database: &DB,

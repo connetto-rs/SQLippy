@@ -45,6 +45,22 @@ fn configured(deployment: Deployment) -> DefaultConstrainer<ParserDB> {
     constrainer
 }
 
+/// Binary send rules the constrainer's deployment leaves inactive, with the
+/// declaration each lacks.
+fn inactive_binary_rules(constrainer: &DefaultConstrainer<ParserDB>) -> Vec<(&str, Declaration)> {
+    constrainer
+        .inactive_rules()
+        .into_iter()
+        .filter(|inactive| binary_rule(inactive.rule().name))
+        .map(|inactive| (inactive.rule().name, inactive.missing()))
+        .collect()
+}
+
+const INACTIVE: [(&str, Declaration); 2] = [
+    ("binary_send_failure", Declaration::BinaryReplicationTables),
+    ("unknown_binary_send", Declaration::BinaryReplicationTables),
+];
+
 fn signatures(found: &[Violation<ParserDB>]) -> Vec<(&str, Level, &str)> {
     let mut signatures: Vec<_> = found
         .iter()
@@ -55,12 +71,13 @@ fn signatures(found: &[Violation<ParserDB>]) -> Vec<(&str, Level, &str)> {
 }
 
 #[test]
-fn selection_enables_both_rules_and_replacement_disables_them() {
+fn selection_activates_both_rules_and_replacement_deactivates_them() {
     let database = parse(SCHEMA);
     let mut constrainer = DefaultConstrainer::default();
-    assert!(findings(&constrainer, &database).is_empty());
+    assert_eq!(inactive_binary_rules(&constrainer), INACTIVE);
     constrainer
         .set_deployment(Deployment::default().with_binary_replication_table("public", "grants"));
+    assert_eq!(inactive_binary_rules(&constrainer), []);
     let found = findings(&constrainer, &database);
     assert_eq!(
         signatures(&found),
@@ -81,7 +98,7 @@ fn selection_enables_both_rules_and_replacement_disables_them() {
         assert!(violation.message().contains(declared));
     }
     constrainer.set_deployment(Deployment::default());
-    assert!(findings(&constrainer, &database).is_empty());
+    assert_eq!(inactive_binary_rules(&constrainer), INACTIVE);
 }
 
 #[test]
@@ -102,6 +119,33 @@ fn selection_matches_stored_schema_and_case_sensitive_table_names() {
     let missing =
         configured(Deployment::default().with_binary_replication_table("archive", "mixedcase"));
     assert!(findings(&missing, &database).is_empty());
+}
+
+#[test]
+fn a_selected_partitioned_table_selects_every_partition_below_it() {
+    let database = parse(
+        "CREATE TABLE logs (id INT, items aclitem[]) PARTITION BY RANGE (id);
+         CREATE TABLE logs_low PARTITION OF logs FOR VALUES FROM (0) TO (10) PARTITION BY RANGE (id);
+         CREATE TABLE logs_low_a PARTITION OF logs_low FOR VALUES FROM (0) TO (5);",
+    );
+    let root = configured(Deployment::default().with_binary_replication_table("public", "logs"));
+    assert_eq!(
+        signatures(&findings(&root, &database)),
+        [
+            ("binary_send_failure", Level::Deny, "logs.items"),
+            ("binary_send_failure", Level::Deny, "logs_low.items"),
+            ("binary_send_failure", Level::Deny, "logs_low_a.items"),
+        ]
+    );
+    let middle =
+        configured(Deployment::default().with_binary_replication_table("public", "logs_low"));
+    assert_eq!(
+        signatures(&findings(&middle, &database)),
+        [
+            ("binary_send_failure", Level::Deny, "logs_low.items"),
+            ("binary_send_failure", Level::Deny, "logs_low_a.items"),
+        ]
+    );
 }
 
 #[test]
