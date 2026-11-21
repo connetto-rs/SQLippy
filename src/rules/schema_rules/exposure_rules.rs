@@ -132,7 +132,7 @@ impl<DB: DatabaseLike> SchemaRule for SecurityDefinerFunctionExposed<DB> {
                 continue;
             }
             let signature = signature(function, database);
-            reporter.function(
+            reporter.function_privilege(
                 function,
                 format!(
                     "SECURITY DEFINER function '{signature}' sits in the exposed schema '{schema}' and {} can execute it with its owner's privileges.",
@@ -219,7 +219,7 @@ impl<DB: DatabaseLike> SchemaRule for DefinerSchemaWithoutDefaultRevoke<DB> {
                     || ("the role the schema runs as".to_owned(), String::new()),
                     |owner| (format!("role '{owner}'"), format!(" FOR ROLE {owner}")),
                 );
-                reporter.function(
+                reporter.function_privilege(
                     function,
                     format!("SECURITY DEFINER functions in schema '{schema}' are created by {creator}, whose default privileges still grant EXECUTE on the next function to PUBLIC."),
                     format!("ALTER DEFAULT PRIVILEGES{for_role} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC; before creating functions, and grant EXECUTE to the intended callers."),

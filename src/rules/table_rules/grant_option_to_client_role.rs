@@ -145,7 +145,7 @@ impl<DB: DatabaseLike> FunctionRule for GrantOptionToClientRole<DB> {
         }
         let signature = signature(function, database);
         let grantees = grantees.join(", ");
-        reporter.function(
+        reporter.function_privilege(
             function,
             format!("EXECUTE on '{signature}' is granted to {grantees} WITH GRANT OPTION, so the grantee can hand it to any role."),
             format!("REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION {signature} FROM {grantees};"),

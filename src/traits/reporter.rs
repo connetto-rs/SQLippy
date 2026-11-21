@@ -557,14 +557,44 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         )
     }
 
-    /// Reports a violation on a function, named with its argument types so
-    /// overloads stay apart.
+    /// Reports a violation in a function's definition, named with its
+    /// argument types so overloads stay apart.
+    ///
+    /// A function an extension creates is skipped, since its install script
+    /// owns the definition. PostgreSQL refuses to drop it, and the next
+    /// `ALTER EXTENSION ... UPDATE` overwrites any `ALTER FUNCTION` on it.
+    /// A violation the schema fixes with a `GRANT` or `REVOKE` goes through
+    /// [`Self::function_privilege`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Interruption::Lookup`] when `database` does not hold the
+    /// function, and [`Interruption::Halted`] when the caller needs no
+    /// further violations.
+    pub fn function(
+        &mut self,
+        function: &DB::Function,
+        message: String,
+        resolution: String,
+    ) -> Result<(), Interruption> {
+        if function.extension(self.database)?.is_some() {
+            return Ok(());
+        }
+        self.function_privilege(function, message, resolution)
+    }
+
+    /// Reports a violation the schema fixes through the privileges on a
+    /// function, such as `EXECUTE` held by a role that should not call it,
+    /// named with its argument types so overloads stay apart.
+    ///
+    /// Unlike [`Self::function`], this reports a function an extension
+    /// creates as well, whose privileges the schema grants and revokes.
     ///
     /// # Errors
     ///
     /// Returns [`Interruption::Halted`] when the caller needs no further
     /// violations.
-    pub fn function(
+    pub fn function_privilege(
         &mut self,
         function: &DB::Function,
         message: String,
