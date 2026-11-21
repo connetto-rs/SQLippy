@@ -11,8 +11,8 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, ForeignKeyLike, TableLike},
 };
 use sqlparser::ast::{
-    BinaryOperator, Expr, FunctionArguments, InTarget, Query, SelectItem, SetExpr, TableFactor,
-    Visit, visit_expressions,
+    BinaryOperator, Expr, Function, FunctionArguments, InTarget, Query, Select, SelectItem,
+    SetExpr, TableFactor, Visit, visit_expressions,
 };
 
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         closed_set_support::names_cast_column,
-        key_support::{Instance, equality_keys, instances, named},
+        key_support::{equality_keys, instances, named},
         policy_read_support::sublink_reads,
         policy_support::{acting, client_roles, conjuncts, disjuncts, is_tautology, unwrapped},
     },
@@ -240,106 +240,100 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             .position(|column| names_cast_column(expression, column))
     }
 
-    /// Records in `rows` that the key column `key` names takes the value of
-    /// `referenced` when `referenced`, resolved in `scope`, names the column
-    /// the key maps it onto in one of `instances` of the referenced table.
-    /// `rows` holds the key columns so taken from each instance, by its name.
-    fn pair(
+    /// Whether `query`, a plain `SELECT`, gives every column of a unique key
+    /// of the referenced table from one row it reads under the writer's
+    /// policies, so the key matches that row or none. `pairs` lists each key
+    /// column with the expression of the query that gives its value, and a
+    /// pair counts when that expression names the column the key maps the
+    /// key column onto.
+    fn draws_row_key<'e>(
         &self,
-        rows: &mut Vec<(String, u64)>,
-        instances: &[Instance<'_, DB>],
-        scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
-        key: &Expr,
-        referenced: &Expr,
-    ) -> Result<(), LookupError> {
-        let Some(position) = self.key_position(key) else {
-            return Ok(());
+        query: &'e Query,
+        pairs: impl FnOnce(
+            &'e Select,
+            &ColumnDefinitionScope<'_, '_, '_, DB>,
+        ) -> Result<Vec<(&'e Expr, &'e Expr)>, LookupError>,
+    ) -> Result<bool, LookupError> {
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            return Ok(false);
         };
-        let Some((relation, column)) = named(scope, referenced)? else {
-            return Ok(());
+        let local = ColumnScope::from_query(query, self.database, IdentifierCase::Folded)?;
+        let (Some(instances), Some(scope)) = (
+            instances(self.database, select).filter(|_| query.with.is_none()),
+            local.scope_for_select(select),
+        ) else {
+            return Ok(false);
         };
-        if column != self.referenced_columns[position]
-            || !instances
-                .iter()
-                .any(|instance| instance.name == relation && instance.table == self.parent)
-        {
-            return Ok(());
+        // The key columns each instance of the referenced table gives, by its name.
+        let mut rows: Vec<(String, u64)> = Vec::new();
+        for (key, referenced) in pairs(select, &scope)? {
+            let (Some(position), Some((relation, column))) =
+                (self.key_position(key), named(&scope, referenced)?)
+            else {
+                continue;
+            };
+            if column != self.referenced_columns[position]
+                || !instances
+                    .iter()
+                    .any(|instance| instance.name == relation && instance.table == self.parent)
+            {
+                continue;
+            }
+            match rows.iter_mut().find(|(row, _)| *row == relation) {
+                Some((_, mask)) => *mask |= 1 << position,
+                None => rows.push((relation, 1 << position)),
+            }
         }
-        match rows.iter_mut().find(|(row, _)| *row == relation) {
-            Some((_, mask)) => *mask |= 1 << position,
-            None => rows.push((relation, 1 << position)),
-        }
-        Ok(())
-    }
-
-    /// Whether one of `rows` takes every column of a unique key of the
-    /// referenced table, so the key matches that row or none.
-    fn holds_row_key(&self, rows: &[(String, u64)]) -> bool {
-        rows.iter()
-            .any(|(_, mask)| self.row_keys.iter().any(|key| mask & key == *key))
+        Ok(rows
+            .iter()
+            .any(|(_, mask)| self.row_keys.iter().any(|key| mask & key == *key)))
     }
 
     /// Whether every row of `query` gives `items` the values of one row of
     /// the referenced table it reads under the writer's policies, over the
     /// columns of a unique key the key maps them onto.
-    fn yields_readable_row(&self, items: &[Expr], query: &Query) -> Result<bool, LookupError> {
-        let SetExpr::Select(select) = query.body.as_ref() else {
-            return Ok(false);
-        };
-        let Some(instances) = instances(self.database, select).filter(|_| query.with.is_none())
-        else {
-            return Ok(false);
-        };
-        let local = ColumnScope::from_query(query, self.database, IdentifierCase::Folded)?;
-        let Some(scope) = local.scope_for_select(select) else {
-            return Ok(false);
-        };
-        let mut rows = Vec::new();
-        for (item, projected) in items.iter().zip(&select.projection) {
-            if let SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. } =
-                projected
-            {
-                self.pair(&mut rows, &instances, &scope, item, value)?;
-            }
-        }
-        Ok(self.holds_row_key(&rows))
+    fn yields_readable_row<'e>(
+        &self,
+        items: &'e [Expr],
+        query: &'e Query,
+    ) -> Result<bool, LookupError> {
+        self.draws_row_key(query, |select, _| {
+            Ok(items
+                .iter()
+                .zip(&select.projection)
+                .filter_map(|(item, projected)| match projected {
+                    SelectItem::UnnamedExpr(value)
+                    | SelectItem::ExprWithAlias { expr: value, .. } => Some((item, value)),
+                    _ => None,
+                })
+                .collect())
+        })
     }
 
     /// Whether an `EXISTS` over `query` equates every column of a unique key
     /// of one row of the referenced table it reads under the writer's
     /// policies with the key column the key maps onto it.
     fn matches_readable_row(&self, query: &Query) -> Result<bool, LookupError> {
-        let SetExpr::Select(select) = query.body.as_ref() else {
-            return Ok(false);
-        };
-        let (Some(selection), Some(instances)) = (
-            &select.selection,
-            instances(self.database, select).filter(|_| query.with.is_none()),
-        ) else {
-            return Ok(false);
-        };
-        let local = ColumnScope::from_query(query, self.database, IdentifierCase::Folded)?;
-        let Some(scope) = local.scope_for_select(select) else {
-            return Ok(false);
-        };
-        let mut rows = Vec::new();
-        for conjunct in conjuncts(selection) {
-            if let Expr::BinaryOp {
-                left,
-                op: BinaryOperator::Eq,
-                right,
-            } = unwrapped(conjunct)
-                && is_column(left)
-                && is_column(right)
-            {
-                for (inner, outer) in [(left, right), (right, left)] {
-                    if scope.resolve_column_binding(outer)?.is_none() {
-                        self.pair(&mut rows, &instances, &scope, outer, inner)?;
+        self.draws_row_key(query, |select, scope| {
+            let mut pairs = Vec::new();
+            for conjunct in select.selection.iter().flat_map(conjuncts) {
+                if let Expr::BinaryOp {
+                    left,
+                    op: BinaryOperator::Eq,
+                    right,
+                } = unwrapped(conjunct)
+                    && is_column(left)
+                    && is_column(right)
+                {
+                    for (inner, outer) in [(left, right), (right, left)] {
+                        if scope.resolve_column_binding(outer)?.is_none() {
+                            pairs.push((outer.as_ref(), inner.as_ref()));
+                        }
                     }
                 }
             }
-        }
-        Ok(self.holds_row_key(&rows))
+            Ok(pairs)
+        })
     }
 
     /// Whether the conjunct leaves the key check nothing hidden to find: it
@@ -369,15 +363,12 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 ..
             } => match unwrapped(right) {
                 Expr::Subquery(query) => self.yields_readable_row(slice::from_ref(left), query),
-                Expr::Function(function)
-                    if function.name.to_string().eq_ignore_ascii_case("array") =>
-                {
-                    match &function.args {
-                        FunctionArguments::Subquery(query) => {
-                            self.yields_readable_row(slice::from_ref(left), query)
-                        }
-                        _ => Ok(false),
-                    }
+                Expr::Function(Function {
+                    name,
+                    args: FunctionArguments::Subquery(query),
+                    ..
+                }) if name.to_string().eq_ignore_ascii_case("array") => {
+                    self.yields_readable_row(slice::from_ref(left), query)
                 }
                 _ => Ok(false),
             },

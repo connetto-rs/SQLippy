@@ -338,6 +338,11 @@ fn a_check_pinning_a_unique_referenced_column_to_a_readable_row_is_clean() {
             "resource_id = ANY (ARRAY(SELECT id FROM resources))",
             vec![],
         ),
+        ("resource_id = ANY (SELECT id FROM resources)", vec![]),
+        (
+            "resource_id = ANY (ARRAY[1, 2])",
+            vec!["grants.grants_resource"],
+        ),
         ("resource_id = (SELECT id FROM resources LIMIT 1)", vec![]),
         ("(resource_id, id) IN (SELECT id, 1 FROM resources)", vec![]),
         (
