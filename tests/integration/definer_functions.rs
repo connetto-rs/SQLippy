@@ -192,6 +192,70 @@ fn revoking_from_public_clears_it_unless_an_anonymous_role_still_executes() {
 }
 
 #[test]
+fn a_definer_over_a_protected_table_that_an_app_role_can_execute_is_reported() {
+    let helpers = "
+        CREATE ROLE app NOLOGIN;
+        CREATE ROLE readers NOLOGIN;
+        CREATE ROLE auditor NOLOGIN;
+        GRANT readers TO app;
+        GRANT SELECT ON docs TO app;
+        CREATE FUNCTION doc_ids() RETURNS SETOF INT LANGUAGE sql SECURITY DEFINER
+          SET search_path = pg_catalog, pg_temp AS 'SELECT id FROM public.docs';
+        CREATE FUNCTION doc_owned(doc INT) RETURNS BOOLEAN LANGUAGE sql SECURITY DEFINER
+          SET search_path = pg_catalog, pg_temp
+          AS 'SELECT EXISTS (SELECT FROM public.docs WHERE id = doc AND owner IS NOT NULL)';
+        CREATE FUNCTION audit_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER
+          SET search_path = pg_catalog, pg_temp AS 'SELECT count(*) FROM public.docs';
+        CREATE FUNCTION visible_doc_ids() RETURNS SETOF INT LANGUAGE sql SECURITY INVOKER
+          SET search_path = pg_catalog, pg_temp AS 'SELECT id FROM public.docs';
+        CREATE FUNCTION note_ids() RETURNS SETOF INT LANGUAGE sql SECURITY DEFINER
+          SET search_path = pg_catalog, pg_temp AS 'SELECT id FROM public.open_notes';
+        CREATE POLICY owned_docs ON docs FOR SELECT TO app USING (doc_owned(id));
+        REVOKE ALL ON FUNCTION doc_ids() FROM PUBLIC;
+        REVOKE ALL ON FUNCTION doc_owned(INT) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION audit_count() FROM PUBLIC;
+        REVOKE ALL ON FUNCTION visible_doc_ids() FROM PUBLIC;
+        REVOKE ALL ON FUNCTION note_ids() FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION doc_ids() TO app;
+        GRANT EXECUTE ON FUNCTION visible_doc_ids() TO app;
+        GRANT EXECUTE ON FUNCTION note_ids() TO app;
+        GRANT EXECUTE ON FUNCTION doc_owned(INT) TO readers;
+        GRANT EXECUTE ON FUNCTION audit_count() TO auditor;";
+    assert_eq!(
+        exposed(Deployment::default(), helpers),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        exposed(Deployment::default().with_app_role("app"), helpers),
+        ["doc_ids()", "doc_owned(INT)"]
+    );
+
+    let mut constrainer: GenericConstrainer<ParserDB> =
+        ExposedDefinerOverProtectedTable::default().into();
+    constrainer.set_deployment(Deployment::default().with_app_role("app"));
+    let database = ParserDB::parse::<PostgreSqlDialect>(&format!("{PROTECTED}{helpers}"))
+        .expect("schema parses");
+    let violations: Vec<(String, String)> = constrainer
+        .diagnostics(&database)
+        .into_iter()
+        .filter_map(|error| match error {
+            Error::Violation(violation) if violation.object() == "doc_ids()" => Some((
+                violation.message().to_owned(),
+                violation.resolution().to_owned(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        violations,
+        [(
+            "`SECURITY DEFINER` function 'doc_ids()' reads or writes 'docs', which has row-level security, as its owner, and 'app' can execute it.".to_owned(),
+            "REVOKE EXECUTE ON FUNCTION doc_ids() FROM app; and grant it only to the roles that need it, or have its body limit each caller to the rows that caller may see.".to_owned(),
+        )]
+    );
+}
+
+#[test]
 fn a_plpgsql_definer_is_reported_only_when_its_body_touches_a_protected_table() {
     assert_eq!(
         exposed(

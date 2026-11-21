@@ -6,20 +6,26 @@ use sqlparser::ast::FunctionSecurity;
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
+    rules::grant_support::function_callers,
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
 };
 
 /// Struct defining a rule that reports a `SECURITY DEFINER` function that
-/// `PUBLIC` or a declared anonymous role can execute while its body reads or
-/// writes a table with row-level security.
+/// `PUBLIC` or a declared anonymous or app role can execute while its body
+/// reads or writes a table with row-level security.
 ///
-/// Every such caller reads and writes those tables as the function's owner.
+/// Every such caller reads and writes those tables as the function's owner,
+/// so a helper returning identifiers, counts or yes-or-no answers discloses
+/// rows the caller's own policies hide. A helper a policy calls is reported
+/// too, since a caller holding `EXECUTE` can also call it directly.
 /// PostgreSQL grants `PUBLIC` `EXECUTE` on every new function, and default
 /// privileges such as Supabase's grant it to anonymous roles, so the rule reads
-/// the privileges the schema leaves after both. SQL and PL/pgSQL bodies are
-/// read for the tables they touch. A body whose tables cannot be known, such as
-/// C code or one running dynamic SQL through `EXECUTE`, is reported as well,
-/// since nothing shows it stays away from protected tables.
+/// the privileges the schema leaves after both, with those a role inherits.
+/// A declared role that neither the schema nor its cluster bootstrap creates
+/// is not checked. SQL and PL/pgSQL bodies are read for the tables they
+/// touch. A body whose tables cannot be known, such as C code or one running
+/// dynamic SQL through `EXECUTE`, is reported as well, since nothing shows it
+/// stays away from protected tables.
 ///
 /// # Example
 ///
@@ -71,7 +77,7 @@ impl<DB> Rule for ExposedDefinerOverProtectedTable<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(ExposedDefinerOverProtectedTable),
             group: LintGroup::Suspicious,
-            rationale: "A `SECURITY DEFINER` function reads and writes with its owner's rights, so letting `PUBLIC` or an anonymous role execute it hands every such caller the owner's view of the row-level-security tables its body touches.",
+            rationale: "A `SECURITY DEFINER` function reads and writes with its owner's rights, so letting `PUBLIC` or an anonymous or app role execute it hands every such caller the owner's view of the row-level-security tables its body touches.",
             source: Some("https://supabase.com/docs/guides/database/database-advisors"),
             basis: Basis::Declared,
             example: RuleExample {
@@ -100,18 +106,7 @@ impl<DB: DatabaseLike> FunctionRule for ExposedDefinerOverProtectedTable<DB> {
         if function.security_mode() != FunctionSecurity::Definer {
             return Ok(());
         }
-        let mut callers = Vec::new();
-        if function.is_executable_by_public(database)? {
-            callers.push("PUBLIC".to_owned());
-        } else {
-            for name in reporter.deployment().anonymous_roles() {
-                if let Some(role) = database.role(name)
-                    && function.can_execute(role, database)?
-                {
-                    callers.push(format!("'{name}'"));
-                }
-            }
-        }
+        let callers = function_callers(database, reporter.deployment(), function)?;
         if callers.is_empty() {
             return Ok(());
         }
@@ -144,7 +139,7 @@ impl<DB: DatabaseLike> FunctionRule for ExposedDefinerOverProtectedTable<DB> {
                 "`SECURITY DEFINER` function '{signature}' {touched} as its owner, and {callers} can execute it."
             ),
             format!(
-                "REVOKE EXECUTE ON FUNCTION {signature} FROM {}; and grant it only to the roles that need it.",
+                "REVOKE EXECUTE ON FUNCTION {signature} FROM {}; and grant it only to the roles that need it, or have its body limit each caller to the rows that caller may see.",
                 callers.replace('\'', "")
             ),
         )

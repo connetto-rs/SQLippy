@@ -8,7 +8,7 @@ use sql_traits::{
     structs::{DefaultGrantee, DefaultPrivilegeKind},
     traits::{
         ColumnGrantLike, DataStatementLike, DatabaseLike, ExtensionLike, FunctionLike, Relation,
-        RoleLike, SequenceLike, TableGrantLike, TableLike, ViewLike,
+        SequenceLike, TableGrantLike, TableLike, ViewLike,
     },
 };
 use sqlparser::ast::{Action, FunctionSecurity, SetExpr};
@@ -18,7 +18,9 @@ use crate::{
     engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::grant_support::{ClientRoles, grantee_list, grants_privilege, schema_of},
+    rules::grant_support::{
+        ClientRoles, function_callers, grantee_list, grants_privilege, schema_of,
+    },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
 
@@ -103,11 +105,6 @@ impl<DB: DatabaseLike> SchemaRule for SecurityDefinerFunctionExposed<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         let deployment = reporter.deployment();
-        let clients: Vec<&DB::Role> = deployment
-            .anonymous_roles()
-            .chain(deployment.app_roles())
-            .filter_map(|name| database.role(name))
-            .collect();
         let definers = database.functions().filter(|function| {
             function.security_mode() == FunctionSecurity::Definer
                 && function.target_name().schema() != Some("pg_catalog")
@@ -118,16 +115,7 @@ impl<DB: DatabaseLike> SchemaRule for SecurityDefinerFunctionExposed<DB> {
             if !deployment.exposes_schema(&schema) {
                 continue;
             }
-            let mut callers = Vec::new();
-            if function.is_executable_by_public(database)? {
-                callers.push("PUBLIC".to_owned());
-            } else {
-                for role in &clients {
-                    if function.can_execute(role, database)? {
-                        callers.push(format!("'{}'", role.name()));
-                    }
-                }
-            }
+            let callers = function_callers(database, deployment, function)?;
             if callers.is_empty() {
                 continue;
             }
