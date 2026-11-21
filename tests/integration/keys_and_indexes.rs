@@ -200,7 +200,8 @@ fn a_live_index_repeating_another_on_a_materialized_view_is_reported() {
 
 #[test]
 fn duplicates_another_rule_reports_are_left_to_it() {
-    let sql = "CREATE TABLE t (a INT, b INT, UNIQUE (a), UNIQUE (a));
+    let sql = "CREATE TABLE t (a INT, b INT, UNIQUE (a));
+         ALTER TABLE t ADD UNIQUE (a);
          CREATE INDEX t_b ON t (b);
          CREATE INDEX t_b_again ON t (b);";
     assert_eq!(named_by("duplicate_index", sql), Vec::<String>::new());

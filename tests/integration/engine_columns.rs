@@ -191,7 +191,11 @@ fn sqlite_numeric_scale_does_not_make_counts_integral() {
 #[test]
 fn counter_key_advice_names_a_uuid_form_the_engine_has() {
     let mut constrainer: GenericConstrainer<ParserDB> = ClientWrittenCounterKey::default().into();
-    constrainer.set_deployment(Deployment::default().with_client_written_table("public", "drafts"));
+    constrainer.set_deployment(
+        Deployment::default()
+            .with_client_written_table("main", "drafts")
+            .with_client_written_table("public", "drafts"),
+    );
     let sql = "CREATE TABLE drafts (id INTEGER PRIMARY KEY);";
     let advice = resolution(&constrainer, &sqlite(sql));
     assert!(advice.contains("CHECK (length(id) = 36)"), "{advice}");

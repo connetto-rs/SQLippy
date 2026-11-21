@@ -43,9 +43,13 @@ pub(crate) fn read_columns<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
         .into_iter()
         .flatten()
     {
-        let Ok(columns) =
-            columns_in_expression(expression, database.catalog_name(), &target, &declared)
-        else {
+        let Ok(columns) = columns_in_expression(
+            expression,
+            database.catalog_name(),
+            &target,
+            &declared,
+            database.identifier_case(),
+        ) else {
             return Ok(None);
         };
         read.extend(columns);

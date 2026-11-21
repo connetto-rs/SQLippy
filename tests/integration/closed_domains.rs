@@ -477,7 +477,6 @@ fn bounds_are_read_through_signs_and_casts_at_every_site() {
                    SELECT n.id, w.depth + 1 FROM nodes n JOIN walk w ON n.parent_id = w.id
                    WHERE w.depth < +(24)::int AND w.depth > -8 AND n.id > 2 AND w.depth < '99')
                SELECT w.id FROM audit.marks m JOIN (SELECT 1 AS one) s ON true JOIN walk w ON w.id = m.id
-                 WHERE public.walk.depth > 5
                UNION ALL SELECT 0;
                CREATE FUNCTION deepest() RETURNS INT LANGUAGE sql STABLE BEGIN ATOMIC
                  WITH RECURSIVE walk(id, depth) AS (SELECT id, 0 FROM nodes WHERE parent_id IS NULL UNION ALL

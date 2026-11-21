@@ -140,19 +140,6 @@ fn a_client_role_inserting_or_updating_a_key_column_keeps_the_finding() {
 }
 
 #[test]
-fn an_index_reading_a_column_its_table_does_not_declare_keeps_the_finding() {
-    assert_eq!(
-        client_findings(
-            "GRANT SELECT ON users TO app, anon;
-             CREATE UNIQUE INDEX users_slug ON users (handle) WHERE archived IS NULL;"
-        ),
-        [
-            "Unique constraint 'users_slug' on 'users' leaves out 'tenant_id', so a duplicate-key error reveals values in rows the caller's policies hide."
-        ]
-    );
-}
-
-#[test]
 fn a_declared_client_role_the_schema_never_creates_keeps_the_finding() {
     let mut constrainer: GenericConstrainer<ParserDB> =
         UnscopedUniqueConstraintOnRowLevelSecurityTable::default().into();

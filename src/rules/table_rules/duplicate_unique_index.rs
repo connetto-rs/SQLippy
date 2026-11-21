@@ -56,7 +56,8 @@ impl<DB> Rule for DuplicateUniqueIndex<DB> {
             source: None,
             basis: Basis::Declared,
             example: RuleExample {
-                bad: "CREATE TABLE accounts (id INT PRIMARY KEY, email TEXT, UNIQUE (email), UNIQUE (email));",
+                bad: "CREATE TABLE accounts (id INT PRIMARY KEY, email TEXT, UNIQUE (email));\n\
+ALTER TABLE accounts ADD UNIQUE (email);",
                 good: "CREATE TABLE accounts (id INT PRIMARY KEY, email TEXT, UNIQUE (email));",
             },
         };

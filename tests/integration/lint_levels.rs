@@ -334,10 +334,10 @@ fn the_default_constrainer_reports_every_rule_at_its_group_level() {
              FOREIGN KEY (base) REFERENCES bases (id),
              FOREIGN KEY (base) REFERENCES bases (id),
              UNIQUE (tags),
-             UNIQUE (tags),
              CHECK (code > 0),
              CHECK (code > 0)
-         );",
+         );
+         ALTER TABLE notes_ ADD UNIQUE (tags);",
     );
     let mut constrainer = DefaultConstrainer::<ParserDB>::default();
     constrainer.set_group_level(LintGroup::Pedantic, Level::Warn);
