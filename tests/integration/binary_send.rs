@@ -212,11 +212,41 @@ fn unknown_nested_type_warning_names_the_column_and_both_types() {
 }
 
 #[test]
-fn rule_overrides_take_precedence_over_group_overrides_and_registration_floors() {
+fn declaring_no_binary_replicated_table_runs_every_binary_replication_rule_without_findings() {
+    let database = parse(SCHEMA);
+    for deployment in [
+        Deployment::default().without_binary_replication_tables(),
+        Deployment::default()
+            .with_binary_replication_all_tables()
+            .with_binary_replication_table("public", "grants")
+            .without_binary_replication_tables(),
+    ] {
+        let constrainer = configured(deployment);
+        assert!(
+            constrainer
+                .inactive_rules()
+                .iter()
+                .all(|inactive| inactive.missing() != Declaration::BinaryReplicationTables)
+        );
+        assert!(findings(&constrainer, &database).is_empty());
+    }
+    let selected = configured(
+        Deployment::default()
+            .without_binary_replication_tables()
+            .with_binary_replication_table("archive", "grants"),
+    );
+    assert_eq!(
+        signatures(&findings(&selected, &database)),
+        [("binary_send_failure", Level::Deny, "grants.old_items")]
+    );
+}
+
+#[test]
+fn rule_overrides_take_precedence_over_group_overrides() {
     let database = parse(SCHEMA);
     let mut constrainer =
         configured(Deployment::default().with_binary_replication_table("public", "grants"));
-    constrainer.set_group_level(LintGroup::Restriction, Level::Deny);
+    constrainer.set_group_level(LintGroup::Suspicious, Level::Deny);
     assert_eq!(
         signatures(&findings(&constrainer, &database)),
         [
@@ -227,7 +257,7 @@ fn rule_overrides_take_precedence_over_group_overrides_and_registration_floors()
     );
     constrainer.set_rule_level("unknown_binary_send", Level::Allow);
     constrainer.set_rule_level("binary_send_failure", Level::Warn);
-    constrainer.set_group_level(LintGroup::Restriction, Level::Allow);
+    constrainer.set_group_level(LintGroup::Correctness, Level::Allow);
     assert_eq!(
         signatures(&findings(&constrainer, &database)),
         [
