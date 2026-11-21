@@ -19,6 +19,8 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         closed_set_support::{names_cast_column, stored_name},
+        grant_support::schema_of,
+        key_support::{equality_keys, key_pairs},
         policy_read_support::sublink_reads,
         policy_support::{
             acting, client_roles, conjuncts, disjuncts, is_column_reference, is_tautology,
@@ -50,7 +52,13 @@ use crate::{
 /// of the referenced table tests the columns the key maps onto as the check
 /// tests their key columns, or tests one against a set the check confines its
 /// key column within, as written or declared with
-/// [`Deployment::with_set_within`]. An arm of the check that leaves a key
+/// [`Deployment::with_set_within`]. A policy is also met when it states the
+/// condition [`Deployment::with_set_satisfying`] declares of a set the check
+/// confines a key column within, and the column the key maps it onto is
+/// carried by a foreign key into the declared column, a unique key of its
+/// table on its own, that maps every column the policy reads onto the
+/// declared condition's and forces each of them, being `MATCH FULL` or
+/// `NOT NULL` on every other column. An arm of the check that leaves a key
 /// column `NULL` needs neither, since PostgreSQL checks no key holding a
 /// `NULL`. The rule does not run on SQLite, which has no row-level security.
 ///
@@ -178,6 +186,30 @@ struct Confinement<'a, DB: DatabaseLike> {
     parent: &'a DB::Table,
     key_columns: Vec<Cow<'a, str>>,
     referenced_columns: Vec<Cow<'a, str>>,
+    carried: Vec<CarriedSet<'a>>,
+}
+
+/// A set declared with [`Deployment::with_set_satisfying`] whose values
+/// foreign keys of the referenced table carry into the declared column.
+struct CarriedSet<'a> {
+    /// The expression yielding the set.
+    set: &'a Expr,
+    /// The declared condition, its columns by stored name.
+    condition: Expr,
+    /// The foreign keys carrying the values.
+    carriers: Vec<Carrier<'a>>,
+}
+
+/// A foreign key of the referenced table into the declared column, which is
+/// a unique key of its table on its own, forcing every pair of a row holding
+/// a value. A referenced row holding a value of the set thus equals the
+/// declared row it came from on every column the foreign key pairs.
+struct Carrier<'a> {
+    /// The key columns mapped onto the referenced column carrying the value.
+    key_columns: u64,
+    /// Each column of the referenced table the foreign key pairs, with the
+    /// column of the declared table it equals.
+    pairs: Vec<(Cow<'a, str>, Cow<'a, str>)>,
 }
 
 impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
@@ -191,16 +223,18 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             .host_columns(database)?
             .map(ColumnLike::stored_column_name)
             .collect();
-        let referenced_columns = foreign_key
+        let referenced_columns: Vec<Cow<'a, str>> = foreign_key
             .referenced_columns(database)?
             .map(ColumnLike::stored_column_name)
             .collect();
+        let carried = carried_sets(database, deployment, parent, &referenced_columns)?;
         Ok(Self {
             database,
             deployment,
             parent,
             key_columns,
             referenced_columns,
+            carried,
         })
     }
 
@@ -451,7 +485,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
 
     /// `condition` on the referenced row as a check on the written row would
     /// state it of the key columns.
-    fn condition<'e>(&self, condition: &'e Expr) -> Condition<'e> {
+    fn condition<'e>(&'e self, condition: &'e Expr) -> Condition<'e> {
         let condition = without_parentheses(condition);
         let split = |operands: Vec<&'e Expr>| {
             if operands.len() > 1 {
@@ -463,6 +497,21 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 Vec::new()
             }
         };
+        let tested = membership(condition)
+            .map(|(column, members)| (positions(&self.referenced_columns, column), members))
+            .filter(|(mapped, _)| *mapped != 0);
+        let carried = self.carried.iter().flat_map(|carried| {
+            carried.carriers.iter().filter_map(|carrier| {
+                let stated = renamed(condition, |column| {
+                    carrier
+                        .pairs
+                        .iter()
+                        .find(|(referenced, _)| *referenced == column)
+                        .map(|(_, declared)| declared.to_string())
+                })?;
+                (stated == carried.condition).then_some((carrier.key_columns, carried.set))
+            })
+        });
         Condition {
             renamed: renamed(condition, |column| {
                 self.referenced_columns
@@ -470,9 +519,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                     .position(|referenced| *referenced == column)
                     .map(|position| self.key_columns[position].to_string())
             }),
-            membership: membership(condition)
-                .map(|(column, members)| (positions(&self.referenced_columns, column), members))
-                .filter(|(mapped, _)| *mapped != 0),
+            sets: tested.into_iter().chain(carried).collect(),
             parts: split(conjuncts(condition)),
             arms: split(disjuncts(condition)),
         }
@@ -495,12 +542,13 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         {
             return true;
         }
-        if let Some((mapped, wider)) = condition.membership
-            && let Some((column, members)) = membership(clause)
-            && self.key_columns_named(column) & mapped != 0
-            && self.deployment.is_set_within(members, wider)
-        {
-            return true;
+        if let Some((column, members)) = membership(clause) {
+            let named = self.key_columns_named(column);
+            if condition.sets.iter().any(|&(mapped, wider)| {
+                named & mapped != 0 && self.deployment.is_set_within(members, wider)
+            }) {
+                return true;
+            }
         }
         let arms = disjuncts(clause);
         if arms.len() > 1 && arms.iter().all(|arm| self.clause_implies(arm, condition)) {
@@ -564,15 +612,89 @@ fn without_parentheses(mut expression: &Expr) -> &Expr {
     expression
 }
 
+/// The declared sets whose values a foreign key of `parent` carries into the
+/// declared column, for the key referencing `referenced_columns` of `parent`.
+fn carried_sets<'a, DB: DatabaseLike>(
+    database: &'a DB,
+    deployment: &'a Deployment,
+    parent: &'a DB::Table,
+    referenced_columns: &[Cow<'a, str>],
+) -> Result<Vec<CarriedSet<'a>>, LookupError> {
+    let mut found = Vec::new();
+    for declared in deployment.sets_satisfying() {
+        let (schema, table, column) = declared.column();
+        let Some(condition) = renamed(declared.condition(), |name| Some(name.into_owned())) else {
+            continue;
+        };
+        let mut carriers = Vec::new();
+        'keys: for foreign_key in parent.foreign_keys(database)? {
+            let target = foreign_key.referenced_table(database)?;
+            if schema_of(database, target.stored_table_schema()) != schema
+                || target.stored_table_name() != table
+            {
+                continue;
+            }
+            let pairs = key_pairs(database, foreign_key)?;
+            let Some(&(carrier, _)) = pairs
+                .iter()
+                .find(|(_, referenced)| referenced.stored_column_name() == column)
+            else {
+                continue;
+            };
+            if !equality_keys(database, target)?
+                .iter()
+                .any(|key| matches!(key.as_slice(), [only] if only.stored_column_name() == column))
+            {
+                continue;
+            }
+            if !foreign_key.match_full(database) {
+                for &(host, _) in &pairs {
+                    if host != carrier && host.is_nullable(database)? {
+                        continue 'keys;
+                    }
+                }
+            }
+            let carrier_name = carrier.stored_column_name();
+            let key_columns = referenced_columns
+                .iter()
+                .enumerate()
+                .filter(|(_, referenced)| **referenced == carrier_name)
+                .fold(0, |mask, (position, _)| mask | 1 << position);
+            if key_columns == 0 {
+                continue;
+            }
+            carriers.push(Carrier {
+                key_columns,
+                pairs: pairs
+                    .into_iter()
+                    .map(|(host, referenced)| {
+                        (host.stored_column_name(), referenced.stored_column_name())
+                    })
+                    .collect(),
+            });
+        }
+        if !carriers.is_empty() {
+            found.push(CarriedSet {
+                set: declared.set(),
+                condition,
+                carriers,
+            });
+        }
+    }
+    Ok(found)
+}
+
 /// A condition of a `SELECT` policy of the referenced table, as a check on
 /// the written row would state it of the key columns.
 struct Condition<'e> {
     /// The condition with each column it tests named by the key column the
     /// key maps onto it, when the key maps every one.
     renamed: Option<Expr>,
-    /// The key columns mapped onto the column the condition tests against a
-    /// set, and the expression yielding the members of the set.
-    membership: Option<(u64, &'e Expr)>,
+    /// Key columns, each with a set that a key column among them confined
+    /// within meets the condition, from the column the condition tests
+    /// against a set and from each declared set whose carried condition
+    /// this is.
+    sets: Vec<(u64, &'e Expr)>,
     /// The conjuncts of an `AND`, each implied for the whole.
     parts: Vec<Condition<'e>>,
     /// The arms of an `OR`, one implied for the whole.

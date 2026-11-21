@@ -490,3 +490,140 @@ fn a_referenced_policy_implied_through_the_key_part_by_part_is_clean() {
         assert_eq!(objects, expected, "{check} into {readable}");
     }
 }
+
+const BLOCKED: &str = "NOT (organization_id = ANY (ARRAY(SELECT blocking())))";
+
+const PARENT_READ: &str = "parent_id = ANY (ARRAY(SELECT resources_with('reader')))";
+
+const RESOURCES: &str =
+    "id INT PRIMARY KEY, organization_id INT NOT NULL, UNIQUE (organization_id, id)";
+
+const PARENT_RESOURCE: &str = "organization_id INT NOT NULL,
+    FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id)";
+
+/// Parents hidden by `blocked` and read through `resources_with`, whose
+/// columns past `id` are `parent`, and children whose insert check is
+/// `check`.
+fn blocked_parents(resources: &str, parent: &str, blocked: &str, check: &str) -> String {
+    format!(
+        "CREATE ROLE app;
+         CREATE FUNCTION resources_with(level TEXT) RETURNS SETOF INT LANGUAGE sql STABLE AS $$ SELECT 1 $$;
+         CREATE FUNCTION blocking() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ SELECT 1 $$;
+         CREATE TABLE resources ({resources});
+         CREATE TABLE parents (id INT PRIMARY KEY, {parent});
+         ALTER TABLE parents ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY parents_select ON parents FOR SELECT TO app
+             USING (id = ANY (ARRAY(SELECT resources_with('reader'))));
+         CREATE POLICY parents_blocked ON parents AS RESTRICTIVE FOR ALL TO app USING ({blocked});
+         CREATE TABLE children (id INT PRIMARY KEY, organization_id INT NOT NULL,
+             parent_id INT NOT NULL CONSTRAINT children_parent REFERENCES parents (id));
+         ALTER TABLE children ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY children_insert ON children FOR INSERT TO app WITH CHECK ({check});
+         CREATE POLICY children_blocked ON children AS RESTRICTIVE FOR ALL TO app
+             USING ({BLOCKED}) WITH CHECK ({BLOCKED});
+         GRANT SELECT ON parents TO app;
+         GRANT INSERT ON children TO app;"
+    )
+}
+
+/// Whether the key of the children into `blocked_parents` is reported, with
+/// `resources_with('writer')` within `resources_with('reader')`, and the
+/// reader set declared to yield `resources.id` of rows meeting `BLOCKED`
+/// when `declared` is set.
+fn blocked_parent_reported(
+    declared: bool,
+    resources: &str,
+    parent: &str,
+    blocked: &str,
+    check: &str,
+) -> bool {
+    let mut deployment = Deployment::default()
+        .with_app_role("app")
+        .with_set_within("resources_with('writer')", "resources_with('reader')")
+        .unwrap();
+    if declared {
+        deployment = deployment
+            .with_set_satisfying(
+                "resources_with('reader')",
+                "public",
+                "resources",
+                "id",
+                BLOCKED,
+            )
+            .unwrap();
+    }
+    let mut constrainer: GenericConstrainer<ParserDB> = ForeignKeyExistenceOracle::default().into();
+    constrainer.set_deployment(deployment);
+    let objects: Vec<String> = findings(
+        &constrainer,
+        "foreign_key_existence_oracle",
+        &blocked_parents(resources, parent, blocked, check),
+    )
+    .into_iter()
+    .map(|(_, object, _)| object)
+    .collect();
+    match objects.as_slice() {
+        [] => false,
+        [object] if object == "children.children_parent" => true,
+        _ => panic!("unexpected findings {objects:?}"),
+    }
+}
+
+const NULLABLE_PARENT_RESOURCE: &str = "organization_id INT,
+    FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id)";
+
+#[test]
+fn a_referenced_policy_a_declared_set_satisfies_through_the_referenced_table_is_clean() {
+    let matched_fully = format!("{NULLABLE_PARENT_RESOURCE} MATCH FULL");
+    let null_arm = format!("parent_id IS NULL OR {PARENT_READ}");
+    let writer = "parent_id = ANY (ARRAY(SELECT resources_with('writer')))";
+    for (parent, check) in [
+        (PARENT_RESOURCE, PARENT_READ),
+        (PARENT_RESOURCE, null_arm.as_str()),
+        (PARENT_RESOURCE, writer),
+        (matched_fully.as_str(), PARENT_READ),
+    ] {
+        assert!(
+            !blocked_parent_reported(true, RESOURCES, parent, BLOCKED, check),
+            "{check} into ({parent})"
+        );
+    }
+}
+
+#[test]
+fn a_referenced_policy_no_declared_set_satisfies_through_the_referenced_table_is_reported() {
+    let shared_id =
+        "id INT NOT NULL, organization_id INT NOT NULL, PRIMARY KEY (organization_id, id)";
+    let unrelated = "parent_id = ANY (ARRAY(SELECT resources_with('any')))";
+    for (declared, resources, parent, blocked, check) in [
+        (false, RESOURCES, PARENT_RESOURCE, BLOCKED, PARENT_READ),
+        (
+            true,
+            RESOURCES,
+            NULLABLE_PARENT_RESOURCE,
+            BLOCKED,
+            PARENT_READ,
+        ),
+        (
+            true,
+            RESOURCES,
+            "organization_id INT NOT NULL",
+            BLOCKED,
+            PARENT_READ,
+        ),
+        (
+            true,
+            RESOURCES,
+            PARENT_RESOURCE,
+            "organization_id <> 0",
+            PARENT_READ,
+        ),
+        (true, shared_id, PARENT_RESOURCE, BLOCKED, PARENT_READ),
+        (true, RESOURCES, PARENT_RESOURCE, BLOCKED, unrelated),
+    ] {
+        assert!(
+            blocked_parent_reported(declared, resources, parent, blocked, check),
+            "{check} into ({parent}) over ({resources}), {blocked}"
+        );
+    }
+}

@@ -49,6 +49,7 @@ pub struct Deployment {
     credentials: Fact<Expr>,
     request_settings: Vec<Expr>,
     sets_within: Vec<(Expr, Expr)>,
+    sets_satisfying: Vec<SatisfyingSet>,
     client_written_tables: Vec<(String, String)>,
     binary_replication_tables: Fact<(String, String)>,
     binary_replication_all_tables: bool,
@@ -112,6 +113,33 @@ impl StoredColumn {
 
     fn names(&self) -> (&str, &str, &str) {
         (&self.schema, &self.table, &self.column)
+    }
+}
+
+/// A set whose every value is the declared column of a row of its table
+/// meeting the declared condition.
+#[derive(Debug, Clone)]
+pub(crate) struct SatisfyingSet {
+    set: Expr,
+    column: StoredColumn,
+    condition: Expr,
+}
+
+impl SatisfyingSet {
+    /// The expression yielding the set.
+    pub(crate) fn set(&self) -> &Expr {
+        &self.set
+    }
+
+    /// The stored schema, table and column names of the column the values
+    /// are taken from.
+    pub(crate) fn column(&self) -> (&str, &str, &str) {
+        self.column.names()
+    }
+
+    /// The condition every row the values are taken from meets.
+    pub(crate) fn condition(&self) -> &Expr {
+        &self.condition
     }
 }
 
@@ -659,6 +687,45 @@ impl Deployment {
             next += 1;
         }
         false
+    }
+
+    /// Declares that every value the expression `set` yields, or a set
+    /// declared within it through [`Deployment::with_set_within`], is the
+    /// `column` of a row of `table` meeting `condition`, by the stored names
+    /// of the schema, table and column. A function returning the resources a
+    /// caller may read, minus those of organizations blocking the caller,
+    /// declares
+    /// `NOT (organization_id = ANY (ARRAY(SELECT authz.blocking_organizations())))`
+    /// of `public.resources.id`.
+    ///
+    /// The set is matched as written, like the sets of
+    /// [`Deployment::with_set_within`], and the condition reads the columns
+    /// of `table` by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parser error when `set` or `condition` is not one
+    /// PostgreSQL SQL expression.
+    pub fn with_set_satisfying(
+        mut self,
+        set: &str,
+        schema: impl Into<String>,
+        table: impl Into<String>,
+        column: impl Into<String>,
+        condition: &str,
+    ) -> Result<Self, ParserError> {
+        self.sets_satisfying.push(SatisfyingSet {
+            set: parse_expression(set)?,
+            column: StoredColumn::new(schema, table, column),
+            condition: parse_expression(condition)?,
+        });
+        Ok(self)
+    }
+
+    /// Returns the declared sets whose values are taken from rows meeting a
+    /// condition.
+    pub(crate) fn sets_satisfying(&self) -> &[SatisfyingSet] {
+        &self.sets_satisfying
     }
 
     /// Returns whether `expression` is a declared credential, as written.
