@@ -559,7 +559,7 @@ fn a_condition_comparing_two_columns_confines_as_written() {
 }
 
 #[test]
-fn a_read_through_a_view_a_lock_a_parenthesized_join_or_table_is_reported() {
+fn a_read_through_a_view_a_lock_a_parenthesized_join_a_write_or_table_is_reported() {
     let confined = "resource.organization_id IN (SELECT public.member_organizations())";
     assert_eq!(
         exposed_to_app(&format!(
@@ -579,9 +579,16 @@ fn a_read_through_a_view_a_lock_a_parenthesized_join_or_table_is_reported() {
                  WHERE {confined} AND membership.user_id = current_setting('app.user_id', true) $$;
              CREATE FUNCTION whole_table() RETURNS SETOF resources
                LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                 TABLE public.resources $$;"
+                 TABLE public.resources $$;
+             CREATE FUNCTION leaving() RETURNS SETOF INT
+               LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH gone AS (DELETE FROM public.memberships membership
+                   WHERE membership.user_id = current_setting('app.user_id', true)
+                   RETURNING membership.organization_id)
+                 SELECT gone.organization_id FROM gone $$;"
         )),
         [
+            "leaving()",
             "locked()",
             "parenthesized()",
             "through_view()",
