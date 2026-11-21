@@ -1,19 +1,17 @@
 //! Submodule providing the `ClientChosenTimestamp` rule.
 
-use std::{borrow::Cow, ops::ControlFlow, time::Duration};
+use std::{ops::ControlFlow, time::Duration};
 
 use sql_traits::{
     errors::LookupError,
-    structs::TriggerEnablement,
     traits::{CheckConstraintLike, ColumnLike, DatabaseLike, FunctionLike, TableLike, TriggerLike},
-    utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{
-    BinaryOperator, Expr, Ident, ObjectName, ObjectNamePart, TriggerEvent, TriggerObject,
-    TriggerObjectKind, TriggerPeriod, UnaryOperator, Visitor,
+    BinaryOperator, Expr, TriggerEvent, TriggerObject, TriggerObjectKind, TriggerPeriod,
+    UnaryOperator, Visitor,
 };
 use sqlparser_plpgsql::{
-    embedded::{self, AliasTarget, Block, DeclarationKind, Node, NodeKind, RaiseLevel, Target},
+    embedded::{self, Block, Node, NodeKind, RaiseLevel, Target},
     embedded_sql,
 };
 
@@ -28,6 +26,9 @@ use crate::{
         closed_set_support::names_column,
         expression_site_support::is_null_literal,
         policy_support::is_column_reference,
+        trigger_support::{
+            Written, fires_for_clients, names_record, new_field_write, shadows_new, stored,
+        },
         walk_support::walk,
     },
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
@@ -231,25 +232,6 @@ fn client_writes<DB: DatabaseLike>(
     Ok(if declared { writes } else { Writes::BOTH })
 }
 
-/// The stored name of each part of `name`, which the PL/pgSQL parser builds
-/// from identifiers alone.
-fn stored_parts(name: &ObjectName) -> Vec<Cow<'_, str>> {
-    name.0
-        .iter()
-        .filter_map(ObjectNamePart::as_ident)
-        .map(stored)
-        .collect()
-}
-
-/// Whether the expression, under parentheses, names `record` alone.
-fn names_record(expression: &Expr, record: &str) -> bool {
-    match expression {
-        Expr::Nested(inner) => names_record(inner, record),
-        Expr::Identifier(ident) => stored(ident) == record,
-        _ => false,
-    }
-}
-
 /// Whether the expression, under parentheses and casts, is `record.column`.
 fn names_field(expression: &Expr, record: &str, column: &str) -> bool {
     match expression {
@@ -259,11 +241,6 @@ fn names_field(expression: &Expr, record: &str, column: &str) -> bool {
         }
         _ => false,
     }
-}
-
-/// The name PostgreSQL stores for `ident`.
-fn stored(ident: &Ident) -> Cow<'_, str> {
-    normalize_identifier(&ident.value, ident.quote_style.is_some())
 }
 
 /// Whether `expression` being true, or not being true when `holds` is false,
@@ -389,32 +366,9 @@ struct Stamping<'c> {
     column: &'c str,
 }
 
-/// What a write to a target does to `NEW.column`.
-enum Written {
-    /// It leaves the column alone.
-    Elsewhere,
-    /// It assigns the column itself.
-    Column,
-    /// It writes the column in a way the analysis does not follow.
-    Unfollowed,
-}
-
 impl Stamping<'_> {
     fn target(&self, target: &Target) -> Written {
-        let parts = stored_parts(&target.name);
-        match parts.as_slice() {
-            [record, column] if record == "new" && column == self.column => {
-                if target.indirection.is_empty() {
-                    Written::Column
-                } else {
-                    Written::Unfollowed
-                }
-            }
-            [record] if record == "new" => Written::Unfollowed,
-            [record, column, ..] if record == "new" && column == self.column => Written::Unfollowed,
-            parts if parts.iter().skip(1).any(|part| part == "new") => Written::Unfollowed,
-            _ => Written::Elsewhere,
-        }
+        new_field_write(target, self.column)
     }
 
     /// Whether the targets leave the column alone.
@@ -432,12 +386,7 @@ impl Stamping<'_> {
     }
 
     fn block(&self, block: &Block, reach: Reach) -> Option<Reach> {
-        let shadows = block.declarations.iter().any(|declaration| {
-            declaration.name == "new"
-                || matches!(&declaration.kind, DeclarationKind::Alias(AliasTarget::Name(name))
-                    if stored_parts(name).iter().any(|part| part == "new"))
-        });
-        if shadows || !block.handlers.is_empty() {
+        if shadows_new(block) || !block.handlers.is_empty() {
             return None;
         }
         self.nodes(&block.statements, reach)
@@ -583,10 +532,7 @@ fn stamped_writes<DB: DatabaseLike>(
         let condition = trigger.condition();
         let update_only = !trigger.events().contains(&TriggerEvent::Insert);
         if trigger.timing() != Some(TriggerPeriod::Before)
-            || !matches!(
-                trigger.enablement(database)?,
-                TriggerEnablement::Origin | TriggerEnablement::Always
-            )
+            || !fires_for_clients(database, trigger)?
             || !per_row
             || condition
                 .is_some_and(|condition| !skips_no_chosen_value(condition, column, update_only))

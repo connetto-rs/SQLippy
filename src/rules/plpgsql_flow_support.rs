@@ -34,6 +34,10 @@ pub(crate) trait FlowVisitor {
     /// Reads a block as a path enters it, before its declarations.
     fn enter(&mut self, _block: &Block, _state: &mut Self::State) {}
 
+    /// Reads a loop as a path reaches it, before the SQL its control runs
+    /// and the targets each iteration assigns.
+    fn repeat(&mut self, _repeated: &Loop, _state: &mut Self::State) {}
+
     /// Reads a query the body evaluates, such as a condition, a loop bound,
     /// a declaration default or an assigned value.
     fn query(&mut self, query: &Query, state: &mut Self::State);
@@ -248,6 +252,7 @@ impl<'b, V: FlowVisitor> Walker<'_, 'b, V> {
     /// Walks a loop body twice, so the second pass sees what the first
     /// carried around the loop.
     fn repeated(&mut self, repeated: &'b Loop, mut head: V::State) -> Option<V::State> {
+        self.visitor.repeat(repeated, &mut head);
         self.control(&repeated.control, &mut head);
         let condition = match &repeated.control {
             LoopControl::While(condition) => Some(condition.as_ref()),
