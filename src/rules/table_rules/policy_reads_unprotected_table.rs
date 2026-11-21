@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
-    structs::{ActingRole, RowSecurity, RowSecurityExemption, RowStatement},
+    structs::{RowSecurity, RowSecurityExemption, RowStatement},
     traits::{DataStatementLike, DatabaseLike, PolicyLike, Relation, RoleLike, TableLike},
 };
 use sqlparser::ast::{
@@ -17,7 +17,7 @@ use crate::{
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         policy_read_support::sublink_reads,
-        policy_support::{may_aggregate, walked_clauses},
+        policy_support::{acting, may_aggregate, walked_clauses},
         walk_support::walk,
     },
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
@@ -207,11 +207,6 @@ impl<DB: DatabaseLike> Visitor for Calls<'_, DB> {
             outcome => ControlFlow::Break(outcome.map(|_| false)),
         }
     }
-}
-
-/// The acting role for a declared role, or `PUBLIC` for `None`.
-fn acting<R>(role: Option<&R>) -> ActingRole<'_, R> {
-    role.map_or(ActingRole::Public, ActingRole::Declared)
 }
 
 /// Why `role`, `PUBLIC` for `None`, reads or writes `table` past its

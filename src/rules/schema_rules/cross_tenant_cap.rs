@@ -20,20 +20,10 @@ use crate::{
         cte_support::{WithScopes, same_name, stored_column, stored_table},
         function_body_support::{function_body, parameter},
         grant_support::schema_of,
-        policy_support::conjuncts,
+        policy_support::{conjuncts, unwrapped},
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
-
-/// Removes casts and parentheses from a compared value.
-fn unwrapped(mut expression: &Expr) -> &Expr {
-    loop {
-        match expression {
-            Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => expression = inner,
-            _ => return expression,
-        }
-    }
-}
 
 /// The predicate of an inner or outer join.
 fn join_constraint(operator: &JoinOperator) -> Option<&JoinConstraint> {

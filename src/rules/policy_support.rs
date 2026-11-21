@@ -5,8 +5,8 @@ use std::{borrow::Cow, collections::BTreeSet, ops::ControlFlow};
 use sql_traits::{
     errors::LookupError,
     structs::{
-        ColumnDefinition, ColumnDefinitionScope, ColumnScope, FunctionKind, IdentifierCase,
-        PolicyExpression,
+        ActingRole, ColumnDefinition, ColumnDefinitionScope, ColumnScope, FunctionKind,
+        IdentifierCase, PolicyExpression,
     },
     traits::{DatabaseLike, FunctionLike, PolicyLike, RoleLike, RoleMembershipLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
@@ -181,6 +181,41 @@ pub(crate) fn anonymous_callers<DB: DatabaseLike>(
         .map(|role| held_by_name(database, role))
         .chain([BTreeSet::new()])
         .collect()
+}
+
+/// The client roles of `deployment` the schema declares, its app roles then
+/// its anonymous roles, each with the name a message gives it, followed by
+/// `PUBLIC` as `None`.
+pub(crate) fn client_roles<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    deployment: &Deployment,
+) -> Vec<(String, Option<&'db DB::Role>)> {
+    let mut roles: Vec<(String, Option<&DB::Role>)> = deployment
+        .app_roles()
+        .chain(deployment.anonymous_roles())
+        .filter_map(|name| {
+            database
+                .role(name)
+                .map(|role| (format!("'{name}'"), Some(role)))
+        })
+        .collect();
+    roles.push(("PUBLIC".to_owned(), None));
+    roles
+}
+
+/// The acting role for a declared role, or `PUBLIC` for `None`.
+pub(crate) fn acting<R>(role: Option<&R>) -> ActingRole<'_, R> {
+    role.map_or(ActingRole::Public, ActingRole::Declared)
+}
+
+/// Removes casts and parentheses from an expression.
+pub(crate) fn unwrapped(mut expression: &Expr) -> &Expr {
+    loop {
+        match expression {
+            Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => expression = inner,
+            _ => return expression,
+        }
+    }
 }
 
 /// Whether `policy` applies to a caller holding the roles `held`.

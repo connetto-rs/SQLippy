@@ -20,3 +20,5 @@ mod copied_column_through_superkey;
 pub use copied_column_through_superkey::CopiedColumnThroughSuperkey;
 mod undeletable_reference;
 pub use undeletable_reference::UndeletableReference;
+mod foreign_key_existence_oracle;
+pub use foreign_key_existence_oracle::ForeignKeyExistenceOracle;

@@ -237,6 +237,7 @@ rule_icons! {
     "copied_column_through_superkey" => FaCopy,
     "parallel_tables" => FaTableList,
     "undeletable_reference" => FaLinkSlash,
+    "foreign_key_existence_oracle" => FaEyeSlash,
     "nullable_tenant_key" => FaPeopleGroup,
     "boolean_state_without_time" => FaToggleOff,
     "closed_set_as_text" => FaListCheck,
