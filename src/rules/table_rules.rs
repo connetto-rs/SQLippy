@@ -66,6 +66,8 @@ mod credential_free_write;
 pub use credential_free_write::CredentialFreeWrite;
 mod null_credential_read;
 pub use null_credential_read::NullCredentialRead;
+mod nullable_tenant_key;
+pub use nullable_tenant_key::NullableTenantKey;
 mod correlated_policy_subquery;
 pub use correlated_policy_subquery::CorrelatedPolicySubquery;
 mod key_without_exact_equality;

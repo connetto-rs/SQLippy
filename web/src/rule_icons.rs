@@ -236,6 +236,7 @@ rule_icons! {
     "copied_column_through_superkey" => FaCopy,
     "parallel_tables" => FaTableList,
     "undeletable_reference" => FaLinkSlash,
+    "nullable_tenant_key" => FaPeopleGroup,
     "boolean_state_without_time" => FaToggleOff,
     "closed_set_as_text" => FaListCheck,
     "constant_column_not_generated" => FaGears,
