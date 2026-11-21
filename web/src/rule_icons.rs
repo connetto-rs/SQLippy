@@ -177,6 +177,8 @@ rule_icons! {
     "prefix_redundant_index" => FaTags,
     "duplicate_index" => FaClone,
     "repeated_index_column" => FaClone,
+    "equality_index_on_array" => FaListUl,
+    "numbered_columns" => FaListOl,
     "uncached_policy_call" => FaBolt,
     "uncached_helper_query" => FaBolt,
     "repeated_policy_call" => FaBolt,
