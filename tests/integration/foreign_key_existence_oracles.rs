@@ -307,3 +307,159 @@ fn an_update_reported_through_its_own_check() {
         ["notes.notes_secret"]
     );
 }
+
+const RESOURCES: &str = "CREATE TABLE resources (
+        id INT PRIMARY KEY,
+        organization_id INT NOT NULL,
+        owner_id INT NOT NULL,
+        UNIQUE (organization_id, id)
+    );
+    ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY resources_select ON resources FOR SELECT TO app USING (owner_id = 1);
+    CREATE TABLE grants (
+        id INT PRIMARY KEY,
+        organization_id INT NOT NULL,
+        resource_id INT NOT NULL,
+        CONSTRAINT grants_resource FOREIGN KEY (organization_id, resource_id)
+            REFERENCES resources (organization_id, id)
+    );
+    GRANT INSERT ON grants TO app;
+    ALTER TABLE grants ENABLE ROW LEVEL SECURITY;";
+
+#[test]
+fn a_check_pinning_a_unique_referenced_column_to_a_readable_row_is_clean() {
+    for (check, expected) in [
+        ("resource_id IN (SELECT id FROM resources)", vec![]),
+        (
+            "resource_id IN (SELECT resource.id FROM resources resource WHERE resource.owner_id = 1)",
+            vec![],
+        ),
+        (
+            "resource_id = ANY (ARRAY(SELECT id FROM resources))",
+            vec![],
+        ),
+        ("resource_id = (SELECT id FROM resources LIMIT 1)", vec![]),
+        ("(resource_id, id) IN (SELECT id, 1 FROM resources)", vec![]),
+        (
+            "id > 0 AND resource_id IN (SELECT id FROM resources)",
+            vec![],
+        ),
+        (
+            "EXISTS (SELECT 1 FROM resources resource WHERE resource.id = grants.resource_id)",
+            vec![],
+        ),
+        (
+            "resource_id IN (SELECT owner_id FROM resources)",
+            vec!["grants.grants_resource"],
+        ),
+        (
+            "organization_id IN (SELECT organization_id FROM resources)",
+            vec!["grants.grants_resource"],
+        ),
+        (
+            "resource_id IN (SELECT id FROM grants)",
+            vec!["grants.grants_resource"],
+        ),
+        (
+            "resource_id IN (SELECT id FROM resources UNION SELECT 1)",
+            vec!["grants.grants_resource"],
+        ),
+        // The projected name resolves to the written row, which resources lacks.
+        (
+            "resource_id IN (SELECT resource_id FROM resources)",
+            vec!["grants.grants_resource"],
+        ),
+        (
+            "EXISTS (SELECT 1 FROM resources resource WHERE resource.owner_id = grants.resource_id)",
+            vec!["grants.grants_resource"],
+        ),
+    ] {
+        assert_eq!(
+            objects(&format!(
+                "{RESOURCES}
+                 CREATE POLICY grants_insert ON grants FOR INSERT TO app WITH CHECK ({check});"
+            )),
+            expected,
+            "{check}"
+        );
+    }
+}
+
+#[test]
+fn a_composite_unique_subset_is_pinned_only_from_one_row() {
+    for (check, expected) in [
+        ("(a, b) IN (SELECT a, b FROM slots)", vec![]),
+        ("(b, a) IN (SELECT s.b, s.a FROM slots s)", vec![]),
+        (
+            "EXISTS (SELECT 1 FROM slots s WHERE s.a = uses.a AND uses.b = s.b)",
+            vec![],
+        ),
+        ("(a, b) IN (SELECT b, a FROM slots)", vec!["uses.uses_slot"]),
+        (
+            "a IN (SELECT a FROM slots) AND b IN (SELECT b FROM slots)",
+            vec!["uses.uses_slot"],
+        ),
+        (
+            "(a, b) IN (SELECT x.a, y.b FROM slots x, slots y)",
+            vec!["uses.uses_slot"],
+        ),
+        (
+            "EXISTS (SELECT 1 FROM slots x, slots y WHERE x.a = uses.a AND y.b = uses.b)",
+            vec!["uses.uses_slot"],
+        ),
+    ] {
+        assert_eq!(
+            objects(&format!(
+                "CREATE TABLE slots (a INT, b INT, c INT, UNIQUE (a, b), UNIQUE (a, b, c));
+                 ALTER TABLE slots ENABLE ROW LEVEL SECURITY;
+                 CREATE TABLE uses (a INT, b INT, c INT,
+                     CONSTRAINT uses_slot FOREIGN KEY (a, b, c) REFERENCES slots (a, b, c));
+                 GRANT INSERT ON uses TO app;
+                 ALTER TABLE uses ENABLE ROW LEVEL SECURITY;
+                 CREATE POLICY uses_write ON uses FOR INSERT TO app WITH CHECK ({check});"
+            )),
+            expected,
+            "{check}"
+        );
+    }
+}
+
+#[test]
+fn an_arm_forcing_a_key_column_null_checks_nothing() {
+    for match_kind in ["", "MATCH SIMPLE", "MATCH FULL"] {
+        for (check, expected) in [
+            (
+                "invitation_id IS NULL OR (organization_id, invitation_id) IN (SELECT organization_id, id FROM invitations)",
+                vec![],
+            ),
+            ("invitation_id IS NULL", vec![]),
+            (
+                "invitation_id IS NULL OR id > 0",
+                vec!["memberships.memberships_invitation"],
+            ),
+            (
+                "id IS NULL OR (organization_id, invitation_id) IN (SELECT organization_id, id FROM invitations)",
+                vec!["memberships.memberships_invitation"],
+            ),
+            (
+                "invitation_id IS NOT NULL OR (organization_id, invitation_id) IN (SELECT organization_id, id FROM invitations)",
+                vec!["memberships.memberships_invitation"],
+            ),
+        ] {
+            assert_eq!(
+                objects(&format!(
+                    "CREATE TABLE invitations (organization_id INT, id INT, PRIMARY KEY (organization_id, id));
+                     ALTER TABLE invitations ENABLE ROW LEVEL SECURITY;
+                     CREATE TABLE memberships (id INT PRIMARY KEY, organization_id INT NOT NULL, invitation_id INT,
+                         CONSTRAINT memberships_invitation FOREIGN KEY (organization_id, invitation_id)
+                             REFERENCES invitations (organization_id, id) {match_kind});
+                     GRANT INSERT ON memberships TO app;
+                     ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+                     CREATE POLICY memberships_write ON memberships FOR INSERT TO app WITH CHECK ({check});"
+                )),
+                expected,
+                "{match_kind} {check}"
+            );
+        }
+    }
+}

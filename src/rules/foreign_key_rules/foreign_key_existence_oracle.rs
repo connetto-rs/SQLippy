@@ -1,10 +1,13 @@
 //! Submodule providing the `ForeignKeyExistenceOracle` rule.
 
-use std::{borrow::Cow, ops::ControlFlow};
+use std::{borrow::Cow, ops::ControlFlow, slice};
 
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
-    structs::{ColumnPrivilege, RowGate, RowSecurity, RowStatement, RowVersion},
+    structs::{
+        ColumnDefinitionScope, ColumnPrivilege, ColumnScope, IdentifierCase, RowGate, RowSecurity,
+        RowStatement, RowVersion,
+    },
     traits::{ColumnLike, DatabaseLike, ForeignKeyLike, TableLike},
 };
 use sqlparser::ast::{
@@ -18,6 +21,7 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         closed_set_support::names_cast_column,
+        key_support::{Instance, equality_keys, instances, named},
         policy_read_support::sublink_reads,
         policy_support::{acting, client_roles, conjuncts, disjuncts, is_tautology, unwrapped},
     },
@@ -41,8 +45,12 @@ use crate::{
 /// reads no column or to a subquery reading the referenced table, or with an
 /// `EXISTS` over the referenced table equating its column with the key column.
 /// Such a subquery runs under the role's own policies and fails alike for a
-/// hidden and a missing key. The rule does not run on SQLite, which has no
-/// row-level security.
+/// hidden and a missing key. Confining the key columns that the key maps onto
+/// a unique key of the referenced table is enough when one subquery draws
+/// them all from the same row of that table, which is then the only row the
+/// key can match. A check that forces a key column `NULL` also confines the
+/// key, since PostgreSQL then looks up no row. The rule does not run on
+/// SQLite, which has no row-level security.
 ///
 /// # Example
 ///
@@ -169,6 +177,11 @@ struct Confinement<'a, DB: DatabaseLike> {
     database: &'a DB,
     parent: &'a DB::Table,
     key_columns: Vec<Cow<'a, str>>,
+    /// The referenced column each key column maps onto, by position.
+    referenced_columns: Vec<Cow<'a, str>>,
+    /// The key columns mapped onto each unique key of the referenced table
+    /// whose columns the key references.
+    row_keys: Vec<u64>,
 }
 
 impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
@@ -181,10 +194,28 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             .host_columns(database)?
             .map(ColumnLike::stored_column_name)
             .collect();
+        let referenced_columns: Vec<Cow<'a, str>> = foreign_key
+            .referenced_columns(database)?
+            .map(ColumnLike::stored_column_name)
+            .collect();
+        let row_keys = equality_keys(database, parent)?
+            .into_iter()
+            .filter_map(|key| {
+                key.iter().try_fold(0, |mask, column| {
+                    let name = column.stored_column_name();
+                    let position = referenced_columns
+                        .iter()
+                        .position(|mapped| *mapped == name)?;
+                    Some(mask | 1 << position)
+                })
+            })
+            .collect();
         Ok(Self {
             database,
             parent,
             key_columns,
+            referenced_columns,
+            row_keys,
         })
     }
 
@@ -200,6 +231,171 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             .enumerate()
             .filter(|(_, column)| names_cast_column(expression, column))
             .fold(0, |mask, (position, _)| mask | 1 << position)
+    }
+
+    /// The position in the key of the key column `expression` names.
+    fn key_position(&self, expression: &Expr) -> Option<usize> {
+        self.key_columns
+            .iter()
+            .position(|column| names_cast_column(expression, column))
+    }
+
+    /// Records in `rows` that the key column `key` names takes the value of
+    /// `referenced` when `referenced`, resolved in `scope`, names the column
+    /// the key maps it onto in one of `instances` of the referenced table.
+    /// `rows` holds the key columns so taken from each instance, by its name.
+    fn pair(
+        &self,
+        rows: &mut Vec<(String, u64)>,
+        instances: &[Instance<'_, DB>],
+        scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
+        key: &Expr,
+        referenced: &Expr,
+    ) -> Result<(), LookupError> {
+        let Some(position) = self.key_position(key) else {
+            return Ok(());
+        };
+        let Some((relation, column)) = named(scope, referenced)? else {
+            return Ok(());
+        };
+        if column != self.referenced_columns[position]
+            || !instances
+                .iter()
+                .any(|instance| instance.name == relation && instance.table == self.parent)
+        {
+            return Ok(());
+        }
+        match rows.iter_mut().find(|(row, _)| *row == relation) {
+            Some((_, mask)) => *mask |= 1 << position,
+            None => rows.push((relation, 1 << position)),
+        }
+        Ok(())
+    }
+
+    /// Whether one of `rows` takes every column of a unique key of the
+    /// referenced table, so the key matches that row or none.
+    fn holds_row_key(&self, rows: &[(String, u64)]) -> bool {
+        rows.iter()
+            .any(|(_, mask)| self.row_keys.iter().any(|key| mask & key == *key))
+    }
+
+    /// Whether every row of `query` gives `items` the values of one row of
+    /// the referenced table it reads under the writer's policies, over the
+    /// columns of a unique key the key maps them onto.
+    fn yields_readable_row(&self, items: &[Expr], query: &Query) -> Result<bool, LookupError> {
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            return Ok(false);
+        };
+        let Some(instances) = instances(self.database, select).filter(|_| query.with.is_none())
+        else {
+            return Ok(false);
+        };
+        let local = ColumnScope::from_query(query, self.database, IdentifierCase::Folded)?;
+        let Some(scope) = local.scope_for_select(select) else {
+            return Ok(false);
+        };
+        let mut rows = Vec::new();
+        for (item, projected) in items.iter().zip(&select.projection) {
+            if let SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. } =
+                projected
+            {
+                self.pair(&mut rows, &instances, &scope, item, value)?;
+            }
+        }
+        Ok(self.holds_row_key(&rows))
+    }
+
+    /// Whether an `EXISTS` over `query` equates every column of a unique key
+    /// of one row of the referenced table it reads under the writer's
+    /// policies with the key column the key maps onto it.
+    fn matches_readable_row(&self, query: &Query) -> Result<bool, LookupError> {
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            return Ok(false);
+        };
+        let (Some(selection), Some(instances)) = (
+            &select.selection,
+            instances(self.database, select).filter(|_| query.with.is_none()),
+        ) else {
+            return Ok(false);
+        };
+        let local = ColumnScope::from_query(query, self.database, IdentifierCase::Folded)?;
+        let Some(scope) = local.scope_for_select(select) else {
+            return Ok(false);
+        };
+        let mut rows = Vec::new();
+        for conjunct in conjuncts(selection) {
+            if let Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Eq,
+                right,
+            } = unwrapped(conjunct)
+                && is_column(left)
+                && is_column(right)
+            {
+                for (inner, outer) in [(left, right), (right, left)] {
+                    if scope.resolve_column_binding(outer)?.is_none() {
+                        self.pair(&mut rows, &instances, &scope, outer, inner)?;
+                    }
+                }
+            }
+        }
+        Ok(self.holds_row_key(&rows))
+    }
+
+    /// Whether the conjunct leaves the key check nothing hidden to find: it
+    /// forces a key column `NULL`, so PostgreSQL looks up no row under any
+    /// `MATCH`, or it ties the key to one row the writer reads.
+    fn settles_key(&self, conjunct: &Expr) -> Result<bool, LookupError> {
+        match unwrapped(conjunct) {
+            Expr::IsNull(column) => Ok(self.key_position(column).is_some()),
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Eq,
+                right,
+            } => {
+                for (column, value) in [(left, right), (right, left)] {
+                    if let Expr::Subquery(query) = unwrapped(value)
+                        && self.yields_readable_row(slice::from_ref(column), query)?
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Expr::AnyOp {
+                left,
+                compare_op: BinaryOperator::Eq,
+                right,
+                ..
+            } => match unwrapped(right) {
+                Expr::Subquery(query) => self.yields_readable_row(slice::from_ref(left), query),
+                Expr::Function(function)
+                    if function.name.to_string().eq_ignore_ascii_case("array") =>
+                {
+                    match &function.args {
+                        FunctionArguments::Subquery(query) => {
+                            self.yields_readable_row(slice::from_ref(left), query)
+                        }
+                        _ => Ok(false),
+                    }
+                }
+                _ => Ok(false),
+            },
+            Expr::In {
+                expr,
+                target: InTarget::Subquery(query),
+                negated: false,
+                ..
+            } => match unwrapped(expr) {
+                Expr::Tuple(items) => self.yields_readable_row(items, query),
+                item => self.yields_readable_row(slice::from_ref(item), query),
+            },
+            Expr::Exists {
+                subquery,
+                negated: false,
+            } => self.matches_readable_row(subquery),
+            _ => Ok(false),
+        }
     }
 
     /// Whether `query` yields only keys its writer may point at: rows of the
@@ -282,12 +478,16 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             .fold(0, |mask, matched| mask | matched))
     }
 
-    /// The key columns the conjunct confines.
+    /// The key columns the conjunct confines, every one when it settles the
+    /// key.
     fn columns_confined_by_conjunct(
         &self,
         policy: &DB::Policy,
         conjunct: &Expr,
     ) -> Result<u64, LookupError> {
+        if self.settles_key(conjunct)? {
+            return Ok(self.whole_key());
+        }
         match unwrapped(conjunct) {
             Expr::BinaryOp {
                 left,
