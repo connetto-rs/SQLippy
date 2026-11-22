@@ -218,8 +218,7 @@ pub(crate) fn identity<DB: DatabaseLike>(
 }
 
 /// The values every row of its table holds `column` to, the expression it is
-/// generated as or, when it is `NOT NULL`, the values a top-level conjunct
-/// of a validated check holds it `=` or `IN`, those of the first such check.
+/// generated as or the values [`checked_values`] reads.
 pub(crate) fn held_values<'a, DB: DatabaseLike>(
     database: &'a DB,
     column: &'a DB::Column,
@@ -227,6 +226,16 @@ pub(crate) fn held_values<'a, DB: DatabaseLike>(
     if let Some(expression) = column.generation_expression() {
         return Ok(Some(vec![expression]));
     }
+    checked_values(database, column)
+}
+
+/// The values a `NOT NULL` column is held to by a top-level conjunct of a
+/// validated check, `=` one value or `IN` a list of values, those of the
+/// first such check.
+pub(crate) fn checked_values<'a, DB: DatabaseLike>(
+    database: &'a DB,
+    column: &'a DB::Column,
+) -> Result<Option<Vec<&'a Expr>>, LookupError> {
     if column.is_nullable(database)? {
         return Ok(None);
     }
@@ -272,7 +281,7 @@ pub(crate) fn pin<'a, DB: DatabaseLike>(
 /// The string literal `expression` writes under parentheses and casts that
 /// keep its text: to `text`, to `varchar` of no length, and, for an enum
 /// column, to a type of no modifiers, which `=` accepts only as the enum.
-fn kept_literal(mut expression: &Expr, enumeration: bool) -> Option<&str> {
+pub(crate) fn kept_literal(mut expression: &Expr, enumeration: bool) -> Option<&str> {
     loop {
         match expression {
             Expr::Nested(inner) => expression = inner,

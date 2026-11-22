@@ -10,6 +10,7 @@ use crate::{
     rules::{
         expression_site_support::is_null_literal,
         function_reach_support::Reach,
+        guarded_parent_support::Parent,
         plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, walk_block},
         trigger_support::{
             WritesElsewhere, evaluated, fires_on_insert, row_trigger, triggers_with_functions,
@@ -25,6 +26,33 @@ schema_rule!(
     /// The write stays when the insert does not happen, as under `ON
     /// CONFLICT DO NOTHING`. A function returning `NULL` after the write
     /// redirects the row instead, and is reported with its own message.
+    ///
+    /// A write inserting the row a foreign key of the table references, as
+    /// one `VALUES` row holding `NEW`'s value of each host column, possibly
+    /// `ON CONFLICT DO NOTHING`, is not reported when the referenced table
+    /// refuses that row at commit while no row of the table references it.
+    /// A subtype table whose key must reach its parent table before a `NOT
+    /// DEFERRABLE` foreign key is checked has no other place for that write.
+    /// The refusal is an enabled `DEFERRABLE INITIALLY DEFERRED` row-level
+    /// constraint trigger on the referenced table, firing on `INSERT`, whose
+    /// `WHEN` condition, if any, holds for every row the table can reference,
+    /// running a PL/pgSQL function that reaches every `RETURN` only past a
+    /// condition showing either of two facts, with neither table written
+    /// since.
+    ///
+    /// - A row of the table references the trigger's row. An `EXISTS` over
+    ///   the table alone shows it, equating host columns with `NEW`'s
+    ///   referenced columns that cover a unique key of the referenced table,
+    ///   while the other host columns are `NOT NULL`.
+    /// - The trigger's row is gone. A `NOT EXISTS` over the referenced table
+    ///   alone shows it, equating `NOT NULL` columns with `NEW`'s, read by a
+    ///   function that sees every row past row-level security.
+    ///
+    /// A `CASE` over a column of `NEW`, and the `WHEN` condition, are read
+    /// through the one value a validated check of the table pins the host
+    /// column to. The trigger's own function, and every other enabled
+    /// `BEFORE INSERT` row trigger of the table, must return `NEW` with its
+    /// host columns unwritten, so the row checked is the row written.
     ///
     /// # Example
     ///
@@ -76,6 +104,9 @@ impl FlowState for Wrote {
 /// How the paths that wrote another table leave the function.
 struct Returns<'r, 'db, DB: DatabaseLike> {
     reach: &'r mut Reach<'db, DB, WritesElsewhere<'db, DB>>,
+    /// The referenced rows whose insert a deferred check refuses while
+    /// unreferenced at commit.
+    guarded: &'r [Parent<'db, DB>],
     /// A path that wrote returns a row, so the insert goes on.
     row: bool,
     /// A path that wrote returns `NULL`, so the insert is skipped.
@@ -90,6 +121,9 @@ impl<DB: DatabaseLike> FlowVisitor for Returns<'_, '_, DB> {
     }
 
     fn statement(&mut self, statement: &Statement, state: &mut Wrote) {
+        if self.guarded.iter().any(|parent| parent.inserts(statement)) {
+            return;
+        }
         state.0 |= !self.reach.occurrences(statement).is_empty();
     }
 
@@ -130,9 +164,17 @@ impl<DB: DatabaseLike> SchemaRule for BeforeTriggerWritesOtherTable<DB> {
             else {
                 continue;
             };
+            let mut guarded = Vec::new();
+            for foreign_key in table.foreign_keys(database)? {
+                let parent = Parent::new(database, table, foreign_key)?;
+                if parent.guarded()? && parent.settled()? {
+                    guarded.push(parent);
+                }
+            }
             let mut reach = Reach::new(database, WritesElsewhere::new(database, table));
             let mut returns = Returns {
                 reach: &mut reach,
+                guarded: &guarded,
                 row: false,
                 null: false,
             };
