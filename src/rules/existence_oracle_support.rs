@@ -36,7 +36,7 @@ use crate::{
         policy_read_support::sublink_reads,
         policy_support::{
             acting, conjuncts, disjuncts, is_column_reference, is_contradiction, is_tautology,
-            sql_set_body, unwrapped,
+            sets_only_search_path, sql_set_body, unwrapped,
         },
     },
 };
@@ -1262,12 +1262,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         &self,
         function: &DB::Function,
     ) -> Result<Option<Vec<Arm<'a, DB>>>, LookupError> {
-        if function.configuration_parameters().iter().any(|parameter| {
-            !parameter
-                .name
-                .to_string()
-                .eq_ignore_ascii_case("search_path")
-        }) {
+        if !sets_only_search_path(function) {
             return Ok(None);
         }
         let Some(body) = sql_set_body(self.database, function)? else {

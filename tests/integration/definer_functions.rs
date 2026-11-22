@@ -1283,6 +1283,415 @@ fn a_semi_join_carries_its_filter_to_the_outer_column_it_equates() {
     );
 }
 
+/// Teams of organizations whose members hold memberships, `keys` declaring
+/// the keys of `teams` and `deferral` closing the key of `team_members` onto
+/// it, with a team administrator helper that excludes blocked organizations.
+fn teams(keys: &str, deferral: &str) -> String {
+    format!(
+        "CREATE ROLE app NOLOGIN;
+         CREATE ROLE auditor NOLOGIN;
+         CREATE SCHEMA authz;
+         CREATE TABLE memberships (organization_id UUID NOT NULL, user_id UUID NOT NULL,
+           active BOOLEAN NOT NULL, PRIMARY KEY (organization_id, user_id));
+         CREATE TABLE teams (id UUID NOT NULL, organization_id UUID NOT NULL, {keys});
+         CREATE TABLE team_members (team_id UUID NOT NULL, organization_id UUID NOT NULL,
+           user_id UUID NOT NULL, admin BOOLEAN NOT NULL, PRIMARY KEY (team_id, user_id),
+           FOREIGN KEY (organization_id, team_id) REFERENCES teams (organization_id, id){deferral},
+           FOREIGN KEY (organization_id, user_id) REFERENCES memberships (organization_id, user_id));
+         ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE team_members ENABLE ROW LEVEL SECURITY;
+         GRANT SELECT ON memberships, teams, team_members TO app;
+         ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+         ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+         CREATE FUNCTION authz.caller_id() RETURNS UUID
+           LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+           AS $$ SELECT NULLIF(current_setting('app.user_id', true), '')::uuid $$;
+         CREATE FUNCTION authz.blocked() RETURNS SETOF UUID
+           LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+           AS $$ SELECT NULLIF(current_setting('app.blocked', true), '')::uuid $$;
+         CREATE FUNCTION authz.member_organizations() RETURNS SETOF UUID
+           LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             SELECT membership.organization_id FROM public.memberships membership
+             WHERE membership.user_id = authz.caller_id() AND membership.active
+               AND NOT (membership.organization_id = ANY (ARRAY(SELECT authz.blocked()))) $$;
+         CREATE FUNCTION authz.administered_teams() RETURNS SETOF UUID
+           LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             SELECT member.team_id FROM public.team_members member
+             JOIN public.memberships membership
+               ON membership.organization_id = member.organization_id AND membership.user_id = member.user_id
+             WHERE member.user_id = authz.caller_id() AND member.admin AND membership.active
+               AND NOT (member.organization_id = ANY (ARRAY(SELECT authz.blocked()))) $$;
+         CREATE POLICY memberships_select ON memberships FOR SELECT TO app
+           USING (user_id = (SELECT authz.caller_id()));
+         CREATE POLICY teams_select ON teams FOR SELECT TO app
+           USING (organization_id = ANY (ARRAY(SELECT authz.member_organizations())));
+         CREATE POLICY team_members_select ON team_members FOR SELECT TO app
+           USING (organization_id = ANY (ARRAY(SELECT authz.member_organizations())));
+         CREATE POLICY teams_blocked ON teams AS RESTRICTIVE FOR ALL TO app
+           USING (NOT (organization_id = ANY (ARRAY(SELECT authz.blocked()))));
+         CREATE POLICY team_members_blocked ON team_members AS RESTRICTIVE FOR ALL TO app
+           USING (NOT (organization_id = ANY (ARRAY(SELECT authz.blocked()))));"
+    )
+}
+
+const TEAM_KEYS: &str = "PRIMARY KEY (id), UNIQUE (organization_id, id)";
+
+/// Functions reported over [`teams`] and `sql`, the organizations of the
+/// teams `helper` returns declared within the caller's.
+fn exposed_over_teams(schema: &str, helper: &str, sql: &str) -> Vec<String> {
+    exposed(
+        Deployment::default()
+            .with_app_role("app")
+            .with_set_within(helper, "authz.member_organizations()")
+            .expect("both sets parse"),
+        &format!("{schema}{sql}"),
+    )
+}
+
+#[test]
+fn a_helper_filter_reaches_the_row_its_returned_key_references() {
+    let administered = "
+        CREATE FUNCTION authz.team_admin_organizations() RETURNS SETOF UUID
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT team.organization_id FROM public.teams team
+            WHERE team.id IN (SELECT authz.administered_teams()) $$;";
+    let helper = "authz.team_admin_organizations()";
+    assert_eq!(
+        exposed_over_teams(&teams(TEAM_KEYS, ""), helper, administered),
+        Vec::<String>::new()
+    );
+    let numeric_team_ids = teams(TEAM_KEYS, "")
+        .replace("teams (id UUID", "teams (id NUMERIC")
+        .replace("team_id UUID", "team_id NUMERIC")
+        .replace(
+            "administered_teams() RETURNS SETOF UUID",
+            "administered_teams() RETURNS SETOF NUMERIC",
+        );
+    assert_eq!(
+        exposed_over_teams(&numeric_team_ids, helper, administered),
+        Vec::<String>::new()
+    );
+    for schema in [
+        teams(TEAM_KEYS, " DEFERRABLE INITIALLY DEFERRED"),
+        teams("UNIQUE (organization_id, id)", ""),
+        teams(
+            "PRIMARY KEY (id), code UUID NOT NULL, UNIQUE (organization_id, code)",
+            "",
+        )
+        .replace(
+            "REFERENCES teams (organization_id, id)",
+            "REFERENCES teams (organization_id, code)",
+        ),
+    ] {
+        assert_eq!(
+            exposed_over_teams(&schema, helper, administered),
+            ["team_admin_organizations()"]
+        );
+    }
+    assert_eq!(
+        exposed_over_teams(
+            &teams(TEAM_KEYS, ""),
+            "authz.volatile_admin_organizations()",
+            "CREATE FUNCTION authz.volatile_administered_teams() RETURNS SETOF UUID
+               LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT member.team_id FROM public.team_members member
+                 WHERE member.user_id = authz.caller_id()
+                   AND member.organization_id IN (SELECT authz.member_organizations())
+                   AND NOT (member.organization_id = ANY (ARRAY(SELECT authz.blocked()))) $$;
+             CREATE FUNCTION authz.volatile_admin_organizations() RETURNS SETOF UUID
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT team.organization_id FROM public.teams team
+                 WHERE team.id IN (SELECT authz.volatile_administered_teams()) $$;"
+        ),
+        ["volatile_admin_organizations()"]
+    );
+}
+
+#[test]
+fn every_arm_of_a_helper_carries_its_filter_or_none_does() {
+    let excluded = "member.organization_id IN (SELECT authz.member_organizations())
+        AND NOT (member.organization_id = ANY (ARRAY(SELECT authz.blocked())))";
+    let reported = |teams_body: &str| {
+        exposed_over_teams(
+            &teams(TEAM_KEYS, ""),
+            "authz.listed_organizations()",
+            &format!(
+                "SET check_function_bodies = false;
+                 CREATE FUNCTION authz.listed_teams() RETURNS SETOF UUID
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT team_id FROM public.team_members WHERE admin $$;
+                 CREATE OR REPLACE FUNCTION authz.listed_teams() RETURNS SETOF UUID
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     {teams_body} $$;
+                 CREATE FUNCTION authz.listed_organizations() RETURNS SETOF UUID
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT team.organization_id FROM public.teams team
+                     WHERE team.id IN (SELECT authz.listed_teams()) $$;"
+            ),
+        )
+    };
+    let admin = format!(
+        "SELECT member.team_id FROM public.team_members member WHERE member.admin AND {excluded}"
+    );
+    let own = format!(
+        "SELECT member.team_id FROM public.team_members member
+         WHERE member.user_id = authz.caller_id() AND {excluded}"
+    );
+    assert_eq!(
+        reported(&format!("{admin} UNION {own}")),
+        Vec::<String>::new()
+    );
+    for body in [
+        format!("{admin} UNION VALUES ('00000000-0000-0000-0000-000000000000'::uuid)"),
+        format!("{admin} UNION SELECT listed FROM authz.listed_teams() listed"),
+        format!("{admin} UNION SELECT missing.team_id FROM public.missing_members missing"),
+    ] {
+        assert_eq!(reported(&body), ["listed_organizations()"], "{body}");
+    }
+    for body in [
+        format!("{admin} UNION SELECT member.team_id FROM public.team_members member"),
+        format!("{admin} UNION SELECT nobody.team_id FROM public.team_members member"),
+    ] {
+        assert_eq!(
+            reported(&body),
+            ["listed_organizations()", "listed_teams()"],
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_joined_row_meeting_a_helpers_whole_filter_proves_the_helpers_set() {
+    let variants = "
+        CREATE FUNCTION authz.inactive_teams() RETURNS SETOF UUID
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT member.team_id FROM public.team_members member
+            JOIN public.memberships membership
+              ON membership.organization_id = member.organization_id AND membership.user_id = member.user_id
+            WHERE member.user_id = authz.caller_id() AND member.admin
+              AND NOT (member.organization_id = ANY (ARRAY(SELECT authz.blocked()))) $$;
+        CREATE FUNCTION authz.left_joined_teams() RETURNS SETOF UUID
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT member.team_id FROM public.team_members member
+            LEFT JOIN public.memberships membership
+              ON membership.organization_id = member.organization_id AND membership.user_id = member.user_id
+              AND membership.active
+            WHERE member.user_id = authz.caller_id() AND member.admin
+              AND NOT (member.organization_id = ANY (ARRAY(SELECT authz.blocked()))) $$;";
+    let unrelated = "authz.team_admin_organizations()";
+    assert_eq!(
+        exposed_over_teams(&teams(TEAM_KEYS, ""), unrelated, variants),
+        ["inactive_teams()", "left_joined_teams()"]
+    );
+    assert_eq!(
+        exposed_over_teams(
+            &format!(
+                "{}ALTER FUNCTION authz.member_organizations() OWNER TO auditor;",
+                teams(TEAM_KEYS, "")
+            ),
+            unrelated,
+            variants
+        ),
+        [
+            "administered_teams()",
+            "inactive_teams()",
+            "left_joined_teams()"
+        ]
+    );
+    for partial in [
+        "FROM ONLY public.memberships membership",
+        "FROM public.memberships membership TABLESAMPLE SYSTEM (10)",
+    ] {
+        assert_eq!(
+            exposed_over_teams(
+                &teams(TEAM_KEYS, "").replace("FROM public.memberships membership", partial),
+                unrelated,
+                variants
+            ),
+            [
+                "administered_teams()",
+                "inactive_teams()",
+                "left_joined_teams()"
+            ],
+            "{partial}"
+        );
+    }
+}
+
+/// Grantees of three kinds, each user and organization pinned to its kind
+/// by a key closed with `deferral`, with a helper yielding the caller, the
+/// grantee standing for everyone and the caller's organizations.
+fn grantees(deferral: &str) -> String {
+    format!(
+        "CREATE ROLE app NOLOGIN;
+         CREATE SCHEMA authz;
+         CREATE TYPE authz.grantee_kind AS ENUM ('user', 'organization', 'everyone');
+         CREATE TABLE grantees (id UUID PRIMARY KEY, kind authz.grantee_kind NOT NULL, UNIQUE (id, kind));
+         CREATE TABLE users (id UUID PRIMARY KEY,
+           kind authz.grantee_kind GENERATED ALWAYS AS ('user'::authz.grantee_kind) STORED NOT NULL,
+           FOREIGN KEY (id, kind) REFERENCES grantees (id, kind){deferral});
+         CREATE TABLE organizations (id UUID PRIMARY KEY,
+           kind authz.grantee_kind GENERATED ALWAYS AS ('organization'::authz.grantee_kind) STORED NOT NULL,
+           FOREIGN KEY (id, kind) REFERENCES grantees (id, kind){deferral});
+         CREATE TABLE memberships (organization_id UUID NOT NULL REFERENCES organizations (id),
+           user_id UUID NOT NULL REFERENCES users (id), active BOOLEAN NOT NULL,
+           PRIMARY KEY (organization_id, user_id));
+         CREATE TABLE grants (resource_id UUID NOT NULL, organization_id UUID NOT NULL,
+           grantee_id UUID NOT NULL REFERENCES grantees (id));
+         ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+         GRANT SELECT ON memberships TO app;
+         ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+         ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+         CREATE FUNCTION authz.caller_id() RETURNS UUID
+           LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+           AS $$ SELECT NULLIF(current_setting('app.user_id', true), '')::uuid $$;
+         CREATE FUNCTION authz.member_organizations() RETURNS SETOF UUID
+           LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             SELECT membership.organization_id FROM public.memberships membership
+             WHERE membership.user_id = authz.caller_id() AND membership.active $$;
+         CREATE FUNCTION authz.caller_grantees() RETURNS SETOF UUID
+           LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             WITH RECURSIVE reached (id) AS (
+               SELECT grantee.id FROM public.grantees grantee
+               WHERE grantee.id = authz.caller_id() AND grantee.kind = 'user'
+               UNION
+               SELECT grantee.id FROM public.grantees grantee WHERE grantee.kind = 'everyone'
+               UNION
+               SELECT organization FROM authz.member_organizations() organization
+             )
+             SELECT id FROM reached $$;
+         CREATE POLICY memberships_select ON memberships FOR SELECT TO app
+           USING (user_id = (SELECT authz.caller_id()));"
+    )
+}
+
+#[test]
+fn a_helper_arm_whose_kind_the_keys_rule_out_drops_from_its_set() {
+    let functions = "
+        CREATE FUNCTION authz.listed_grantees() RETURNS SETOF UUID
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT id FROM public.grantees WHERE id = authz.caller_id()
+            UNION SELECT id FROM public.grantees WHERE kind = 'user' $$;
+        CREATE FUNCTION authz.granted_resources() RETURNS SETOF UUID
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT permission.resource_id FROM public.grants permission
+            WHERE permission.grantee_id IN (SELECT authz.caller_grantees())
+              AND NOT EXISTS (
+                SELECT 1 FROM public.memberships membership
+                WHERE membership.organization_id = permission.organization_id
+                  AND membership.user_id = permission.grantee_id AND NOT membership.active) $$;
+        CREATE FUNCTION authz.granted_to_listed() RETURNS SETOF UUID
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT permission.resource_id FROM public.grants permission
+            WHERE permission.grantee_id IN (SELECT authz.listed_grantees())
+              AND NOT EXISTS (
+                SELECT 1 FROM public.memberships membership
+                WHERE membership.organization_id = permission.organization_id
+                  AND membership.user_id = permission.grantee_id AND NOT membership.active) $$;";
+    let app = || Deployment::default().with_app_role("app");
+    assert_eq!(
+        exposed(app(), &format!("{}{functions}", grantees(""))),
+        ["granted_to_listed()"]
+    );
+    assert_eq!(
+        exposed(
+            app(),
+            &format!("{}{functions}", grantees(" DEFERRABLE INITIALLY DEFERRED"))
+        ),
+        ["granted_resources()", "granted_to_listed()"]
+    );
+    let text_kinds = |user: &str| {
+        grantees("")
+            .replace("kind authz.grantee_kind", "kind TEXT")
+            .replace("('user'::authz.grantee_kind)", user)
+            .replace(
+                "('organization'::authz.grantee_kind)",
+                "('organization'::TEXT)",
+            )
+    };
+    assert_eq!(
+        exposed(
+            app(),
+            &format!("{}{functions}", text_kinds("('user'::TEXT)"))
+        ),
+        ["granted_to_listed()"]
+    );
+    let everyone = "grantee.kind = 'everyone'";
+    for (kinds, reported) in [
+        ("grantee.kind = ('everyone')", &["granted_to_listed()"][..]),
+        (
+            "grantee.kind IN ('everyone', 'organization')",
+            &["granted_to_listed()"],
+        ),
+        (
+            "grantee.kind IN ('everyone', 'user')",
+            &["granted_resources()", "granted_to_listed()"],
+        ),
+    ] {
+        assert_eq!(
+            exposed(
+                app(),
+                &format!("{}{functions}", grantees("").replace(everyone, kinds))
+            ),
+            reported,
+            "{kinds}"
+        );
+    }
+    assert_eq!(
+        exposed(
+            app(),
+            &format!(
+                "{}ALTER TABLE grantees ADD FOREIGN KEY (id) REFERENCES grantees (id);{functions}",
+                grantees("")
+            )
+        ),
+        ["granted_to_listed()"]
+    );
+    for schema in [
+        text_kinds("('useridx'::VARCHAR(4))"),
+        format!(
+            "{}CREATE TABLE guest_grantees () INHERITS (grantees);",
+            grantees("")
+        ),
+    ] {
+        assert_eq!(
+            exposed(app(), &format!("{schema}{functions}")),
+            ["granted_resources()", "granted_to_listed()"],
+            "{schema}"
+        );
+    }
+}
+
+#[test]
+fn a_strict_helper_a_policy_calls_with_null_admits_no_witnessed_row() {
+    let reported = |strict: &str, default: &str, argument: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "{ORGANIZATIONS}
+                 CREATE FUNCTION authz.founded_with(min_role authz.role{default}) RETURNS SETOF INT
+                   LANGUAGE sql STABLE {strict} SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     {FOUNDED} $$;
+                 CREATE FUNCTION authz.founded_list() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     {FOUNDED} $$;
+                 CREATE POLICY organizations_select ON public.organizations FOR SELECT TO app
+                   USING (id = ANY (ARRAY(SELECT authz.founded_with({argument}))));"
+            ),
+        )
+    };
+    for (strict, default, argument) in [("STRICT", "", "NULL"), ("STRICT", " DEFAULT NULL", "")] {
+        assert_eq!(
+            reported(strict, default, argument),
+            ["founded_list()", "founded_with(authz.role)"],
+            "{default} {argument}"
+        );
+    }
+    assert_eq!(reported("STRICT", "", "'reader'"), Vec::<String>::new());
+    assert_eq!(reported("", "", "NULL"), Vec::<String>::new());
+}
+
 const ROLE_SETS: &str = "
     CREATE ROLE app NOLOGIN;
     CREATE SCHEMA authz;
@@ -1714,12 +2123,16 @@ fn a_set_declared_within_the_policys_set_carries_the_key() {
     );
     assert_eq!(
         founded(&helpers, "", Deployment::default()),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        founded(&helpers, AUDITOR_OWNS_FOUNDED, Deployment::default()),
         ["parentless_founded_organizations()"]
     );
     assert_eq!(
         founded(
             &helpers,
-            "",
+            AUDITOR_OWNS_FOUNDED,
             Deployment::default()
                 .with_set_within(
                     "authz.parentless_founded_organizations()",
@@ -1730,6 +2143,9 @@ fn a_set_declared_within_the_policys_set_carries_the_key() {
         Vec::<String>::new()
     );
 }
+
+const AUDITOR_OWNS_FOUNDED: &str = "CREATE ROLE auditor NOLOGIN;
+    ALTER FUNCTION authz.founded_organizations() OWNER TO auditor;";
 
 #[test]
 fn a_restrictive_policy_still_needs_the_filter_to_imply_it() {
@@ -1771,7 +2187,7 @@ fn a_parameter_is_carried_over_every_value_a_strict_definer_takes() {
                 "{ORGANIZATIONS}
                  CREATE FUNCTION authz.organizations_with(min_role authz.role) RETURNS SETOF INT
                    LANGUAGE sql STABLE {strict} SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                     {FOUNDED} $$;
+                     {FOUNDED} AND min_role IS NOT NULL $$;
                  CREATE POLICY organizations_select ON public.organizations FOR SELECT TO app
                    USING (id = ANY (ARRAY(SELECT authz.organizations_with('reader')))
                      AND (SELECT authz.acting_installation_id()) IS NULL);"
@@ -1884,7 +2300,8 @@ fn a_definer_with_an_input_output_parameter_or_returning_its_input_carries_no_ke
         founded(
             &founded_organizations(FOUNDED),
             &format!(
-                "CREATE FUNCTION {extra} RETURNS SETOF INT
+                "{AUDITOR_OWNS_FOUNDED}
+                 CREATE FUNCTION {extra} RETURNS SETOF INT
                    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
                      {} $$;",
                 FOUNDED.replace("organization.id FROM", &format!("{projected} FROM"))
