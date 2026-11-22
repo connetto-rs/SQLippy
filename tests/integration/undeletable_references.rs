@@ -138,6 +138,20 @@ fn a_cascading_ancestor_the_role_cannot_rely_on_is_reported() {
          REVOKE DELETE ON folders FROM app;
          REVOKE DELETE ON docs FROM app;"
             .to_owned(),
+        // The search for tables cascading into the referenced table passes a
+        // key that does not cascade and a second key on a table already found.
+        "CREATE TABLE tenants (id INT PRIMARY KEY);
+         CREATE TABLE workspaces (id INT PRIMARY KEY, account_id INT NOT NULL REFERENCES accounts (id),
+           tenant_id INT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
+           backup_tenant_id INT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE);
+         CREATE TABLE folders (id INT PRIMARY KEY, tenant_id INT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE);
+         CREATE TABLE docs (workspace_id INT NOT NULL REFERENCES workspaces (id),
+           folder_id INT NOT NULL REFERENCES folders (id) ON DELETE CASCADE);
+         GRANT DELETE ON workspaces TO app;
+         GRANT DELETE ON tenants TO app;
+         REVOKE DELETE ON folders FROM app;
+         REVOKE DELETE ON docs FROM app;"
+            .to_owned(),
     ] {
         assert_eq!(reported(&sql).len(), 1, "{sql}");
     }
