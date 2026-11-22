@@ -932,7 +932,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 )?;
                 conditions.extend(witnessed);
                 if let Some(membership) = self.lineage.membership(select, |column| {
-                    match term(&resolver, Clause::Where, column, relation, &equalities)? {
+                    match term(&resolver, column, relation, &equalities)? {
                         Term::Column(column) => Some(column),
                         Term::Parameter(_) => None,
                     }
@@ -1009,7 +1009,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         let mut whole = true;
         for &(clause, conjunct) in &dropping {
             match renamed(conjunct, |reference| {
-                term(&resolver, clause, reference, relation, &equalities)
+                term(&resolver, reference, relation, &equalities)
             }) {
                 Some(stated) if self.body.confinement.reads_alike(conjunct)? => {
                     conditions.push(stated);
@@ -1311,8 +1311,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     mut conditions,
                     whole: stated,
                 } = self.stated(&filters, from, position)?;
-                if let Some(Term::Column(name)) =
-                    term(&resolver, Clause::Where, projected, relation, &equalities)
+                if let Some(Term::Column(name)) = term(&resolver, projected, relation, &equalities)
                     && let Some(column) =
                         column_named(self.body.confinement.database, table, &name)?
                 {
@@ -1358,16 +1357,10 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 )
             });
             for (index, join) in from.joins.iter().enumerate() {
-                let (names, alias) = match join_constraint(&join.join_operator) {
-                    Some(JoinConstraint::Using(names)) => (names, None),
-                    Some(JoinConstraint::UsingAlias(names, alias)) => (
-                        names,
-                        Some(
-                            normalize_identifier(&alias.value, alias.quote_style.is_some())
-                                .into_owned(),
-                        ),
-                    ),
-                    _ => continue,
+                let Some(JoinConstraint::Using(names) | JoinConstraint::UsingAlias(names, _)) =
+                    join_constraint(&join.join_operator)
+                else {
+                    continue;
                 };
                 for name in names
                     .iter()
@@ -1375,13 +1368,11 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 {
                     let right = self.identity_at(from, index + 1, name, sources)?;
                     let normalized = normalize_identifier(&name.value, name.quote_style.is_some());
-                    let alias = alias.clone();
                     if let Some(merge) = merges
                         .iter_mut()
                         .find(|merge| ptr::eq(merge.from, from) && merge.name == normalized)
                     {
                         merge.last = index;
-                        merge.alias = alias;
                         merge.sides.push(index + 1);
                         if merge.identity != right {
                             merge.identity = None;
@@ -1391,7 +1382,6 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                         merges.push(Merge {
                             from,
                             name: normalized.into_owned(),
-                            alias,
                             last: index,
                             sides: left
                                 .iter()
@@ -1752,23 +1742,22 @@ impl<'r> Equalities<'r> {
         position: usize,
     ) -> Result<Self, LookupError> {
         let mut equalities = Self::default();
-        for &(clause, filter) in filters {
-            let (left, right, inner) = match unnested(filter) {
+        for &(_, filter) in filters {
+            let (left, right) = match unnested(filter) {
                 Expr::BinaryOp {
                     left,
                     op: BinaryOperator::Eq,
                     right,
-                } => (left.as_ref(), right.as_ref(), clause),
+                } => (left.as_ref(), right.as_ref()),
                 Expr::In { expr, .. } => match semi_join(filter).and_then(carried_column) {
-                    Some((projected, _)) => (expr.as_ref(), projected, Clause::Witness),
+                    Some((projected, _)) => (expr.as_ref(), projected),
                     None => continue,
                 },
                 _ => continue,
             };
-            if let (Some((left, kind)), Some((right, other))) = (
-                resolver.equated(clause, left)?,
-                resolver.equated(inner, right)?,
-            ) && kind == other
+            if let (Some((left, kind)), Some((right, other))) =
+                (resolver.equated(left)?, resolver.equated(right)?)
+                && kind == other
             {
                 equalities.link(left, right);
             }
@@ -1851,9 +1840,6 @@ struct Merge {
     from: *const TableWithJoins,
     /// The name the joins merge.
     name: String,
-    /// The name the `AS` of the last join merging the name gives the joined
-    /// columns, normalized.
-    alias: Option<String>,
     /// The index of the last join merging the name.
     last: usize,
     /// The positions of the relations the joins merge the column of, the
@@ -1875,8 +1861,7 @@ impl Merge {
     }
 }
 
-/// Where a filter of a read stands, which decides the merged columns it
-/// sees.
+/// Where a filter of a read stands.
 #[derive(Clone, Copy)]
 enum Clause {
     /// A condition of the outer rows.
@@ -1886,8 +1871,8 @@ enum Clause {
     /// The `WHERE` of a query an `EXISTS` or `IN` of that `WHERE` finds a
     /// row of, or of the body of a `WITH` item or subquery of its `FROM`.
     Witness,
-    /// The `ON` condition of the join at this index of the `FROM` item.
-    On(usize),
+    /// An `ON` condition of the `FROM` item.
+    On,
 }
 
 /// The filters of a `SELECT`, with the conditions held of its outer rows.
@@ -1935,7 +1920,7 @@ impl Filters<'_> {
             .chain(
                 resolver
                     .joined_filter(position)
-                    .map(|(join, condition)| (Clause::On(join), condition)),
+                    .map(|condition| (Clause::On, condition)),
             )
             .collect()
     }
@@ -1975,15 +1960,13 @@ struct Resolver<'r, 'q, 'a, DB: DatabaseLike> {
 }
 
 impl<'r, 'q, 'a, DB: DatabaseLike> Resolver<'r, 'q, 'a, DB> {
-    /// The definition and binding of the column `reference`, in a filter of
-    /// `clause`, names, with the clause its binding resolves in. A column a
-    /// source projects from a column reference is that column of the row
+    /// The definition and binding of the column `reference` names. A column
+    /// a source projects from a column reference is that column of the row
     /// its `SELECT` yields it from.
     fn reference(
         &self,
-        clause: Clause,
         reference: &Expr,
-    ) -> Option<(ColumnDefinition<'r, 'q, 'a, DB>, ColumnBinding<'r>, Clause)> {
+    ) -> Option<(ColumnDefinition<'r, 'q, 'a, DB>, ColumnBinding<'r>)> {
         let (definition, binding) = self.context.reference(reference).ok()??;
         if let Some(entry) = binding.entry()
             && let Some(source) = self
@@ -1991,27 +1974,22 @@ impl<'r, 'q, 'a, DB: DatabaseLike> Resolver<'r, 'q, 'a, DB> {
                 .iter()
                 .find(|source| ptr::eq(source.relation, entry.factor()))
             && let Some(projected) = projection_at(source.body, entry.ordinal())
-            && let Some((definition, binding)) = self.context.reference(projected).ok().flatten()
+            && let Some(resolved) = self.context.reference(projected).ok().flatten()
         {
-            return Some((definition, binding, Clause::Witness));
+            return Some(resolved);
         }
-        Some((definition, binding, clause))
+        Some((definition, binding))
     }
 
     /// The conjuncts of the `ON` conditions of the `FROM` item that drop
-    /// rows of its relation at `position`, counted from zero, each with the
-    /// index of its join.
-    fn joined_filter(&self, position: usize) -> impl Iterator<Item = (usize, &'r Expr)> + '_ {
+    /// rows of its relation at `position`, counted from zero.
+    fn joined_filter(&self, position: usize) -> impl Iterator<Item = &'r Expr> + '_ {
         (0..self.from.joins.len())
             .filter_map(move |index| match self.dropping(index, position) {
-                Some(JoinConstraint::On(condition)) => Some((index, condition)),
+                Some(JoinConstraint::On(condition)) => Some(condition),
                 _ => None,
             })
-            .flat_map(|(index, condition)| {
-                conjuncts(condition)
-                    .into_iter()
-                    .map(move |conjunct| (index, conjunct))
-            })
+            .flat_map(conjuncts)
     }
 
     /// The constraint of the join at `index` of the `FROM` item when it
@@ -2070,41 +2048,24 @@ impl<'r, 'q, 'a, DB: DatabaseLike> Resolver<'r, 'q, 'a, DB> {
             .iter()
             .find(|source| ptr::eq(source.relation, relation))
             .and_then(|source| source.column(self.context, name))
-            .and_then(|(_, binding)| self.node(Clause::Witness, &binding))
+            .and_then(|(_, binding)| self.node(&binding))
             .unwrap_or_else(|| Node::at(self.from, position, name))
     }
 
-    /// The column a `USING` join merged that `binding` reached from a
-    /// filter of `clause`. A `WHERE` sees the merges of every join of the
-    /// `SELECT`, and an `ON` condition those of the joins before its own. A
-    /// name qualified by the alias of a join reaches its merge alone.
-    fn merge(&self, clause: Clause, binding: &ColumnBinding<'_>) -> Option<&'r Merge> {
-        if binding.entry().is_some() {
-            return None;
-        }
-        let alias = binding
-            .relation()
-            .map(|(relation, quoted)| normalize_identifier(relation, quoted));
+    /// The column a `USING` join of the `SELECT` merged that `binding`
+    /// reached.
+    fn merge(&self, binding: &ColumnBinding<'_>) -> Option<&'r Merge> {
+        let found = binding.merge()?;
         let (name, quoted) = binding.exposed()?;
         let name = normalize_identifier(name, quoted);
-        let mut named = self.merges.iter().filter(|merge| {
-            merge.name == name
-                && alias
-                    .as_deref()
-                    .is_none_or(|alias| merge.alias.as_deref() == Some(alias))
-        });
-        match clause {
-            Clause::Held | Clause::Witness => None,
-            Clause::Where => named.next().filter(|_| named.next().is_none()),
-            Clause::On(join) => {
-                named.find(|merge| ptr::eq(merge.from, self.from) && merge.last < join)
-            }
-        }
+        self.merges.iter().find(|merge| {
+            ptr::eq(merge.from, found.from()) && merge.last == found.join() && merge.name == name
+        })
     }
 
-    /// The column `binding` reached from a filter of `clause`.
-    fn node(&self, clause: Clause, binding: &ColumnBinding<'r>) -> Option<Node<'r>> {
-        if let Some(merge) = self.merge(clause, binding) {
+    /// The column `binding` reached.
+    fn node(&self, binding: &ColumnBinding<'r>) -> Option<Node<'r>> {
+        if let Some(merge) = self.merge(binding) {
             return Some(merge.node());
         }
         let (entry, (name, quoted)) = (binding.entry()?, binding.exposed()?);
@@ -2114,18 +2075,13 @@ impl<'r, 'q, 'a, DB: DatabaseLike> Resolver<'r, 'q, 'a, DB> {
         })
     }
 
-    /// The column `side`, of a filter of `clause`, names, with what `=`
-    /// compares its values by, or `None` when two equal values of it may
-    /// differ.
-    fn equated(
-        &self,
-        clause: Clause,
-        side: &Expr,
-    ) -> Result<Option<(Node<'r>, Cow<'r, Identity>)>, LookupError> {
-        let Some((definition, binding, clause)) = self.reference(clause, unnested(side)) else {
+    /// The column `side` names, with what `=` compares its values by, or
+    /// `None` when two equal values of it may differ.
+    fn equated(&self, side: &Expr) -> Result<Option<(Node<'r>, Cow<'r, Identity>)>, LookupError> {
+        let Some((definition, binding)) = self.reference(unnested(side)) else {
             return Ok(None);
         };
-        let identity = match (self.merge(clause, &binding), definition) {
+        let identity = match (self.merge(&binding), definition) {
             (Some(merge), _) => merge.identity.as_ref().map(Cow::Borrowed),
             (
                 None,
@@ -2136,7 +2092,7 @@ impl<'r, 'q, 'a, DB: DatabaseLike> Resolver<'r, 'q, 'a, DB> {
             _ => None,
         };
         Ok(identity
-            .zip(self.node(clause, &binding))
+            .zip(self.node(&binding))
             .map(|(identity, node)| (node, identity)))
     }
 }
@@ -2918,17 +2874,16 @@ fn relation_at(from: &TableWithJoins, position: usize) -> &TableFactor {
 /// The input parameter of the function whose body holds `reference` that
 /// it names where no column of the same name is in reach, or else the stored
 /// name of the column of `relation` it names or `equalities` hold equal to
-/// the column it names from a filter of `clause`.
+/// the column it names.
 fn term<'r, DB: DatabaseLike>(
     resolver: &Resolver<'r, '_, '_, DB>,
-    clause: Clause,
     reference: &Expr,
     relation: &TableFactor,
     equalities: &Equalities<'r>,
 ) -> Option<Term> {
-    match resolver.reference(clause, reference)? {
-        (ColumnDefinition::Parameter { ordinal, .. }, _, _) => Some(Term::Parameter(ordinal)),
-        (_, binding, clause) => match resolver.node(clause, &binding)? {
+    match resolver.reference(reference)? {
+        (ColumnDefinition::Parameter { ordinal, .. }, _) => Some(Term::Parameter(ordinal)),
+        (_, binding) => match resolver.node(&binding)? {
             Node::Column { factor, name } if ptr::eq(factor, relation) => {
                 Some(Term::Column(name.into_owned()))
             }
