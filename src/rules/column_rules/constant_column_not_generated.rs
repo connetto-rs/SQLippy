@@ -1,7 +1,9 @@
 //! Submodule providing the `ConstantColumnNotGenerated` rule.
 
-use sql_traits::traits::{CheckConstraintLike, ColumnLike, DatabaseLike, TableLike};
-use sqlparser::ast::{BinaryOperator, Expr, Value};
+use sql_traits::traits::{
+    CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, TableLike,
+};
+use sqlparser::ast::{BinaryOperator, Expr, ReferentialAction, Value};
 
 use crate::{
     error::Interruption,
@@ -20,7 +22,11 @@ rule_definition!(
     /// operand order, of a check of the column's table, compared with the
     /// default through parentheses and casts. A nullable column is not
     /// reported, since a generated column computing the literal would refuse
-    /// the `NULL` it admits.
+    /// the `NULL` it admits. Nor is a column among the referencing columns of
+    /// a foreign key whose `ON UPDATE` action is `CASCADE`, `SET NULL` or
+    /// `SET DEFAULT`, or whose `ON DELETE` action is `SET NULL` or
+    /// `SET DEFAULT`, since PostgreSQL refuses such a key over a generated
+    /// column.
     ///
     /// # Example
     ///
@@ -84,6 +90,20 @@ impl<DB: DatabaseLike> ColumnRule for ConstantColumnNotGenerated<DB> {
         };
         if column.is_generated(database) || column.is_nullable(database)? {
             return Ok(());
+        }
+        for foreign_key in column.foreign_keys(database)? {
+            let writes_referencing = matches!(
+                foreign_key.on_update(database),
+                ReferentialAction::Cascade
+                    | ReferentialAction::SetNull
+                    | ReferentialAction::SetDefault
+            ) || matches!(
+                foreign_key.on_delete(database),
+                ReferentialAction::SetNull | ReferentialAction::SetDefault
+            );
+            if writes_referencing {
+                return Ok(());
+            }
         }
         let stored = column.stored_column_name();
         let mut held = false;
