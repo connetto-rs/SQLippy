@@ -195,6 +195,17 @@ fn a_cascading_ancestor_the_role_cannot_rely_on_is_reported() {
             "GENERATED ALWAYS AS ('note'::resource_kind) STORED",
             "GENERATED ALWAYS AS ('project'::resource_kind) STORED",
         ),
+        // The held key maps no discriminator, so a project may be any note's
+        // own resource.
+        "CREATE TYPE resource_kind AS ENUM ('project', 'note');
+         CREATE TABLE resources (id INT PRIMARY KEY, kind resource_kind NOT NULL, UNIQUE (id, kind));
+         GRANT DELETE ON resources TO app;
+         CREATE TABLE notes (id INT PRIMARY KEY,
+           kind resource_kind GENERATED ALWAYS AS ('note'::resource_kind) STORED NOT NULL,
+           project_id INT NOT NULL REFERENCES resources (id),
+           FOREIGN KEY (id, kind) REFERENCES resources (id, kind) ON DELETE CASCADE);
+         REVOKE DELETE ON notes FROM app;"
+            .to_owned(),
     ] {
         assert_eq!(reported(&sql).len(), 1, "{sql}");
     }
@@ -398,6 +409,26 @@ fn a_reference_cleared_by_deleting_a_cascading_ancestor_passes() {
             "CHECK (kind IN ('note'))",
             "CHECK (project_kind IN ('project', 'folder'))",
         ),
+        // Generated text labels keep the rows apart.
+        discriminated(
+            "TEXT",
+            "",
+            "GENERATED ALWAYS AS ('note'::TEXT) STORED",
+            "GENERATED ALWAYS AS ('project'::TEXT) STORED",
+        ),
+        // Enumeration labels count under a domain and through quoted columns.
+        "CREATE TYPE resource_kind AS ENUM ('project', 'note');
+         CREATE DOMAIN kind_domain AS resource_kind;
+         CREATE TABLE resources (id INT PRIMARY KEY, \"Kind\" kind_domain NOT NULL, UNIQUE (id, \"Kind\"));
+         GRANT DELETE ON resources TO app;
+         CREATE TABLE notes (id INT PRIMARY KEY,
+           \"Kind\" kind_domain GENERATED ALWAYS AS ('note'::resource_kind) STORED NOT NULL,
+           project_id INT NOT NULL,
+           \"ProjectKind\" kind_domain GENERATED ALWAYS AS ('project'::resource_kind) STORED NOT NULL,
+           FOREIGN KEY (id, \"Kind\") REFERENCES resources (id, \"Kind\") ON DELETE CASCADE,
+           FOREIGN KEY (project_id, \"ProjectKind\") REFERENCES resources (id, \"Kind\"));
+         REVOKE DELETE ON notes FROM app;"
+            .to_owned(),
     ] {
         assert_eq!(reported(&sql), Vec::<String>::new(), "{sql}");
     }
