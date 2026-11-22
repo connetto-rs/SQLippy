@@ -129,20 +129,23 @@ fn the_resolution_names_the_composite_key_and_whether_it_exists() {
         ),
         "{keyed}"
     );
-    let [(_, unkeyed)] = reported(
-        &constrainer(),
-        &format!(
-            "CREATE TABLE projects (id INT PRIMARY KEY, organization_id INT NOT NULL); {documents}"
-        ),
-    )
-    .try_into()
-    .expect("one finding");
-    assert!(
-        unkeyed.starts_with(
-            "Add UNIQUE (organization_id, id) to 'projects', which a composite reference requires"
-        ),
-        "{unkeyed}"
-    );
+    for projects in [
+        "CREATE TABLE projects (id INT PRIMARY KEY, organization_id INT NOT NULL);",
+        "CREATE TABLE projects (id INT PRIMARY KEY, organization_id INT NOT NULL,
+           UNIQUE (organization_id, id) DEFERRABLE);",
+        "CREATE TABLE projects (id INT PRIMARY KEY, organization_id INT NOT NULL,
+           UNIQUE (organization_id, id) DEFERRABLE INITIALLY DEFERRED);",
+    ] {
+        let [(_, unkeyed)] = reported(&constrainer(), &format!("{projects} {documents}"))
+            .try_into()
+            .expect("one finding");
+        assert!(
+            unkeyed.starts_with(
+                "Add UNIQUE (organization_id, id) to 'projects', which a composite reference requires"
+            ),
+            "{unkeyed}"
+        );
+    }
     let [(_, swapped)] = reported(
         &constrainer(),
         &format!(
@@ -259,6 +262,15 @@ fn a_shared_root_that_does_not_pin_both_rows_to_one_tenant_is_reported() {
         format!(
             "CREATE TABLE resources (id INT, organization_id INT NOT NULL,
                PRIMARY KEY (organization_id, id)); {PARENTS} {extension}"
+        ),
+        format!(
+            "CREATE TABLE resources (id INT PRIMARY KEY DEFERRABLE, organization_id INT NOT NULL,
+               UNIQUE (organization_id, id)); {PARENTS} {extension}"
+        ),
+        format!(
+            "CREATE TABLE resources (id INT UNIQUE DEFERRABLE INITIALLY DEFERRED,
+               organization_id INT NOT NULL, PRIMARY KEY (organization_id, id));
+             {PARENTS} {extension}"
         ),
         // MATCH SIMPLE skips a row whose tenant key is NULL.
         format!(

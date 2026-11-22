@@ -328,6 +328,8 @@ fn a_foreign_key_a_unique_key_inside_it_finds_is_not_reported() {
             "{PARENT}
              CREATE TABLE subtype (a INT PRIMARY KEY, b INT NOT NULL, FOREIGN KEY (a, b) REFERENCES p (a, b));
              CREATE TABLE constrained (a INT, b INT, UNIQUE (b), FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE TABLE deferred (a INT, b INT, UNIQUE (b) DEFERRABLE, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE TABLE initially_deferred (a INT, b INT, UNIQUE (b) DEFERRABLE INITIALLY DEFERRED, FOREIGN KEY (a, b) REFERENCES p (a, b));
              CREATE TABLE indexed (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
              CREATE UNIQUE INDEX ON indexed (b);
              CREATE TABLE outside (a INT, b INT, c INT, UNIQUE (a, c), FOREIGN KEY (a, b) REFERENCES p (a, b));

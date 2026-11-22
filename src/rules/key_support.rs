@@ -149,16 +149,25 @@ pub(crate) fn named<DB: DatabaseLike>(
 /// The columns of one unique key.
 pub(crate) type Key<'db, DB> = Vec<&'db <DB as DatabaseLike>::Column>;
 
-/// The unconditional unique keys of a table over plain columns, each with
-/// whether several of its rows can hold a `NULL` in the key.
+/// An unconditional unique key of a table over plain columns.
+struct PlainKey<'db, DB: DatabaseLike> {
+    columns: Key<'db, DB>,
+    /// Whether several of its rows can hold a `NULL` in the key.
+    distinct_nulls: bool,
+    /// Whether its check may wait until later in the transaction, so the
+    /// key may hold duplicate rows until then.
+    deferrable: bool,
+}
+
+/// The unconditional unique keys of a table over plain columns.
 fn plain_unique_keys<'db, DB: DatabaseLike>(
     database: &'db DB,
     table: &'db DB::Table,
-) -> Result<Vec<(Key<'db, DB>, bool)>, LookupError> {
+) -> Result<Vec<PlainKey<'db, DB>>, LookupError> {
     fn usable<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
         database: &'db DB,
         index: &'db I,
-    ) -> Result<Option<(Key<'db, DB>, bool)>, LookupError> {
+    ) -> Result<Option<PlainKey<'db, DB>>, LookupError> {
         if index.predicate().is_some() || !index.is_simple(database)? {
             return Ok(None);
         }
@@ -167,7 +176,11 @@ fn plain_unique_keys<'db, DB: DatabaseLike>(
         for column in &columns {
             nullable |= column.is_nullable(database)?;
         }
-        Ok(Some((columns, nullable && index.nulls_distinct())))
+        Ok(Some(PlainKey {
+            columns,
+            distinct_nulls: nullable && index.nulls_distinct(),
+            deferrable: index.deferral(database).is_deferrable(),
+        }))
     }
     let mut keys = Vec::new();
     for index in table.unique_indices(database)? {
@@ -180,27 +193,44 @@ fn plain_unique_keys<'db, DB: DatabaseLike>(
 }
 
 /// The unique keys of a table that tell its rows apart: unconditional,
-/// over plain columns, and over columns that cannot hold distinct `NULL`s.
+/// over plain columns, over columns that cannot hold distinct `NULL`s, and
+/// not deferrable, since a deferrable key may hold duplicates until its
+/// check runs.
 pub(crate) fn unique_keys<'db, DB: DatabaseLike>(
     database: &'db DB,
     table: &'db DB::Table,
 ) -> Result<Vec<Key<'db, DB>>, LookupError> {
     Ok(plain_unique_keys(database, table)?
         .into_iter()
-        .filter_map(|(key, nulls)| (!nulls).then_some(key))
+        .filter_map(|key| (!key.distinct_nulls && !key.deferrable).then_some(key.columns))
         .collect())
 }
 
 /// The unique keys of a table through which an equality on every key column
-/// matches at most one row: unconditional and over plain columns, nullable
-/// ones included, since an equality never matches a `NULL`.
+/// matches at most one row: unconditional, over plain columns, nullable
+/// ones included, since an equality never matches a `NULL`, and not
+/// deferrable, since a deferrable key may hold duplicates until its check
+/// runs.
 pub(crate) fn equality_keys<'db, DB: DatabaseLike>(
     database: &'db DB,
     table: &'db DB::Table,
 ) -> Result<Vec<Key<'db, DB>>, LookupError> {
     Ok(plain_unique_keys(database, table)?
         .into_iter()
-        .map(|(key, _)| key)
+        .filter_map(|key| (!key.deferrable).then_some(key.columns))
+        .collect())
+}
+
+/// The unconditional unique keys of a table over plain columns whose index
+/// an equality on every key column reads, deferrable ones included, since
+/// a deferrable key keeps its index.
+pub(crate) fn indexed_keys<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    table: &'db DB::Table,
+) -> Result<Vec<Key<'db, DB>>, LookupError> {
+    Ok(plain_unique_keys(database, table)?
+        .into_iter()
+        .map(|key| key.columns)
         .collect())
 }
 

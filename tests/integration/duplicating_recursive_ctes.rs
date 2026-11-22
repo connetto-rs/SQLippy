@@ -9,7 +9,9 @@ use sqlparser::dialect::PostgreSqlDialect;
 const SCHEMA: &str = "CREATE TABLE groups (id INT PRIMARY KEY, parent_id INT);
     CREATE TABLE dag_edges (child INT, parent INT, PRIMARY KEY (child, parent));
     CREATE TABLE links (child INT NOT NULL, parent INT);
-    CREATE UNIQUE INDEX links_child ON links (child);";
+    CREATE UNIQUE INDEX links_child ON links (child);
+    CREATE TABLE deferred_groups (id INT, parent_id INT, PRIMARY KEY (id) DEFERRABLE);
+    CREATE TABLE deferred_links (child INT NOT NULL UNIQUE DEFERRABLE, parent INT);";
 
 fn duplicating(sql: &str) -> Vec<String> {
     let constrainer: GenericConstrainer<ParserDB> = DuplicatingRecursiveCte::default().into();
@@ -33,6 +35,10 @@ fn a_union_all_walk_over_a_non_unique_column_is_reported() {
         "WITH RECURSIVE r(id) AS (SELECT 0 UNION ALL SELECT e.child FROM public.dag_edges AS e, r WHERE e.parent = r.id) SELECT id FROM r",
         // Upward over a graph, the joined child column is no key on its own.
         "WITH RECURSIVE r(id) AS (SELECT 40 UNION ALL SELECT e.parent FROM dag_edges AS e JOIN r ON e.child = r.id) SELECT id FROM r",
+        "WITH RECURSIVE r(id) AS (SELECT 6 UNION ALL SELECT g.parent_id FROM deferred_groups AS g JOIN r ON g.id = r.id WHERE g.parent_id IS NOT NULL) SELECT id FROM r",
+        "WITH RECURSIVE r(id) AS (SELECT 6 UNION ALL SELECT l.parent FROM deferred_links AS l JOIN r ON l.child = r.id WHERE l.parent IS NOT NULL) SELECT id FROM r",
+        "WITH RECURSIVE r(id) AS (SELECT 1 UNION ALL SELECT g.id FROM deferred_groups AS g JOIN r ON g.parent_id = r.id) SELECT id FROM r",
+        "WITH RECURSIVE r(id) AS (SELECT 0 UNION ALL SELECT l.child FROM deferred_links AS l JOIN r ON l.parent = r.id) SELECT id FROM r",
     ] {
         assert_eq!(duplicating(sql).len(), 1, "{sql}");
     }

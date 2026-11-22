@@ -1404,6 +1404,10 @@ fn a_helper_filter_reaches_the_row_its_returned_key_references() {
         teams(TEAM_KEYS, " DEFERRABLE INITIALLY DEFERRED"),
         teams("UNIQUE (organization_id, id)", ""),
         teams(
+            "PRIMARY KEY (id) DEFERRABLE, UNIQUE (organization_id, id)",
+            "",
+        ),
+        teams(
             "PRIMARY KEY (id), code UUID NOT NULL, UNIQUE (organization_id, code)",
             "",
         )
