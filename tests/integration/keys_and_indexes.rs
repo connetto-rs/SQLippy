@@ -155,6 +155,48 @@ fn a_unique_index_repeating_a_key_constraint_is_reported() {
     assert_eq!(found, ["accounts_email", "accounts_identifier"]);
 }
 
+/// Keys and unique indexes over one column that PostgreSQL checks at
+/// different times, besides one key repeated as written and one unique
+/// index repeating the primary key.
+const DEFERRED_KEYS: &str = "
+    CREATE TABLE ledgers (identifier INT PRIMARY KEY, code TEXT, slot INT,
+      UNIQUE (code) DEFERRABLE,
+      UNIQUE (slot), UNIQUE (slot) DEFERRABLE, UNIQUE (slot) DEFERRABLE INITIALLY DEFERRED);
+    ALTER TABLE ledgers ADD UNIQUE (code) DEFERRABLE;
+    CREATE UNIQUE INDEX ledgers_code ON ledgers (code);
+    CREATE UNIQUE INDEX ledgers_identifier ON ledgers (identifier);
+";
+
+#[test]
+fn keys_checked_at_different_times_are_not_duplicates() {
+    assert_eq!(
+        named_by("duplicate_index", DEFERRED_KEYS),
+        ["ledgers_identifier"]
+    );
+    let database = ParserDB::parse::<PostgreSqlDialect>(DEFERRED_KEYS).expect("schema parses");
+    let unique = GenericConstrainer::from(DuplicateUniqueIndex::default());
+    assert_eq!(
+        first_names(&unique, &database, "duplicate_unique_index"),
+        ["ledgers"]
+    );
+}
+
+#[test]
+fn live_keys_checked_at_different_times_are_not_duplicates() {
+    let (_container, database) = crate::live_catalog::catalog("public", DEFERRED_KEYS);
+    let index: GenericConstrainer<pg_diesel::PgDieselDatabase> = DuplicateIndex::default().into();
+    assert_eq!(
+        first_names(&index, &database, "duplicate_index"),
+        ["ledgers_identifier"]
+    );
+    let unique: GenericConstrainer<pg_diesel::PgDieselDatabase> =
+        DuplicateUniqueIndex::default().into();
+    assert_eq!(
+        first_names(&unique, &database, "duplicate_unique_index"),
+        ["ledgers"]
+    );
+}
+
 #[test]
 fn a_quoted_operator_class_names_the_class_it_quotes() {
     let found = named_by(
