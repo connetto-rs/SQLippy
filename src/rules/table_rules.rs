@@ -102,6 +102,8 @@ mod equality_index_on_array;
 pub use equality_index_on_array::EqualityIndexOnArray;
 mod empty_partial_index;
 pub use empty_partial_index::EmptyPartialIndex;
+mod needless_index_predicate;
+pub use needless_index_predicate::NeedlessIndexPredicate;
 mod numbered_columns;
 pub use numbered_columns::NumberedColumns;
 mod time_dependent_check;
