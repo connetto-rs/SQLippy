@@ -946,6 +946,30 @@ fn a_parameter_confines_nothing_unless_it_is_an_enum_no_column_shadows() {
 }
 
 #[test]
+fn a_parameter_compared_directly_confines_only_in_a_strict_function() {
+    assert_eq!(
+        exposed(
+            Deployment::default().with_app_role("app"),
+            "CREATE ROLE app NOLOGIN;
+             CREATE TYPE clearance AS ENUM ('public');
+             CREATE TABLE notices (id INT, level clearance);
+             ALTER TABLE notices ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON notices TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE POLICY public_notices ON notices FOR SELECT TO app USING (level = 'public');
+             CREATE FUNCTION strict_notices(wanted clearance) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT notice.id FROM public.notices notice WHERE notice.level = wanted $$;
+             CREATE FUNCTION lenient_notices(wanted clearance) RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT notice.id FROM public.notices notice WHERE notice.level = wanted $$;",
+        ),
+        ["lenient_notices(clearance)"]
+    );
+}
+
+#[test]
 fn the_default_constrainer_runs_the_function_rules_at_their_group_levels() {
     let found = findings(
         &DefaultConstrainer::<ParserDB>::default(),
