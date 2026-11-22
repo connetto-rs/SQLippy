@@ -36,6 +36,7 @@ mod duplicate_column_assignments;
 mod duplicate_policies;
 mod duplicating_recursive_ctes;
 mod dynamic_sql;
+mod empty_partial_indexes;
 mod engine_columns;
 mod engine_foreign_keys;
 mod engine_schema_advice;
