@@ -61,7 +61,8 @@ fn a_reference_the_role_cannot_clear_is_reported() {
          REVOKE DELETE ON notes FROM app;
          GRANT UPDATE (account_id) ON notes TO app;"
             .to_owned(),
-        // A cascading sibling key clears only the rows that reference through it.
+        // Deleting the account a cascading sibling key references first deletes
+        // from the referenced table, whose immediate check may refuse it.
         "CREATE TABLE notes (id INT PRIMARY KEY,
            author_id INT NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
            reviewer_id INT NOT NULL REFERENCES accounts (id));
@@ -103,6 +104,56 @@ fn a_reference_the_role_cannot_clear_is_reported() {
         let messages = reported(&sql);
         assert_eq!(messages.len(), 1, "{sql}");
         assert!(messages[0].contains("'app'"), "{}", messages[0]);
+    }
+}
+
+#[test]
+fn a_cascading_ancestor_the_role_cannot_rely_on_is_reported() {
+    for sql in [
+        // A nullable cascading key leaves rows without a row to delete.
+        "CREATE TABLE folders (id INT PRIMARY KEY);
+         CREATE TABLE notes (account_id INT NOT NULL REFERENCES accounts (id),
+           folder_id INT REFERENCES folders (id) ON DELETE CASCADE);
+         REVOKE DELETE ON notes FROM app;
+         GRANT DELETE ON folders TO app;"
+            .to_owned(),
+        // A nullable key further up the chain leaves rows without an ancestor.
+        "CREATE TABLE libraries (id INT PRIMARY KEY);
+         CREATE TABLE folders (id INT PRIMARY KEY, library_id INT REFERENCES libraries (id) ON DELETE CASCADE);
+         CREATE TABLE notes (account_id INT NOT NULL REFERENCES accounts (id),
+           folder_id INT NOT NULL REFERENCES folders (id) ON DELETE CASCADE);
+         REVOKE DELETE ON notes FROM app;
+         REVOKE DELETE ON folders FROM app;
+         GRANT DELETE ON libraries TO app;"
+            .to_owned(),
+        // Deleting the ancestor also cascades into the referenced table, whose
+        // immediate check may run before the cascade reaching the row.
+        "CREATE TABLE tenants (id INT PRIMARY KEY);
+         CREATE TABLE workspaces (id INT PRIMARY KEY, tenant_id INT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE);
+         CREATE TABLE folders (id INT PRIMARY KEY, tenant_id INT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE);
+         CREATE TABLE docs (workspace_id INT NOT NULL REFERENCES workspaces (id),
+           folder_id INT NOT NULL REFERENCES folders (id) ON DELETE CASCADE);
+         GRANT DELETE ON workspaces TO app;
+         GRANT DELETE ON tenants TO app;
+         REVOKE DELETE ON folders FROM app;
+         REVOKE DELETE ON docs FROM app;"
+            .to_owned(),
+        // The search for tables cascading into the referenced table passes a
+        // key that does not cascade and a second key on a table already found.
+        "CREATE TABLE tenants (id INT PRIMARY KEY);
+         CREATE TABLE workspaces (id INT PRIMARY KEY, account_id INT NOT NULL REFERENCES accounts (id),
+           tenant_id INT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
+           backup_tenant_id INT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE);
+         CREATE TABLE folders (id INT PRIMARY KEY, tenant_id INT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE);
+         CREATE TABLE docs (workspace_id INT NOT NULL REFERENCES workspaces (id),
+           folder_id INT NOT NULL REFERENCES folders (id) ON DELETE CASCADE);
+         GRANT DELETE ON workspaces TO app;
+         GRANT DELETE ON tenants TO app;
+         REVOKE DELETE ON folders FROM app;
+         REVOKE DELETE ON docs FROM app;"
+            .to_owned(),
+    ] {
+        assert_eq!(reported(&sql).len(), 1, "{sql}");
     }
 }
 
@@ -233,6 +284,55 @@ fn a_reference_with_a_cleanup_path_passes() {
              REVOKE EXECUTE ON FUNCTION purge() FROM PUBLIC;
              CREATE TRIGGER accounts_purge BEFORE DELETE ON accounts FOR EACH ROW EXECUTE FUNCTION purge();"
         ),
+    ] {
+        assert_eq!(reported(&sql), Vec::<String>::new(), "{sql}");
+    }
+}
+
+#[test]
+fn a_reference_cleared_by_deleting_a_cascading_ancestor_passes() {
+    for sql in [
+        // The role may delete the row each referencing row cascades from.
+        "CREATE TABLE folders (id INT PRIMARY KEY);
+         CREATE TABLE notes (account_id INT NOT NULL REFERENCES accounts (id),
+           folder_id INT NOT NULL REFERENCES folders (id) ON DELETE CASCADE);
+         REVOKE DELETE ON notes FROM app;
+         GRANT DELETE ON folders TO app;"
+            .to_owned(),
+        // The role may delete an ancestor further up the cascades.
+        "CREATE TABLE libraries (id INT PRIMARY KEY);
+         CREATE TABLE folders (id INT PRIMARY KEY, library_id INT NOT NULL REFERENCES libraries (id) ON DELETE CASCADE);
+         CREATE TABLE notes (account_id INT NOT NULL REFERENCES accounts (id),
+           folder_id INT NOT NULL REFERENCES folders (id) ON DELETE CASCADE);
+         REVOKE DELETE ON notes FROM app;
+         REVOKE DELETE ON folders FROM app;
+         GRANT DELETE ON libraries TO app;"
+            .to_owned(),
+        // A nullable cascading column is never NULL in a row the key holds.
+        "CREATE TABLE folders (id INT, account_id INT, PRIMARY KEY (id, account_id));
+         CREATE TABLE notes (account_id INT REFERENCES accounts (id), folder_id INT NOT NULL,
+           FOREIGN KEY (folder_id, account_id) REFERENCES folders (id, account_id) ON DELETE CASCADE);
+         REVOKE DELETE, UPDATE ON notes FROM app;
+         GRANT DELETE ON folders TO app;"
+            .to_owned(),
+        // A deferrable check the role may defer past deleting each row's own
+        // referenced row, in the same table, first.
+        "CREATE TABLE notes (id INT PRIMARY KEY REFERENCES accounts (id) ON DELETE CASCADE,
+           account_id INT NOT NULL REFERENCES accounts (id) DEFERRABLE);
+         REVOKE DELETE ON notes FROM app;"
+            .to_owned(),
+        // A deferrable check the role may defer past an ancestor's cascades
+        // into the referenced table.
+        "CREATE TABLE tenants (id INT PRIMARY KEY);
+         CREATE TABLE workspaces (id INT PRIMARY KEY, tenant_id INT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE);
+         CREATE TABLE folders (id INT PRIMARY KEY, tenant_id INT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE);
+         CREATE TABLE docs (workspace_id INT NOT NULL REFERENCES workspaces (id) DEFERRABLE,
+           folder_id INT NOT NULL REFERENCES folders (id) ON DELETE CASCADE);
+         GRANT DELETE ON workspaces TO app;
+         GRANT DELETE ON tenants TO app;
+         REVOKE DELETE ON folders FROM app;
+         REVOKE DELETE ON docs FROM app;"
+            .to_owned(),
     ] {
         assert_eq!(reported(&sql), Vec::<String>::new(), "{sql}");
     }
