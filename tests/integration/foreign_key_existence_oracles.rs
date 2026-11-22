@@ -858,3 +858,439 @@ fn a_trigger_covers_the_writes_it_fires_on() {
         }
     }
 }
+
+/// Object of every finding of the rule on `sql`, under `deployment`.
+fn objects_under(deployment: Deployment, sql: &str) -> Vec<String> {
+    let mut constrainer: GenericConstrainer<ParserDB> = ForeignKeyExistenceOracle::default().into();
+    constrainer.set_deployment(deployment);
+    findings(&constrainer, "foreign_key_existence_oracle", sql)
+        .into_iter()
+        .map(|(_, object, _)| object)
+        .collect()
+}
+
+/// Grants whose resource key a definer helper hands out, with `body` as the
+/// helper's query and `readable` as the security of the set function.
+fn sharable_schema(readable: &str, header: &str, body: &str, check: &str) -> String {
+    format!(
+        "CREATE ROLE app;
+         CREATE FUNCTION readable(level TEXT) RETURNS SETOF INT LANGUAGE sql STABLE {readable} AS $$ SELECT 1 $$;
+         CREATE FUNCTION sharable() RETURNS TABLE (resource_id INT, role TEXT)
+         LANGUAGE sql STABLE SECURITY DEFINER {header} AS $$ {body} $$;
+         CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL, UNIQUE (organization_id, id));
+         ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY resources_read ON resources FOR SELECT TO app USING (id IN (SELECT readable('reader')));
+         CREATE TABLE grants (organization_id INT, resource_id INT, role TEXT,
+           CONSTRAINT grants_resource FOREIGN KEY (organization_id, resource_id) REFERENCES resources (organization_id, id));
+         ALTER TABLE grants ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY grants_write ON grants FOR INSERT TO app WITH CHECK ({check});
+         GRANT SELECT ON resources TO app;
+         GRANT INSERT ON grants TO app;"
+    )
+}
+
+#[test]
+fn a_key_column_a_definer_helper_draws_from_a_readable_set_is_clean() {
+    let writer = "SELECT resource.id, 'writer'::text FROM readable('writer') resource(id)";
+    let filtered = "SELECT resource.id, 'reader'::text FROM resources resource
+        WHERE resource.organization_id > 0 AND resource.id IN (SELECT readable('writer'))";
+    let paired =
+        "(resource_id, role) IN (SELECT share.resource_id, share.role FROM sharable() share)";
+    let definer = "SECURITY DEFINER";
+    let path = "SET search_path = pg_catalog, public, pg_temp";
+    let expanded = "SELECT resource.id, allowed.role FROM readable('writer') resource(id)
+        CROSS JOIN unnest(ARRAY['writer', 'reader']) allowed(role) WHERE now() IS NOT NULL";
+    for (readable, header, body, check, expected) in [
+        (definer, "", writer, paired, vec![]),
+        (definer, path, writer, paired, vec![]),
+        // Built-ins resolve to the catalog, and an array expansion reads no key.
+        (definer, path, expanded, paired, vec![]),
+        (
+            definer,
+            "",
+            &format!("{writer} UNION {filtered}"),
+            paired,
+            vec![],
+        ),
+        (
+            definer,
+            "",
+            writer,
+            "(resource_id, role) IN (SELECT * FROM sharable())",
+            vec![],
+        ),
+        (
+            definer,
+            "",
+            writer,
+            "resource_id IN (SELECT share.resource_id FROM sharable() share WHERE share.role = 'writer')",
+            vec![],
+        ),
+        // An arm drawing from every resource leaves the key unconfined.
+        (
+            definer,
+            "",
+            &format!("{writer} UNION SELECT resource.id, 'reader' FROM resources resource"),
+            paired,
+            vec!["grants.grants_resource"],
+        ),
+        // Inside the definer, an invoker set runs as the helper's owner.
+        ("", "", writer, paired, vec!["grants.grants_resource"]),
+        // A setting the helper changes may change what the set yields.
+        (
+            definer,
+            "SET app.level = 'admin'",
+            writer,
+            paired,
+            vec!["grants.grants_resource"],
+        ),
+        // A search path that leaves out the set's schema reaches another set.
+        (
+            definer,
+            "SET search_path = pg_catalog",
+            writer,
+            paired,
+            vec!["grants.grants_resource"],
+        ),
+        // The key column pairs with the role, which no set confines.
+        (
+            definer,
+            "",
+            writer,
+            "(role, resource_id) IN (SELECT share.resource_id, share.role FROM sharable() share)",
+            vec!["grants.grants_resource"],
+        ),
+        (
+            definer,
+            "",
+            "SELECT 1, 'writer'::text FROM readable('writer') resource(id)",
+            paired,
+            vec!["grants.grants_resource"],
+        ),
+        (
+            definer,
+            "",
+            "SELECT resource.id, 'writer'::text FROM readable('writer') resource(id) LIMIT 1",
+            paired,
+            vec![],
+        ),
+        (
+            definer,
+            "",
+            "SELECT resource.id, 'writer'::text FROM readable('any') resource(id)",
+            paired,
+            vec!["grants.grants_resource"],
+        ),
+    ] {
+        let deployment = Deployment::default()
+            .with_app_role("app")
+            .with_set_within("readable('writer')", "readable('reader')")
+            .unwrap();
+        assert_eq!(
+            objects_under(deployment, &sharable_schema(readable, header, body, check)),
+            expected,
+            "{readable} {header} {body} under {check}"
+        );
+    }
+}
+
+#[test]
+fn a_definer_helper_without_a_declared_relation_between_sets_is_reported() {
+    let writer = "SELECT resource.id, 'writer'::text FROM readable('writer') resource(id)";
+    let paired =
+        "(resource_id, role) IN (SELECT share.resource_id, share.role FROM sharable() share)";
+    assert_eq!(
+        objects_under(
+            Deployment::default().with_app_role("app"),
+            &sharable_schema("SECURITY DEFINER", "", writer, paired)
+        ),
+        ["grants.grants_resource"]
+    );
+}
+
+#[test]
+fn a_definer_helper_calling_a_name_another_schema_declares_is_reported() {
+    let schema = sharable_schema(
+        "SECURITY DEFINER",
+        "SET search_path = public, other",
+        "SELECT resource.id, 'writer'::text FROM readable('writer') resource(id)",
+        "(resource_id, role) IN (SELECT share.resource_id, share.role FROM sharable() share)",
+    );
+    let deployment = || {
+        Deployment::default()
+            .with_app_role("app")
+            .with_set_within("readable('writer')", "readable('reader')")
+            .unwrap()
+    };
+    assert_eq!(objects_under(deployment(), &schema), Vec::<String>::new());
+    assert_eq!(
+        objects_under(
+            deployment(),
+            &format!(
+                "{schema} CREATE SCHEMA other;
+                 CREATE FUNCTION other.readable(level INT) RETURNS SETOF INT LANGUAGE sql STABLE AS $$ SELECT 2 $$;"
+            )
+        ),
+        ["grants.grants_resource"]
+    );
+}
+
+/// Memberships whose organization and invitation a definer helper hands out
+/// from the invitations addressed to the caller.
+fn pending_schema(email: &str, pending: &str, organizations_read: &str) -> String {
+    format!(
+        "CREATE ROLE app;
+         CREATE FUNCTION founded() RETURNS SETOF INT LANGUAGE sql STABLE SECURITY DEFINER AS $$ SELECT 1 $$;
+         CREATE FUNCTION caller_email() RETURNS TEXT LANGUAGE sql STABLE {email} AS $$ SELECT 'caller' $$;
+         CREATE FUNCTION blocking() RETURNS SETOF INT LANGUAGE sql STABLE SECURITY DEFINER AS $$ SELECT 1 $$;
+         CREATE FUNCTION capped(level TEXT) RETURNS TABLE (organization_id INT, kind TEXT)
+           LANGUAGE sql STABLE SECURITY DEFINER AS $$ SELECT 1, 'organization' $$;
+         CREATE TABLE organizations (id INT PRIMARY KEY);
+         CREATE TABLE invitations (organization_id INT REFERENCES organizations (id), id INT PRIMARY KEY,
+           email TEXT, accepted BOOLEAN, UNIQUE (organization_id, id));
+         CREATE FUNCTION pending() RETURNS TABLE (organization_id INT, id INT)
+         LANGUAGE sql STABLE SECURITY DEFINER AS $$ {pending} $$;
+         ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE invitations ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY invitations_read ON invitations FOR SELECT TO app
+           USING (email = (SELECT caller_email())
+             AND (organization_id, 'organization') IN (SELECT * FROM capped('reader')));
+         CREATE POLICY invitations_blocked ON invitations AS RESTRICTIVE FOR ALL TO app
+           USING (NOT (organization_id = ANY (ARRAY(SELECT blocking()))));
+         CREATE POLICY organizations_read ON organizations FOR SELECT TO app
+           USING (id = ANY (ARRAY(SELECT founded()))
+             OR id = ANY (ARRAY(SELECT invitation.organization_id FROM invitations invitation {organizations_read})));
+         CREATE POLICY organizations_blocked ON organizations AS RESTRICTIVE FOR ALL TO app
+           USING (NOT (id = ANY (ARRAY(SELECT blocking()))));
+         CREATE TABLE memberships (organization_id INT, invitation_id INT,
+           CONSTRAINT memberships_organization FOREIGN KEY (organization_id) REFERENCES organizations (id),
+           CONSTRAINT memberships_invitation FOREIGN KEY (organization_id, invitation_id) REFERENCES invitations (organization_id, id));
+         ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY memberships_write ON memberships FOR INSERT TO app
+           WITH CHECK ((organization_id = ANY (ARRAY(SELECT founded())) AND invitation_id IS NULL)
+             OR ((organization_id, invitation_id) IN (SELECT * FROM pending())
+               AND (organization_id, 'organization') IN (SELECT * FROM capped('writer'))));
+         CREATE POLICY memberships_blocked ON memberships AS RESTRICTIVE FOR ALL TO app
+           USING (NOT (organization_id = ANY (ARRAY(SELECT blocking()))))
+           WITH CHECK (NOT (organization_id = ANY (ARRAY(SELECT blocking()))));
+         GRANT SELECT ON organizations, invitations TO app;
+         GRANT INSERT ON memberships TO app;"
+    )
+}
+
+#[test]
+fn a_key_a_definer_helper_draws_from_one_readable_row_is_clean() {
+    let caller = "SELECT invitation.organization_id, invitation.id FROM invitations invitation
+        WHERE invitation.email = caller_email() AND invitation.accepted IS NULL";
+    let open = "WHERE invitation.accepted IS NULL";
+    let definer = "SECURITY DEFINER";
+    let both = vec![
+        "memberships.memberships_organization",
+        "memberships.memberships_invitation",
+    ];
+    for (email, pending, organizations_read, capped, expected) in [
+        (definer, caller, open, true, vec![]),
+        (definer, caller, "", true, vec![]),
+        // The capped set the check confines the organization to is not within the one reads test.
+        (definer, caller, open, false, both.clone()),
+        // An invitation addressed to anyone is not one the caller reads.
+        (
+            definer,
+            "SELECT invitation.organization_id, invitation.id FROM invitations invitation
+             WHERE invitation.accepted IS NULL",
+            open,
+            true,
+            both.clone(),
+        ),
+        // Inside the definer, the invoker email function runs as the helper's owner.
+        ("", caller, open, true, both.clone()),
+        // The organization's read needs an unaccepted invitation, which the helper leaves open.
+        (
+            definer,
+            "SELECT invitation.organization_id, invitation.id FROM invitations invitation
+             WHERE invitation.email = caller_email()",
+            open,
+            true,
+            vec!["memberships.memberships_organization"],
+        ),
+        // The organization comes from another invitation than the one the key names, which no
+        // organization read covers. The invitation key still matches only the caller's invitation.
+        (
+            definer,
+            "SELECT other.organization_id, invitation.id FROM invitations invitation, invitations other
+             WHERE invitation.email = caller_email() AND invitation.accepted IS NULL",
+            open,
+            true,
+            vec!["memberships.memberships_organization"],
+        ),
+        // An expansion whose columns are not listed shifts every output after it.
+        (
+            definer,
+            "SELECT number.*, invitation.organization_id FROM unnest(ARRAY[2]) number, invitations invitation
+             WHERE invitation.email = caller_email() AND invitation.accepted IS NULL",
+            open,
+            true,
+            both.clone(),
+        ),
+    ] {
+        let mut deployment = Deployment::default().with_app_role("app");
+        if capped {
+            deployment = deployment
+                .with_set_within("capped('writer')", "capped('reader')")
+                .unwrap();
+        }
+        assert_eq!(
+            objects_under(deployment, &pending_schema(email, pending, organizations_read)),
+            expected,
+            "{email} {pending} reading {organizations_read}"
+        );
+    }
+}
+
+/// Resources each of whose kinds a child table covers, through reverse keys
+/// on generated columns, with `edge` as the kinds the edges cover.
+fn covered_schema(reverse: &str, edge: &str, privileges: &str) -> String {
+    format!(
+        "CREATE ROLE app;
+         CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL, kind TEXT NOT NULL,
+           CHECK (kind IN ('ownable', 'folder', 'project')), UNIQUE (organization_id, id, kind),
+           ownable_id INT GENERATED ALWAYS AS (CASE WHEN kind = 'ownable' THEN id END) STORED,
+           edge_id INT GENERATED ALWAYS AS (CASE WHEN kind IN ({edge}) THEN id END) STORED);
+         ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY resources_read ON resources FOR SELECT TO app USING (false);
+         CREATE TABLE ownables (id INT PRIMARY KEY, organization_id INT NOT NULL,
+           kind TEXT GENERATED ALWAYS AS ('ownable'::text) STORED NOT NULL,
+           CONSTRAINT ownables_resource FOREIGN KEY (organization_id, id, kind)
+             REFERENCES resources (organization_id, id, kind) DEFERRABLE INITIALLY DEFERRED);
+         CREATE TABLE resource_parents (id INT PRIMARY KEY, organization_id INT NOT NULL,
+           resource_kind TEXT NOT NULL CHECK (resource_kind IN ('folder', 'project')),
+           CONSTRAINT edges_resource FOREIGN KEY (organization_id, id, resource_kind)
+             REFERENCES resources (organization_id, id, kind) DEFERRABLE INITIALLY DEFERRED);
+         ALTER TABLE resources ADD CONSTRAINT resources_ownable FOREIGN KEY (ownable_id) REFERENCES ownables (id) {reverse};
+         ALTER TABLE resources ADD CONSTRAINT resources_edge FOREIGN KEY (edge_id) REFERENCES resource_parents (id) {reverse};
+         GRANT SELECT ON resources TO app;
+         {privileges}"
+    )
+}
+
+#[test]
+fn a_key_whose_every_matchable_row_its_primary_key_already_holds_is_clean_on_insert() {
+    let insert = "GRANT INSERT ON ownables, resource_parents TO app;";
+    let both = vec![
+        "ownables.ownables_resource",
+        "resource_parents.edges_resource",
+    ];
+    for (reverse, edge, privileges, expected) in [
+        ("", "'folder', 'project'", insert.to_owned(), vec![]),
+        ("NOT DEFERRABLE", "'folder', 'project'", insert.to_owned(), vec![]),
+        // A deferred reverse key lets a transaction leave a hidden row uncovered.
+        ("DEFERRABLE", "'folder', 'project'", insert.to_owned(), both.clone()),
+        // An unvalidated reverse key leaves the rows it predates uncovered.
+        ("NOT VALID", "'folder', 'project'", insert.to_owned(), both.clone()),
+        // A project has no edge, so a hidden project answers the edge's key.
+        (
+            "",
+            "'folder'",
+            insert.to_owned(),
+            vec!["resource_parents.edges_resource"],
+        ),
+        // Deleting a covering row and inserting it again in one statement reaches the key.
+        (
+            "",
+            "'folder', 'project'",
+            format!("{insert} GRANT SELECT, DELETE ON ownables TO app;"),
+            vec!["ownables.ownables_resource"],
+        ),
+        // A delete confined to rows whose resource the deleter reads still moves a covering row aside.
+        (
+            "",
+            "'folder', 'project'",
+            format!(
+                "{insert} GRANT SELECT, DELETE ON ownables TO app;
+                 ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+                 CREATE POLICY ownables_insert ON ownables FOR INSERT TO app WITH CHECK (true);
+                 CREATE POLICY ownables_delete ON ownables FOR DELETE TO app
+                   USING ((organization_id, id, kind) IN (SELECT organization_id, id, kind FROM resources));"
+            ),
+            vec!["ownables.ownables_resource"],
+        ),
+        // The covering key does not reach an update of the key.
+        (
+            "",
+            "'folder', 'project'",
+            format!("{insert} GRANT UPDATE (organization_id) ON ownables TO app;"),
+            vec!["ownables.ownables_resource"],
+        ),
+        // A cascade from another table removes a covering row only after the statement's unique check.
+        (
+            "",
+            "'folder', 'project'",
+            format!(
+                "{insert} CREATE TABLE owners (id INT PRIMARY KEY);
+                 ALTER TABLE ownables ADD CONSTRAINT ownables_owner FOREIGN KEY (organization_id)
+                   REFERENCES owners (id) ON DELETE CASCADE;
+                 GRANT SELECT, DELETE ON owners TO app;"
+            ),
+            vec![],
+        ),
+    ] {
+        assert_eq!(
+            objects_under(
+                Deployment::default().with_app_role("app"),
+                &covered_schema(reverse, edge, &privileges)
+            ),
+            expected,
+            "{reverse} over {edge} with {privileges}"
+        );
+    }
+    // Moving a covering row's key away and inserting it again in one statement reaches the key.
+    let mut constrainer: GenericConstrainer<ParserDB> = ForeignKeyExistenceOracle::default().into();
+    constrainer.set_deployment(Deployment::default().with_app_role("app"));
+    let messages: Vec<String> = findings(
+        &constrainer,
+        "foreign_key_existence_oracle",
+        &covered_schema(
+            "",
+            "'folder', 'project'",
+            "GRANT INSERT ON ownables, resource_parents TO app; GRANT UPDATE (id) ON ownables TO app;",
+        ),
+    )
+    .into_iter()
+    .map(|(_, _, message)| message)
+    .collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("INSERT and UPDATE"), "{}", messages[0]);
+}
+
+#[test]
+fn a_key_whose_matchable_rows_no_reverse_key_covers_is_reported() {
+    let uncovered = "CREATE ROLE app;
+        CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL, kind TEXT NOT NULL,
+          UNIQUE (organization_id, id, kind));
+        ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+        CREATE TABLE ownables (id INT PRIMARY KEY, organization_id INT NOT NULL,
+          kind TEXT GENERATED ALWAYS AS ('ownable'::text) STORED,
+          CONSTRAINT ownables_resource FOREIGN KEY (organization_id, id, kind)
+            REFERENCES resources (organization_id, id, kind));
+        GRANT INSERT ON ownables TO app;";
+    assert_eq!(
+        objects_under(Deployment::default().with_app_role("app"), uncovered),
+        ["ownables.ownables_resource"]
+    );
+    // A kind compared by value, which `'01'` matches as `1`, leaves its resource uncovered.
+    let numeric = "CREATE ROLE app;
+        CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL, kind INT NOT NULL,
+          UNIQUE (organization_id, id, kind),
+          ownable_id INT GENERATED ALWAYS AS (CASE WHEN kind = '01' THEN NULL ELSE id END) STORED);
+        ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+        CREATE TABLE ownables (id INT PRIMARY KEY, organization_id INT NOT NULL,
+          kind INT NOT NULL CHECK (kind IN ('1')),
+          CONSTRAINT ownables_resource FOREIGN KEY (organization_id, id, kind)
+            REFERENCES resources (organization_id, id, kind) DEFERRABLE INITIALLY DEFERRED);
+        ALTER TABLE resources ADD CONSTRAINT resources_ownable FOREIGN KEY (ownable_id) REFERENCES ownables (id);
+        GRANT INSERT ON ownables TO app;";
+    assert_eq!(
+        objects_under(Deployment::default().with_app_role("app"), numeric),
+        ["ownables.ownables_resource"]
+    );
+}

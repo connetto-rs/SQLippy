@@ -450,7 +450,7 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
             };
             let admitted = match security.gates() {
                 Some(gates) => admits(database, table, gates, self, |condition| {
-                    clause_implies(self, filter, condition)
+                    clause_implies(self, filter, condition, &[])
                 })?,
                 None => security.exemption().is_some(),
             };

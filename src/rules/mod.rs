@@ -114,6 +114,7 @@ mod clock_support;
 mod closed_set_support;
 mod credential_support;
 mod cte_support;
+mod existence_oracle_support;
 mod expression_site_support;
 mod function_body_support;
 mod function_reach_support;

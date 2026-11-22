@@ -141,3 +141,25 @@ pub(crate) fn closed_set<'db, DB: DatabaseLike>(
     }
     Ok(None)
 }
+
+/// The literals a check of `column` restricts it to, whatever its type, when
+/// one top-level conjunct of a check lists them.
+///
+/// # Errors
+///
+/// Returns the lookup error reading the column's checks raised.
+pub(crate) fn checked_literals<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    column: &'db DB::Column,
+) -> Result<Option<Vec<&'db str>>, LookupError> {
+    let stored = column.stored_column_name();
+    for check in column.check_constraints(database)? {
+        if let Some(listed) = conjuncts(check.expression(database))
+            .into_iter()
+            .find_map(|conjunct| listed(conjunct, &stored))
+        {
+            return Ok(Some(listed));
+        }
+    }
+    Ok(None)
+}
