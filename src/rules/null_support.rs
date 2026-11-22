@@ -41,6 +41,14 @@ pub(crate) fn rejects_null<DB: DatabaseLike>(
                 && null_when(left, bound, database, types)?)
                 || null_when(filter, bound, database, types)?
         }
+        // A `NULL` left operand makes `IN` over a query `NULL`, or `false`
+        // over no row, and neither is true.
+        Expr::In {
+            expr,
+            target: InTarget::Subquery(_),
+            negated: false,
+            ..
+        } => null_when(expr, bound, database, types)?,
         _ => null_when(filter, bound, database, types)?,
     })
 }

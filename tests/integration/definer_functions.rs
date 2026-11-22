@@ -887,11 +887,6 @@ fn a_join_equality_carries_a_condition_to_the_rows_it_joins() {
                  SELECT project.id FROM public.resources resource
                  LEFT JOIN public.projects project ON project.organization_id = resource.organization_id
                  WHERE {confined} $$;
-             CREATE FUNCTION left_preserved() RETURNS SETOF INT
-               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                 SELECT project.id FROM public.projects project
-                 LEFT JOIN public.resources resource ON project.organization_id = resource.organization_id
-                 WHERE {confined} $$;
              CREATE FUNCTION numeric_joined() RETURNS SETOF INT
                LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
                  SELECT ledger.id FROM public.resources resource
@@ -904,7 +899,64 @@ fn a_join_equality_carries_a_condition_to_the_rows_it_joins() {
                    ON project.organization_id = resource.organization_id OR project.id = resource.id
                  WHERE {confined} $$;"
         )),
-        ["equated_under_or()", "left_preserved()", "numeric_joined()"]
+        ["equated_under_or()", "numeric_joined()"]
+    );
+}
+
+#[test]
+fn a_where_dropping_null_extended_rows_confines_the_preserved_side_of_an_outer_join() {
+    let equated = "project.organization_id = resource.organization_id";
+    let confined = "resource.organization_id IN (SELECT public.member_organizations())";
+    assert_eq!(
+        exposed_to_app(&format!(
+            "{PROJECTS}
+             CREATE FUNCTION left_rejected() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project
+                 LEFT JOIN public.resources resource ON {equated}
+                 WHERE {confined} $$;
+             CREATE FUNCTION right_rejected() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 RIGHT JOIN public.projects project ON {equated}
+                 WHERE {confined} $$;
+             CREATE FUNCTION using_rejected() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project
+                 LEFT JOIN public.resources resource USING (organization_id)
+                 WHERE {confined} $$;
+             CREATE FUNCTION rejected_by_comparison() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project
+                 LEFT JOIN public.resources resource ON {equated} AND {confined}
+                 WHERE resource.id > 0 $$;
+             CREATE FUNCTION anti_joined() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project
+                 LEFT JOIN public.resources resource ON {equated} AND {confined}
+                 WHERE resource.id IS NULL $$;
+             CREATE FUNCTION left_preserved_tested() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project
+                 LEFT JOIN public.resources resource ON {equated} AND {confined}
+                 WHERE project.id > 0 $$;
+             CREATE FUNCTION right_preserved_tested() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 RIGHT JOIN public.projects project ON {equated} AND {confined}
+                 WHERE project.id > 0 $$;
+             CREATE FUNCTION not_in_kept() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project
+                 LEFT JOIN public.resources resource ON {equated} AND {confined}
+                 WHERE resource.organization_id NOT IN (SELECT public.member_organizations()) $$;"
+        )),
+        [
+            "anti_joined()",
+            "left_preserved_tested()",
+            "not_in_kept()",
+            "right_preserved_tested()"
+        ]
     );
 }
 
@@ -967,10 +1019,6 @@ fn a_using_join_holds_its_merged_column_equal_to_each_side() {
                  WHERE {merged} AND EXISTS (
                    SELECT 1 FROM public.projects other
                    JOIN public.resources nearby USING (organization_id)) $$;
-             CREATE FUNCTION preserved_side() RETURNS SETOF INT
-               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                 SELECT project.id FROM public.projects project
-                 LEFT JOIN public.resources resource USING (organization_id) WHERE {confined} $$;
              CREATE FUNCTION numeric_side() RETURNS SETOF INT
                LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
                  SELECT ledger.id FROM public.resources resource
@@ -987,8 +1035,7 @@ fn a_using_join_holds_its_merged_column_equal_to_each_side() {
             "item_side()",
             "numeric_chain()",
             "numeric_side()",
-            "outer_merge_held()",
-            "preserved_side()"
+            "outer_merge_held()"
         ]
     );
 }
