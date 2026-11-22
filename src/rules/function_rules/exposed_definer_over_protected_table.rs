@@ -5,8 +5,8 @@ use std::{borrow::Cow, iter, mem, ops::ControlFlow, ptr, slice};
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
     structs::{
-        ColumnDefinition, ExpressionContext, ExpressionScope, IdentifierCase, OperandType,
-        RangeTableEntry, RowStatement, WrittenCall,
+        ColumnBinding, ColumnDefinition, ExpressionContext, ExpressionScope, IdentifierCase,
+        OperandType, RowStatement, WrittenCall,
     },
     traits::{
         ColumnCollation, ColumnLike, DataTypeLike, DatabaseLike, EnumerationKind, FunctionLike,
@@ -31,7 +31,9 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         closed_set_support::stored_name,
-        cte_support::{WithScopes, same_name, stored_relation},
+        cte_support::{
+            WithScopes, join_constraint, same_name, stored_column, stored_relation, stored_table,
+        },
         grant_support::{function_callers, granted_callers},
         implication_support::{
             Columns, ParameterValues, Term, admits, clause_implies, parameter, renamed,
@@ -88,7 +90,10 @@ use crate::{
 /// equal to it with `=`, when both are columns of stored tables whose types
 /// hold `=` only between identical values. These are integers, `uuid`,
 /// `boolean`, dates, timestamps, one enum type, and `text` or `varchar` with
-/// no collation. A query nested in a condition of a `WHERE` is filtered by
+/// no collation. A `USING` join holds the column it merges equal to that
+/// column of each table it merges whose row is present, and the first join
+/// merging a name holds its two sides equal wherever an `ON` with that
+/// equality would. A query nested in a condition of a `WHERE` is filtered by
 /// the other conditions of that `WHERE` too, since its outcome reaches the
 /// result only for outer rows passing them.
 ///
@@ -577,6 +582,16 @@ fn reads_session_state(call: &Function) -> bool {
         })
 }
 
+/// What a relation of a `FROM` item holds under a column name.
+enum Side<'a, DB: DatabaseLike> {
+    /// Something other than a stored table, whose columns are not read.
+    Unknown,
+    /// A stored table with no column of the name.
+    Absent,
+    /// The column of the name of a stored table.
+    Column(&'a DB::Column),
+}
+
 /// What a relation of a `FROM` item reads.
 enum Read<'a, DB: DatabaseLike> {
     /// No table with row-level security.
@@ -655,7 +670,13 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
     /// of the outer rows.
     fn confines_select(&self, select: &Select, held: &[&Expr]) -> Result<bool, LookupError> {
         let filter: Vec<&Expr> = select.selection.iter().flat_map(conjuncts).collect();
+        let merges = self.merges(select)?;
         for from in &select.from {
+            let resolver = Resolver {
+                context: self.context,
+                merges: &merges,
+                from,
+            };
             let relations =
                 iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation));
             for (position, relation) in relations.enumerate() {
@@ -664,18 +685,22 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
                     Read::Unconfined => return Ok(false),
                     Read::Protected(table) => table,
                 };
-                let dropping: Vec<&Expr> = held
+                let dropping: Vec<(Clause, &Expr)> = held
                     .iter()
-                    .chain(&filter)
-                    .copied()
-                    .chain(joined_filter(from, position))
+                    .map(|condition| (Clause::Held, *condition))
+                    .chain(filter.iter().map(|condition| (Clause::Where, *condition)))
+                    .chain(
+                        joined_filter(from, position)
+                            .map(|(join, condition)| (Clause::On(join), condition)),
+                    )
                     .collect();
-                let equalities = Equalities::of(self.context, &dropping)?;
-                let stated =
-                    |reference: &Expr| term(self.context, reference, relation, &equalities);
+                let equalities = Equalities::of(&resolver, &dropping, position)?;
+                let stated = |clause: Clause, reference: &Expr| {
+                    term(&resolver, clause, reference, relation, &equalities)
+                };
                 let mut kept = Vec::new();
-                for conjunct in dropping {
-                    if let Some(stated) = renamed(conjunct, stated)
+                for (clause, conjunct) in dropping {
+                    if let Some(stated) = renamed(conjunct, |reference| stated(clause, reference))
                         && self.body.confinement.reads_alike(conjunct)?
                     {
                         kept.push(stated);
@@ -683,7 +708,7 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
                 }
                 if let Some(membership) =
                     self.lineage
-                        .membership(select, |column| match stated(column)? {
+                        .membership(select, |column| match stated(Clause::Where, column)? {
                             Term::Column(column) => Some(column),
                             Term::Parameter(_) => None,
                         })
@@ -696,6 +721,128 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
             }
         }
         Ok(true)
+    }
+
+    /// The columns the `USING` joins of `select` merge.
+    fn merges(&self, select: &Select) -> Result<Vec<Merge>, LookupError> {
+        let mut merges: Vec<Merge> = Vec::new();
+        for from in &select.from {
+            let natural = from.joins.iter().any(|join| {
+                matches!(
+                    join_constraint(&join.join_operator),
+                    Some(JoinConstraint::Natural)
+                )
+            });
+            for (index, join) in from.joins.iter().enumerate() {
+                let Some(JoinConstraint::Using(names)) = join_constraint(&join.join_operator)
+                else {
+                    continue;
+                };
+                for name in names
+                    .iter()
+                    .filter_map(|name| name.0.last().and_then(ObjectNamePart::as_ident))
+                {
+                    let right = self.identity_at(from, index + 1, name)?;
+                    let normalized = normalize_identifier(&name.value, name.quote_style.is_some());
+                    if let Some(merge) = merges
+                        .iter_mut()
+                        .find(|merge| ptr::eq(merge.from, from) && merge.name == normalized)
+                    {
+                        merge.last = index;
+                        merge.sides.push(index + 1);
+                        if merge.identity != right {
+                            merge.identity = None;
+                        }
+                    } else {
+                        let left = self.left_side(from, index, name)?;
+                        merges.push(Merge {
+                            from,
+                            name: normalized.into_owned(),
+                            first: index,
+                            last: index,
+                            sides: left
+                                .iter()
+                                .map(|(side, _)| *side)
+                                .chain([index + 1])
+                                .collect(),
+                            identity: left.and_then(|(_, identity)| {
+                                (!natural && right.as_ref() == Some(&identity)).then_some(identity)
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(merges)
+    }
+
+    /// The position of the first relation of `from`, up to the one at
+    /// `index`, with a column named `name`, with what `=` compares its values
+    /// by, `None` when any of those relations is no stored table. PostgreSQL
+    /// refuses a `USING` name more than one relation before the join holds.
+    fn left_side(
+        &self,
+        from: &TableWithJoins,
+        index: usize,
+        name: &Ident,
+    ) -> Result<Option<(usize, Identity)>, LookupError> {
+        let mut found = None;
+        for position in 0..=index {
+            match self.column_at(from, position, name)? {
+                Side::Unknown => return Ok(None),
+                Side::Column(column) if found.is_none() => found = Some((position, column)),
+                Side::Column(_) | Side::Absent => {}
+            }
+        }
+        found.map_or(Ok(None), |(position, column)| {
+            Ok(identity(column, self.body.confinement.database)?
+                .map(|identity| (position, identity)))
+        })
+    }
+
+    /// What `=` compares the values of the column named `name` of the
+    /// relation at `position` of `from` by, when it is a stored table's.
+    fn identity_at(
+        &self,
+        from: &TableWithJoins,
+        position: usize,
+        name: &Ident,
+    ) -> Result<Option<Identity>, LookupError> {
+        match self.column_at(from, position, name)? {
+            Side::Column(column) => identity(column, self.body.confinement.database),
+            Side::Unknown | Side::Absent => Ok(None),
+        }
+    }
+
+    /// The column named `name` of the relation at `position` of `from`.
+    fn column_at(
+        &self,
+        from: &TableWithJoins,
+        position: usize,
+        name: &Ident,
+    ) -> Result<Side<'a, DB>, LookupError> {
+        let database = self.body.confinement.database;
+        let TableFactor::Table {
+            name: relation,
+            alias,
+            args: None,
+            ..
+        } = relation_at(from, position)
+        else {
+            return Ok(Side::Unknown);
+        };
+        let stored = if self.items.binding(relation).is_none() {
+            stored_table(database, relation, self.path)?
+        } else {
+            None
+        };
+        let Some(table) = stored else {
+            return Ok(Side::Unknown);
+        };
+        Ok(
+            stored_column(database, table, alias.as_ref(), name)?
+                .map_or(Side::Absent, Side::Column),
+        )
     }
 
     /// What `relation` reads, a `WITH` item and a call nothing.
@@ -817,33 +964,56 @@ fn nested_queries<N: Visit + ?Sized, B>(
     )
 }
 
-/// The columns of stored tables that the column equalities among some
-/// filters hold equal, where `=` holds only between identical values.
+/// The columns the column equalities among some filters hold equal, where
+/// `=` holds only between identical values.
 #[derive(Default)]
-struct Equalities {
+struct Equalities<'r> {
     /// Each column an equality names.
-    columns: Vec<Equated>,
+    columns: Vec<Node<'r>>,
     /// For each column, the index of one of its class nearer the column
     /// heading the class, or its own for the head.
     parents: Vec<usize>,
 }
 
-/// One column an equality names, by its `FROM` item and position there,
-/// with the name the query gives it.
-struct Equated {
-    factor: *const TableFactor,
-    ordinal: usize,
-    name: String,
+/// A column an equality names.
+#[derive(PartialEq, Eq)]
+enum Node<'r> {
+    /// The column of this name of a `FROM` item.
+    Column {
+        factor: *const TableFactor,
+        name: Cow<'r, str>,
+    },
+    /// The column of this name the `USING` joins of a `FROM` item merge.
+    Merged {
+        from: *const TableWithJoins,
+        name: &'r str,
+    },
 }
 
-impl Equalities {
-    /// The classes the conditions `a.x = b.y` among `filters` form.
+impl<'r> Node<'r> {
+    /// The column named `name` of the relation at `position` of `from`.
+    fn at(from: &TableWithJoins, position: usize, name: &'r str) -> Self {
+        Self::Column {
+            factor: relation_at(from, position),
+            name: Cow::Borrowed(name),
+        }
+    }
+}
+
+impl<'r> Equalities<'r> {
+    /// The classes the conditions `a.x = b.y` among `filters` form, with
+    /// those the `USING` joins `resolver` reads form for the relation at
+    /// `position` of its `FROM` item. A `USING` join holds the merged
+    /// column equal to the column of each relation it merges whose row is
+    /// present, and the column of its first join equal on both sides
+    /// wherever that join drops rows of the relation.
     fn of<DB: DatabaseLike>(
-        context: &ExpressionContext<'_, '_, DB>,
-        filters: &[&Expr],
+        resolver: &Resolver<'r, '_, '_, DB>,
+        filters: &[(Clause, &Expr)],
+        position: usize,
     ) -> Result<Self, LookupError> {
         let mut equalities = Self::default();
-        for filter in filters {
+        for &(clause, filter) in filters {
             let Expr::BinaryOp {
                 left,
                 op: BinaryOperator::Eq,
@@ -852,36 +1022,60 @@ impl Equalities {
             else {
                 continue;
             };
-            if let (Some((left, kind)), Some((right, other))) =
-                (equated(context, left)?, equated(context, right)?)
-                && kind == other
+            if let (Some((left, kind)), Some((right, other))) = (
+                resolver.equated(clause, left)?,
+                resolver.equated(clause, right)?,
+            ) && kind == other
             {
-                let left = equalities.joined(left);
-                let right = equalities.joined(right);
-                equalities.parents[left] = right;
+                equalities.link(left, right);
+            }
+        }
+        let from = resolver.from;
+        for merge in resolver
+            .merges
+            .iter()
+            .filter(|merge| ptr::eq(merge.from, from) && merge.identity.is_some())
+        {
+            if merge.sides.contains(&position) {
+                equalities.link(merge.node(), Node::at(from, position, &merge.name));
+            }
+            if dropping_constraint(
+                &from.joins[merge.first].join_operator,
+                position,
+                merge.first + 1,
+            )
+            .is_some()
+            {
+                equalities.link(
+                    Node::at(from, merge.sides[0], &merge.name),
+                    Node::at(from, merge.sides[1], &merge.name),
+                );
             }
         }
         Ok(equalities)
     }
 
+    /// Joins the classes of `left` and `right`.
+    fn link(&mut self, left: Node<'r>, right: Node<'r>) {
+        let left = self.joined(left);
+        let right = self.joined(right);
+        self.parents[left] = right;
+    }
+
     /// The head of the class of `column`, which forms a class of its own
     /// when no equality named it yet.
-    fn joined(&mut self, column: Equated) -> usize {
-        let index = self
-            .position(column.factor, column.ordinal)
-            .unwrap_or_else(|| {
-                self.parents.push(self.columns.len());
-                self.columns.push(column);
-                self.columns.len() - 1
-            });
+    fn joined(&mut self, column: Node<'r>) -> usize {
+        let index = self.position(&column).unwrap_or_else(|| {
+            self.parents.push(self.columns.len());
+            self.columns.push(column);
+            self.columns.len() - 1
+        });
         self.head(index)
     }
 
-    /// The index of the column at `ordinal` of `factor`.
-    fn position(&self, factor: *const TableFactor, ordinal: usize) -> Option<usize> {
-        self.columns
-            .iter()
-            .position(|column| ptr::eq(column.factor, factor) && column.ordinal == ordinal)
+    /// The index of `column`.
+    fn position(&self, column: &Node<'_>) -> Option<usize> {
+        self.columns.iter().position(|named| named == column)
     }
 
     /// The head of the class of the column at `index`.
@@ -893,21 +1087,134 @@ impl Equalities {
     }
 
     /// The name of a column of `relation` held equal to `column`.
-    fn of_relation(&self, column: RangeTableEntry<'_>, relation: &TableFactor) -> Option<&str> {
-        let class = self.head(self.position(column.factor(), column.ordinal())?);
+    fn of_relation(&self, column: &Node<'_>, relation: &TableFactor) -> Option<&str> {
+        let class = self.head(self.position(column)?);
         self.columns
             .iter()
             .enumerate()
-            .find(|(index, equated)| {
-                ptr::eq(equated.factor, relation) && self.head(*index) == class
+            .find_map(|(index, named)| match named {
+                Node::Column { factor, name }
+                    if ptr::eq(*factor, relation) && self.head(index) == class =>
+                {
+                    Some(name.as_ref())
+                }
+                _ => None,
             })
-            .map(|(_, equated)| equated.name.as_str())
+    }
+}
+
+/// A column the `USING` joins of one `FROM` item merge.
+struct Merge {
+    from: *const TableWithJoins,
+    /// The name the joins merge.
+    name: String,
+    /// The index of the first join merging the name.
+    first: usize,
+    /// The index of the last join merging the name.
+    last: usize,
+    /// The positions of the relations the joins merge the column of, the
+    /// one before the first join leading.
+    sides: Vec<usize>,
+    /// What `=` compares the merged values by, when every relation the
+    /// joins merge is a stored table whose column compares by it and no
+    /// `NATURAL` join merges more.
+    identity: Option<Identity>,
+}
+
+impl Merge {
+    /// The merged column.
+    fn node(&self) -> Node<'_> {
+        Node::Merged {
+            from: self.from,
+            name: &self.name,
+        }
+    }
+}
+
+/// Where a filter of a read stands, which decides the merged columns it
+/// sees.
+#[derive(Clone, Copy)]
+enum Clause {
+    /// A condition of the outer rows.
+    Held,
+    /// The `WHERE` of the `SELECT`.
+    Where,
+    /// The `ON` condition of the join at this index of the `FROM` item.
+    On(usize),
+}
+
+/// Resolves the columns the filters of the relations of one `FROM` item
+/// name.
+struct Resolver<'r, 'q, 'a, DB: DatabaseLike> {
+    context: &'r ExpressionContext<'q, 'a, DB>,
+    /// The columns the `USING` joins of the `SELECT` merge.
+    merges: &'r [Merge],
+    from: &'r TableWithJoins,
+}
+
+impl<'r, DB: DatabaseLike> Resolver<'r, '_, '_, DB> {
+    /// The column a `USING` join merged that `binding` reached from a
+    /// filter of `clause`. A `WHERE` sees the merges of every join of the
+    /// `SELECT`, and an `ON` condition those of the joins before its own.
+    fn merge(&self, clause: Clause, binding: &ColumnBinding<'_>) -> Option<&'r Merge> {
+        if binding.entry().is_some() || binding.relation().is_some() {
+            return None;
+        }
+        let (name, quoted) = binding.exposed()?;
+        let name = normalize_identifier(name, quoted);
+        let mut named = self.merges.iter().filter(|merge| merge.name == name);
+        match clause {
+            Clause::Held => None,
+            Clause::Where => named.next().filter(|_| named.next().is_none()),
+            Clause::On(join) => {
+                named.find(|merge| ptr::eq(merge.from, self.from) && merge.last < join)
+            }
+        }
+    }
+
+    /// The column `binding` reached from a filter of `clause`.
+    fn node(&self, clause: Clause, binding: &ColumnBinding<'r>) -> Option<Node<'r>> {
+        if let Some(merge) = self.merge(clause, binding) {
+            return Some(merge.node());
+        }
+        let (entry, (name, quoted)) = (binding.entry()?, binding.exposed()?);
+        Some(Node::Column {
+            factor: entry.factor(),
+            name: normalize_identifier(name, quoted),
+        })
+    }
+
+    /// The column `side`, of a filter of `clause`, names, with what `=`
+    /// compares its values by, or `None` when two equal values of it may
+    /// differ.
+    fn equated(
+        &self,
+        clause: Clause,
+        side: &Expr,
+    ) -> Result<Option<(Node<'r>, Cow<'r, Identity>)>, LookupError> {
+        let Some((definition, binding)) = self.context.reference(unnested(side)).ok().flatten()
+        else {
+            return Ok(None);
+        };
+        let identity = match (self.merge(clause, &binding), definition) {
+            (Some(merge), _) => merge.identity.as_ref().map(Cow::Borrowed),
+            (
+                None,
+                ColumnDefinition::Base {
+                    column, database, ..
+                },
+            ) => identity(column, database)?.map(Cow::Owned),
+            _ => None,
+        };
+        Ok(identity
+            .zip(self.node(clause, &binding))
+            .map(|(identity, node)| (node, identity)))
     }
 }
 
 /// What `=` compares the values of a column by, when two values it holds
 /// equal are the same value.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Identity {
     /// A builtin type of this family.
     Family(ScalarFamily),
@@ -915,27 +1222,15 @@ enum Identity {
     Enumeration(String),
 }
 
-/// The column of a stored table `side` names, with what `=` compares its
-/// values by, or `None` when two equal values of it may differ.
-fn equated<DB: DatabaseLike>(
-    context: &ExpressionContext<'_, '_, DB>,
-    side: &Expr,
-) -> Result<Option<(Equated, Identity)>, LookupError> {
-    let Some((
-        ColumnDefinition::Base {
-            column, database, ..
-        },
-        binding,
-    )) = context.reference(unnested(side)).ok().flatten()
-    else {
-        return Ok(None);
-    };
-    let (Some(entry), Some((name, quoted))) = (binding.entry(), binding.exposed()) else {
-        return Ok(None);
-    };
+/// What `=` compares the values of `column` by, or `None` when two equal
+/// values of it may differ.
+fn identity<DB: DatabaseLike>(
+    column: &DB::Column,
+    database: &DB,
+) -> Result<Option<Identity>, LookupError> {
     let declared = column.data_type(database);
     let data_type = declared.base_type(database).unwrap_or(declared);
-    let identity = if data_type.array_element(database).is_some() {
+    Ok(if data_type.array_element(database).is_some() {
         None
     } else if let Some(enumeration) = data_type.enumeration(database) {
         (enumeration.kind() == EnumerationKind::Enum)
@@ -962,15 +1257,7 @@ fn equated<DB: DatabaseLike>(
             }
             _ => None,
         }
-    };
-    Ok(identity.map(|identity| {
-        let equated = Equated {
-            factor: ptr::from_ref(entry.factor()),
-            ordinal: entry.ordinal(),
-            name: normalize_identifier(name, quoted).into_owned(),
-        };
-        (equated, identity)
-    }))
+    })
 }
 
 /// The `SELECT`s of a function body each of whose rows reaches the
@@ -1247,65 +1534,81 @@ fn names(parts: &[Ident], relation: &Ident, column: &Ident) -> bool {
 }
 
 /// The conjuncts of the `ON` conditions of `from` that drop rows of its
-/// relation at `position`, counted from zero. An inner join's drop rows of
-/// the relations up to the one it joins, a left join's of the one it joins
-/// and a right join's of those before it.
-fn joined_filter(from: &TableWithJoins, position: usize) -> impl Iterator<Item = &Expr> {
+/// relation at `position`, counted from zero, each with the index of its
+/// join.
+fn joined_filter(from: &TableWithJoins, position: usize) -> impl Iterator<Item = (usize, &Expr)> {
     from.joins
         .iter()
         .enumerate()
         .filter_map(move |(index, join)| {
-            let joined = index + 1;
-            match &join.join_operator {
-                JoinOperator::Join(JoinConstraint::On(condition))
-                | JoinOperator::Inner(JoinConstraint::On(condition))
-                    if position <= joined =>
-                {
-                    Some(condition)
-                }
-                JoinOperator::Left(JoinConstraint::On(condition))
-                | JoinOperator::LeftOuter(JoinConstraint::On(condition))
-                    if position == joined =>
-                {
-                    Some(condition)
-                }
-                JoinOperator::Right(JoinConstraint::On(condition))
-                | JoinOperator::RightOuter(JoinConstraint::On(condition))
-                    if position < joined =>
-                {
-                    Some(condition)
-                }
+            match dropping_constraint(&join.join_operator, position, index + 1) {
+                Some(JoinConstraint::On(condition)) => Some((index, condition)),
                 _ => None,
             }
         })
-        .flat_map(conjuncts)
+        .flat_map(|(index, condition)| {
+            conjuncts(condition)
+                .into_iter()
+                .map(move |conjunct| (index, conjunct))
+        })
+}
+
+/// The constraint of the join `operator` joining the relation at `joined`,
+/// when it drops rows of the relation at `position`. An inner join drops
+/// rows of the relations up to the one it joins, a left join of the one it
+/// joins and a right join of those before it.
+fn dropping_constraint(
+    operator: &JoinOperator,
+    position: usize,
+    joined: usize,
+) -> Option<&JoinConstraint> {
+    match operator {
+        JoinOperator::Join(constraint) | JoinOperator::Inner(constraint) if position <= joined => {
+            Some(constraint)
+        }
+        JoinOperator::Left(constraint) | JoinOperator::LeftOuter(constraint)
+            if position == joined =>
+        {
+            Some(constraint)
+        }
+        JoinOperator::Right(constraint) | JoinOperator::RightOuter(constraint)
+            if position < joined =>
+        {
+            Some(constraint)
+        }
+        _ => None,
+    }
+}
+
+/// The relation at `position` of `from`, counted from zero.
+fn relation_at(from: &TableWithJoins, position: usize) -> &TableFactor {
+    match position.checked_sub(1) {
+        Some(join) => &from.joins[join].relation,
+        None => &from.relation,
+    }
 }
 
 /// The input parameter of the function whose body holds `reference` that
 /// it names where no column of the same name is in reach, or else the stored
 /// name of the column of `relation` it names or `equalities` hold equal to
-/// the column it names.
-fn term<DB: DatabaseLike>(
-    context: &ExpressionContext<'_, '_, DB>,
+/// the column it names from a filter of `clause`.
+fn term<'r, DB: DatabaseLike>(
+    resolver: &Resolver<'r, '_, '_, DB>,
+    clause: Clause,
     reference: &Expr,
     relation: &TableFactor,
-    equalities: &Equalities,
+    equalities: &Equalities<'r>,
 ) -> Option<Term> {
-    match context.reference(reference).ok()?? {
+    match resolver.context.reference(reference).ok()?? {
         (ColumnDefinition::Parameter { ordinal, .. }, _) => Some(Term::Parameter(ordinal)),
-        (_, binding) => {
-            let entry = binding.entry()?;
-            if ptr::eq(entry.factor(), relation) {
-                let (column, quoted) = binding.exposed()?;
-                Some(Term::Column(
-                    normalize_identifier(column, quoted).into_owned(),
-                ))
-            } else {
-                equalities
-                    .of_relation(entry, relation)
-                    .map(|column| Term::Column(column.to_owned()))
+        (_, binding) => match resolver.node(clause, &binding)? {
+            Node::Column { factor, name } if ptr::eq(factor, relation) => {
+                Some(Term::Column(name.into_owned()))
             }
-        }
+            node => equalities
+                .of_relation(&node, relation)
+                .map(|column| Term::Column(column.to_owned())),
+        },
     }
 }
 

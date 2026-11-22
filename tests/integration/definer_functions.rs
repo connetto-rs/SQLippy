@@ -909,6 +909,91 @@ fn a_join_equality_carries_a_condition_to_the_rows_it_joins() {
 }
 
 #[test]
+fn a_using_join_holds_its_merged_column_equal_to_each_side() {
+    let confined = "resource.organization_id IN (SELECT public.member_organizations())";
+    let merged = "organization_id IN (SELECT public.member_organizations())";
+    assert_eq!(
+        exposed_to_app(&format!(
+            "{PROJECTS}
+             CREATE TABLE teams (id INT, owner_organization INT);
+             CREATE TABLE crews (id INT, organization_ids INT[]);
+             CREATE TABLE rosters (id INT, organization_ids INT[]);
+             ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE rosters ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON teams, rosters TO app;
+             CREATE POLICY member_teams ON teams FOR SELECT TO app
+               USING (owner_organization IN (SELECT public.member_organizations()));
+             CREATE POLICY staffed_rosters ON rosters FOR SELECT TO app
+               USING (cardinality(organization_ids) > 0);
+             CREATE FUNCTION side_condition() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.crews crew
+                 JOIN public.resources resource ON resource.id = crew.id
+                 JOIN public.projects project USING (organization_id) WHERE {confined} $$;
+             CREATE FUNCTION merged_condition() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 JOIN public.crews crew ON crew.id = resource.id
+                 FULL JOIN public.projects project USING (organization_id) WHERE {merged} $$;
+             CREATE FUNCTION merged_and_equated() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT team.id FROM public.resources resource
+                 JOIN public.projects project USING (organization_id)
+                 JOIN public.teams team ON team.owner_organization = organization_id
+                 WHERE {merged} $$;
+             CREATE FUNCTION chained() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT other.id FROM public.resources resource
+                 JOIN public.projects project USING (organization_id)
+                 JOIN public.projects other USING (organization_id) WHERE {merged} $$;
+             CREATE FUNCTION numeric_chain() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 JOIN public.projects project USING (organization_id)
+                 JOIN public.ledgers ledger USING (organization_id) WHERE {merged} $$;
+             CREATE FUNCTION item_side() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH chosen AS (SELECT 1 AS organization_id)
+                 SELECT project.id FROM chosen
+                 JOIN public.projects project USING (organization_id) WHERE {merged} $$;
+             CREATE FUNCTION derived_side() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project
+                 JOIN (SELECT 1 AS organization_id) chosen USING (organization_id) WHERE {merged} $$;
+             CREATE FUNCTION outer_merge_held() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 JOIN public.projects project USING (organization_id)
+                 WHERE {merged} AND EXISTS (
+                   SELECT 1 FROM public.projects other
+                   JOIN public.resources nearby USING (organization_id)) $$;
+             CREATE FUNCTION preserved_side() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project
+                 LEFT JOIN public.resources resource USING (organization_id) WHERE {confined} $$;
+             CREATE FUNCTION numeric_side() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT ledger.id FROM public.resources resource
+                 JOIN public.ledgers ledger USING (organization_id) WHERE {merged} $$;
+             CREATE FUNCTION array_side() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT roster.id FROM public.crews crew
+                 JOIN public.rosters roster ON roster.organization_ids = crew.organization_ids
+                 WHERE cardinality(crew.organization_ids) > 0 $$;"
+        )),
+        [
+            "array_side()",
+            "derived_side()",
+            "item_side()",
+            "numeric_chain()",
+            "numeric_side()",
+            "outer_merge_held()",
+            "preserved_side()"
+        ]
+    );
+}
+
+#[test]
 fn a_correlated_subquery_holds_the_other_conditions_of_its_where() {
     let confined = "resource.organization_id IN (SELECT public.member_organizations())";
     assert_eq!(
