@@ -1,17 +1,22 @@
-//! Text columns a check constraint restricts to a list of string literals,
-//! shared by the rules that read such a column as a closed set.
+//! Columns a check constraint restricts to literals, shared by the rules that
+//! read such a column as a closed set or as pinned to one value.
 
 use std::borrow::Cow;
 
 use sql_traits::{
     errors::LookupError,
-    traits::{CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike},
-    utils::identifier_resolution::normalize_identifier,
+    traits::{
+        CheckConstraintLike, ColumnCollation, ColumnLike, DataTypeLike, DatabaseLike,
+        EnumerationKind,
+    },
+    utils::{identifier_resolution::normalize_identifier, scalar_family::ScalarFamily},
 };
-use sqlparser::ast::{BinaryOperator, Expr, InTarget};
+use sqlparser::ast::{BinaryOperator, DataType, Expr, InTarget};
 
 use crate::rules::{
-    literal_support::text_literal, policy_support::conjuncts, type_support::underlying_type,
+    literal_support::{string_value, text_literal},
+    policy_support::{conjuncts, unwrapped},
+    type_support::underlying_type,
 };
 
 /// The stored name of the column `expression` names under parentheses, bare
@@ -162,4 +167,148 @@ pub(crate) fn checked_literals<'db, DB: DatabaseLike>(
         }
     }
     Ok(None)
+}
+
+/// What `=` compares the values of a column by, when two values it holds
+/// equal are the same value.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum Identity {
+    /// A builtin type of this family.
+    Family(ScalarFamily),
+    /// The enum type of this name.
+    Enumeration(String),
+}
+
+/// What `=` compares the values of `column` by, or `None` when two equal
+/// values of it may differ.
+pub(crate) fn identity<DB: DatabaseLike>(
+    column: &DB::Column,
+    database: &DB,
+) -> Result<Option<Identity>, LookupError> {
+    let declared = column.data_type(database);
+    let data_type = declared.base_type(database).unwrap_or(declared);
+    Ok(if data_type.array_element(database).is_some() {
+        None
+    } else if let Some(enumeration) = data_type.enumeration(database) {
+        (enumeration.kind() == EnumerationKind::Enum)
+            .then(|| Identity::Enumeration(data_type.name(database).into_owned()))
+    } else {
+        match data_type.scalar_family(database) {
+            Some(
+                family @ (ScalarFamily::Bool
+                | ScalarFamily::Int
+                | ScalarFamily::Uuid
+                | ScalarFamily::Date
+                | ScalarFamily::Timestamp
+                | ScalarFamily::TimestampTz),
+            ) => Some(Identity::Family(family)),
+            Some(ScalarFamily::String)
+                if declared.domain(database).is_none()
+                    && !data_type.normalized_name(database).starts_with("CHAR")
+                    && matches!(
+                        column.collation(database)?,
+                        ColumnCollation::DatabaseDefault
+                    ) =>
+            {
+                Some(Identity::Family(ScalarFamily::String))
+            }
+            _ => None,
+        }
+    })
+}
+
+/// The values every row of its table holds `column` to, the expression it is
+/// generated as or, when it is `NOT NULL`, the values a top-level conjunct
+/// of a validated check holds it `=` or `IN`, those of the first such check.
+pub(crate) fn held_values<'a, DB: DatabaseLike>(
+    database: &'a DB,
+    column: &'a DB::Column,
+) -> Result<Option<Vec<&'a Expr>>, LookupError> {
+    if let Some(expression) = column.generation_expression() {
+        return Ok(Some(vec![expression]));
+    }
+    if column.is_nullable(database)? {
+        return Ok(None);
+    }
+    let stored = column.stored_column_name();
+    for check in column.check_constraints(database)? {
+        if !check.is_validated(database)? {
+            continue;
+        }
+        if let Some((_, values)) = conjuncts(check.expression(database))
+            .into_iter()
+            .filter_map(fixed_by)
+            .find(|(name, _)| *name == stored)
+        {
+            return Ok(Some(values));
+        }
+    }
+    Ok(None)
+}
+
+/// A column with the texts its row may hold in it.
+pub(crate) type Fixed<'a, DB> = (&'a <DB as DatabaseLike>::Column, Vec<String>);
+
+/// `column` with the texts of `values`, when it is an enum or a text column
+/// `=` compares by identity and each value a string literal it holds as
+/// written.
+pub(crate) fn pin<'a, DB: DatabaseLike>(
+    database: &DB,
+    column: &'a DB::Column,
+    values: &[&Expr],
+) -> Result<Option<Fixed<'a, DB>>, LookupError> {
+    let enumeration = match identity(column, database)? {
+        Some(Identity::Enumeration(_)) => true,
+        Some(Identity::Family(ScalarFamily::String)) => false,
+        _ => return Ok(None),
+    };
+    Ok(values
+        .iter()
+        .map(|value| kept_literal(value, enumeration).map(str::to_owned))
+        .collect::<Option<Vec<String>>>()
+        .map(|values| (column, values)))
+}
+
+/// The string literal `expression` writes under parentheses and casts that
+/// keep its text: to `text`, to `varchar` of no length, and, for an enum
+/// column, to a type of no modifiers, which `=` accepts only as the enum.
+fn kept_literal(mut expression: &Expr, enumeration: bool) -> Option<&str> {
+    loop {
+        match expression {
+            Expr::Nested(inner) => expression = inner,
+            Expr::Cast {
+                expr, data_type, ..
+            } if matches!(
+                data_type,
+                DataType::Text | DataType::Varchar(None) | DataType::CharacterVarying(None)
+            ) || (enumeration
+                && matches!(data_type, DataType::Custom(_, modifiers) if modifiers.is_empty())) =>
+            {
+                expression = expr;
+            }
+            Expr::Value(value) => return string_value(&value.value),
+            _ => return None,
+        }
+    }
+}
+
+/// The column `condition` fixes with `=` or `IN` to values reading no
+/// column, with the values.
+pub(crate) fn fixed_by(condition: &Expr) -> Option<(Cow<'_, str>, Vec<&Expr>)> {
+    match unwrapped(condition) {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => [(left, right), (right, left)]
+            .into_iter()
+            .find_map(|(column, value)| Some((stored_name(column)?, vec![value.as_ref()]))),
+        Expr::In {
+            expr,
+            target: InTarget::List(list),
+            negated: false,
+            ..
+        } => Some((stored_name(expr)?, list.iter().collect())),
+        _ => None,
+    }
 }
