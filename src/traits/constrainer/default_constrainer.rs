@@ -61,12 +61,12 @@ use crate::{
         UnboundedTextColumn, UncachedHelperQuery, UncachedPolicyCall,
         UnconditionalClientWritePolicy, UndeletableReference, UnfilteredChangeTrigger,
         UnfilteredWrite, UnforcedRowLevelSecurity, UnindexedCorrelatedSelect, UnindexedFilter,
-        UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin, UnknownBinarySend,
-        UnlinkedFromItem, UnloggedTable, UnorderedDistinctOn, UnorderedLimit,
-        UnqualifiedNameUnderUnsafeSearchPath, UnreadOuterJoin, UnsatisfiableCheck,
-        UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable, UnseededPolicySet,
-        UnstreamableReplicaIdentity, UnusedCte, UnvalidatedConstraint, UuidStoredAsText,
-        WildcardView, WritingNonVolatileFunction, ZeroPrecisionTimestamp,
+        UnindexedForeignKey, UnindexedPolicyFilter, UnindexedRecursiveJoin,
+        UniqueKeyExistenceOracle, UnknownBinarySend, UnlinkedFromItem, UnloggedTable,
+        UnorderedDistinctOn, UnorderedLimit, UnqualifiedNameUnderUnsafeSearchPath, UnreadOuterJoin,
+        UnsatisfiableCheck, UnsatisfiablePolicy, UnscopedUniqueConstraintOnRowLevelSecurityTable,
+        UnseededPolicySet, UnstreamableReplicaIdentity, UnusedCte, UnvalidatedConstraint,
+        UuidStoredAsText, WildcardView, WritingNonVolatileFunction, ZeroPrecisionTimestamp,
     },
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, GenericConstrainer, QueryRule,
@@ -191,7 +191,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 59] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 60] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(DuplicateIndex::default()),
@@ -246,6 +246,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(RoleKeyedPolicyWhenPooled::default()),
         Box::new(CredentialFreeWrite::default()),
         Box::new(SuperkeyPrimaryKey::default()),
+        Box::new(UniqueKeyExistenceOracle::default()),
         Box::new(NullCredentialRead::default()),
         Box::new(NullableTenantKey::default()),
         Box::new(SensitiveColumnsExposed::default()),

@@ -169,19 +169,24 @@ pub(crate) struct Confinement<'a, DB: DatabaseLike> {
     /// The key columns mapped onto each unique key of the referenced table
     /// whose columns the key references.
     row_keys: Vec<u64>,
+    /// Whether a `NULL` key column skips the check, as it does for a foreign
+    /// key and for a unique key whose `NULL` values are distinct.
+    null_skips: bool,
     /// The helper arms each clause reads, by the clause's address.
     helpers: RefCell<HashMap<*const Expr, Option<Rc<HelperArms<'a, DB>>>>>,
 }
 
 impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// A confinement of the written `key_columns` onto `referenced_columns`
-    /// of `parent`, by position.
+    /// of `parent`, by position, under a check that a `NULL` key column
+    /// skips when `null_skips` is set.
     pub(crate) fn new(
         database: &'a DB,
         deployment: &'a Deployment,
         key_columns: Vec<Cow<'a, str>>,
         parent: &'a DB::Table,
         referenced_columns: Vec<Cow<'a, str>>,
+        null_skips: bool,
     ) -> Result<Self, LookupError> {
         let row_keys = equality_keys(database, parent)?
             .into_iter()
@@ -202,6 +207,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             key_columns,
             referenced_columns,
             row_keys,
+            null_skips,
             helpers: RefCell::new(HashMap::new()),
         })
     }
@@ -325,11 +331,12 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 
     /// Whether the conjunct leaves the key check nothing hidden to find. It
-    /// forces a key column `NULL`, so PostgreSQL looks up no row under any
-    /// `MATCH`, or it ties the key to one row the writer reads.
+    /// forces a key column `NULL` under a check that `NULL` skips, so
+    /// PostgreSQL looks up no row, or it ties the key to one row the writer
+    /// reads.
     fn settles_key(&self, conjunct: &Expr) -> Result<bool, LookupError> {
         match unwrapped(conjunct) {
-            Expr::IsNull(column) => Ok(self.key_position(column).is_some()),
+            Expr::IsNull(column) => Ok(self.null_skips && self.key_position(column).is_some()),
             Expr::BinaryOp {
                 left,
                 op: BinaryOperator::Eq,
@@ -1437,9 +1444,11 @@ impl<DB: DatabaseLike> Columns for Reading<'_, '_, DB> {
         self.confinement.key_columns_named(column) & tested != 0
     }
 
-    /// A clause leaving a key column `NULL` skips the check.
+    /// A clause leaving a key column `NULL` skips a check that `NULL` skips.
     fn settles(&self, clause: &Expr) -> bool {
-        matches!(clause, Expr::IsNull(column) if self.confinement.key_columns_named(column) != 0)
+        let confinement = self.confinement;
+        confinement.null_skips
+            && matches!(clause, Expr::IsNull(column) if confinement.key_columns_named(column) != 0)
     }
 
     /// A clause drawing the key from a set-returning helper whose every arm
