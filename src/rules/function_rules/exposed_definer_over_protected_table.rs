@@ -93,9 +93,12 @@ use crate::{
 /// no collation. A `USING` join holds the column it merges equal to that
 /// column of each table it merges whose row is present, and the first join
 /// merging a name holds its two sides equal wherever an `ON` with that
-/// equality would. A query nested in a condition of a `WHERE` is filtered by
-/// the other conditions of that `WHERE` too, since its outcome reaches the
-/// result only for outer rows passing them.
+/// equality would. An `EXISTS` or `IN` of a `WHERE` over a query that
+/// neither aggregates nor combines rows adds that query's `WHERE` to the
+/// outer filters, since a row passing it exists, and `x IN (SELECT y …)`
+/// holds `x` equal to `y`. A query nested in a condition of a `WHERE` is
+/// filtered by the other conditions of that `WHERE` too, since its outcome
+/// reaches the result only for outer rows passing them.
 ///
 /// A read whose column reaches, unchanged, the result of a function that is
 /// not `VOLATILE` and returns a set, through `UNION` arms and `WITH` items
@@ -670,6 +673,11 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
     /// of the outer rows.
     fn confines_select(&self, select: &Select, held: &[&Expr]) -> Result<bool, LookupError> {
         let filter: Vec<&Expr> = select.selection.iter().flat_map(conjuncts).collect();
+        let witnessed: Vec<&Expr> = filter
+            .iter()
+            .filter_map(|condition| semi_join(condition))
+            .flat_map(|found| found.selection.iter().flat_map(conjuncts))
+            .collect();
         let merges = self.merges(select)?;
         for from in &select.from {
             let resolver = Resolver {
@@ -689,6 +697,11 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
                     .iter()
                     .map(|condition| (Clause::Held, *condition))
                     .chain(filter.iter().map(|condition| (Clause::Where, *condition)))
+                    .chain(
+                        witnessed
+                            .iter()
+                            .map(|condition| (Clause::Witness, *condition)),
+                    )
                     .chain(
                         joined_filter(from, position)
                             .map(|(join, condition)| (Clause::On(join), condition)),
@@ -1001,12 +1014,12 @@ impl<'r> Node<'r> {
 }
 
 impl<'r> Equalities<'r> {
-    /// The classes the conditions `a.x = b.y` among `filters` form, with
-    /// those the `USING` joins `resolver` reads form for the relation at
-    /// `position` of its `FROM` item. A `USING` join holds the merged
-    /// column equal to the column of each relation it merges whose row is
-    /// present, and the column of its first join equal on both sides
-    /// wherever that join drops rows of the relation.
+    /// The classes the conditions `a.x = b.y` and `a.x IN (SELECT b.y …)`
+    /// among `filters` form, with those the `USING` joins `resolver` reads
+    /// form for the relation at `position` of its `FROM` item. A `USING`
+    /// join holds the merged column equal to the column of each relation it
+    /// merges whose row is present, and the column of its first join equal
+    /// on both sides wherever that join drops rows of the relation.
     fn of<DB: DatabaseLike>(
         resolver: &Resolver<'r, '_, '_, DB>,
         filters: &[(Clause, &Expr)],
@@ -1014,17 +1027,21 @@ impl<'r> Equalities<'r> {
     ) -> Result<Self, LookupError> {
         let mut equalities = Self::default();
         for &(clause, filter) in filters {
-            let Expr::BinaryOp {
-                left,
-                op: BinaryOperator::Eq,
-                right,
-            } = unnested(filter)
-            else {
-                continue;
+            let (left, right, inner) = match unnested(filter) {
+                Expr::BinaryOp {
+                    left,
+                    op: BinaryOperator::Eq,
+                    right,
+                } => (left.as_ref(), right.as_ref(), clause),
+                Expr::In { expr, .. } => match semi_join(filter).and_then(carried_column) {
+                    Some((projected, _)) => (expr.as_ref(), projected, Clause::Witness),
+                    None => continue,
+                },
+                _ => continue,
             };
             if let (Some((left, kind)), Some((right, other))) = (
                 resolver.equated(clause, left)?,
-                resolver.equated(clause, right)?,
+                resolver.equated(inner, right)?,
             ) && kind == other
             {
                 equalities.link(left, right);
@@ -1139,6 +1156,9 @@ enum Clause {
     Held,
     /// The `WHERE` of the `SELECT`.
     Where,
+    /// The `WHERE` of a query an `EXISTS` or `IN` of that `WHERE` finds a
+    /// row of.
+    Witness,
     /// The `ON` condition of the join at this index of the `FROM` item.
     On(usize),
 }
@@ -1164,7 +1184,7 @@ impl<'r, DB: DatabaseLike> Resolver<'r, '_, '_, DB> {
         let name = normalize_identifier(name, quoted);
         let mut named = self.merges.iter().filter(|merge| merge.name == name);
         match clause {
-            Clause::Held => None,
+            Clause::Held | Clause::Witness => None,
             Clause::Where => named.next().filter(|_| named.next().is_none()),
             Clause::On(join) => {
                 named.find(|merge| ptr::eq(merge.from, self.from) && merge.last < join)
@@ -1478,7 +1498,18 @@ fn carried_column(select: &Select) -> Option<(&Expr, &[Ident])> {
     else {
         return None;
     };
-    let plain = matches!(
+    let parts = match projected {
+        Expr::Identifier(name) => slice::from_ref(name),
+        Expr::CompoundIdentifier(parts) => parts.as_slice(),
+        _ => return None,
+    };
+    plain(select).then_some((projected, parts))
+}
+
+/// Whether each row the `FROM` and filters of `select` leave yields at
+/// most one row, with no grouping or `DISTINCT ON` choosing among them.
+fn plain(select: &Select) -> bool {
+    matches!(
         select.distinct,
         None | Some(Distinct::All | Distinct::Distinct)
     ) && select.select_modifiers.is_none()
@@ -1496,13 +1527,41 @@ fn carried_column(select: &Select) -> Option<(&Expr, &[Ident])> {
         && select.named_window.is_empty()
         && select.qualify.is_none()
         && select.value_table_mode.is_none()
-        && select.flavor == SelectFlavor::Standard;
-    let parts = match projected {
-        Expr::Identifier(name) => slice::from_ref(name),
-        Expr::CompoundIdentifier(parts) => parts.as_slice(),
-        _ => return None,
+        && select.flavor == SelectFlavor::Standard
+}
+
+/// The `SELECT` that `condition`, an `EXISTS` or `IN` over a query, finds
+/// a row of that passes its `WHERE` whenever `condition` holds.
+fn semi_join(condition: &Expr) -> Option<&Select> {
+    let (Expr::Exists {
+        subquery,
+        negated: false,
+    }
+    | Expr::In {
+        target: InTarget::Subquery(subquery),
+        negated: false,
+        ..
+    }) = unnested(condition)
+    else {
+        return None;
     };
-    plain.then_some((projected, parts))
+    let SetExpr::Select(select) = subquery.body.as_ref() else {
+        return None;
+    };
+    let projected = select.projection.iter().all(|item| match item {
+        SelectItem::UnnamedExpr(projected)
+        | SelectItem::ExprWithAlias {
+            expr: projected, ..
+        } => matches!(
+            projected,
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_)
+        ),
+        _ => matches!(
+            item,
+            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)
+        ),
+    });
+    (subquery.order_by.is_none() && plain(select) && projected).then_some(select)
 }
 
 /// The name of the one column `query` yields, given by its leftmost

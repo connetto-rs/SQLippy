@@ -1028,6 +1028,62 @@ fn a_correlated_subquery_holds_the_other_conditions_of_its_where() {
     );
 }
 
+#[test]
+fn a_semi_join_carries_its_filter_to_the_outer_column_it_equates() {
+    let equated = "resource.organization_id = project.organization_id";
+    let confined = "resource.organization_id IN (SELECT public.member_organizations())";
+    assert_eq!(
+        exposed_to_app(&format!(
+            "{PROJECTS}
+             CREATE FUNCTION exists_correlated() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project WHERE EXISTS (
+                   SELECT * FROM public.resources resource WHERE {equated} AND {confined}) $$;
+             CREATE FUNCTION in_subquery() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project WHERE project.organization_id IN (
+                   SELECT resource.organization_id FROM public.resources resource
+                   WHERE {confined}) $$;
+             CREATE FUNCTION not_exists() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project WHERE NOT EXISTS (
+                   SELECT 1 FROM public.resources resource WHERE {equated} AND {confined}) $$;
+             CREATE FUNCTION not_in() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project WHERE project.organization_id NOT IN (
+                   SELECT resource.organization_id FROM public.resources resource
+                   WHERE {confined}) $$;
+             CREATE FUNCTION counted() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project WHERE EXISTS (
+                   SELECT count(*) FROM public.resources resource WHERE {equated} AND {confined}) $$;
+             CREATE FUNCTION having_none() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project WHERE EXISTS (
+                   SELECT 1 FROM public.resources resource WHERE {equated} AND {confined}
+                   HAVING count(*) = 0) $$;
+             CREATE FUNCTION united() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project WHERE EXISTS (
+                   SELECT 1 FROM public.resources resource WHERE {equated} AND {confined}
+                   UNION ALL SELECT 1) $$;
+             CREATE FUNCTION in_other_column() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project WHERE project.id IN (
+                   SELECT resource.organization_id FROM public.resources resource
+                   WHERE {confined}) $$;"
+        )),
+        [
+            "counted()",
+            "having_none()",
+            "in_other_column()",
+            "not_exists()",
+            "not_in()",
+            "united()"
+        ]
+    );
+}
+
 const ROLE_SETS: &str = "
     CREATE ROLE app NOLOGIN;
     CREATE SCHEMA authz;
