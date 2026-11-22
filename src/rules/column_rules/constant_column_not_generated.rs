@@ -1,15 +1,29 @@
 //! Submodule providing the `ConstantColumnNotGenerated` rule.
 
-use sql_traits::traits::{
-    CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, TableLike,
+use std::ops::ControlFlow;
+
+use sql_traits::{
+    errors::LookupError,
+    structs::VariableKind,
+    traits::{
+        CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, TableLike,
+        TriggerLike,
+    },
 };
-use sqlparser::ast::{BinaryOperator, Expr, ReferentialAction, Value};
+use sqlparser::ast::{
+    BinaryOperator, Expr, Ident, ReferentialAction, TriggerPeriod, Value, Visitor,
+};
 
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        closed_set_support::names_cast_column, literal_support::literal, policy_support::conjuncts,
+        closed_set_support::names_cast_column,
+        function_rules::readable,
+        literal_support::literal,
+        policy_support::conjuncts,
+        trigger_support::{fires_on_insert, fires_on_update, row, row_trigger, stored},
+        walk_support::walk,
     },
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
@@ -26,7 +40,10 @@ rule_definition!(
     /// a foreign key whose `ON UPDATE` action is `CASCADE`, `SET NULL` or
     /// `SET DEFAULT`, or whose `ON DELETE` action is `SET NULL` or
     /// `SET DEFAULT`, since PostgreSQL refuses such a key over a generated
-    /// column.
+    /// column. Nor is a column that a row-level `BEFORE INSERT` or `BEFORE
+    /// UPDATE` trigger of its table reads as `NEW.column`, in its `WHEN`
+    /// condition or its PL/pgSQL function, since a stored generated column
+    /// holds no value there until those triggers have run.
     ///
     /// # Example
     ///
@@ -73,6 +90,76 @@ fn fixes(conjunct: &Expr, column: &str, fixed: &Value) -> bool {
         || (names_cast_column(right, column) && literal(left) == Some(fixed))
 }
 
+/// Finds `NEW.column` in an expression, where `reaches_new` tells whether the
+/// parts before the field name the trigger's `NEW` row.
+struct NewField<'c, F> {
+    column: &'c str,
+    reaches_new: F,
+}
+
+impl<F: Fn(&[Ident]) -> bool> Visitor for NewField<'_, F> {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
+        if let Expr::CompoundIdentifier(parts) = expression
+            && let [record @ .., field] = parts.as_slice()
+            && !record.is_empty()
+            && stored(field) == self.column
+            && (self.reaches_new)(record)
+        {
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Whether a row-level `BEFORE INSERT` or `BEFORE UPDATE` trigger of `table`
+/// reads `NEW.column` in its `WHEN` condition or its PL/pgSQL function.
+fn before_trigger_reads<DB: DatabaseLike>(
+    database: &DB,
+    table: &DB::Table,
+    column: &str,
+) -> Result<bool, LookupError> {
+    let mut in_condition = NewField {
+        column,
+        reaches_new: |record: &[Ident]| matches!(record, [new] if row(new) == Some(true)),
+    };
+    for trigger in table.triggers(database)? {
+        if !row_trigger(trigger, TriggerPeriod::Before)
+            || !(fires_on_insert(trigger) || fires_on_update(trigger))
+        {
+            continue;
+        }
+        if trigger
+            .condition()
+            .is_some_and(|condition| walk(condition, &mut in_condition).is_break())
+        {
+            return Ok(true);
+        }
+        let Some(function) = trigger.function(database) else {
+            continue;
+        };
+        let Some(body) = readable(function.plpgsql_sites(database).map(Some))? else {
+            continue;
+        };
+        for site in &readable(body.sites())? {
+            let scope = site.plpgsql_scope();
+            let mut in_body = NewField {
+                column,
+                reaches_new: |record: &[Ident]| {
+                    scope.variable(record).is_some_and(|variable| {
+                        *variable.kind() == VariableKind::Trigger && variable.name() == "new"
+                    })
+                },
+            };
+            if walk(&site.sql(), &mut in_body).is_break() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 impl<DB: DatabaseLike> ColumnRule for ConstantColumnNotGenerated<DB> {
     type Database = DB;
 
@@ -112,7 +199,7 @@ impl<DB: DatabaseLike> ColumnRule for ConstantColumnNotGenerated<DB> {
                 .into_iter()
                 .any(|conjunct| fixes(conjunct, &stored, fixed));
         }
-        if !held {
+        if !held || before_trigger_reads(database, column.table(database), &stored)? {
             return Ok(());
         }
         reporter.column(
