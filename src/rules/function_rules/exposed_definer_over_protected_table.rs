@@ -9,8 +9,9 @@ use sql_traits::{
         IdentifierCase, OperandType, RowStatement, WrittenCall,
     },
     traits::{
-        ColumnCollation, ColumnLike, DataTypeLike, DatabaseLike, EnumerationKind, ForeignKeyLike,
-        FunctionLike, PolicyLike, Relation, TableLike, UserDefinedTypeLike,
+        CheckConstraintLike, ColumnCollation, ColumnLike, DataTypeLike, DatabaseLike,
+        EnumerationKind, ForeignKeyLike, FunctionLike, PolicyLike, Relation, TableLike,
+        UserDefinedTypeLike,
     },
     utils::{identifier_resolution::normalize_identifier, scalar_family::ScalarFamily},
 };
@@ -128,11 +129,13 @@ use crate::{
 /// its table, and maps that column onto one compared by the same identity.
 /// A row the keys keep apart from the tested one is left out first.
 /// Following such keys from a column, each table on which the value is
-/// unique pins its columns generated as one value, the columns a key fills
-/// from a column pinned before and those the filter pins, and a value whose
-/// row pins a column to none of the values the tested value's row may hold
-/// is never the tested value. Keys of a table another table inherits from
-/// count for nothing, since that table's rows escape them.
+/// unique pins its columns generated as one value, its `NOT NULL` columns a
+/// validated check holds `=` one value or `IN` a list of values as a
+/// top-level conjunct, the columns a key fills from a column pinned before
+/// and those the filter pins, and a value whose row pins a column to none of
+/// the values the tested value's row may hold is never the tested value.
+/// Keys of a table another table inherits from count for nothing, since
+/// that table's rows escape them.
 ///
 /// A column also lies in the set of a `SECURITY DEFINER` function a policy
 /// of the table tests a column against, when that function runs as the
@@ -2403,8 +2406,8 @@ struct Pinned<'a, DB: DatabaseLike> {
 /// What pins the row holding the value of `column` of a row of `table`
 /// meeting `conditions`. Following each foreign key that binds the column
 /// holding the value, it reaches the one row each key references. Each row
-/// reached pins its columns generated as one literal and the columns a key
-/// fills from a column pinned before, the first also those `conditions`
+/// reached pins the columns its table holds to literals and the columns a
+/// key fills from a column pinned before, the first also those `conditions`
 /// fix, counting only enum and text columns compared by identity.
 fn discriminators<'a, DB: DatabaseLike>(
     database: &'a DB,
@@ -2428,9 +2431,9 @@ fn discriminators<'a, DB: DatabaseLike>(
             continue;
         }
         visited.push(column);
-        for generated in table.columns(database)? {
-            if let Some(expression) = generated.generation_expression() {
-                fixed.extend(pin(database, generated, &[expression])?);
+        for held in table.columns(database)? {
+            if let Some(values) = held_values(database, held)? {
+                fixed.extend(pin(database, held, &values)?);
             }
         }
         if unique_alone(database, table, column)? {
@@ -2463,6 +2466,35 @@ fn discriminators<'a, DB: DatabaseLike>(
         }
     }
     Ok(pinned)
+}
+
+/// The values every row of its table holds `column` to, the expression it is
+/// generated as or, when it is `NOT NULL`, the values a top-level conjunct
+/// of a validated check holds it `=` or `IN`, those of the first such check.
+fn held_values<'a, DB: DatabaseLike>(
+    database: &'a DB,
+    column: &'a DB::Column,
+) -> Result<Option<Vec<&'a Expr>>, LookupError> {
+    if let Some(expression) = column.generation_expression() {
+        return Ok(Some(vec![expression]));
+    }
+    if column.is_nullable(database)? {
+        return Ok(None);
+    }
+    let stored = column.stored_column_name();
+    for check in column.check_constraints(database)? {
+        if !check.is_validated(database)? {
+            continue;
+        }
+        if let Some((_, values)) = conjuncts(check.expression(database))
+            .into_iter()
+            .filter_map(fixed_by)
+            .find(|(name, _)| *name == stored)
+        {
+            return Ok(Some(values));
+        }
+    }
+    Ok(None)
 }
 
 /// A column with the texts its row may hold in it.

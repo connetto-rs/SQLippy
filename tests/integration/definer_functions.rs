@@ -1664,6 +1664,74 @@ fn a_helper_arm_whose_kind_the_keys_rule_out_drops_from_its_set() {
 }
 
 #[test]
+fn a_validated_check_pins_a_not_null_kind_as_a_generated_one_does() {
+    let functions = "
+        CREATE FUNCTION authz.granted_resources() RETURNS SETOF UUID
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT permission.resource_id FROM public.grants permission
+            WHERE permission.grantee_id IN (SELECT authz.caller_grantees())
+              AND NOT EXISTS (
+                SELECT 1 FROM public.memberships membership
+                WHERE membership.organization_id = permission.organization_id
+                  AND membership.user_id = permission.grantee_id AND NOT membership.active) $$;";
+    let checked = |user: &str| {
+        format!(
+            "{}{functions}",
+            grantees("")
+                .replace(
+                    "GENERATED ALWAYS AS ('organization'::authz.grantee_kind) STORED NOT NULL",
+                    "NOT NULL DEFAULT 'organization' CHECK (kind = 'organization')",
+                )
+                .replace(
+                    "GENERATED ALWAYS AS ('user'::authz.grantee_kind) STORED NOT NULL",
+                    user,
+                )
+        )
+    };
+    let app = || Deployment::default().with_app_role("app");
+    let added = format!(
+        "{}ALTER TABLE users ADD CONSTRAINT user_kind CHECK (kind = 'user') NOT VALID;",
+        checked("NOT NULL")
+    );
+    assert_eq!(exposed(app(), &added), ["granted_resources()"]);
+    assert_eq!(
+        exposed(
+            app(),
+            &format!("{added}ALTER TABLE users VALIDATE CONSTRAINT user_kind;")
+        ),
+        Vec::<String>::new()
+    );
+    for (user, reported) in [
+        ("NOT NULL DEFAULT 'user' CHECK (kind = 'user')", &[][..]),
+        ("NOT NULL CHECK ('user' = kind)", &[]),
+        ("NOT NULL CHECK (kind IN ('user'))", &[]),
+        (
+            "NOT NULL, CHECK ((kind = 'user'::authz.grantee_kind) AND id IS NOT NULL)",
+            &[],
+        ),
+        (
+            "DEFAULT 'user' CHECK (kind = 'user')",
+            &["granted_resources()"],
+        ),
+        (
+            "NOT NULL CHECK (kind = 'user' OR id IS NULL)",
+            &["granted_resources()"],
+        ),
+        (
+            "NOT NULL CHECK (kind IN ('user', 'organization'))",
+            &["granted_resources()"],
+        ),
+        (
+            "NOT NULL, CHECK (kind = 'user') NOT ENFORCED",
+            &["granted_resources()"],
+        ),
+        ("NOT NULL", &["granted_resources()"]),
+    ] {
+        assert_eq!(exposed(app(), &checked(user)), reported, "{user}");
+    }
+}
+
+#[test]
 fn a_strict_helper_a_policy_calls_with_null_admits_no_witnessed_row() {
     let reported = |strict: &str, default: &str, argument: &str| {
         exposed(
