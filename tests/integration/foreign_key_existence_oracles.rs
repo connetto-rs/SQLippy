@@ -44,6 +44,14 @@ fn a_key_the_writer_may_insert_into_hidden_rows_is_reported() {
     assert_eq!(object, "notes.notes_secret");
     assert!(message.contains("'app'"), "{message}");
     assert!(message.contains("INSERT"), "{message}");
+    assert_eq!(
+        objects(
+            "CREATE TABLE notes (id INT PRIMARY KEY,
+               secret_id INT CONSTRAINT notes_secret REFERENCES secrets (id) NOT ENFORCED);
+             GRANT INSERT ON notes TO app;"
+        ),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -1245,6 +1253,16 @@ fn a_key_whose_every_matchable_row_its_primary_key_already_holds_is_clean_on_ins
             "{reverse} over {edge} with {privileges}"
         );
     }
+    assert_eq!(
+        objects_under(
+            Deployment::default().with_app_role("app"),
+            &covered_schema("", "'folder', 'project'", insert).replace(
+                "CHECK (resource_kind IN ('folder', 'project'))",
+                "CHECK (resource_kind IN ('folder', 'project')) NOT ENFORCED"
+            )
+        ),
+        ["resource_parents.edges_resource"]
+    );
     // Moving a covering row's key away and inserting it again in one statement reaches the key.
     let mut constrainer: GenericConstrainer<ParserDB> = ForeignKeyExistenceOracle::default().into();
     constrainer.set_deployment(Deployment::default().with_app_role("app"));

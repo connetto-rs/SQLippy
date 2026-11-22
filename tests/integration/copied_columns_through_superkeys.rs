@@ -33,6 +33,9 @@ fn a_cascaded_copy_the_host_keys_on_nowhere_is_reported() {
         "CREATE TABLE notes (id INT PRIMARY KEY, account_id INT NOT NULL,
            label TEXT NOT NULL CHECK (label IN ('a', 'b')),
            FOREIGN KEY (account_id, label) REFERENCES accounts (id, label) ON UPDATE CASCADE);",
+        "CREATE TABLE notes (id INT PRIMARY KEY, account_id INT NOT NULL,
+           label TEXT NOT NULL CHECK (label = 'a') NOT ENFORCED,
+           FOREIGN KEY (account_id, label) REFERENCES accounts (id, label) ON UPDATE CASCADE);",
         // An index the copy does not lead serves no lookup on it.
         "CREATE TABLE notes (id INT PRIMARY KEY, account_id INT NOT NULL, label TEXT NOT NULL,
            FOREIGN KEY (account_id, label) REFERENCES accounts (id, label) ON UPDATE CASCADE);

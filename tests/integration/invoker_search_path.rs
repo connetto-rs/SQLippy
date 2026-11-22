@@ -98,6 +98,7 @@ fn views_and_unused_functions_are_excluded() {
         "CREATE VIEW visible AS SELECT v FROM allowed WHERE ok(v);",
         "CREATE MATERIALIZED VIEW visible AS SELECT v FROM allowed WHERE ok(v);",
         "CREATE TABLE docs (v INT);",
+        "CREATE TABLE docs (v INT CHECK (ok(v)) NOT ENFORCED);",
     ] {
         assert!(reported(&format!("{FUNCTION} {site}")).is_empty(), "{site}");
     }

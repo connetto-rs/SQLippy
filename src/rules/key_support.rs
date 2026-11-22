@@ -500,13 +500,17 @@ pub(crate) fn key_pairs<'db, DB: DatabaseLike>(
 }
 
 /// Whether `foreign_key` checks every row in which `column` is not `NULL`,
-/// which it does under `MATCH FULL` or when every other host column is
-/// `NOT NULL`, since `MATCH SIMPLE` skips a row with a `NULL` in its key.
+/// which an enforced key does under `MATCH FULL` or when every other host
+/// column is `NOT NULL`, since `MATCH SIMPLE` skips a row with a `NULL` in
+/// its key. A `NOT ENFORCED` key checks no row.
 pub(crate) fn checked_whenever_set<DB: DatabaseLike>(
     database: &DB,
     foreign_key: &DB::ForeignKey,
     column: &DB::Column,
 ) -> Result<bool, LookupError> {
+    if !foreign_key.is_enforced(database) {
+        return Ok(false);
+    }
     if foreign_key.match_full(database) {
         return Ok(true);
     }
@@ -551,13 +555,17 @@ pub(crate) fn holds_through_references<'db, DB: DatabaseLike>(
 }
 
 /// Whether `wider` checks every row `narrower` holds against the same
-/// referenced columns: its column pairs contain those of `narrower`, and
-/// `MATCH SIMPLE` on a `NULL` extra column does not let a row escape it.
+/// referenced columns: it is enforced, its column pairs contain those of
+/// `narrower`, and `MATCH SIMPLE` on a `NULL` extra column does not let a
+/// row escape it.
 pub(crate) fn checks_every_row_of<DB: DatabaseLike>(
     database: &DB,
     wider: &DB::ForeignKey,
     narrower: &DB::ForeignKey,
 ) -> Result<bool, LookupError> {
+    if !wider.is_enforced(database) {
+        return Ok(false);
+    }
     let wider_pairs = key_pairs(database, wider)?;
     let narrower_pairs = key_pairs(database, narrower)?;
     if !narrower_pairs.iter().all(|pair| wider_pairs.contains(pair)) {

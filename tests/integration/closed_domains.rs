@@ -112,6 +112,12 @@ fn a_lifecycle_boolean_a_foreign_key_copies_is_judged_as_its_source() {
                    archived BOOLEAN NOT NULL,
                    FOREIGN KEY (resource_id, archived) REFERENCES resources (id, archived) ON UPDATE CASCADE
                );
+               CREATE TABLE unenforced (
+                   id INT PRIMARY KEY,
+                   resource_id INT NOT NULL,
+                   archived BOOLEAN NOT NULL,
+                   FOREIGN KEY (resource_id, archived) REFERENCES resources (id, archived) ON UPDATE CASCADE NOT ENFORCED
+               );
                CREATE TABLE flagged (
                    id INT PRIMARY KEY,
                    flag_id INT NOT NULL,
@@ -124,7 +130,12 @@ fn a_lifecycle_boolean_a_foreign_key_copies_is_judged_as_its_source() {
             Deployment::default(),
             sql
         ),
-        ["flagged.archived", "flags.archived", "loose.archived"]
+        [
+            "flagged.archived",
+            "flags.archived",
+            "loose.archived",
+            "unenforced.archived"
+        ]
     );
 }
 
@@ -172,6 +183,7 @@ fn every_spelling_of_a_literal_list_closes_a_text_column() {
     let sql = "CREATE TABLE t (
                    id INT PRIMARY KEY,
                    listed TEXT CHECK (listed IN ('a', 'b')),
+                   unenforced TEXT CHECK (unenforced IN ('a', 'b')) NOT ENFORCED,
                    arrayed VARCHAR(8) CHECK ((arrayed)::text = ANY ((ARRAY['a'::character varying, 'b'::character varying])::text[])),
                    alternated TEXT CHECK (alternated = 'a' OR 'b' = alternated),
                    tabled TEXT,
@@ -203,6 +215,7 @@ fn a_column_fixed_by_its_default_and_check_is_reported_only_when_not_null() {
     let sql = "CREATE TABLE t (
                    id INT PRIMARY KEY,
                    kind TEXT NOT NULL DEFAULT 'entry'::text CHECK ('entry' = kind),
+                   unenforced_kind TEXT NOT NULL DEFAULT 'entry'::text CHECK ('entry' = unenforced_kind) NOT ENFORCED,
                    nullable_kind TEXT DEFAULT 'entry' CHECK (nullable_kind = 'entry'),
                    other_kind TEXT NOT NULL DEFAULT 'entry' CHECK (other_kind = 'note'),
                    version INT NOT NULL DEFAULT 2,
@@ -229,6 +242,11 @@ fn a_fixed_column_a_foreign_key_writes_into_is_not_reported() {
                    resource_id INT NOT NULL,
                    kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
                    FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON UPDATE CASCADE
+               );
+               CREATE TABLE unenforced (
+                   resource_id INT NOT NULL,
+                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
+                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON UPDATE CASCADE NOT ENFORCED
                );
                CREATE TABLE nulled (
                    resource_id INT,
@@ -265,7 +283,12 @@ fn a_fixed_column_a_foreign_key_writes_into_is_not_reported() {
             Deployment::default(),
             sql
         ),
-        ["beside.kind", "deleted_cascade.kind", "resources.kind"]
+        [
+            "beside.kind",
+            "deleted_cascade.kind",
+            "resources.kind",
+            "unenforced.kind"
+        ]
     );
 }
 
@@ -492,6 +515,26 @@ fn email_comparisons_pass_only_when_both_sides_fold_the_same_case() {
         objects(CaseSensitiveEmail::default(), Deployment::default(), &sql),
         [
             "exact",
+            "held_unfolded",
+            "json_claim",
+            "mixed_cases",
+            "one_side",
+            "refolded"
+        ]
+    );
+    let unenforced = sql.replace(
+        "CHECK (owner_email = lower(owner_email))",
+        "CHECK (owner_email = lower(owner_email)) NOT ENFORCED",
+    );
+    assert_eq!(
+        objects(
+            CaseSensitiveEmail::default(),
+            Deployment::default(),
+            &unenforced
+        ),
+        [
+            "exact",
+            "held",
             "held_unfolded",
             "json_claim",
             "mixed_cases",
@@ -843,6 +886,14 @@ fn a_checked_text_set_is_reported_with_the_order_its_cases_fit() {
         );
         assert!(!message.contains("is NULL"), "{message}");
     }
+    let unenforced = sql.replace(
+        "IN ('admin', 'read', 'write'))",
+        "IN ('admin', 'read', 'write')) NOT ENFORCED",
+    );
+    assert!(
+        explained(OrderedSetAsDisjunction::default(), &unenforced).is_empty(),
+        "{unenforced}"
+    );
 }
 
 #[test]

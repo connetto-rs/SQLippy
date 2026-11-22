@@ -76,6 +76,9 @@ fn a_wider_key_checking_every_row_with_the_same_actions_implies_the_narrower() {
 #[test]
 fn a_narrower_key_the_wider_one_does_not_imply_is_kept() {
     for notes in [
+        "CREATE TABLE notes (id INT PRIMARY KEY, account_id INT NOT NULL, tenant_id INT NOT NULL,
+           FOREIGN KEY (account_id) REFERENCES accounts (id),
+           FOREIGN KEY (account_id, tenant_id) REFERENCES accounts (id, tenant_id) NOT ENFORCED);",
         // MATCH SIMPLE skips the wider check when tenant_id is NULL.
         "CREATE TABLE notes (id INT PRIMARY KEY, account_id INT NOT NULL, tenant_id INT,
            FOREIGN KEY (account_id) REFERENCES accounts (id),

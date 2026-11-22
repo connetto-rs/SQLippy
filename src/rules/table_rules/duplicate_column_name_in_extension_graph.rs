@@ -159,15 +159,18 @@ CREATE TABLE notes (id INT PRIMARY KEY REFERENCES records (id), description TEXT
     }
 }
 
-/// Whether `foreign_key` pairs its host's primary key with the primary key of
-/// the referenced table and the host column named `column_name` with the
-/// referenced column of that name, on every row, so the two columns of one
-/// entity always hold the same value.
+/// Whether the enforced `foreign_key` pairs its host's primary key with the
+/// primary key of the referenced table and the host column named
+/// `column_name` with the referenced column of that name, on every row, so
+/// the two columns of one entity always hold the same value.
 fn pins<DB: DatabaseLike>(
     database: &DB,
     foreign_key: &DB::ForeignKey,
     column_name: &str,
 ) -> Result<bool, LookupError> {
+    if !foreign_key.is_enforced(database) {
+        return Ok(false);
+    }
     let pairs = key_pairs(database, foreign_key)?;
     if !pairs.iter().any(|(host, referenced)| {
         host.column_name() == column_name && referenced.column_name() == column_name

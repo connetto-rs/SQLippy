@@ -223,6 +223,7 @@ fn a_composite_key_that_can_point_nowhere_is_reported() {
         &format!(
             "{PARENT}
              CREATE TABLE simple (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE TABLE unenforced (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b) NOT ENFORCED);
              CREATE TABLE optional (a INT, b INT NOT NULL, FOREIGN KEY (a, b) REFERENCES p (a, b));
              CREATE TABLE full_match (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b) MATCH FULL);
              CREATE TABLE required (a INT NOT NULL, b INT NOT NULL, FOREIGN KEY (a, b) REFERENCES p (a, b));
@@ -241,6 +242,9 @@ fn a_composite_key_whose_checks_keep_nullable_columns_null_together_is_not_repor
         "CREATE TABLE w (a INT NOT NULL, b INT NOT NULL, c INT NOT NULL, PRIMARY KEY (a, b, c));
          CREATE TABLE tied (a INT, b INT, c INT NOT NULL,
            CHECK ((a IS NULL) = (b IS NULL)),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE untied (a INT, b INT, c INT NOT NULL,
+           CHECK ((a IS NULL) = (b IS NULL)) NOT ENFORCED,
            FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
          CREATE TABLE mirrored (a INT, b INT, c INT NOT NULL,
            CHECK ((b IS NOT NULL) = (a IS NOT NULL)),
@@ -268,8 +272,15 @@ fn a_composite_key_whose_checks_keep_nullable_columns_null_together_is_not_repor
            CHECK ((a IS NULL) = (b IS NULL)),
            FOREIGN KEY (a, b, c) REFERENCES w (a, b, c));",
     );
-    assert_eq!(found.len(), 5, "{found:?}");
-    for table in ["crossed", "loose", "disjoined", "equated", "partly"] {
+    assert_eq!(found.len(), 6, "{found:?}");
+    for table in [
+        "crossed",
+        "loose",
+        "disjoined",
+        "equated",
+        "partly",
+        "untied",
+    ] {
         assert!(
             found
                 .iter()
@@ -286,6 +297,7 @@ fn a_foreign_key_no_index_leads_with_is_reported() {
         &format!(
             "{PARENT}
              CREATE TABLE bare (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
+             CREATE TABLE unenforced (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b) NOT ENFORCED);
              CREATE TABLE behind (a INT, b INT, c INT, FOREIGN KEY (a, b) REFERENCES p (a, b));
              CREATE INDEX ON behind (c, a, b);
              CREATE TABLE partial (a INT, b INT, FOREIGN KEY (a, b) REFERENCES p (a, b));

@@ -81,6 +81,15 @@ fn the_portable_bounds_refuse_every_non_finite_value() {
          );",
     );
     assert_eq!(raised, Vec::new());
+    assert_eq!(
+        admitted(
+            "CREATE TABLE t (
+                 offset_m DOUBLE PRECISION,
+                 CHECK (offset_m > '-Infinity'::double precision AND offset_m < 'Infinity'::double precision) NOT ENFORCED
+             );"
+        ),
+        vec![found("t.offset_m", "'NaN', 'Infinity' and '-Infinity'")]
+    );
 }
 
 #[test]

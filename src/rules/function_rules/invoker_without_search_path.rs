@@ -141,7 +141,10 @@ fn reaching_site<DB: DatabaseLike>(
                 }
             }
         }
-        for check in table.check_constraints(database)? {
+        for check in table
+            .check_constraints(database)?
+            .filter(|check| check.is_enforced())
+        {
             if expression_reaches(check.expression(database), |call| {
                 callees_reach(
                     database,

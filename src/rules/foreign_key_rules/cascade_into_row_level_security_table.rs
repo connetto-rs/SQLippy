@@ -98,7 +98,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for CascadeIntoRowLevelSecurityTable<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         let host = foreign_key.host_table(database);
-        if !host.has_row_level_security(database)? {
+        if !foreign_key.is_enforced(database) || !host.has_row_level_security(database)? {
             return Ok(());
         }
         let mut bypassed = Vec::new();

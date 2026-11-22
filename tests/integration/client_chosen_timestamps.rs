@@ -133,6 +133,16 @@ fn a_clock_check_accepts_a_column_a_client_role_may_write() {
         ),
         []
     );
+    assert_eq!(
+        unstamped_commands(
+            app(),
+            &format!(
+                "{RESOURCES} GRANT INSERT, UPDATE ON resources TO app;
+                 ALTER TABLE resources ADD CHECK (archived_at <= now() + interval '6 hours') NOT ENFORCED;"
+            )
+        ),
+        ["INSERT", "UPDATE"]
+    );
 }
 
 #[test]

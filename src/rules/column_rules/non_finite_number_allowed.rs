@@ -282,6 +282,7 @@ fn admitted<DB: DatabaseLike>(
     };
     let table_checks: Vec<&Expr> = column
         .check_constraints(database)?
+        .filter(|check| check.is_enforced())
         .map(|check| check.expression(database))
         .collect();
     let name = column.stored_column_name();

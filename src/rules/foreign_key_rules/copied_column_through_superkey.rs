@@ -146,13 +146,19 @@ fn narrowed<DB: DatabaseLike>(
 ) -> Result<bool, LookupError> {
     let parent = foreign_key.referenced_table(database)?;
     let mut declared = Vec::new();
-    for check in parent.check_constraints(database)? {
+    for check in parent
+        .check_constraints(database)?
+        .filter(|check| check.is_enforced())
+    {
         if check.columns(database)?.any(|read| read == source) {
             let renamed = renamed_to_host(database, foreign_key, check.expression(database))?;
             declared.push(shape(&renamed));
         }
     }
-    for check in host.check_constraints(database)? {
+    for check in host
+        .check_constraints(database)?
+        .filter(|check| check.is_enforced())
+    {
         if check.columns(database)?.any(|read| read == column)
             && !declared.contains(&shape(check.expression(database)))
         {

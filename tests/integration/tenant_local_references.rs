@@ -59,6 +59,14 @@ fn a_key_on_the_identifier_alone_is_reported() {
         )),
         ["documents.documents_project_id_fkey"]
     );
+    assert_eq!(
+        objects(&format!(
+            "{PROJECTS} CREATE TABLE documents (id INT PRIMARY KEY, organization_id INT NOT NULL,
+               project_id INT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+               FOREIGN KEY (organization_id, project_id) REFERENCES projects (organization_id, id) NOT ENFORCED);"
+        )),
+        ["documents.documents_project_id_fkey"]
+    );
 }
 
 #[test]
@@ -241,6 +249,11 @@ fn a_shared_root_that_does_not_pin_both_rows_to_one_tenant_is_reported() {
         format!(
             "{RESOURCES} {PARENTS} CREATE TABLE children (id INT PRIMARY KEY REFERENCES parents (id),
                organization_id INT NOT NULL);"
+        ),
+        format!(
+            "{RESOURCES} {PARENTS} CREATE TABLE children (id INT PRIMARY KEY REFERENCES parents (id),
+               organization_id INT NOT NULL,
+               FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id) NOT ENFORCED);"
         ),
         // Without a key on the identifier alone, one identifier names a row of each tenant.
         format!(

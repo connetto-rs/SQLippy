@@ -525,6 +525,9 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
         foreign_key: &<Self::Database as DatabaseLike>::ForeignKey,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
+        if !foreign_key.is_enforced(database) {
+            return Ok(());
+        }
         let parent = foreign_key.referenced_table(database)?;
         if !parent.has_row_level_security(database)? {
             return Ok(());

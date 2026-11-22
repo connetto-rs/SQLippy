@@ -11,12 +11,15 @@ use sql_traits::{
     traits::{CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, TableLike},
 };
 
-/// Whether a check constraint of `column` rejects the empty string.
+/// Whether an enforced check constraint of `column` rejects the empty string.
 fn rejects_empty<DB: DatabaseLike>(
     database: &DB,
     column: &DB::Column,
 ) -> Result<bool, LookupError> {
-    for check in column.check_constraints(database)? {
+    for check in column
+        .check_constraints(database)?
+        .filter(|check| check.is_enforced())
+    {
         if check.is_not_empty_text_constraint(database)? {
             return Ok(true);
         }

@@ -431,6 +431,11 @@ fn a_composite_key_binds_its_columns_to_a_constrained_one() {
         keyed("")
     );
     assert_eq!(reported(&guarded), Vec::<String>::new());
+    let unenforced = format!(
+        "{} CREATE POLICY w ON seats FOR INSERT WITH CHECK (person = CRED AND {BY_PASS});",
+        keyed("NOT ENFORCED")
+    );
+    assert_eq!(reported(&unenforced), ["Warn seats.w"]);
 }
 
 #[test]
