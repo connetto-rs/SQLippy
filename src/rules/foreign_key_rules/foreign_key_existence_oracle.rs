@@ -91,16 +91,17 @@ use crate::{
 /// already holds a referencing row with the same values of a unique key of
 /// the referencing table, since PostgreSQL then refuses the insert with
 /// `23505` before it checks the foreign key, and the unique key is the one
-/// telling the role whether that row exists. That holds when a
-/// `NOT DEFERRABLE` key of the referenced table references unique columns
-/// among the foreign key's referencing columns, from columns whose value,
-/// generated or plain, is the matched row's key for every value the
-/// referencing table lets its key columns take, and the role may neither
-/// delete a referencing row nor update a column of that unique key, either
-/// of which would let one statement move the covering row aside before
-/// inserting. A function or trigger that deletes a covering row partway
-/// through the inserting statement is not modelled. The rule does not run
-/// on SQLite, which has no row-level security.
+/// telling the role whether that row exists, as
+/// [`UniqueKeyExistenceOracle`](crate::prelude::UniqueKeyExistenceOracle)
+/// reports. That holds when a `NOT DEFERRABLE` key of the referenced table
+/// references unique columns among the foreign key's referencing columns,
+/// from columns whose value, generated or plain, is the matched row's key
+/// for every value the referencing table lets its key columns take, and the
+/// role may neither delete a referencing row nor update a column of that
+/// unique key, either of which would let one statement move the covering
+/// row aside before inserting. A function or trigger that deletes a
+/// covering row partway through the inserting statement is not modelled.
+/// The rule does not run on SQLite, which has no row-level security.
 ///
 /// # Example
 ///
@@ -542,6 +543,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
                 .referenced_columns(database)?
                 .map(ColumnLike::stored_column_name)
                 .collect(),
+            true,
         )?;
         let covering = covering_columns(database, foreign_key)?;
         let (insert_settled, update_settled) =

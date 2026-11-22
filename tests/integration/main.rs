@@ -117,6 +117,7 @@ mod unconditional_writes;
 mod undeletable_references;
 mod unfiltered_change_triggers;
 mod unindexed_recursive_joins;
+mod unique_key_existence_oracles;
 mod unprotected_policy_reads;
 mod unseeded_policy_sets;
 mod unused_ctes;
