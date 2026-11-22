@@ -7,7 +7,9 @@ use std::ops::ControlFlow;
 use sql_traits::{
     errors::LookupError,
     structs::{IdentifierCase, TargetName},
-    traits::{ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableIndexLike, TableLike},
+    traits::{
+        ColumnLike, DataTypeLike, DatabaseLike, DialectLike, IndexLike, TableIndexLike, TableLike,
+    },
     utils::columns_in_expression,
 };
 use sqlparser::ast::{
@@ -49,6 +51,7 @@ pub(crate) fn read_columns<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
             &target,
             &declared,
             database.identifier_case(),
+            database.dialect().sqlparser_dialect(),
         ) else {
             return Ok(None);
         };

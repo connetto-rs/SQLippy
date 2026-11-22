@@ -11,7 +11,7 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         policy_read_support::reads_relation,
-        policy_support::{Command, applied, reads_row},
+        policy_support::{Command, admits_every_row, admits_no_row, applied, reads_row},
     },
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -109,9 +109,13 @@ impl<DB: DatabaseLike> TableRule for PolicyWithoutRowReference<DB> {
                         session_only = true;
                         continue;
                     }
-                    if table
-                        .expression_truth(database, clause.expression, IdentifierCase::AsWritten)?
-                        .is_some()
+                    let truth = table.expression_truth(
+                        database,
+                        clause.expression,
+                        IdentifierCase::AsWritten,
+                    )?;
+                    if admits_every_row(truth)
+                        || admits_no_row(truth)
                         || reads_row(database, table, None, clause.expression)?
                         || reads_relation(database, policy, clause.expression)?
                     {

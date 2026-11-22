@@ -2,7 +2,7 @@
 
 use sql_traits::{
     errors::LookupError,
-    traits::{ColumnLike, DatabaseLike, TableIndexLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, DialectLike, TableIndexLike, TableLike},
     utils::columns_in_expression,
 };
 use sqlparser::ast::{Expr, IndexType};
@@ -122,6 +122,7 @@ fn repeated<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
                 &target,
                 &declared,
                 database.identifier_case(),
+                database.dialect().sqlparser_dialect(),
             )
             .unwrap_or_default()
         })
