@@ -388,6 +388,39 @@ fn a_policys_scalar_subquery_reads_as_the_value_it_projects() {
 }
 
 #[test]
+fn a_value_list_confines_when_each_value_meets_a_policy_arm() {
+    assert_eq!(
+        exposed(
+            Deployment::default().with_app_role("app"),
+            "CREATE ROLE app NOLOGIN;
+             CREATE TABLE seats (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+             ALTER TABLE seats ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON seats TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE POLICY own_seats ON seats FOR SELECT TO app
+               USING (user_id = (SELECT current_setting('app.user_id', true))
+                 OR user_id = (SELECT current_setting('app.acting_id', true)));
+             CREATE FUNCTION held_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT seat.organization_id FROM public.seats seat
+                 WHERE seat.user_id IN (current_setting('app.acting_id', true),
+                   current_setting('app.user_id', true)) $$;
+             CREATE FUNCTION named_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT seat.organization_id FROM public.seats seat
+                 WHERE seat.user_id IN (current_setting('app.user_id', true), 'root') $$;
+             CREATE FUNCTION other_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT seat.organization_id FROM public.seats seat
+                 WHERE seat.user_id NOT IN (current_setting('app.acting_id', true),
+                   current_setting('app.user_id', true)) $$;",
+        ),
+        ["named_organizations()", "other_organizations()"]
+    );
+}
+
+#[test]
 fn a_set_declared_within_the_policys_set_confines_a_read() {
     let helper = "
         CREATE FUNCTION admin_organizations() RETURNS SETOF INT
