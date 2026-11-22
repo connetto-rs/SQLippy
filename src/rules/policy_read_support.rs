@@ -61,6 +61,30 @@ impl<'db> Rights<'db> {
     }
 }
 
+/// Whether `function` reads every row of `table`, since the table enforces
+/// no row-level security or the function runs with rights that pass its
+/// policies.
+pub(crate) fn reads_every_row<DB: DatabaseLike>(
+    database: &DB,
+    function: &DB::Function,
+    table: &DB::Table,
+) -> Result<bool, LookupError> {
+    if !table.has_row_level_security(database)? {
+        return Ok(true);
+    }
+    let invoker = function.security_mode() != FunctionSecurity::Definer;
+    Ok(
+        match Rights::of(database, invoker, function.owner(database)?) {
+            Rights::Reader => false,
+            Rights::Bypassing => true,
+            Rights::Owner(owner) => {
+                table.owner(database)? == Some(owner)
+                    && !table.has_forced_row_level_security(database)?
+            }
+        },
+    )
+}
+
 /// The roles checked where a read happens, for its direct table reads and for
 /// the views it reads with their reader's rights, `None` inside a function
 /// whose rights bypass every policy.
