@@ -1193,6 +1193,34 @@ fn a_using_join_carries_its_sides_through_chains_aliases_and_items() {
 }
 
 #[test]
+fn a_subquery_filters_the_merged_column_of_the_join_it_reaches() {
+    let member = "IN (SELECT public.member_organizations())";
+    assert_eq!(
+        exposed_to_app(&format!(
+            "{PROJECTS}
+             CREATE TABLE sites (id INT, organization_id INT);
+             CREATE FUNCTION outer_merge() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 JOIN public.projects project USING (organization_id)
+                 WHERE EXISTS (SELECT 1 WHERE organization_id {member}) $$;
+             CREATE FUNCTION aliased_outer_merge() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 JOIN public.projects project USING (organization_id) AS joined
+                 WHERE EXISTS (SELECT 1 WHERE joined.organization_id {member}) $$;
+             CREATE FUNCTION inner_merge() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 JOIN public.projects project USING (organization_id)
+                 WHERE EXISTS (SELECT 1 FROM public.sites site
+                   JOIN public.sites other USING (organization_id) WHERE organization_id {member}) $$;"
+        )),
+        ["inner_merge()"]
+    );
+}
+
+#[test]
 fn a_correlated_subquery_holds_the_other_conditions_of_its_where() {
     let confined = "resource.organization_id IN (SELECT public.member_organizations())";
     assert_eq!(
