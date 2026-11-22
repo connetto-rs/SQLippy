@@ -118,7 +118,9 @@ fn unvalidated_checks_and_foreign_keys_are_reported_until_validated() {
              ALTER TABLE t ADD CONSTRAINT positive CHECK (x > 0) NOT VALID;
              ALTER TABLE t ADD CONSTRAINT small CHECK (x < 100) NOT VALID;
              ALTER TABLE t ADD CONSTRAINT to_parent FOREIGN KEY (parent_id) REFERENCES parent (id) NOT VALID;
-             ALTER TABLE t VALIDATE CONSTRAINT small;"
+             ALTER TABLE t VALIDATE CONSTRAINT small;
+             CREATE TABLE unenforced (x INT CHECK (x > 0) NOT ENFORCED,
+               parent_id INT REFERENCES parent (id) NOT ENFORCED);"
         )
         .len(),
         2

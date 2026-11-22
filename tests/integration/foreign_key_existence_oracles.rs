@@ -1187,6 +1187,8 @@ fn a_key_whose_every_matchable_row_its_primary_key_already_holds_is_clean_on_ins
         ("DEFERRABLE", "'folder', 'project'", insert.to_owned(), both.clone()),
         // An unvalidated reverse key leaves the rows it predates uncovered.
         ("NOT VALID", "'folder', 'project'", insert.to_owned(), both.clone()),
+        // A reverse key PostgreSQL never checks covers no row.
+        ("NOT ENFORCED", "'folder', 'project'", insert.to_owned(), both.clone()),
         // A project has no edge, so a hidden project answers the edge's key.
         (
             "",
