@@ -19,7 +19,8 @@ use sqlparser::{
         ArgMode, BinaryOperator, Distinct, Expr, Function, FunctionBehavior, FunctionCalledOnNull,
         FunctionSecurity, GroupByExpr, Ident, InTarget, JoinConstraint, JoinOperator,
         ObjectNamePart, Query, Select, SelectFlavor, SelectItem, SetExpr, SetOperator,
-        SetQuantifier, Statement, TableFactor, TableWithJoins, Value, Visit, Visitor, With,
+        SetQuantifier, Statement, TableAliasColumnDef, TableFactor, TableWithJoins, Value, Visit,
+        Visitor, With,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -587,13 +588,70 @@ fn reads_session_state(call: &Function) -> bool {
 }
 
 /// What a relation of a `FROM` item holds under a column name.
-enum Side<'a, DB: DatabaseLike> {
-    /// Something other than a stored table, whose columns are not read.
+enum Side<'c, DB: DatabaseLike> {
+    /// Something other than a stored table or a source projecting a stored
+    /// column under the name, whose columns are not read.
     Unknown,
     /// A stored table with no column of the name.
     Absent,
-    /// The column of the name of a stored table.
-    Column(&'a DB::Column),
+    /// The stored column the name reaches.
+    Column(&'c DB::Column),
+}
+
+/// A relation reading a `WITH` item or a subquery whose body yields each
+/// of its rows from a row passing the body's `WHERE`.
+#[derive(Clone, Copy)]
+struct Source<'s> {
+    relation: &'s TableFactor,
+    body: &'s Select,
+    /// The names the alias of the relation gives its columns.
+    aliased: &'s [TableAliasColumnDef],
+    /// The names the `WITH` item gives its columns, which `aliased`
+    /// overrides.
+    renamed: &'s [TableAliasColumnDef],
+}
+
+impl Source<'_> {
+    /// The position of the first output column named `name`, normalized,
+    /// unless the body projects a `*`, which may shift or hold it.
+    /// PostgreSQL refuses a `USING` name a side holds twice.
+    fn ordinal(&self, name: &str) -> Option<usize> {
+        let mut found = None;
+        for (ordinal, item) in self.body.projection.iter().enumerate() {
+            let projected = match item {
+                SelectItem::ExprWithAlias { alias, .. } => Some(alias),
+                SelectItem::UnnamedExpr(Expr::Identifier(name)) => Some(name),
+                SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts)) => parts.last(),
+                SelectItem::UnnamedExpr(_) => None,
+                _ => return None,
+            };
+            let output = self
+                .aliased
+                .get(ordinal)
+                .or_else(|| self.renamed.get(ordinal))
+                .map(|column| &column.name)
+                .or(projected);
+            if found.is_none()
+                && output.is_some_and(|output| {
+                    normalize_identifier(&output.value, output.quote_style.is_some()) == name
+                })
+            {
+                found = Some(ordinal);
+            }
+        }
+        found
+    }
+
+    /// The definition and binding of the column the body projects as its
+    /// output column named `name`, normalized.
+    fn column<'c, 'q, 'a, DB: DatabaseLike>(
+        &self,
+        context: &'c ExpressionContext<'q, 'a, DB>,
+        name: &str,
+    ) -> Option<(ColumnDefinition<'c, 'q, 'a, DB>, ColumnBinding<'c>)> {
+        let projected = projection_at(self.body, self.ordinal(name)?)?;
+        context.reference(projected).ok().flatten()
+    }
 }
 
 /// What a relation of a `FROM` item reads.
@@ -615,7 +673,7 @@ struct Reads<'c, 'q, 'a, DB: DatabaseLike> {
     lineage: &'c Lineage,
 }
 
-impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
+impl<'c, 'a, DB: DatabaseLike> Reads<'c, '_, 'a, DB> {
     /// Whether `query` and every query nested in it confine their reads,
     /// where `held` holds for every outer row the result of `query` reaches
     /// the function's result through and `owners` are the queries around it
@@ -703,10 +761,10 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
         let witnessed: Vec<&Expr> = filter
             .iter()
             .filter_map(|condition| semi_join(condition))
-            .chain(sources.iter().map(|(_, found)| *found))
+            .chain(sources.iter().map(|source| source.body))
             .flat_map(|found| found.selection.iter().flat_map(conjuncts))
             .collect();
-        let merges = self.merges(select)?;
+        let merges = self.merges(select, &sources)?;
         for from in &select.from {
             let rejected = self.rejected(from, &filter)?;
             let resolver = Resolver {
@@ -769,7 +827,7 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
     }
 
     /// The columns the `USING` joins of `select` merge.
-    fn merges(&self, select: &Select) -> Result<Vec<Merge>, LookupError> {
+    fn merges(&self, select: &Select, sources: &[Source<'_>]) -> Result<Vec<Merge>, LookupError> {
         let mut merges: Vec<Merge> = Vec::new();
         for from in &select.from {
             let natural = from.joins.iter().any(|join| {
@@ -779,31 +837,40 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
                 )
             });
             for (index, join) in from.joins.iter().enumerate() {
-                let Some(JoinConstraint::Using(names)) = join_constraint(&join.join_operator)
-                else {
-                    continue;
+                let (names, alias) = match join_constraint(&join.join_operator) {
+                    Some(JoinConstraint::Using(names)) => (names, None),
+                    Some(JoinConstraint::UsingAlias(names, alias)) => (
+                        names,
+                        Some(
+                            normalize_identifier(&alias.value, alias.quote_style.is_some())
+                                .into_owned(),
+                        ),
+                    ),
+                    _ => continue,
                 };
                 for name in names
                     .iter()
                     .filter_map(|name| name.0.last().and_then(ObjectNamePart::as_ident))
                 {
-                    let right = self.identity_at(from, index + 1, name)?;
+                    let right = self.identity_at(from, index + 1, name, sources)?;
                     let normalized = normalize_identifier(&name.value, name.quote_style.is_some());
+                    let alias = alias.clone();
                     if let Some(merge) = merges
                         .iter_mut()
                         .find(|merge| ptr::eq(merge.from, from) && merge.name == normalized)
                     {
                         merge.last = index;
+                        merge.alias = alias;
                         merge.sides.push(index + 1);
                         if merge.identity != right {
                             merge.identity = None;
                         }
                     } else {
-                        let left = self.left_side(from, index, name)?;
+                        let left = self.left_side(from, index, name, sources)?;
                         merges.push(Merge {
                             from,
                             name: normalized.into_owned(),
-                            first: index,
+                            alias,
                             last: index,
                             sides: left
                                 .iter()
@@ -860,23 +927,24 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
     }
 
     /// The relations of the `FROM` items of `select` that read a `WITH` item
-    /// or a subquery, each with the `SELECT` of its body that yields each of
-    /// its rows from a row passing its `WHERE`. A body two of them read is
-    /// left out, since their rows come from different rows of it.
-    fn sources<'s>(
-        &self,
-        select: &'s Select,
-        owners: &[&'s Query],
-    ) -> Vec<(&'s TableFactor, &'s Select)> {
-        let mut sources: Vec<(&TableFactor, &Select)> = Vec::new();
+    /// or a subquery whose body yields each of its rows from a row passing
+    /// its `WHERE`. A body two of them read is left out, since their rows
+    /// come from different rows of it.
+    fn sources<'s>(&self, select: &'s Select, owners: &[&'s Query]) -> Vec<Source<'s>> {
+        let mut sources: Vec<Source<'_>> = Vec::new();
         for from in &select.from {
             for relation in
                 iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation))
             {
-                let body = match relation {
-                    TableFactor::Derived { subquery, .. } => Some(subquery.as_ref()),
+                let read = match relation {
+                    TableFactor::Derived {
+                        subquery, alias, ..
+                    } => Some((subquery.as_ref(), &[][..], alias)),
                     TableFactor::Table {
-                        name, args: None, ..
+                        name,
+                        alias,
+                        args: None,
+                        ..
                     } => self
                         .items
                         .binding(name)
@@ -885,22 +953,29 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
                             let owner = owners
                                 .iter()
                                 .find(|owner| ptr::eq(**owner, binding.owner))?;
-                            let with = owner.with.as_ref()?;
-                            Some(with.cte_tables[binding.item].query.as_ref())
+                            let item = &owner.with.as_ref()?.cte_tables[binding.item];
+                            Some((item.query.as_ref(), item.alias.columns.as_slice(), alias))
                         }),
                     _ => None,
                 };
-                if let Some(found) = body.and_then(witnessed) {
-                    sources.push((relation, found));
+                if let Some((query, renamed, alias)) = read
+                    && let Some(body) = witnessed(query)
+                {
+                    sources.push(Source {
+                        relation,
+                        body,
+                        aliased: alias.as_ref().map_or(&[], |alias| alias.columns.as_slice()),
+                        renamed,
+                    });
                 }
             }
         }
         sources
             .iter()
-            .filter(|(_, found)| {
+            .filter(|source| {
                 sources
                     .iter()
-                    .filter(|(_, other)| ptr::eq(*other, *found))
+                    .filter(|other| ptr::eq(other.body, source.body))
                     .count()
                     == 1
             })
@@ -917,10 +992,11 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
         from: &TableWithJoins,
         index: usize,
         name: &Ident,
+        sources: &[Source<'_>],
     ) -> Result<Option<(usize, Identity)>, LookupError> {
         let mut found = None;
         for position in 0..=index {
-            match self.column_at(from, position, name)? {
+            match self.column_at(from, position, name, sources)? {
                 Side::Unknown => return Ok(None),
                 Side::Column(column) if found.is_none() => found = Some((position, column)),
                 Side::Column(_) | Side::Absent => {}
@@ -933,33 +1009,47 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
     }
 
     /// What `=` compares the values of the column named `name` of the
-    /// relation at `position` of `from` by, when it is a stored table's.
+    /// relation at `position` of `from` by, when it reaches a stored column.
     fn identity_at(
         &self,
         from: &TableWithJoins,
         position: usize,
         name: &Ident,
+        sources: &[Source<'_>],
     ) -> Result<Option<Identity>, LookupError> {
-        match self.column_at(from, position, name)? {
+        match self.column_at(from, position, name, sources)? {
             Side::Column(column) => identity(column, self.body.confinement.database),
             Side::Unknown | Side::Absent => Ok(None),
         }
     }
 
-    /// The column named `name` of the relation at `position` of `from`.
+    /// The column named `name` of the relation at `position` of `from`, for
+    /// a source the stored column its body projects under the name.
     fn column_at(
         &self,
         from: &TableWithJoins,
         position: usize,
         name: &Ident,
-    ) -> Result<Side<'a, DB>, LookupError> {
+        sources: &[Source<'_>],
+    ) -> Result<Side<'c, DB>, LookupError> {
         let database = self.body.confinement.database;
+        let factor = relation_at(from, position);
+        if let Some(source) = sources
+            .iter()
+            .find(|source| ptr::eq(source.relation, factor))
+        {
+            let normalized = normalize_identifier(&name.value, name.quote_style.is_some());
+            return Ok(match source.column(self.context, &normalized) {
+                Some((ColumnDefinition::Base { column, .. }, _)) => Side::Column(column),
+                _ => Side::Unknown,
+            });
+        }
         let TableFactor::Table {
             name: relation,
             alias,
             args: None,
             ..
-        } = relation_at(from, position)
+        } = factor
         else {
             return Ok(Side::Unknown);
         };
@@ -1175,11 +1265,17 @@ impl<'r> Equalities<'r> {
             if merge.sides.contains(&position) {
                 equalities.link(merge.node(), Node::at(from, position, &merge.name));
             }
-            if resolver.dropping(merge.first, position).is_some() {
-                equalities.link(
-                    Node::at(from, merge.sides[0], &merge.name),
-                    Node::at(from, merge.sides[1], &merge.name),
-                );
+            for (index, &side) in merge.sides.iter().enumerate().skip(1) {
+                if resolver.dropping(side - 1, position).is_some()
+                    && merge.sides[1..index]
+                        .iter()
+                        .all(|earlier| resolver.keeps_left(earlier - 1))
+                {
+                    equalities.link(
+                        resolver.column_node(merge.sides[0], &merge.name),
+                        resolver.column_node(side, &merge.name),
+                    );
+                }
             }
         }
         Ok(equalities)
@@ -1238,8 +1334,9 @@ struct Merge {
     from: *const TableWithJoins,
     /// The name the joins merge.
     name: String,
-    /// The index of the first join merging the name.
-    first: usize,
+    /// The name the `AS` of the last join merging the name gives the joined
+    /// columns, normalized.
+    alias: Option<String>,
     /// The index of the last join merging the name.
     last: usize,
     /// The positions of the relations the joins merge the column of, the
@@ -1286,9 +1383,9 @@ struct Resolver<'r, 'q, 'a, DB: DatabaseLike> {
     /// For each join of `from`, whether the `WHERE` drops the rows it
     /// extends with nulls.
     rejected: &'r [bool],
-    /// The relations of the `SELECT` reading a `WITH` item or subquery, each
-    /// with the `SELECT` of its body every row of it comes from.
-    sources: &'r [(&'r TableFactor, &'r Select)],
+    /// The relations of the `SELECT` reading a `WITH` item or subquery
+    /// every row of which comes from a row of its body.
+    sources: &'r [Source<'r>],
 }
 
 impl<'r, 'q, 'a, DB: DatabaseLike> Resolver<'r, 'q, 'a, DB> {
@@ -1303,11 +1400,11 @@ impl<'r, 'q, 'a, DB: DatabaseLike> Resolver<'r, 'q, 'a, DB> {
     ) -> Option<(ColumnDefinition<'r, 'q, 'a, DB>, ColumnBinding<'r>, Clause)> {
         let (definition, binding) = self.context.reference(reference).ok()??;
         if let Some(entry) = binding.entry()
-            && let Some((_, found)) = self
+            && let Some(source) = self
                 .sources
                 .iter()
-                .find(|(source, _)| ptr::eq(*source, entry.factor()))
-            && let Some(projected) = projection_at(found, entry.ordinal())
+                .find(|source| ptr::eq(source.relation, entry.factor()))
+            && let Some(projected) = projection_at(source.body, entry.ordinal())
             && let Some((definition, binding)) = self.context.reference(projected).ok().flatten()
         {
             return Some((definition, binding, Clause::Witness));
@@ -1366,16 +1463,50 @@ impl<'r, 'q, 'a, DB: DatabaseLike> Resolver<'r, 'q, 'a, DB> {
         }
     }
 
+    /// Whether the join at `index` of the `FROM` item yields, on each row,
+    /// the value its left side holds in a column a `USING` merges.
+    fn keeps_left(&self, index: usize) -> bool {
+        match self.from.joins[index].join_operator {
+            JoinOperator::Join(_)
+            | JoinOperator::Inner(_)
+            | JoinOperator::Left(_)
+            | JoinOperator::LeftOuter(_) => true,
+            JoinOperator::Right(_) | JoinOperator::RightOuter(_) => self.rejected[index],
+            _ => false,
+        }
+    }
+
+    /// The column named `name` of the relation at `position` of the `FROM`
+    /// item, for a source the column of the row of its body it comes from.
+    fn column_node(&self, position: usize, name: &'r str) -> Node<'r> {
+        let relation = relation_at(self.from, position);
+        self.sources
+            .iter()
+            .find(|source| ptr::eq(source.relation, relation))
+            .and_then(|source| source.column(self.context, name))
+            .and_then(|(_, binding)| self.node(Clause::Witness, &binding))
+            .unwrap_or_else(|| Node::at(self.from, position, name))
+    }
+
     /// The column a `USING` join merged that `binding` reached from a
     /// filter of `clause`. A `WHERE` sees the merges of every join of the
-    /// `SELECT`, and an `ON` condition those of the joins before its own.
+    /// `SELECT`, and an `ON` condition those of the joins before its own. A
+    /// name qualified by the alias of a join reaches its merge alone.
     fn merge(&self, clause: Clause, binding: &ColumnBinding<'_>) -> Option<&'r Merge> {
-        if binding.entry().is_some() || binding.relation().is_some() {
+        if binding.entry().is_some() {
             return None;
         }
+        let alias = binding
+            .relation()
+            .map(|(relation, quoted)| normalize_identifier(relation, quoted));
         let (name, quoted) = binding.exposed()?;
         let name = normalize_identifier(name, quoted);
-        let mut named = self.merges.iter().filter(|merge| merge.name == name);
+        let mut named = self.merges.iter().filter(|merge| {
+            merge.name == name
+                && alias
+                    .as_deref()
+                    .is_none_or(|alias| merge.alias.as_deref() == Some(alias))
+        });
         match clause {
             Clause::Held | Clause::Witness => None,
             Clause::Where => named.next().filter(|_| named.next().is_none()),

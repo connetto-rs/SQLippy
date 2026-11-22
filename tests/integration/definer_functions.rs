@@ -1093,6 +1093,106 @@ fn a_using_join_holds_its_merged_column_equal_to_each_side() {
 }
 
 #[test]
+fn a_using_join_carries_its_sides_through_chains_aliases_and_items() {
+    let confined = "resource.organization_id IN (SELECT public.member_organizations())";
+    let chosen =
+        format!("SELECT resource.organization_id FROM public.resources resource WHERE {confined}");
+    assert_eq!(
+        exposed_to_app(&format!(
+            "{PROJECTS}
+             CREATE TABLE sites (id INT, organization_id INT);
+             CREATE FUNCTION chain_side() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT other.id FROM public.resources resource
+                 JOIN public.projects project USING (organization_id)
+                 JOIN public.projects other USING (organization_id) WHERE {confined} $$;
+             CREATE FUNCTION chain_after_left() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT other.id FROM public.resources resource
+                 LEFT JOIN public.projects project USING (organization_id)
+                 JOIN public.projects other USING (organization_id) WHERE {confined} $$;
+             CREATE FUNCTION aliased_side() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 JOIN public.projects project USING (organization_id) AS joined WHERE {confined} $$;
+             CREATE FUNCTION aliased_merge() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 JOIN public.projects project USING (organization_id) AS joined
+                 WHERE joined.organization_id IN (SELECT public.member_organizations()) $$;
+             CREATE FUNCTION item_using() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH chosen AS ({chosen})
+                 SELECT project.id FROM chosen JOIN public.projects project USING (organization_id) $$;
+             CREATE FUNCTION derived_using() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project
+                 JOIN ({chosen}) chosen USING (organization_id) $$;
+             CREATE FUNCTION unfiltered_item_using() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH chosen AS (SELECT site.organization_id FROM public.sites site)
+                 SELECT project.id FROM chosen JOIN public.projects project USING (organization_id) $$;
+             CREATE FUNCTION chain_left_joined() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT other.id FROM public.resources resource
+                 JOIN public.projects project USING (organization_id)
+                 LEFT JOIN public.projects other USING (organization_id) WHERE {confined} $$;
+             CREATE FUNCTION aliased_other_name() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 JOIN public.projects project USING (id) AS joined WHERE {confined} $$;
+             CREATE FUNCTION chain_after_right() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT other.id FROM public.resources resource
+                 RIGHT JOIN public.projects project USING (organization_id)
+                 JOIN public.projects other USING (organization_id) WHERE {confined} $$;
+             CREATE FUNCTION chain_after_full() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT other.id FROM public.resources resource
+                 FULL JOIN public.projects project USING (organization_id)
+                 JOIN public.projects other USING (organization_id) WHERE {confined} $$;
+             CREATE FUNCTION item_bare_name() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH chosen AS (SELECT organization_id FROM public.resources
+                   WHERE organization_id IN (SELECT public.member_organizations()))
+                 SELECT project.id FROM chosen JOIN public.projects project USING (organization_id) $$;
+             CREATE FUNCTION item_after_constant() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH chosen AS (SELECT 0, resource.organization_id
+                   FROM public.resources resource WHERE {confined})
+                 SELECT project.id FROM chosen JOIN public.projects project USING (organization_id) $$;
+             CREATE FUNCTION item_renamed() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH chosen (organization_id) AS (SELECT resource.organization_id AS chosen_id
+                   FROM public.resources resource WHERE {confined})
+                 SELECT project.id FROM chosen JOIN public.projects project USING (organization_id) $$;
+             CREATE FUNCTION derived_renamed() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project
+                 JOIN (SELECT resource.organization_id AS chosen_id FROM public.resources resource
+                   WHERE {confined}) chosen (organization_id) USING (organization_id) $$;
+             CREATE FUNCTION item_renamed_away() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH chosen (organization_id, chosen_id) AS (
+                   SELECT resource.id, resource.organization_id
+                   FROM public.resources resource WHERE {confined})
+                 SELECT project.id FROM chosen JOIN public.projects project USING (organization_id) $$;
+             CREATE FUNCTION item_star() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH chosen AS (SELECT * FROM public.resources resource WHERE {confined})
+                 SELECT project.id FROM chosen JOIN public.projects project USING (organization_id) $$;"
+        )),
+        [
+            "aliased_other_name()",
+            "chain_after_full()",
+            "item_renamed_away()",
+            "item_star()",
+            "unfiltered_item_using()"
+        ]
+    );
+}
+
+#[test]
 fn a_correlated_subquery_holds_the_other_conditions_of_its_where() {
     let confined = "resource.organization_id IN (SELECT public.member_organizations())";
     assert_eq!(
