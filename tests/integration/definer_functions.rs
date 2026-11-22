@@ -994,9 +994,21 @@ fn a_with_item_or_subquery_carries_its_filter_to_the_rows_equated_to_its_columns
              CREATE FUNCTION united_item() RETURNS SETOF INT
                LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
                  WITH chosen AS ({chosen} UNION SELECT site.organization_id FROM public.sites site)
-                 SELECT project.id FROM chosen JOIN public.projects project ON {equated} $$;"
+                 SELECT project.id FROM chosen JOIN public.projects project ON {equated} $$;
+             CREATE FUNCTION expanded_before() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM (
+                   SELECT site.*, resource.organization_id AS member_organization
+                   FROM public.sites site, public.resources resource
+                   WHERE resource.organization_id IN (SELECT public.member_organizations())) chosen
+                 JOIN public.projects project ON {equated} $$;"
         )),
-        ["item_read_twice()", "unfiltered_item()", "united_item()"]
+        [
+            "expanded_before()",
+            "item_read_twice()",
+            "unfiltered_item()",
+            "united_item()"
+        ]
     );
 }
 
