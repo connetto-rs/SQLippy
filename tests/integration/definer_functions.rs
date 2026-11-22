@@ -1361,9 +1361,28 @@ fn a_helper_filter_reaches_the_row_its_returned_key_references() {
         exposed_over_teams(&teams(TEAM_KEYS, ""), helper, administered),
         Vec::<String>::new()
     );
+    let numeric_team_ids = teams(TEAM_KEYS, "")
+        .replace("teams (id UUID", "teams (id NUMERIC")
+        .replace("team_id UUID", "team_id NUMERIC")
+        .replace(
+            "administered_teams() RETURNS SETOF UUID",
+            "administered_teams() RETURNS SETOF NUMERIC",
+        );
+    assert_eq!(
+        exposed_over_teams(&numeric_team_ids, helper, administered),
+        Vec::<String>::new()
+    );
     for schema in [
         teams(TEAM_KEYS, " DEFERRABLE INITIALLY DEFERRED"),
         teams("UNIQUE (organization_id, id)", ""),
+        teams(
+            "PRIMARY KEY (id), code UUID NOT NULL, UNIQUE (organization_id, code)",
+            "",
+        )
+        .replace(
+            "REFERENCES teams (organization_id, id)",
+            "REFERENCES teams (organization_id, code)",
+        ),
     ] {
         assert_eq!(
             exposed_over_teams(&schema, helper, administered),
@@ -1387,6 +1406,59 @@ fn a_helper_filter_reaches_the_row_its_returned_key_references() {
         ),
         ["volatile_admin_organizations()"]
     );
+}
+
+#[test]
+fn every_arm_of_a_helper_carries_its_filter_or_none_does() {
+    let excluded = "member.organization_id IN (SELECT authz.member_organizations())
+        AND NOT (member.organization_id = ANY (ARRAY(SELECT authz.blocked())))";
+    let reported = |teams_body: &str| {
+        exposed_over_teams(
+            &teams(TEAM_KEYS, ""),
+            "authz.listed_organizations()",
+            &format!(
+                "SET check_function_bodies = false;
+                 CREATE FUNCTION authz.listed_teams() RETURNS SETOF UUID
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT team_id FROM public.team_members WHERE admin $$;
+                 CREATE OR REPLACE FUNCTION authz.listed_teams() RETURNS SETOF UUID
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     {teams_body} $$;
+                 CREATE FUNCTION authz.listed_organizations() RETURNS SETOF UUID
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT team.organization_id FROM public.teams team
+                     WHERE team.id IN (SELECT authz.listed_teams()) $$;"
+            ),
+        )
+    };
+    let admin = format!(
+        "SELECT member.team_id FROM public.team_members member WHERE member.admin AND {excluded}"
+    );
+    let own = format!(
+        "SELECT member.team_id FROM public.team_members member
+         WHERE member.user_id = authz.caller_id() AND {excluded}"
+    );
+    assert_eq!(
+        reported(&format!("{admin} UNION {own}")),
+        Vec::<String>::new()
+    );
+    for body in [
+        format!("{admin} UNION VALUES ('00000000-0000-0000-0000-000000000000'::uuid)"),
+        format!("{admin} UNION SELECT listed FROM authz.listed_teams() listed"),
+        format!("{admin} UNION SELECT missing.team_id FROM public.missing_members missing"),
+    ] {
+        assert_eq!(reported(&body), ["listed_organizations()"], "{body}");
+    }
+    for body in [
+        format!("{admin} UNION SELECT member.team_id FROM public.team_members member"),
+        format!("{admin} UNION SELECT nobody.team_id FROM public.team_members member"),
+    ] {
+        assert_eq!(
+            reported(&body),
+            ["listed_organizations()", "listed_teams()"],
+            "{body}"
+        );
+    }
 }
 
 #[test]
@@ -1542,6 +1614,37 @@ fn a_helper_arm_whose_kind_the_keys_rule_out_drops_from_its_set() {
         exposed(
             app(),
             &format!("{}{functions}", text_kinds("('user'::TEXT)"))
+        ),
+        ["granted_to_listed()"]
+    );
+    let everyone = "grantee.kind = 'everyone'";
+    for (kinds, reported) in [
+        ("grantee.kind = ('everyone')", &["granted_to_listed()"][..]),
+        (
+            "grantee.kind IN ('everyone', 'organization')",
+            &["granted_to_listed()"],
+        ),
+        (
+            "grantee.kind IN ('everyone', 'user')",
+            &["granted_resources()", "granted_to_listed()"],
+        ),
+    ] {
+        assert_eq!(
+            exposed(
+                app(),
+                &format!("{}{functions}", grantees("").replace(everyone, kinds))
+            ),
+            reported,
+            "{kinds}"
+        );
+    }
+    assert_eq!(
+        exposed(
+            app(),
+            &format!(
+                "{}ALTER TABLE grantees ADD FOREIGN KEY (id) REFERENCES grantees (id);{functions}",
+                grantees("")
+            )
         ),
         ["granted_to_listed()"]
     );

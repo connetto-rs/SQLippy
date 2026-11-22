@@ -364,13 +364,12 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         if !sets_only_search_path(function) {
             return Ok(false);
         }
-        Ok(self
-            .read_body(
-                function,
-                |query| Lineage::of(function, query),
-                |reads, query| reads.confines_query(query, &[], &[]),
-            )?
-            .unwrap_or(false))
+        self.read_body(
+            function,
+            |query| Lineage::of(function, query),
+            |reads, query| reads.confines_query(query, &[], &[]),
+        )
+        .map(|confined| confined == Some(true))
     }
 
     /// What `walk` finds reading the body of `function`, one `LANGUAGE sql`
@@ -519,26 +518,25 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         {
             return Ok(Arms::default());
         }
-        Ok(self
-            .read_body(
-                function,
-                |_| Lineage::default(),
-                |reads, query| {
-                    let mut carried = Carried::new();
-                    carried.query(query);
-                    let mut drawing = Drawing {
-                        leaves: carried.leaves(),
-                        arms: Arms {
-                            arms: Vec::new(),
-                            complete: carried.complete,
-                        },
-                    };
-                    reads.draw_query(query, &mut drawing)?;
-                    drawing.arms.complete &= drawing.leaves.is_empty();
-                    Ok(drawing.arms)
-                },
-            )?
-            .unwrap_or_default())
+        self.read_body(
+            function,
+            |_| Lineage::default(),
+            |reads, query| {
+                let mut carried = Carried::new();
+                carried.query(query);
+                let mut drawing = Drawing {
+                    leaves: carried.leaves(),
+                    arms: Arms {
+                        arms: Vec::new(),
+                        complete: carried.complete,
+                    },
+                };
+                reads.draw_query(query, &mut drawing)?;
+                drawing.arms.complete &= drawing.leaves.is_empty();
+                Ok(drawing.arms)
+            },
+        )
+        .map(Option::unwrap_or_default)
     }
 }
 
@@ -570,8 +568,8 @@ struct Arm<'a, DB: DatabaseLike> {
 /// A row of a stored table that a function returns one column of.
 struct Drawn<'a, DB: DatabaseLike> {
     table: &'a DB::Table,
-    /// The stored name of the column returned.
-    column: String,
+    /// The column returned.
+    column: &'a DB::Column,
     /// Conditions the row meets, over the stored names of the columns of
     /// `table`, each evaluating alike for every role.
     conditions: Vec<Expr>,
@@ -1084,9 +1082,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         let mut alternatives = Vec::new();
         for arm in &arms.arms {
             let drawn = arm.drawn.as_ref();
-            let Some(source) = column_named(database, drawn.table, &drawn.column)? else {
-                return Ok(None);
-            };
+            let source = drawn.column;
             let kinds = discriminators(database, drawn.table, source, &drawn.conditions)?;
             if apart(&tested_kinds, &kinds) {
                 continue;
@@ -1159,12 +1155,12 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                         continue;
                     }
                     let column = if same {
-                        Some(drawn.column.as_str())
+                        Some(drawn.column.column_name())
                     } else {
                         equalities.of_relation(
                             &Node::Column {
                                 factor: joined,
-                                name: Cow::Borrowed(&drawn.column),
+                                name: Cow::Borrowed(drawn.column.column_name()),
                             },
                             relation,
                         )
@@ -1210,26 +1206,23 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             return Ok(sets);
         }
         let owner = function.owner(database)?;
-        let mut calls: Vec<Expr> = Vec::new();
+        let mut calls: Vec<Function> = Vec::new();
         for policy in table.policies(database)? {
             let Some(using) = policy.using_clause(database)? else {
                 continue;
             };
             let _ = visit_expressions(using.expression(), |expression| {
                 if let Some((_, members)) = membership(expression)
-                    && matches!(members.as_ref(), Expr::Function(_))
-                    && !calls.contains(members.as_ref())
+                    && matches!(members.as_ref(), Expr::Function(written) if !calls.contains(written))
+                    && let Expr::Function(written) = members.into_owned()
                 {
-                    calls.push(members.into_owned());
+                    calls.push(written);
                 }
                 ControlFlow::<()>::Continue(())
             });
         }
-        for call in calls {
-            let Expr::Function(written) = &call else {
-                continue;
-            };
-            let Some(helper) = called(database, written)? else {
+        for written in calls {
+            let Some(helper) = called(database, &written)? else {
                 continue;
             };
             if helper.security_mode() != FunctionSecurity::Definer
@@ -1237,13 +1230,13 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 || (matches!(
                     helper.null_input_behavior(),
                     FunctionCalledOnNull::Strict | FunctionCalledOnNull::ReturnsNullOnNullInput
-                ) && !arguments_set(written, helper))
+                ) && !arguments_set(&written, helper))
             {
                 continue;
             }
             let arms = confinement.arms(helper)?;
             if arms.arms.iter().any(|arm| arm.exhaustive) {
-                sets.push((call, arms));
+                sets.push((Expr::Function(written), arms));
             }
         }
         Ok(sets)
@@ -1318,8 +1311,10 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     mut conditions,
                     whole: stated,
                 } = self.stated(&filters, from, position)?;
-                if let Some(Term::Column(column)) =
+                if let Some(Term::Column(name)) =
                     term(&resolver, Clause::Where, projected, relation, &equalities)
+                    && let Some(column) =
+                        column_named(self.body.confinement.database, table, &name)?
                 {
                     let written = conditions.len();
                     conditions.retain(|condition| !reads_parameter(condition));
@@ -2302,12 +2297,8 @@ fn same_identity<DB: DatabaseLike>(
     left: &DB::Column,
     right: &DB::Column,
 ) -> Result<bool, LookupError> {
-    Ok(
-        match (identity(left, database)?, identity(right, database)?) {
-            (Some(left), Some(right)) => left == right,
-            _ => false,
-        },
-    )
+    let left = identity(left, database)?;
+    Ok(left.is_some() && left == identity(right, database)?)
 }
 
 /// Whether every row of the table holding `foreign_key` with a value in
@@ -2423,7 +2414,11 @@ fn discriminators<'a, DB: DatabaseLike>(
 ) -> Result<Vec<Pinned<'a, DB>>, LookupError> {
     let mut fixed = Vec::new();
     for (name, values) in conditions.iter().filter_map(fixed_by) {
-        fixed.extend(pin(database, table, &name, &values)?);
+        if let Some(column) = column_named(database, table, &name)?
+            && let Some(pinned) = pin(database, column, &values)?
+        {
+            fixed.push(pinned);
+        }
     }
     let mut pending = vec![(table, column, fixed)];
     let mut visited: Vec<&DB::Column> = Vec::new();
@@ -2435,12 +2430,7 @@ fn discriminators<'a, DB: DatabaseLike>(
         visited.push(column);
         for generated in table.columns(database)? {
             if let Some(expression) = generated.generation_expression() {
-                fixed.extend(pin(
-                    database,
-                    table,
-                    generated.column_name(),
-                    &[expression],
-                )?);
+                fixed.extend(pin(database, generated, &[expression])?);
             }
         }
         if unique_alone(database, table, column)? {
@@ -2456,18 +2446,20 @@ fn discriminators<'a, DB: DatabaseLike>(
                 continue;
             }
             let pairs = key_pairs(database, foreign_key)?;
-            let Some(&(_, next)) = pairs.iter().find(|(host, _)| *host == column) else {
-                continue;
-            };
+            let mut next = None;
             let mut carried = Vec::new();
             for &(host, referenced) in &pairs {
+                if host == column {
+                    next = Some(referenced);
+                }
                 if let Some((_, values)) = fixed.iter().find(|(fixed, _)| *fixed == host)
                     && same_identity(database, host, referenced)?
                 {
                     carried.push((referenced, values.clone()));
                 }
             }
-            pending.push((foreign_key.referenced_table(database)?, next, carried));
+            let referenced_table = foreign_key.referenced_table(database)?;
+            pending.extend(next.map(|next| (referenced_table, next, carried)));
         }
     }
     Ok(pinned)
@@ -2476,18 +2468,14 @@ fn discriminators<'a, DB: DatabaseLike>(
 /// A column with the texts its row may hold in it.
 type Fixed<'a, DB> = (&'a <DB as DatabaseLike>::Column, Vec<String>);
 
-/// The column of `table` named `name` with the texts of `values`, when it is
-/// an enum or a text column `=` compares by identity and each value a string
-/// literal it holds as written.
+/// `column` with the texts of `values`, when it is an enum or a text column
+/// `=` compares by identity and each value a string literal it holds as
+/// written.
 fn pin<'a, DB: DatabaseLike>(
-    database: &'a DB,
-    table: &'a DB::Table,
-    name: &str,
+    database: &DB,
+    column: &'a DB::Column,
     values: &[&Expr],
 ) -> Result<Option<Fixed<'a, DB>>, LookupError> {
-    let Some(column) = column_named(database, table, name)? else {
-        return Ok(None);
-    };
     let enumeration = match identity(column, database)? {
         Some(Identity::Enumeration(_)) => true,
         Some(Identity::Family(ScalarFamily::String)) => false,
@@ -2551,24 +2539,14 @@ fn arguments_set<F: FunctionLike>(call: &Function, function: &F) -> bool {
         .argument_modes()
         .filter(|mode| !matches!(mode, ArgMode::Out))
         .count();
-    let arguments = match &call.args {
-        FunctionArguments::None => &[][..],
-        FunctionArguments::List(list) => list.args.as_slice(),
-        FunctionArguments::Subquery(_) => return false,
-    };
-    arguments.len() == inputs
-        && arguments.iter().all(|argument| match argument {
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(value))
-            | FunctionArg::Named {
-                arg: FunctionArgExpr::Expr(value),
-                ..
-            }
-            | FunctionArg::ExprNamed {
-                arg: FunctionArgExpr::Expr(value),
-                ..
-            } => literal(value).is_some_and(|value| !matches!(value, Value::Null)),
-            _ => false,
-        })
+    matches!(&call.args, FunctionArguments::List(list) if list.args.len() == inputs
+    && list.args.iter().all(|argument| {
+        let (FunctionArg::Unnamed(argument)
+        | FunctionArg::Named { arg: argument, .. }
+        | FunctionArg::ExprNamed { arg: argument, .. }) = argument;
+        matches!(argument, FunctionArgExpr::Expr(value)
+            if literal(value).is_some_and(|value| !matches!(value, Value::Null)))
+    }))
 }
 
 /// The call `relation` reads every row of, numbering none.
