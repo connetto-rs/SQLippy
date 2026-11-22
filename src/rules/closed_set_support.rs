@@ -14,6 +14,34 @@ use crate::rules::{
     literal_support::text_literal, policy_support::conjuncts, type_support::underlying_type,
 };
 
+/// The rows a rule relies on a check to have checked.
+#[derive(Clone, Copy)]
+pub(crate) enum CheckedRows {
+    /// The rows written from now on, which every enforced check checks.
+    Written,
+    /// Every stored row, which only a validated check has checked, since a
+    /// `NOT VALID` check skips the rows that predate it.
+    Stored,
+}
+
+impl CheckedRows {
+    /// Whether `check` has checked these rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns the lookup error reading whether `check` is validated raised.
+    pub(crate) fn checked_by<DB: DatabaseLike>(
+        self,
+        database: &DB,
+        check: &DB::CheckConstraint,
+    ) -> Result<bool, LookupError> {
+        match self {
+            Self::Written => Ok(check.is_enforced()),
+            Self::Stored => check.is_validated(database),
+        }
+    }
+}
+
 /// The stored name of the column `expression` names under parentheses, bare
 /// or qualified.
 pub(crate) fn stored_name(mut expression: &Expr) -> Option<Cow<'_, str>> {
@@ -108,9 +136,9 @@ fn listed<'e>(expression: &'e Expr, column: &str) -> Option<Vec<&'e str>> {
     }
 }
 
-/// The distinct labels an enforced check of the textual `column` restricts
-/// it to, in the order first written, when one top-level conjunct of such a
-/// check lists at least two. A `NOT ENFORCED` check restricts nothing.
+/// The distinct labels a check of the textual `column` that has checked
+/// `rows` restricts it to, in the order first written, when one top-level
+/// conjunct of such a check lists at least two.
 ///
 /// # Errors
 ///
@@ -118,15 +146,16 @@ fn listed<'e>(expression: &'e Expr, column: &str) -> Option<Vec<&'e str>> {
 pub(crate) fn closed_set<'db, DB: DatabaseLike>(
     database: &'db DB,
     column: &'db DB::Column,
+    rows: CheckedRows,
 ) -> Result<Option<Vec<&'db str>>, LookupError> {
     if !underlying_type(database, column.data_type(database)).is_textual(database) {
         return Ok(None);
     }
     let stored = column.stored_column_name();
-    for check in column
-        .check_constraints(database)?
-        .filter(|check| check.is_enforced())
-    {
+    for check in column.check_constraints(database)? {
+        if !rows.checked_by(database, check)? {
+            continue;
+        }
         for conjunct in conjuncts(check.expression(database)) {
             let Some(listed) = listed(conjunct, &stored) else {
                 continue;

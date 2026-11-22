@@ -6,7 +6,7 @@ use crate::{
     engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::closed_set_support::closed_set,
+    rules::closed_set_support::{CheckedRows, closed_set},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
 
@@ -64,7 +64,7 @@ impl<DB: DatabaseLike> ColumnRule for ClosedSetAsText<DB> {
         column: &<Self::Database as DatabaseLike>::Column,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let Some(labels) = closed_set(database, column)? else {
+        let Some(labels) = closed_set(database, column, CheckedRows::Written)? else {
             return Ok(());
         };
         let listed = labels
