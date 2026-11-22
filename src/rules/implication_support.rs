@@ -5,8 +5,9 @@ use std::{borrow::Cow, mem, ops::ControlFlow};
 
 use sql_traits::{errors::LookupError, structs::RowGate, traits::DatabaseLike};
 use sqlparser::ast::{
-    BinaryOperator, Expr, FunctionArguments, Ident, InTarget, Query, SelectItem, SetExpr, Value,
-    Visit, VisitMut, VisitorMut, visit_expressions,
+    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
+    InTarget, Query, SelectItem, SetExpr, Value, Visit, VisitMut, Visitor, VisitorMut,
+    visit_expressions, visit_expressions_mut,
 };
 
 use crate::{
@@ -16,8 +17,27 @@ use crate::{
         policy_support::{
             conjuncts, disjuncts, is_column_reference, is_tautology, unnested, unwrapped,
         },
+        walk_support::walk,
     },
 };
+
+/// What a name a filter writes like a column's stands for.
+pub(crate) enum Term {
+    /// The column of this stored name.
+    Column(String),
+    /// The input parameter at this position, counted from zero, of the
+    /// function whose body holds the filter.
+    Parameter(usize),
+}
+
+/// The values an input parameter of an enum type may hold.
+pub(crate) struct ParameterValues {
+    /// Each label of the enum, as a string literal.
+    pub(crate) labels: Vec<Expr>,
+    /// Whether the parameter may also be `NULL`, as in a function that runs
+    /// on `NULL` input.
+    pub(crate) null: bool,
+}
 
 /// How the columns a policy condition tests map onto those a filter tests.
 pub(crate) trait Columns {
@@ -39,6 +59,18 @@ pub(crate) trait Columns {
 
     /// Whether `clause` alone meets every condition.
     fn settles(&self, _clause: &Expr) -> bool {
+        false
+    }
+
+    /// The values the input parameter at `ordinal` may hold, `None` for one
+    /// whose type is no enum.
+    fn parameter_values(&self, _ordinal: usize) -> Option<&ParameterValues> {
+        None
+    }
+
+    /// Whether every function `call` may reach returns `NULL` when its
+    /// positional argument at `index`, counted from zero, is `NULL`.
+    fn returns_null_on_null_argument(&self, _call: &Function, _index: usize) -> bool {
         false
     }
 }
@@ -74,7 +106,9 @@ impl<'e, T> Condition<'e, T> {
         };
         Self {
             renamed: renamed(condition, |column| {
-                stored_name(column).and_then(|name| columns.rename(name))
+                stored_name(column)
+                    .and_then(|name| columns.rename(name))
+                    .map(Term::Column)
             }),
             membership: membership(condition)
                 .and_then(|(column, members)| Some((columns.tested(column)?, members))),
@@ -98,7 +132,10 @@ pub(crate) fn clause_implies<C: Columns>(
         return true;
     }
     if let Some(stated) = &condition.renamed
-        && renamed(clause, |column| stored_name(column).map(Cow::into_owned)).as_ref()
+        && renamed(clause, |column| {
+            stored_name(column).map(|name| Term::Column(name.into_owned()))
+        })
+        .as_ref()
             == Some(stated)
     {
         return true;
@@ -106,7 +143,7 @@ pub(crate) fn clause_implies<C: Columns>(
     if let Some((tested, wider)) = &condition.membership
         && let Some((column, members)) = membership(clause)
         && columns.tests(column, tested)
-        && columns.deployment().is_set_within(members, wider)
+        && is_within(columns, members, wider)
     {
         return true;
     }
@@ -189,29 +226,79 @@ fn references_column<V: Visit>(node: &V) -> bool {
     .is_break()
 }
 
-/// `expression` with every column reference named, quoted, by `rename`, and
-/// every scalar subquery that reads no relation, such as
-/// `(SELECT auth.uid())`, replaced by the value it projects. `None` when
-/// `rename` names none for a column or a subquery reads a column, which may
+/// The numbered placeholder `$n` PostgreSQL reads as the input parameter at
+/// `ordinal`, counted from zero.
+pub(crate) fn parameter(ordinal: usize) -> Expr {
+    Expr::Value(Value::Placeholder(format!("${}", ordinal + 1)).into())
+}
+
+/// The position, counted from zero, of the input parameter `expression`
+/// reads as `$n`.
+fn parameter_ordinal(expression: &Expr) -> Option<usize> {
+    let Expr::Value(value) = expression else {
+        return None;
+    };
+    let Value::Placeholder(placeholder) = &value.value else {
+        return None;
+    };
+    placeholder
+        .strip_prefix('$')?
+        .parse::<usize>()
+        .ok()?
+        .checked_sub(1)
+}
+
+/// `expression` with every column reference named, quoted, by the column
+/// `rename` resolves it to and every parameter reference written as `$n`,
+/// and every scalar subquery that reads no relation, such as
+/// `(SELECT auth.uid())`, replaced by the value it projects. `rename` is
+/// called on the references of `expression` itself. `None` when `rename`
+/// resolves a reference to nothing or a subquery reads a column, which may
 /// resolve to another table's.
-pub(crate) fn renamed(expression: &Expr, rename: impl Fn(&Expr) -> Option<String>) -> Option<Expr> {
-    struct Renamer<F> {
+pub(crate) fn renamed(expression: &Expr, rename: impl Fn(&Expr) -> Option<Term>) -> Option<Expr> {
+    /// Resolves each reference, in the order [`Renamer`] meets them.
+    struct Resolver<F> {
         rename: F,
         depth: usize,
+        resolved: Vec<Expr>,
     }
 
-    impl<F: Fn(&Expr) -> Option<String>> VisitorMut for Renamer<F> {
+    impl<F: Fn(&Expr) -> Option<Term>> Visitor for Resolver<F> {
         type Break = ();
 
-        fn pre_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
+        fn pre_visit_query(&mut self, _query: &Query) -> ControlFlow<()> {
             self.depth += 1;
             ControlFlow::Continue(())
         }
 
-        fn post_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
+        fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<()> {
             self.depth -= 1;
             ControlFlow::Continue(())
         }
+
+        fn post_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
+            if !is_column_reference(expression) {
+                return ControlFlow::Continue(());
+            }
+            let resolved = match (self.rename)(expression) {
+                Some(Term::Column(name)) if self.depth == 0 => {
+                    Expr::Identifier(Ident::with_quote('"', name))
+                }
+                Some(Term::Parameter(ordinal)) => parameter(ordinal),
+                _ => return ControlFlow::Break(()),
+            };
+            self.resolved.push(resolved);
+            ControlFlow::Continue(())
+        }
+    }
+
+    /// Writes the resolved references and inlines the scalar subqueries.
+    struct Renamer<I> {
+        resolved: I,
+    }
+
+    impl<I: Iterator<Item = Expr>> VisitorMut for Renamer<I> {
+        type Break = ();
 
         fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<()> {
             if let Expr::Subquery(query) = expression
@@ -222,28 +309,109 @@ pub(crate) fn renamed(expression: &Expr, rename: impl Fn(&Expr) -> Option<String
                 ] = select.projection.as_mut_slice()
             {
                 *expression = mem::replace(value, Expr::Value(Value::Null.into()));
-                return ControlFlow::Continue(());
-            }
-            if !is_column_reference(expression) {
-                return ControlFlow::Continue(());
-            }
-            if self.depth > 0 {
-                return ControlFlow::Break(());
-            }
-            match (self.rename)(expression) {
-                Some(name) => {
-                    *expression = Expr::Identifier(Ident::with_quote('"', name));
-                    ControlFlow::Continue(())
+            } else if is_column_reference(expression) {
+                match self.resolved.next() {
+                    Some(resolved) => *expression = resolved,
+                    None => return ControlFlow::Break(()),
                 }
-                None => ControlFlow::Break(()),
             }
+            ControlFlow::Continue(())
         }
     }
 
+    let mut resolver = Resolver {
+        rename,
+        depth: 0,
+        resolved: Vec::new(),
+    };
+    if walk(expression, &mut resolver).is_break() {
+        return None;
+    }
     let mut renamed = expression.clone();
-    VisitMut::visit(&mut renamed, &mut Renamer { rename, depth: 0 })
-        .is_continue()
-        .then_some(renamed)
+    VisitMut::visit(
+        &mut renamed,
+        &mut Renamer {
+            resolved: resolver.resolved.into_iter(),
+        },
+    )
+    .is_continue()
+    .then_some(renamed)
+}
+
+/// Whether every value `narrower` yields is one `wider` yields, whatever
+/// value each input parameter it reads holds. A parameter of an enum type
+/// takes each label in turn, and a `NULL` one passes only to a call returning
+/// `NULL` on `NULL` input, which yields no value. A parameter of any other
+/// type proves nothing.
+fn is_within<C: Columns>(columns: &C, narrower: &Expr, wider: &Expr) -> bool {
+    let mut ordinals = Vec::new();
+    let _ = visit_expressions(narrower, |expression| {
+        if let Some(ordinal) = parameter_ordinal(expression)
+            && !ordinals.contains(&ordinal)
+        {
+            ordinals.push(ordinal);
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    if ordinals.is_empty() {
+        return columns.deployment().is_set_within(narrower, wider);
+    }
+    let Some(values) = ordinals
+        .iter()
+        .map(|&ordinal| columns.parameter_values(ordinal))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    if ordinals
+        .iter()
+        .zip(&values)
+        .any(|(&ordinal, values)| values.null && !nothing_on_null(columns, narrower, ordinal))
+    {
+        return false;
+    }
+    let mut choice = vec![0; ordinals.len()];
+    loop {
+        let mut expanded = narrower.clone();
+        let _ = visit_expressions_mut(&mut expanded, |expression| {
+            if let Some(ordinal) = parameter_ordinal(expression)
+                && let Some(position) = ordinals.iter().position(|&seen| seen == ordinal)
+                && let Some(label) = values[position].labels.get(choice[position])
+            {
+                *expression = label.clone();
+            }
+            ControlFlow::<()>::Continue(())
+        });
+        if !columns.deployment().is_set_within(&expanded, wider) {
+            return false;
+        }
+        let Some(position) = (0..choice.len())
+            .find(|&position| choice[position] + 1 < values[position].labels.len())
+        else {
+            return true;
+        };
+        choice[position] += 1;
+        choice[..position].fill(0);
+    }
+}
+
+/// Whether `narrower` yields no value while the input parameter at
+/// `ordinal` is `NULL`, as a call does that takes it, through parentheses
+/// and casts, as a positional argument it returns `NULL` for.
+fn nothing_on_null<C: Columns>(columns: &C, narrower: &Expr, ordinal: usize) -> bool {
+    let Expr::Function(call) = unwrapped(narrower) else {
+        return false;
+    };
+    let FunctionArguments::List(list) = &call.args else {
+        return false;
+    };
+    list.args.iter().enumerate().any(|(index, argument)| {
+        matches!(
+            argument,
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(argument))
+                if parameter_ordinal(unwrapped(argument)) == Some(ordinal)
+        ) && columns.returns_null_on_null_argument(call, index)
+    })
 }
 
 /// The expression yielding the values `value` holds as the operand of `=`,

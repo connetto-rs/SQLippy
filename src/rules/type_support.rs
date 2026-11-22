@@ -6,9 +6,10 @@ use std::ops::ControlFlow;
 
 use sql_traits::{
     errors::LookupError,
+    structs::TargetName,
     traits::{
         CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, DomainLike, FunctionLike,
-        PolicyLike, TableLike, ViewLike,
+        PolicyLike, TableLike, UserDefinedTypeLike, ViewLike,
     },
 };
 use sqlparser::{
@@ -55,6 +56,20 @@ pub(crate) fn underlying_type<'db, DB: DatabaseLike>(
         data_type = inner;
     }
     data_type
+}
+
+/// The user-defined type `type_name` names, as a typed operand names it,
+/// with the schema it omits taken as `public`.
+pub(crate) fn user_type_named<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    type_name: &TargetName<'_>,
+) -> Option<&'db DB::UserDefinedType> {
+    database.user_defined_types().find(|user_type| {
+        user_type.stored_name() == type_name.name()
+            && type_name.schema().is_none_or(|schema| {
+                user_type.stored_schema().as_deref().unwrap_or("public") == schema
+            })
+    })
 }
 
 /// The flaws of a declared type, its array elements included.
