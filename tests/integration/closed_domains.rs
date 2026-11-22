@@ -219,15 +219,20 @@ fn a_column_fixed_by_its_default_and_check_is_reported_only_when_not_null() {
                    nullable_kind TEXT DEFAULT 'entry' CHECK (nullable_kind = 'entry'),
                    other_kind TEXT NOT NULL DEFAULT 'entry' CHECK (other_kind = 'note'),
                    version INT NOT NULL DEFAULT 2,
+                   unvalidated_kind TEXT NOT NULL DEFAULT 'entry',
+                   validated_kind TEXT NOT NULL DEFAULT 'entry',
                    CHECK (id > 0 AND version = 2)
-               );";
+               );
+               ALTER TABLE t ADD CONSTRAINT unvalidated CHECK (unvalidated_kind = 'entry') NOT VALID;
+               ALTER TABLE t ADD CONSTRAINT validated CHECK (validated_kind = 'entry') NOT VALID;
+               ALTER TABLE t VALIDATE CONSTRAINT validated;";
     assert_eq!(
         objects(
             ConstantColumnNotGenerated::default(),
             Deployment::default(),
             sql
         ),
-        ["t.kind", "t.version"]
+        ["t.kind", "t.version", "t.validated_kind"]
     );
 }
 
@@ -535,6 +540,43 @@ fn email_comparisons_pass_only_when_both_sides_fold_the_same_case() {
         [
             "exact",
             "held",
+            "held_unfolded",
+            "json_claim",
+            "mixed_cases",
+            "one_side",
+            "refolded"
+        ]
+    );
+    let unvalidated = format!(
+        "{}
+         ALTER TABLE lowered ADD CONSTRAINT lowered_email CHECK (owner_email = lower(owner_email)) NOT VALID;",
+        sql.replace(" CHECK (owner_email = lower(owner_email))", "")
+    );
+    assert_eq!(
+        objects(
+            CaseSensitiveEmail::default(),
+            Deployment::default(),
+            &unvalidated
+        ),
+        [
+            "exact",
+            "held",
+            "held_unfolded",
+            "json_claim",
+            "mixed_cases",
+            "one_side",
+            "refolded"
+        ]
+    );
+    let validated = format!("{unvalidated} ALTER TABLE lowered VALIDATE CONSTRAINT lowered_email;");
+    assert_eq!(
+        objects(
+            CaseSensitiveEmail::default(),
+            Deployment::default(),
+            &validated
+        ),
+        [
+            "exact",
             "held_unfolded",
             "json_claim",
             "mixed_cases",
@@ -893,6 +935,27 @@ fn a_checked_text_set_is_reported_with_the_order_its_cases_fit() {
     assert!(
         explained(OrderedSetAsDisjunction::default(), &unenforced).is_empty(),
         "{unenforced}"
+    );
+    let unvalidated = format!(
+        "{}
+         ALTER TABLE grants ADD CONSTRAINT grants_level CHECK (level IN ('admin', 'read', 'write')) NOT VALID;
+         ALTER TABLE documents ADD CONSTRAINT documents_level CHECK (required_level IN ('admin', 'read', 'write')) NOT VALID;",
+        sql.replace(" CHECK (level IN ('admin', 'read', 'write'))", "")
+            .replace(" CHECK (required_level IN ('admin', 'read', 'write'))", "")
+    );
+    assert!(
+        explained(OrderedSetAsDisjunction::default(), &unvalidated).is_empty(),
+        "{unvalidated}"
+    );
+    let validated = format!(
+        "{unvalidated}
+         ALTER TABLE grants VALIDATE CONSTRAINT grants_level;
+         ALTER TABLE documents VALIDATE CONSTRAINT documents_level;"
+    );
+    assert_eq!(
+        explained(OrderedSetAsDisjunction::default(), &validated).len(),
+        2,
+        "{validated}"
     );
 }
 

@@ -24,7 +24,7 @@ use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        closed_set_support::names_cast_column,
+        closed_set_support::{CheckedRows, names_cast_column},
         function_reach_support::{call_arguments, calls, literal_key, split},
         literal_support::text_literal,
         name_support::names_email,
@@ -51,11 +51,11 @@ rule_definition!(
     /// read are `=`, `<>` and `IS [NOT] DISTINCT FROM`. A `citext` column is
     /// not reported, nor a comparison whose request side is wrapped in
     /// `lower()` or `upper()`, directly or inside the function it calls,
-    /// while the column side is wrapped in the same function or a check of
-    /// the column holds it in that case. SMTP lets a mailbox's local part be
-    /// case-sensitive, which is why the rule is pedantic. The rule reads
-    /// views, materialized views, policies and SQL and PL/pgSQL function
-    /// bodies.
+    /// while the column side is wrapped in the same function or a validated
+    /// check of the column holds it in that case. SMTP lets a mailbox's
+    /// local part be case-sensitive, which is why the rule is pedantic. The
+    /// rule reads views, materialized views, policies and SQL and PL/pgSQL
+    /// function bodies.
     ///
     /// # Example
     ///
@@ -264,7 +264,7 @@ struct EmailColumn {
     name: String,
     /// Whether the column's type compares case-insensitively.
     insensitive: bool,
-    /// The case a check of the column holds it in, if any.
+    /// The case a validated check of the column holds it in, if any.
     held: Option<Case>,
     /// The case the side folds the column to, if any.
     folded: Option<Case>,
@@ -355,10 +355,10 @@ fn email_column<DB: DatabaseLike>(
                         ));
             let stored = column.stored_column_name();
             let mut held = None;
-            for check in column
-                .check_constraints(database)?
-                .filter(|check| check.is_enforced())
-            {
+            for check in column.check_constraints(database)? {
+                if !CheckedRows::Stored.checked_by(database, check)? {
+                    continue;
+                }
                 held = held.or_else(|| {
                     conjuncts(check.expression(database))
                         .into_iter()

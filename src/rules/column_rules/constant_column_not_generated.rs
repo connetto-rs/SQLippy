@@ -18,7 +18,7 @@ use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        closed_set_support::names_cast_column,
+        closed_set_support::{CheckedRows, names_cast_column},
         function_rules::readable,
         literal_support::literal,
         policy_support::conjuncts,
@@ -33,10 +33,12 @@ rule_definition!(
     /// is a literal and whose check fixes it to that same literal.
     ///
     /// The check is a top-level conjunct `column = literal`, in either
-    /// operand order, of a check of the column's table, compared with the
-    /// default through parentheses and casts. A nullable column is not
-    /// reported, since a generated column computing the literal would refuse
-    /// the `NULL` it admits. Nor is a column among the referencing columns of
+    /// operand order, of a validated check of the column's table, compared
+    /// with the default through parentheses and casts. A check added
+    /// `NOT VALID` fixes nothing, since rows stored before it may hold any
+    /// value. A nullable column is not reported, since a generated column
+    /// computing the literal would refuse the `NULL` it admits. Nor is a
+    /// column among the referencing columns of
     /// a foreign key whose `ON UPDATE` action is `CASCADE`, `SET NULL` or
     /// `SET DEFAULT`, or whose `ON DELETE` action is `SET NULL` or
     /// `SET DEFAULT`, since PostgreSQL refuses such a key over a generated
@@ -197,10 +199,10 @@ impl<DB: DatabaseLike> ColumnRule for ConstantColumnNotGenerated<DB> {
         }
         let stored = column.stored_column_name();
         let mut held = false;
-        for check in column
-            .check_constraints(database)?
-            .filter(|check| check.is_enforced())
-        {
+        for check in column.check_constraints(database)? {
+            if !CheckedRows::Stored.checked_by(database, check)? {
+                continue;
+            }
             held |= conjuncts(check.expression(database))
                 .into_iter()
                 .any(|conjunct| fixes(conjunct, &stored, fixed));

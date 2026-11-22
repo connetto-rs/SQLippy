@@ -17,7 +17,7 @@ use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        closed_set_support::closed_set,
+        closed_set_support::{CheckedRows, closed_set},
         literal_support::text_literal,
         not_in_support::null_extended,
         policy_support::{conjuncts, unnested},
@@ -34,11 +34,13 @@ schema_rule!(
     /// or `>=` over an order of the set's labels.
     ///
     /// A closed set is an enum, whose order is the one it declares, or a
-    /// text column a check restricts to a list of literals, which any order
-    /// of the labels may fit. An operand is a column or a function
-    /// parameter, and a text parameter takes the set of the operand it is
-    /// compared with. The disjunction is built from `=`, `<>`, `[NOT] IN`
-    /// over literals of the set, `AND`, `OR` and `NOT`, and holds an `OR`.
+    /// text column a validated check restricts to a list of literals, which
+    /// any order of the labels may fit. A check added `NOT VALID` closes no
+    /// set, since rows stored before it may hold other labels. An operand is
+    /// a column or a function parameter, and a text parameter takes the set
+    /// of the operand it is compared with. The disjunction is built from
+    /// `=`, `<>`, `[NOT] IN` over literals of the set, `AND`, `OR` and
+    /// `NOT`, and holds an `OR`.
     /// It is evaluated for every pair of labels and must answer as the
     /// comparison does for each, a disjunction answering as `=` or `<>` not
     /// counting. The rule then evaluates the operands' `NULL` values, which a
@@ -306,10 +308,12 @@ impl<DB: DatabaseLike> Builder<'_, '_, '_, DB> {
             )) => {
                 let domain = match declared {
                     Some(domain) => Some(domain),
-                    None => closed_set(database, column)?.map(|labels| Domain {
-                        labels: labels.into_iter().map(str::to_owned).collect(),
-                        declared: None,
-                    }),
+                    None => {
+                        closed_set(database, column, CheckedRows::Stored)?.map(|labels| Domain {
+                            labels: labels.into_iter().map(str::to_owned).collect(),
+                            declared: None,
+                        })
+                    }
                 };
                 let Some(domain) = domain else {
                     return Ok(None);
