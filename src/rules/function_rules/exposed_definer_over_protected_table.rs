@@ -1,6 +1,6 @@
 //! Submodule providing the `ExposedDefinerOverProtectedTable` rule.
 
-use std::{borrow::Cow, iter, mem, ops::ControlFlow, ptr};
+use std::{borrow::Cow, iter, mem, ops::ControlFlow, ptr, slice};
 
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
@@ -14,9 +14,9 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         ArgMode, BinaryOperator, Distinct, Expr, Function, FunctionBehavior, FunctionCalledOnNull,
-        FunctionSecurity, GroupByExpr, Ident, JoinConstraint, JoinOperator, ObjectNamePart, Query,
-        Select, SelectFlavor, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement,
-        TableFactor, TableWithJoins, Value, Visitor, With,
+        FunctionSecurity, GroupByExpr, Ident, InTarget, JoinConstraint, JoinOperator,
+        ObjectNamePart, Query, Select, SelectFlavor, SelectItem, SetExpr, SetOperator,
+        SetQuantifier, Statement, TableFactor, TableWithJoins, Value, Visitor, With,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -729,9 +729,9 @@ impl<DB: DatabaseLike> Visitor for Reads<'_, '_, '_, DB> {
 /// The `SELECT`s of a function body each of whose rows reaches the
 /// function's result holding the one column it projects, unchanged.
 struct Lineage {
-    /// `"_" IN (SELECT f($1, …))` calling the function with its own
-    /// arguments, `None` when calls need not agree on the set it returns.
-    member: Option<Expr>,
+    /// `SELECT f($1, …)` calling the function with its own arguments, `None`
+    /// when calls need not agree on the set it returns.
+    member: Option<Box<Query>>,
     selects: Vec<*const Select>,
 }
 
@@ -766,19 +766,20 @@ impl Lineage {
         if !self.selects.iter().any(|carried| ptr::eq(*carried, select)) {
             return None;
         }
-        let column = own(carried_column(select)?)?;
-        let mut membership = template.clone();
-        if let Expr::In { expr, .. } = &mut membership {
-            **expr = Expr::Identifier(Ident::with_quote('"', column));
-        }
-        Some(membership)
+        let (projected, _) = carried_column(select)?;
+        let column = own(projected)?;
+        Some(Expr::In {
+            expr: Box::new(Expr::Identifier(Ident::with_quote('"', column))),
+            target: InTarget::Subquery(template.clone()),
+            negated: false,
+            global: false,
+        })
     }
 }
 
-/// `"_" IN (SELECT schema.name($1, …))` calling `function`, its schema
-/// `public` when its name has none, or `None` when an argument is not an
-/// input.
-fn member<F: FunctionLike>(function: &F) -> Option<Expr> {
+/// `SELECT schema.name($1, …)` calling `function`, its schema `public` when
+/// its name has none, or `None` when an argument is not an input.
+fn member<F: FunctionLike>(function: &F) -> Option<Box<Query>> {
     let mut arguments = Vec::new();
     for (position, mode) in function.argument_modes().enumerate() {
         if mode != ArgMode::In {
@@ -801,11 +802,8 @@ fn member<F: FunctionLike>(function: &F) -> Option<Expr> {
     );
     let name = written(target.name(), target.name_is_quoted());
     Parser::new(&PostgreSqlDialect {})
-        .try_with_sql(&format!(
-            "\"_\" IN (SELECT {schema}.{name}({}))",
-            arguments.join(", ")
-        ))
-        .and_then(|mut parser| parser.parse_expr())
+        .try_with_sql(&format!("SELECT {schema}.{name}({})", arguments.join(", ")))
+        .and_then(|mut parser| parser.parse_query())
         .ok()
 }
 
@@ -861,7 +859,7 @@ impl<'q> Carried<'q> {
     /// Records `select` when its rows each hold its one projected column,
     /// and follows the `WITH` item it projects whole.
     fn select(&mut self, select: &'q Select) {
-        let Some(projected) = carried_column(select) else {
+        let Some((_, projected)) = carried_column(select) else {
             return;
         };
         self.selects.push(select);
@@ -933,10 +931,10 @@ impl<'q> Carried<'q> {
     }
 }
 
-/// The column reference a `SELECT` projects alone when each row its `FROM`
-/// and filters leave yields one row holding it, with no grouping,
-/// aggregate or `DISTINCT ON` choosing among them.
-fn carried_column(select: &Select) -> Option<&Expr> {
+/// The column reference a `SELECT` projects alone, with the parts of its
+/// name, when each row its `FROM` and filters leave yields one row holding
+/// it, with no grouping, aggregate or `DISTINCT ON` choosing among them.
+fn carried_column(select: &Select) -> Option<(&Expr, &[Ident])> {
     let [
         SelectItem::UnnamedExpr(projected)
         | SelectItem::ExprWithAlias {
@@ -965,8 +963,12 @@ fn carried_column(select: &Select) -> Option<&Expr> {
         && select.qualify.is_none()
         && select.value_table_mode.is_none()
         && select.flavor == SelectFlavor::Standard;
-    (plain && matches!(projected, Expr::Identifier(_) | Expr::CompoundIdentifier(_)))
-        .then_some(projected)
+    let parts = match projected {
+        Expr::Identifier(name) => slice::from_ref(name),
+        Expr::CompoundIdentifier(parts) => parts.as_slice(),
+        _ => return None,
+    };
+    plain.then_some((projected, parts))
 }
 
 /// The name of the one column `query` yields, given by its leftmost
@@ -990,17 +992,11 @@ fn output_name(query: &Query) -> Option<&Ident> {
     }
 }
 
-/// Whether `projected` names `column` of the relation a query names
-/// `relation`.
-fn names(projected: &Expr, relation: &Ident, column: &Ident) -> bool {
-    match projected {
-        Expr::Identifier(name) => same_name(name, column),
-        Expr::CompoundIdentifier(parts) => matches!(
-            parts.as_slice(),
-            [qualifier, name] if same_name(qualifier, relation) && same_name(name, column)
-        ),
-        _ => false,
-    }
+/// Whether the column reference named by `parts` names `column` of the
+/// relation a query names `relation`.
+fn names(parts: &[Ident], relation: &Ident, column: &Ident) -> bool {
+    matches!(parts, [name] if same_name(name, column))
+        || matches!(parts, [qualifier, name] if same_name(qualifier, relation) && same_name(name, column))
 }
 
 /// The conjuncts of the `ON` conditions of `from` that drop rows of its
