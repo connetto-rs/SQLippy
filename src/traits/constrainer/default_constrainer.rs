@@ -20,7 +20,7 @@ use crate::{
         DefinerWithoutSearchPath, DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck,
         DuplicateColumnAssignment, DuplicateColumnNameInExtensionGraph, DuplicateForeignKey,
         DuplicateIndex, DuplicatePolicy, DuplicateUniqueIndex, DuplicatingRecursiveCte,
-        DynamicSqlInjection, EmptyTextAllowed, EqualityIndexOnArray,
+        DynamicSqlInjection, EmptyPartialIndex, EmptyTextAllowed, EqualityIndexOnArray,
         ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, ExtensionWithoutVersion,
         FlagNotBoolean, FloatingPointMoney, ForbiddenColumnInExtension, ForeignKeyExistenceOracle,
@@ -191,12 +191,13 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 57] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 58] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(DuplicateIndex::default()),
         Box::new(RepeatedIndexColumn::default()),
         Box::new(EqualityIndexOnArray::default()),
+        Box::new(EmptyPartialIndex::default()),
         Box::new(NumberedColumns::default()),
         Box::new(MissingPrimaryKey::default()),
         Box::new(KeyWithoutExactEquality::default()),

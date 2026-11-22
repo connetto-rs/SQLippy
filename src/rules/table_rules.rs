@@ -100,6 +100,8 @@ mod repeated_index_column;
 pub use repeated_index_column::RepeatedIndexColumn;
 mod equality_index_on_array;
 pub use equality_index_on_array::EqualityIndexOnArray;
+mod empty_partial_index;
+pub use empty_partial_index::EmptyPartialIndex;
 mod numbered_columns;
 pub use numbered_columns::NumberedColumns;
 mod time_dependent_check;

@@ -179,6 +179,7 @@ rule_icons! {
     "duplicate_index" => FaClone,
     "repeated_index_column" => FaClone,
     "equality_index_on_array" => FaListUl,
+    "empty_partial_index" => FaFilterCircleXmark,
     "numbered_columns" => FaListOl,
     "uncached_policy_call" => FaBolt,
     "uncached_helper_query" => FaBolt,
