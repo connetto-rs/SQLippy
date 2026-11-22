@@ -65,7 +65,10 @@ impl<'db, DB: DatabaseLike> CheckedRow<'db, DB> {
             relevant[position] = true;
         }
         let mut keys = Vec::new();
-        for foreign_key in table.foreign_keys(database)? {
+        for foreign_key in table
+            .foreign_keys(database)?
+            .filter(|foreign_key| foreign_key.is_enforced(database))
+        {
             let hosts: Vec<usize> = foreign_key
                 .host_columns(database)?
                 .filter_map(|host| columns.iter().position(|column| *column == host))

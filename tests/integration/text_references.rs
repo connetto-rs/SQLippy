@@ -34,6 +34,19 @@ fn a_single_column_reference_inherits_the_referenced_checks() {
          CREATE TABLE runs (id INT PRIMARY KEY, status_id TEXT REFERENCES statuses (id));"
     ));
     assert_eq!(raised, Vec::new());
+    assert_eq!(
+        text_findings(&format!(
+            "{STATUSES}
+             CREATE TABLE runs (id INT PRIMARY KEY, status_id TEXT REFERENCES statuses (id) NOT ENFORCED);"
+        )),
+        vec![empty("runs.status_id"), unbounded("runs.status_id")]
+    );
+    assert_eq!(
+        text_findings(
+            "CREATE TABLE statuses (id TEXT PRIMARY KEY CHECK (id <> '' AND length(id) <= 63) NOT ENFORCED);"
+        ),
+        vec![empty("statuses.id"), unbounded("statuses.id")]
+    );
 }
 
 #[test]

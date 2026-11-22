@@ -113,9 +113,9 @@ fn listed<'e>(expression: &'e Expr, column: &str) -> Option<Vec<&'e str>> {
     }
 }
 
-/// The distinct labels a check of the textual `column` restricts it to, in
-/// the order first written, when one top-level conjunct of a check lists at
-/// least two.
+/// The distinct labels an enforced check of the textual `column` restricts
+/// it to, in the order first written, when one top-level conjunct of such a
+/// check lists at least two. A `NOT ENFORCED` check restricts nothing.
 ///
 /// # Errors
 ///
@@ -128,7 +128,10 @@ pub(crate) fn closed_set<'db, DB: DatabaseLike>(
         return Ok(None);
     }
     let stored = column.stored_column_name();
-    for check in column.check_constraints(database)? {
+    for check in column
+        .check_constraints(database)?
+        .filter(|check| check.is_enforced())
+    {
         for conjunct in conjuncts(check.expression(database)) {
             let Some(listed) = listed(conjunct, &stored) else {
                 continue;
@@ -147,8 +150,8 @@ pub(crate) fn closed_set<'db, DB: DatabaseLike>(
     Ok(None)
 }
 
-/// The literals a check of `column` restricts it to, whatever its type, when
-/// one top-level conjunct of a check lists them.
+/// The literals an enforced check of `column` restricts it to, whatever its
+/// type, when one top-level conjunct of such a check lists them.
 ///
 /// # Errors
 ///
@@ -158,7 +161,10 @@ pub(crate) fn checked_literals<'db, DB: DatabaseLike>(
     column: &'db DB::Column,
 ) -> Result<Option<Vec<&'db str>>, LookupError> {
     let stored = column.stored_column_name();
-    for check in column.check_constraints(database)? {
+    for check in column
+        .check_constraints(database)?
+        .filter(|check| check.is_enforced())
+    {
         if let Some(listed) = conjuncts(check.expression(database))
             .into_iter()
             .find_map(|conjunct| listed(conjunct, &stored))

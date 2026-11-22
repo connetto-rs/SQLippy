@@ -587,10 +587,9 @@ impl<DB: DatabaseLike> ColumnRule for ClientChosenTimestamp<DB> {
         {
             return Ok(());
         }
-        if column
-            .check_constraints(database)?
-            .any(|check| keeps_in_past(check.expression(database), column_name))
-        {
+        if column.check_constraints(database)?.any(|check| {
+            check.is_enforced() && keeps_in_past(check.expression(database), column_name)
+        }) {
             return Ok(());
         }
 

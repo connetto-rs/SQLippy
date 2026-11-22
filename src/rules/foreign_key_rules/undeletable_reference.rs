@@ -152,7 +152,8 @@ fn cascades<DB: DatabaseLike>(
     while let Some(table) = pending.pop() {
         for host in database.tables() {
             for cascading in host.foreign_keys(database)? {
-                if cascading.on_delete(database) != ReferentialAction::Cascade
+                if !cascading.is_enforced(database)
+                    || cascading.on_delete(database) != ReferentialAction::Cascade
                     || cascading.referenced_table(database)? != table
                 {
                     continue;
@@ -181,7 +182,9 @@ fn cascade_sources<'db, DB: DatabaseLike>(
     let mut pending = vec![table];
     while let Some(table) = pending.pop() {
         for cascading in table.foreign_keys(database)? {
-            if cascading.on_delete(database) != ReferentialAction::Cascade {
+            if !cascading.is_enforced(database)
+                || cascading.on_delete(database) != ReferentialAction::Cascade
+            {
                 continue;
             }
             let source = cascading.referenced_table(database)?;
@@ -379,7 +382,8 @@ fn may_delete_ancestor<DB: DatabaseLike>(
             &[]
         };
         for cascading in table.foreign_keys(database)? {
-            if cascading.on_delete(database) != ReferentialAction::Cascade
+            if !cascading.is_enforced(database)
+                || cascading.on_delete(database) != ReferentialAction::Cascade
                 || !holds_every_row(database, cascading, held)?
             {
                 continue;
@@ -620,7 +624,9 @@ impl<DB: DatabaseLike> ForeignKeyRule for UndeletableReference<DB> {
         foreign_key: &<Self::Database as DatabaseLike>::ForeignKey,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        if foreign_key.on_delete(database) != ReferentialAction::NoAction {
+        if !foreign_key.is_enforced(database)
+            || foreign_key.on_delete(database) != ReferentialAction::NoAction
+        {
             return Ok(());
         }
         let child = foreign_key.host_table(database);

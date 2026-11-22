@@ -71,4 +71,14 @@ fn a_postgres_text_column_held_to_is_json_is_a_json_document() {
         );",
     );
     assert_eq!(raised, vec!["events.raw"]);
+    assert_eq!(
+        unbounded::<PostgreSqlDialect>(
+            "CREATE TABLE events (
+                 id INT PRIMARY KEY,
+                 payload TEXT CHECK (payload IS JSON OBJECT) NOT ENFORCED,
+                 raw TEXT CHECK (raw IS NOT JSON)
+             );"
+        ),
+        vec!["events.payload", "events.raw"]
+    );
 }

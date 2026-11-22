@@ -178,7 +178,10 @@ impl<DB: DatabaseLike> ColumnRule for ConstantColumnNotGenerated<DB> {
         if column.is_generated(database) || column.is_nullable(database)? {
             return Ok(());
         }
-        for foreign_key in column.foreign_keys(database)? {
+        for foreign_key in column
+            .foreign_keys(database)?
+            .filter(|foreign_key| foreign_key.is_enforced(database))
+        {
             let writes_referencing = matches!(
                 foreign_key.on_update(database),
                 ReferentialAction::Cascade
@@ -194,7 +197,10 @@ impl<DB: DatabaseLike> ColumnRule for ConstantColumnNotGenerated<DB> {
         }
         let stored = column.stored_column_name();
         let mut held = false;
-        for check in column.check_constraints(database)? {
+        for check in column
+            .check_constraints(database)?
+            .filter(|check| check.is_enforced())
+        {
             held |= conjuncts(check.expression(database))
                 .into_iter()
                 .any(|conjunct| fixes(conjunct, &stored, fixed));

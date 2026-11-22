@@ -100,6 +100,13 @@ fn a_reference_the_role_cannot_clear_is_reported() {
            FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE);
          REVOKE DELETE ON notes FROM app;"
             .to_owned(),
+        "CREATE TABLE projects (id INT PRIMARY KEY, account_id INT NOT NULL REFERENCES accounts (id) ON DELETE CASCADE NOT ENFORCED,
+           owner_id INT NOT NULL REFERENCES accounts (id) ON DELETE CASCADE NOT ENFORCED);
+         CREATE TABLE notes (account_id INT NOT NULL REFERENCES accounts (id) DEFERRABLE INITIALLY DEFERRED,
+           project_id INT NOT NULL REFERENCES projects (id) ON DELETE CASCADE);
+         REVOKE DELETE ON notes FROM app;
+         REVOKE DELETE ON projects FROM app;"
+            .to_owned(),
         // MATCH SIMPLE leaves rows with a NULL extra column to the wider cascade.
         "CREATE TABLE tenant_accounts (id INT PRIMARY KEY REFERENCES accounts (id),
            tenant_id INT NOT NULL, UNIQUE (id, tenant_id));
@@ -246,6 +253,9 @@ fn public_deleting_the_parent_is_reported() {
 #[test]
 fn a_reference_with_a_cleanup_path_passes() {
     for sql in [
+        "CREATE TABLE notes (id INT PRIMARY KEY, account_id INT NOT NULL REFERENCES accounts (id) NOT ENFORCED);
+         REVOKE DELETE ON notes FROM app;"
+            .to_owned(),
         // Referential actions that clear or deliberately keep the rows.
         "CREATE TABLE notes (account_id INT NOT NULL REFERENCES accounts (id) ON DELETE CASCADE);
          REVOKE DELETE ON notes FROM app;"

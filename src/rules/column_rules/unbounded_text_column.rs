@@ -16,7 +16,7 @@ use sql_traits::{
 };
 use sqlparser::ast::{BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments};
 
-/// Whether `column` declares an enforced length or checks an upper bound on
+/// Whether `column` declares an enforced length or an enforced check bounds
 /// its length.
 fn is_bounded<DB: DatabaseLike>(database: &DB, column: &DB::Column) -> Result<bool, LookupError> {
     if column
@@ -26,7 +26,10 @@ fn is_bounded<DB: DatabaseLike>(database: &DB, column: &DB::Column) -> Result<bo
     {
         return Ok(true);
     }
-    for check in column.check_constraints(database)? {
+    for check in column
+        .check_constraints(database)?
+        .filter(|check| check.is_enforced())
+    {
         if check.is_upper_bounded_text_constraint(database)?.is_some() {
             return Ok(true);
         }
@@ -69,14 +72,17 @@ fn rejects_non_json(expression: &Expr, column: &str) -> bool {
     }
 }
 
-/// Whether a check of `column` holds it to a JSON document, the text a
+/// Whether an enforced check of `column` holds it to a JSON document, the text a
 /// `json` or `jsonb` column would store.
 fn holds_json_document<DB: DatabaseLike>(
     database: &DB,
     column: &DB::Column,
 ) -> Result<bool, LookupError> {
     let stored = column.stored_column_name();
-    for check in column.check_constraints(database)? {
+    for check in column
+        .check_constraints(database)?
+        .filter(|check| check.is_enforced())
+    {
         if rejects_non_json(check.expression(database), &stored) {
             return Ok(true);
         }

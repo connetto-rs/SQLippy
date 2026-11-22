@@ -66,6 +66,7 @@ fn null_together<DB: DatabaseLike>(
     for check in foreign_key
         .host_table(database)
         .check_constraints(database)?
+        .filter(|check| check.is_enforced())
     {
         ties.extend(
             conjuncts(check.expression(database))
@@ -170,7 +171,9 @@ impl<DB: DatabaseLike> ForeignKeyRule for NullableCompositeForeignKey<DB> {
         foreign_key: &<Self::Database as DatabaseLike>::ForeignKey,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        if Engine::of(database) == Engine::PostgreSql && foreign_key.match_full(database) {
+        if !foreign_key.is_enforced(database)
+            || Engine::of(database) == Engine::PostgreSql && foreign_key.match_full(database)
+        {
             return Ok(());
         }
         let nullable = nullable_host_columns(database, foreign_key)?;
@@ -293,6 +296,9 @@ impl<DB: DatabaseLike> ForeignKeyRule for UnindexedForeignKey<DB> {
         foreign_key: &<Self::Database as DatabaseLike>::ForeignKey,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
+        if !foreign_key.is_enforced(database) {
+            return Ok(());
+        }
         let host = foreign_key.host_table(database);
         let pairs: Vec<(&DB::Column, &DB::Column)> = foreign_key
             .host_columns(database)?

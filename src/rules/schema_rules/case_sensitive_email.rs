@@ -355,7 +355,10 @@ fn email_column<DB: DatabaseLike>(
                         ));
             let stored = column.stored_column_name();
             let mut held = None;
-            for check in column.check_constraints(database)? {
+            for check in column
+                .check_constraints(database)?
+                .filter(|check| check.is_enforced())
+            {
                 held = held.or_else(|| {
                     conjuncts(check.expression(database))
                         .into_iter()

@@ -138,6 +138,7 @@ fn an_action_whose_command_has_no_policy_is_not_reported() {
         ("ON UPDATE CASCADE", "FOR DELETE USING (false)"),
         ("ON DELETE CASCADE", "FOR UPDATE USING (false)"),
         ("ON DELETE RESTRICT ON UPDATE RESTRICT", "USING (false)"),
+        ("ON DELETE CASCADE NOT ENFORCED", "FOR DELETE USING (false)"),
     ] {
         assert_eq!(
             findings(

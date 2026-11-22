@@ -22,9 +22,13 @@ fn findings(sql: &str) -> Vec<String> {
 
 #[test]
 fn a_tenant_column_a_composite_key_keeps_equal_to_the_parent_is_not_reported() {
-    assert_eq!(
-        findings(
-            "CREATE TABLE assets (
+    for (enforcement, expected) in [
+        ("", Vec::<String>::new()),
+        ("NOT ENFORCED", vec!["tubes.organization_id".to_owned()]),
+    ] {
+        assert_eq!(
+            findings(&format!(
+                "CREATE TABLE assets (
                  id INT PRIMARY KEY,
                  organization_id INT NOT NULL,
                  UNIQUE (organization_id, id)
@@ -32,11 +36,13 @@ fn a_tenant_column_a_composite_key_keeps_equal_to_the_parent_is_not_reported() {
              CREATE TABLE tubes (
                  id INT PRIMARY KEY REFERENCES assets (id) ON DELETE CASCADE,
                  organization_id INT NOT NULL,
-                 FOREIGN KEY (organization_id, id) REFERENCES assets (organization_id, id)
-             );",
-        ),
-        Vec::<String>::new()
-    );
+                 FOREIGN KEY (organization_id, id) REFERENCES assets (organization_id, id) {enforcement}
+             );"
+            )),
+            expected,
+            "{enforcement}"
+        );
+    }
 }
 
 #[test]
