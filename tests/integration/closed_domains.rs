@@ -332,6 +332,21 @@ fn a_fixed_column_a_before_row_trigger_reads_from_new_is_not_reported() {
     );
 }
 
+#[test]
+fn a_fixed_column_whose_before_trigger_body_cannot_be_read_is_reported() {
+    let sql = "CREATE TABLE compiled (id INT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'entry' CHECK (kind = 'entry'));
+               CREATE FUNCTION stamp() RETURNS TRIGGER LANGUAGE c AS 'stamp', 'stamp';
+               CREATE TRIGGER compiled BEFORE INSERT ON compiled FOR EACH ROW EXECUTE FUNCTION stamp();";
+    assert_eq!(
+        objects(
+            ConstantColumnNotGenerated::default(),
+            Deployment::default(),
+            sql
+        ),
+        ["compiled.kind"]
+    );
+}
+
 const RELATIONS: &str = "CREATE TABLE documents (id INT PRIMARY KEY);
      CREATE VIEW visible_documents AS SELECT id FROM documents;
      CREATE TABLE grants (id INT PRIMARY KEY, relation_name TEXT NOT NULL, kind TEXT NOT NULL, relation REGCLASS);";

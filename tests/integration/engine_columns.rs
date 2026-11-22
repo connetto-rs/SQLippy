@@ -203,3 +203,12 @@ fn counter_key_advice_names_a_uuid_form_the_engine_has() {
     let postgres = ParserDB::parse::<PostgreSqlDialect>(sql).expect("schema parses");
     assert!(resolution(&constrainer, &postgres).contains("gen_random_uuid()"));
 }
+
+#[test]
+fn a_fixed_column_under_an_inline_sqlite_before_trigger_is_reported() {
+    let constrainer: GenericConstrainer<ParserDB> = ConstantColumnNotGenerated::default().into();
+    let sql = "CREATE TABLE entries (id INTEGER PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'entry' CHECK (kind = 'entry'));
+               CREATE TABLE audit (entry_id INTEGER);
+               CREATE TRIGGER log_entry BEFORE INSERT ON entries FOR EACH ROW BEGIN INSERT INTO audit VALUES (NEW.id); END;";
+    assert!(resolution(&constrainer, &sqlite(sql)).contains("GENERATED ALWAYS AS"));
+}
