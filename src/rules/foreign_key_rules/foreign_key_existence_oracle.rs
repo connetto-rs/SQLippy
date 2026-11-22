@@ -8,11 +8,16 @@ use sql_traits::{
         ColumnDefinitionScope, ColumnPrivilege, ColumnScope, GateTerm, IdentifierCase, RowGate,
         RowSecurity, RowStatement, RowVersion,
     },
-    traits::{ColumnLike, DatabaseLike, ForeignKeyLike, TableLike},
+    traits::{
+        ColumnLike, DatabaseLike, ForeignKeyLike, IndexLike, TableIndexLike, TableLike, TriggerLike,
+    },
 };
 use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionArguments, InTarget, Query, Select, SelectItem, SetExpr,
+    BinaryOperator, ConflictTarget, Expr, Function, FunctionArguments, InTarget, ObjectNamePart,
+    OnConflict, OnConflictAction, OnInsert, Query, Select, SelectItem, SetExpr, Statement,
+    TableObject, TriggerEvent, TriggerPeriod,
 };
+use sqlparser_plpgsql::embedded::{Block, Loop, LoopControl, Node, NodeKind, Target};
 
 use crate::{
     deployment::Deployment,
@@ -21,10 +26,18 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         closed_set_support::names_cast_column,
+        cte_support::stored_table,
+        expression_site_support::is_null_literal,
+        function_reach_support::Reach,
         implication_support::{Columns, Condition, admits, clause_implies, is_column},
         key_support::{equality_keys, instances, named},
+        plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, walk_block},
         policy_read_support::sublink_reads,
         policy_support::{acting, client_roles, conjuncts, disjuncts, is_tautology, unwrapped},
+        trigger_support::{
+            WritesTable, Written, evaluated, fires_for_clients, fires_on_insert, names_record,
+            new_field_write, row_trigger, shadows_new, stored, stored_parts,
+        },
     },
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
@@ -57,7 +70,12 @@ use crate::{
 /// set the check confines its key column within, as written or declared with
 /// [`Deployment::with_set_within`]. An arm of the check that leaves a key
 /// column `NULL` needs neither, since PostgreSQL checks no key holding a
-/// `NULL`. The rule does not run on SQLite, which has no row-level security.
+/// `NULL`. A write is also excused when the referencing table's `BEFORE` row
+/// triggers, on every path that keeps the row, insert the referenced row from
+/// `NEW` with `ON CONFLICT DO NOTHING` and leave the key unchanged afterwards,
+/// while every unique index of the referenced table takes that conflict and
+/// spans the referenced columns. The key then finds its row whether or not it
+/// existed. The rule does not run on SQLite, which has no row-level security.
 ///
 /// # Example
 ///
@@ -702,6 +720,349 @@ fn writes_whole_key<DB: DatabaseLike>(
     Ok(sets_one)
 }
 
+/// Whether `expression`, under parentheses, is `NEW.column`.
+fn names_new_field(expression: &Expr, column: &str) -> bool {
+    match expression {
+        Expr::Nested(inner) => names_new_field(inner, column),
+        Expr::CompoundIdentifier(parts) => matches!(
+            parts.as_slice(),
+            [record, field] if stored(record) == "new" && stored(field) == column
+        ),
+        _ => false,
+    }
+}
+
+/// A unique index of the referenced table, as an `ON CONFLICT` clause meets
+/// it.
+struct UniqueKey {
+    /// The constraint it backs, as PostgreSQL stores its name.
+    constraint: Option<String>,
+    columns: Vec<String>,
+    /// Whether it keys plain columns under no predicate, so a target naming
+    /// its columns infers it.
+    inferable: bool,
+    /// Whether a conflict on it means a row holding the referenced values
+    /// exists.
+    spans_key: bool,
+}
+
+impl UniqueKey {
+    /// Reads `index` against the referenced columns of `pairs`.
+    fn new<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
+        database: &DB,
+        index: &I,
+        pairs: &[(Cow<'_, str>, Cow<'_, str>)],
+    ) -> Result<Self, LookupError> {
+        let columns: Vec<String> = index
+            .columns(database)?
+            .map(|column| column.stored_column_name().into_owned())
+            .collect();
+        let simple = index.is_simple(database)?;
+        Ok(Self {
+            constraint: index.constraint_name(database)?.map(Cow::into_owned),
+            inferable: simple && index.predicate().is_none(),
+            spans_key: simple
+                && pairs
+                    .iter()
+                    .all(|(_, referenced)| columns.iter().any(|column| column == referenced)),
+            columns,
+        })
+    }
+}
+
+/// Decides whether the referencing table's `BEFORE` row triggers insert the
+/// row a written key refers to before PostgreSQL checks the key, so the check
+/// passes whether or not the row existed.
+struct TriggerWrite<'a, DB: DatabaseLike> {
+    database: &'a DB,
+    parent: &'a DB::Table,
+    /// Each referencing column with the referenced column it names.
+    pairs: Vec<(Cow<'a, str>, Cow<'a, str>)>,
+    /// The referenced table's columns in order, which an `INSERT` naming no
+    /// columns fills.
+    parent_columns: Vec<Cow<'a, str>>,
+    unique_keys: Vec<UniqueKey>,
+}
+
+impl<'a, DB: DatabaseLike> TriggerWrite<'a, DB> {
+    /// `None` when no trigger can write the referenced row: a referencing
+    /// column is generated, which `NEW` holds no value for before the row is
+    /// stored, or a `BEFORE INSERT` row trigger of the referenced table may
+    /// change or skip the written row.
+    fn new(
+        database: &'a DB,
+        foreign_key: &'a DB::ForeignKey,
+        parent: &'a DB::Table,
+    ) -> Result<Option<Self>, LookupError> {
+        let mut pairs = Vec::new();
+        for (host, referenced) in foreign_key
+            .host_columns(database)?
+            .zip(foreign_key.referenced_columns(database)?)
+        {
+            if host.generation_expression().is_some() {
+                return Ok(None);
+            }
+            pairs.push((host.stored_column_name(), referenced.stored_column_name()));
+        }
+        for trigger in parent.triggers(database)? {
+            if row_trigger(trigger, TriggerPeriod::Before)
+                && fires_on_insert(trigger)
+                && fires_for_clients(database, trigger)?
+            {
+                return Ok(None);
+            }
+        }
+        let mut unique_keys = Vec::new();
+        for index in parent.unique_indices(database)? {
+            unique_keys.push(UniqueKey::new(database, index, &pairs)?);
+        }
+        for index in parent.indices(database)? {
+            if index.is_unique() {
+                unique_keys.push(UniqueKey::new(database, index, &pairs)?);
+            }
+        }
+        Ok(Some(Self {
+            database,
+            parent,
+            parent_columns: parent
+                .columns(database)?
+                .map(ColumnLike::stored_column_name)
+                .collect(),
+            pairs,
+            unique_keys,
+        }))
+    }
+
+    /// Whether `ON CONFLICT` with `target` takes every conflict the insert
+    /// can meet, each on an index whose conflict leaves a row holding the key.
+    /// A target names the indexes that take its conflicts, and any other
+    /// raises `23505`.
+    fn absorbs(&self, target: Option<&ConflictTarget>) -> bool {
+        self.unique_keys.iter().all(|key| {
+            key.spans_key
+                && match target {
+                    None => true,
+                    Some(ConflictTarget::Columns { columns, .. }) => {
+                        key.inferable
+                            && columns.iter().all(|named| {
+                                key.columns.iter().any(|column| *column == stored(named))
+                            })
+                            && key
+                                .columns
+                                .iter()
+                                .all(|column| columns.iter().any(|named| stored(named) == *column))
+                    }
+                    Some(ConflictTarget::OnConstraint(name)) => name
+                        .0
+                        .last()
+                        .and_then(ObjectNamePart::as_ident)
+                        .is_some_and(|ident| key.constraint.as_deref() == Some(&*stored(ident))),
+                }
+        })
+    }
+
+    /// Whether `statement` inserts a row into the referenced table holding
+    /// `NEW`'s key, with every conflict it can meet taken by `DO NOTHING`.
+    fn writes_key(&self, statement: &Statement) -> bool {
+        let Statement::Insert(insert) = statement else {
+            return false;
+        };
+        let (
+            TableObject::TableName(name),
+            Some(OnInsert::OnConflict(OnConflict {
+                conflict_target,
+                action: OnConflictAction::DoNothing,
+            })),
+            Some(source),
+        ) = (&insert.table, &insert.on, &insert.source)
+        else {
+            return false;
+        };
+        let SetExpr::Values(values) = source.body.as_ref() else {
+            return false;
+        };
+        if source.with.is_some()
+            || source.order_by.is_some()
+            || source.limit_clause.is_some()
+            || source.fetch.is_some()
+            || !matches!(stored_table(self.database, name, None), Ok(Some(table)) if table == self.parent)
+            || !self.absorbs(conflict_target.as_ref())
+        {
+            return false;
+        }
+        let named: Vec<Cow<'_, str>>;
+        let columns = if insert.columns.is_empty() {
+            &self.parent_columns
+        } else {
+            named = insert
+                .columns
+                .iter()
+                .map(|column| stored_parts(column).pop().unwrap_or_default())
+                .collect();
+            &named
+        };
+        values.rows.iter().any(|row| {
+            self.pairs.iter().all(|(host, referenced)| {
+                columns
+                    .iter()
+                    .position(|column| column == referenced)
+                    .and_then(|at| row.content.get(at))
+                    .is_some_and(|value| names_new_field(value, host))
+            })
+        })
+    }
+
+    /// Whether `trigger` fires on the command, `Some(true)` when it fires on
+    /// every row the command writes a key column of.
+    fn fires(&self, trigger: &DB::Trigger, update: bool) -> Option<bool> {
+        trigger
+            .events()
+            .iter()
+            .filter_map(|event| match (event, update) {
+                (TriggerEvent::Insert, false) => Some(true),
+                (TriggerEvent::Update(columns), true) => Some(
+                    columns.is_empty()
+                        || self
+                            .pairs
+                            .iter()
+                            .all(|(host, _)| columns.iter().any(|column| stored(column) == *host)),
+                ),
+                _ => None,
+            })
+            .max()
+            .map(|every_row| every_row && trigger.condition().is_none())
+    }
+
+    /// Whether every row a client writes into `child`, by an `UPDATE` when
+    /// `update` is set and an `INSERT` otherwise, reaches the key check with
+    /// its referenced row present.
+    fn settles(&self, child: &DB::Table, update: bool) -> Result<bool, LookupError> {
+        let mut triggers = Vec::new();
+        for trigger in child.triggers(self.database)? {
+            if row_trigger(trigger, TriggerPeriod::Before)
+                && fires_for_clients(self.database, trigger)?
+                && let Some(always) = self.fires(trigger, update)
+            {
+                triggers.push((trigger, always));
+            }
+        }
+        // PostgreSQL fires the triggers of one event in the order of their
+        // names.
+        triggers.sort_by(|(left, _), (right, _)| left.name().cmp(right.name()));
+        let mut reach = Reach::new(self.database, WritesTable::new(self.database, self.parent));
+        let mut present = false;
+        for (trigger, always) in triggers {
+            let after = trigger
+                .function(self.database)
+                .and_then(plpgsql_block)
+                .is_some_and(|block| {
+                    let mut flow = KeyFlow {
+                        writer: self,
+                        reach: &mut reach,
+                        returned: None,
+                        followed: true,
+                    };
+                    walk_block(&mut flow, &block, Present(present));
+                    flow.followed && flow.returned.unwrap_or(true)
+                });
+            present = after && (always || present);
+        }
+        Ok(present)
+    }
+}
+
+/// Whether a path has the referenced row of `NEW`'s key present.
+#[derive(Clone, Copy)]
+struct Present(bool);
+
+impl FlowState for Present {
+    fn join(&mut self, other: Self) {
+        self.0 &= other.0;
+    }
+}
+
+/// Follows a trigger function's paths to the rows it returns, tracking
+/// whether the referenced row of `NEW`'s key is present on each.
+struct KeyFlow<'r, 'a, DB: DatabaseLike> {
+    writer: &'r TriggerWrite<'a, DB>,
+    reach: &'r mut Reach<'a, DB, WritesTable<'a, DB>>,
+    /// Whether every path returning `NEW` had the row present, `None` until
+    /// one returns it.
+    returned: Option<bool>,
+    /// Whether `NEW` names the trigger row throughout the body.
+    followed: bool,
+}
+
+impl<DB: DatabaseLike> KeyFlow<'_, '_, DB> {
+    /// Whether writing `targets` may change a referencing column of `NEW`.
+    fn rewrites<'t>(&self, targets: impl IntoIterator<Item = &'t Target>) -> bool {
+        targets.into_iter().any(|target| {
+            self.writer
+                .pairs
+                .iter()
+                .any(|(host, _)| !matches!(new_field_write(target, host), Written::Elsewhere))
+        })
+    }
+}
+
+impl<DB: DatabaseLike> FlowVisitor for KeyFlow<'_, '_, DB> {
+    type State = Present;
+
+    fn enter(&mut self, block: &Block, _state: &mut Present) {
+        self.followed &= !shadows_new(block);
+    }
+
+    fn repeat(&mut self, repeated: &Loop, state: &mut Present) {
+        match &repeated.control {
+            LoopControl::Range { variable, .. } | LoopControl::Cursor { variable, .. } => {
+                self.followed &= variable != "new";
+            }
+            LoopControl::Query { targets, .. }
+            | LoopControl::Dynamic { targets, .. }
+            | LoopControl::Array { targets, .. } => {
+                state.0 &= !self.rewrites(targets);
+            }
+            LoopControl::Unconditional | LoopControl::While(_) => {}
+        }
+    }
+
+    fn query(&mut self, query: &Query, state: &mut Present) {
+        state.0 &= self.reach.occurrences(query).is_empty();
+    }
+
+    fn statement(&mut self, statement: &Statement, state: &mut Present) {
+        if self.writer.writes_key(statement) {
+            state.0 = true;
+        } else {
+            state.0 &= self.reach.occurrences(statement).is_empty();
+        }
+    }
+
+    fn step(&mut self, node: &Node, state: &mut Present) {
+        let rewritten = match &node.kind {
+            NodeKind::Assignment(assignment) => self.rewrites([&assignment.target]),
+            NodeKind::Statement { into, .. } => into
+                .as_ref()
+                .is_some_and(|into| self.rewrites(&into.targets)),
+            NodeKind::Dynamic { .. } => true,
+            NodeKind::Fetch(fetch) => self.rewrites(&fetch.targets),
+            NodeKind::Diagnostics(diagnostics) => {
+                self.rewrites(diagnostics.items.iter().map(|item| &item.target))
+            }
+            NodeKind::Return { value } => {
+                let value = value.as_deref().and_then(evaluated);
+                if !value.is_some_and(is_null_literal) {
+                    let kept = state.0 && value.is_some_and(|value| names_record(value, "new"));
+                    self.returned = Some(self.returned.unwrap_or(true) && kept);
+                }
+                false
+            }
+            _ => false,
+        };
+        state.0 &= !rewritten;
+    }
+}
+
 impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
     type Database = DB;
 
@@ -717,6 +1078,14 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
         }
         let child = foreign_key.host_table(database);
         let confinement = Confinement::new(database, reporter.deployment(), foreign_key, parent)?;
+        let (insert_settled, update_settled) =
+            match TriggerWrite::new(database, foreign_key, parent)? {
+                Some(trigger_write) => (
+                    trigger_write.settles(child, false)?,
+                    trigger_write.settles(child, true)?,
+                ),
+                None => (false, false),
+            };
         let mut probes = Vec::new();
         for (name, role) in client_roles(database, reporter.deployment()) {
             let Some(read) = row_security(database, parent, RowStatement::Select, role)? else {
@@ -727,7 +1096,8 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
             }
             let held = child.privileges(acting(role), database)?;
             let mut commands = Vec::new();
-            if writes_whole_key(database, foreign_key, &held.insert, false)?
+            if !insert_settled
+                && writes_whole_key(database, foreign_key, &held.insert, false)?
                 && writes_free_key(
                     &confinement,
                     child,
@@ -739,7 +1109,8 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
             {
                 commands.push("INSERT");
             }
-            if writes_whole_key(database, foreign_key, &held.update, true)?
+            if !update_settled
+                && writes_whole_key(database, foreign_key, &held.update, true)?
                 && writes_free_key(
                     &confinement,
                     child,

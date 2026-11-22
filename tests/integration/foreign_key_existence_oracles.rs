@@ -656,3 +656,205 @@ fn a_referenced_policy_implied_through_the_key_part_by_part_is_clean() {
         assert_eq!(objects, expected, "{check} into {readable}");
     }
 }
+
+const GRANTEES: &str = "CREATE TABLE grantees (id INT, kind TEXT, PRIMARY KEY (id, kind));
+    ALTER TABLE grantees ENABLE ROW LEVEL SECURITY;";
+
+const USERS: &str = "CREATE TABLE users (
+        id INT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        CONSTRAINT users_grantee FOREIGN KEY (id, kind) REFERENCES grantees (id, kind)
+    );
+    GRANT INSERT ON users TO app;";
+
+const WRITTEN: &str =
+    "INSERT INTO grantees (id, kind) VALUES (NEW.id, NEW.kind) ON CONFLICT (id, kind) DO NOTHING;";
+
+const BEFORE_INSERT: &str = "CREATE TRIGGER write_grantee BEFORE INSERT ON users FOR EACH ROW EXECUTE FUNCTION write_grantee();";
+
+/// A trigger function on `users` running `body` and returning `NEW`.
+fn writer(body: &str) -> String {
+    format!(
+        "CREATE FUNCTION write_grantee() RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+         BEGIN {body} RETURN NEW; END $$;"
+    )
+}
+
+/// A `BEFORE INSERT` trigger on `users` named `name` that sets `NEW.kind`.
+fn kind_rewriter(name: &str) -> String {
+    format!(
+        "CREATE FUNCTION {name}() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+         BEGIN NEW.kind := 'team'; RETURN NEW; END $$;
+         CREATE TRIGGER {name} BEFORE INSERT ON users FOR EACH ROW EXECUTE FUNCTION {name}();"
+    )
+}
+
+#[test]
+fn a_before_trigger_writing_the_referenced_row_from_new_is_clean() {
+    for body in [
+        WRITTEN,
+        "INSERT INTO public.grantees (kind, id) VALUES (NEW.kind, NEW.id) ON CONFLICT DO NOTHING;",
+        "INSERT INTO grantees (id, kind) VALUES ((NEW.id), NEW.kind)
+           ON CONFLICT ON CONSTRAINT grantees_pkey DO NOTHING;",
+        "IF NEW.id < 0 THEN RETURN NULL; END IF; INSERT INTO grantees (id, kind) VALUES (NEW.id, NEW.kind)
+           ON CONFLICT (kind, id) DO NOTHING; NEW.created := true;",
+        "INSERT INTO grantees VALUES (NEW.id, 'user'), (NEW.id, NEW.kind) ON CONFLICT DO NOTHING;",
+        &format!("FOR i IN 1..2 LOOP NULL; END LOOP; WHILE false LOOP NULL; END LOOP; {WRITTEN}"),
+    ] {
+        assert_eq!(
+            objects(&format!(
+                "{GRANTEES} {USERS} ALTER TABLE users ADD COLUMN created BOOLEAN;
+                 {} {BEFORE_INSERT}",
+                writer(body)
+            )),
+            Vec::<String>::new(),
+            "{body}"
+        );
+    }
+    // Triggers fire in name order, so this rewrite reaches the written row.
+    assert_eq!(
+        objects(&format!(
+            "{GRANTEES} {USERS} {} {BEFORE_INSERT} {}",
+            writer(WRITTEN),
+            kind_rewriter("rewrite_kind")
+        )),
+        Vec::<String>::new()
+    );
+    // An AFTER trigger and a plain index on the parent leave the written row alone.
+    assert_eq!(
+        objects(&format!(
+            "{GRANTEES} {USERS} {} {BEFORE_INSERT}
+             CREATE INDEX grantees_kind ON grantees (kind);
+             CREATE FUNCTION note_grantee() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+             BEGIN RETURN NULL; END $$;
+             CREATE TRIGGER note_grantee AFTER INSERT ON grantees FOR EACH ROW EXECUTE FUNCTION note_grantee();",
+            writer(WRITTEN)
+        )),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_trigger_write_that_can_fail_or_miss_the_key_is_reported() {
+    for body in [
+        "INSERT INTO grantees (id, kind) VALUES (NEW.id, NEW.kind);",
+        "INSERT INTO grantees (id, kind) VALUES (NEW.id, 'user') ON CONFLICT DO NOTHING;",
+        "INSERT INTO grantees (id, kind) VALUES (NEW.id, NEW.kind::varchar(1)) ON CONFLICT DO NOTHING;",
+        "INSERT INTO grantees (id, kind) (SELECT NEW.id, NEW.kind) ON CONFLICT DO NOTHING;",
+        "INSERT INTO grantees (id, kind) SELECT id, kind FROM grantees ON CONFLICT DO NOTHING;",
+        &format!("IF NEW.kind = 'user' THEN {WRITTEN} END IF;"),
+        &format!("{WRITTEN} NEW.kind := 'team';"),
+        &format!("{WRITTEN} SELECT 'team' INTO NEW.kind;"),
+        &format!("{WRITTEN} DELETE FROM grantees WHERE id = NEW.id;"),
+        &format!("BEGIN {WRITTEN} PERFORM 1 / 0; EXCEPTION WHEN division_by_zero THEN NULL; END;"),
+        "EXECUTE 'INSERT INTO grantees VALUES ($1, $2) ON CONFLICT DO NOTHING' USING NEW.id, NEW.kind;",
+        &format!("DECLARE new RECORD; BEGIN {WRITTEN} END;"),
+        &format!("FOR new IN 1..1 LOOP {WRITTEN} END LOOP;"),
+        &format!("{WRITTEN} FOR NEW.kind IN SELECT 'team' LOOP NULL; END LOOP;"),
+        &format!(
+            "DECLARE cur CURSOR FOR SELECT 'team'; BEGIN {WRITTEN} OPEN cur; FETCH cur INTO NEW.kind; CLOSE cur; END;"
+        ),
+        &format!("{WRITTEN} GET DIAGNOSTICS NEW.kind = ROW_COUNT;"),
+    ] {
+        assert_eq!(
+            objects(&format!(
+                "{GRANTEES} {USERS} {} {BEFORE_INSERT}",
+                writer(body)
+            )),
+            ["users.users_grantee"],
+            "{body}"
+        );
+    }
+    assert_eq!(
+        objects(&format!(
+            "{GRANTEES} {USERS}
+             CREATE FUNCTION forget_grantee(target INT) RETURNS VOID LANGUAGE plpgsql AS $$
+             BEGIN DELETE FROM grantees WHERE id = target; END $$;
+             {} {BEFORE_INSERT}",
+            writer(&format!("{WRITTEN} PERFORM forget_grantee(NEW.id);"))
+        )),
+        ["users.users_grantee"]
+    );
+}
+
+#[test]
+fn a_parent_that_can_refuse_or_skip_the_written_row_is_reported() {
+    let skipping = "CREATE FUNCTION skip_grantee() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+        BEGIN RETURN NULL; END $$;
+        CREATE TRIGGER skip_grantee BEFORE INSERT ON grantees FOR EACH ROW EXECUTE FUNCTION skip_grantee();";
+    for (parent, body) in [
+        ("CREATE UNIQUE INDEX grantees_id ON grantees (id);", WRITTEN),
+        (
+            "CREATE UNIQUE INDEX grantees_id ON grantees (id);",
+            "INSERT INTO grantees (id, kind) VALUES (NEW.id, NEW.kind) ON CONFLICT DO NOTHING;",
+        ),
+        (
+            "CREATE UNIQUE INDEX grantees_kind ON grantees (lower(kind), id);",
+            WRITTEN,
+        ),
+        (skipping, WRITTEN),
+    ] {
+        assert_eq!(
+            objects(&format!(
+                "{GRANTEES} {parent} {USERS} {} {BEFORE_INSERT}",
+                writer(body)
+            )),
+            ["users.users_grantee"],
+            "{parent} {body}"
+        );
+    }
+}
+
+#[test]
+fn a_trigger_that_may_not_write_the_row_first_is_reported() {
+    let rewriting = format!("{BEFORE_INSERT} {}", kind_rewriter("write_kind"));
+    for (users, trigger) in [
+        (
+            USERS,
+            "CREATE TRIGGER write_grantee AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION write_grantee();",
+        ),
+        (
+            USERS,
+            "CREATE TRIGGER write_grantee BEFORE INSERT ON users FOR EACH ROW
+               WHEN (NEW.kind = 'user') EXECUTE FUNCTION write_grantee();",
+        ),
+        (USERS, rewriting.as_str()),
+        (
+            "CREATE TABLE users (
+                 id INT PRIMARY KEY,
+                 kind TEXT GENERATED ALWAYS AS ('user') STORED,
+                 CONSTRAINT users_grantee FOREIGN KEY (id, kind) REFERENCES grantees (id, kind)
+             );
+             GRANT INSERT ON users TO app;",
+            BEFORE_INSERT,
+        ),
+    ] {
+        assert_eq!(
+            objects(&format!("{GRANTEES} {users} {} {trigger}", writer(WRITTEN))),
+            ["users.users_grantee"],
+            "{users} {trigger}"
+        );
+    }
+}
+
+#[test]
+fn a_trigger_covers_the_writes_it_fires_on() {
+    let update_only = ["'app' through UPDATE whether"];
+    for (events, expected) in [
+        ("INSERT", &update_only[..]),
+        ("INSERT OR UPDATE", &[]),
+        ("INSERT OR UPDATE OF kind", &update_only),
+        ("INSERT OR UPDATE OF kind, id", &[]),
+    ] {
+        let findings = reported(&format!(
+            "{GRANTEES} {USERS} GRANT UPDATE ON users TO app; {}
+             CREATE TRIGGER write_grantee BEFORE {events} ON users FOR EACH ROW
+               EXECUTE FUNCTION write_grantee();",
+            writer(WRITTEN)
+        ));
+        assert_eq!(findings.len(), expected.len(), "{events}: {findings:?}");
+        for ((_, message), probe) in findings.iter().zip(expected) {
+            assert!(message.contains(probe), "{events}: {message}");
+        }
+    }
+}
