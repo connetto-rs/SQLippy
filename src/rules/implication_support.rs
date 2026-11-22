@@ -41,7 +41,7 @@ pub(crate) struct ParameterValues {
 }
 
 /// One value of the row a policy condition tests against a set.
-enum Operand<'e, T> {
+pub(crate) enum Operand<'e, T> {
     /// The condition columns this column names.
     Tested(T),
     /// A value that reads no column, met as written.
@@ -82,16 +82,33 @@ pub(crate) trait Columns {
     fn returns_null_on_null_argument(&self, _call: &Function, _index: usize) -> bool {
         false
     }
+
+    /// Whether `clause` draws the row it tests from rows that each meet
+    /// `condition`, when the row also meets every one of `context`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the lookup error reading the rows' source raised.
+    fn draws_implied(
+        &self,
+        _clause: &Expr,
+        _condition: &Condition<'_, Self::Tested>,
+        _context: &[&Expr],
+    ) -> Result<bool, LookupError> {
+        Ok(false)
+    }
 }
 
 /// A policy condition as a filter would state it.
 pub(crate) struct Condition<'e, T> {
+    /// The condition as the policy writes it.
+    pub(crate) original: &'e Expr,
     /// The condition with each column it tests named as the filter names it,
     /// when the filter names every one.
     renamed: Option<Expr>,
     /// The row the condition tests against a set, value by value, and the
     /// expression yielding the members of the set.
-    membership: Option<(Vec<Operand<'e, T>>, Cow<'e, Expr>)>,
+    pub(crate) membership: Option<(Vec<Operand<'e, T>>, Cow<'e, Expr>)>,
     /// The conjuncts of an `AND`, each implied for the whole.
     pub(crate) parts: Vec<Self>,
     /// The arms of an `OR`, one implied for the whole.
@@ -114,6 +131,7 @@ impl<'e, T> Condition<'e, T> {
             }
         };
         Self {
+            original: condition,
             renamed: renamed(condition, |column| {
                 stored_name(column)
                     .and_then(|name| columns.rename(name))
@@ -138,19 +156,25 @@ impl<'e, T> Condition<'e, T> {
     }
 }
 
-/// Whether every row `clause` admits meets `condition`, as when the clause
-/// settles it, states it, tests the same row against a set within the
-/// condition's, implies it in every arm or for every value of an `IN` list,
-/// implies it in one of its conjuncts, or implies each conjunct or one arm of
-/// `condition`.
+/// Whether every row `clause` admits meets `condition`, when the row also
+/// meets every one of `context`. That holds when the clause settles it,
+/// states it, tests the same row against a set within the condition's, or
+/// draws its row from rows meeting it, when it implies the condition in
+/// every arm or for every value of an `IN` list or in one of its conjuncts,
+/// or when it implies each conjunct or one arm of `condition`.
+///
+/// # Errors
+///
+/// Returns the lookup error [`Columns::draws_implied`] raised.
 pub(crate) fn clause_implies<C: Columns>(
     columns: &C,
     clause: &Expr,
     condition: &Condition<'_, C::Tested>,
-) -> bool {
+    context: &[&Expr],
+) -> Result<bool, LookupError> {
     let clause = unnested(clause);
     if columns.settles(clause) {
-        return true;
+        return Ok(true);
     }
     if let Some(stated) = &condition.renamed
         && renamed(clause, |column| {
@@ -159,7 +183,7 @@ pub(crate) fn clause_implies<C: Columns>(
         .as_ref()
             == Some(stated)
     {
-        return true;
+        return Ok(true);
     }
     if let Some((operands, wider)) = &condition.membership
         && let Some((row, members)) = membership(clause)
@@ -173,15 +197,18 @@ pub(crate) fn clause_implies<C: Columns>(
             })
         && is_within(columns, &members, wider)
     {
-        return true;
+        return Ok(true);
+    }
+    if columns.draws_implied(clause, condition, context)? {
+        return Ok(true);
     }
     let arms = disjuncts(clause);
     if arms.len() > 1
-        && arms
-            .iter()
-            .all(|arm| clause_implies(columns, arm, condition))
+        && every(&arms, |arm| {
+            clause_implies(columns, arm, condition, context)
+        })?
     {
-        return true;
+        return Ok(true);
     }
     if let Expr::In {
         expr,
@@ -189,49 +216,80 @@ pub(crate) fn clause_implies<C: Columns>(
         negated: false,
         ..
     } = clause
-        && list.iter().all(|value| {
-            let arm = Expr::BinaryOp {
+    {
+        let arms: Vec<Expr> = list
+            .iter()
+            .map(|value| Expr::BinaryOp {
                 left: expr.clone(),
                 op: BinaryOperator::Eq,
                 right: Box::new(value.clone()),
-            };
-            clause_implies(columns, &arm, condition)
-        })
-    {
-        return true;
+            })
+            .collect();
+        if every(&arms, |arm| {
+            clause_implies(columns, arm, condition, context)
+        })? {
+            return Ok(true);
+        }
     }
     if !condition.parts.is_empty()
-        && condition
-            .parts
-            .iter()
-            .all(|part| clause_implies(columns, clause, part))
+        && every(&condition.parts, |part| {
+            clause_implies(columns, clause, part, context)
+        })?
     {
-        return true;
+        return Ok(true);
     }
     let parts = conjuncts(clause);
-    (parts.len() > 1
-        && parts
-            .iter()
-            .any(|part| clause_implies(columns, part, condition)))
-        || condition
-            .arms
-            .iter()
-            .any(|arm| clause_implies(columns, clause, arm))
+    if parts.len() > 1 {
+        for (index, part) in parts.iter().enumerate() {
+            let mut beside = context.to_vec();
+            beside.extend(
+                parts
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| *other != index)
+                    .flat_map(|(_, other)| conjuncts(other)),
+            );
+            if clause_implies(columns, part, condition, &beside)? {
+                return Ok(true);
+            }
+        }
+    }
+    for arm in &condition.arms {
+        if clause_implies(columns, clause, arm, context)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `holds` accepts every one of `items`, stopping at the first it
+/// refuses or the first error it raises.
+fn every<T, E>(items: &[T], mut holds: impl FnMut(&T) -> Result<bool, E>) -> Result<bool, E> {
+    for item in items {
+        if !holds(item)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Whether `gates` admit every row of `table` that meets each condition
 /// `implied` accepts, which holds when every restrictive term and one
 /// permissive term of each gate is a tautology or accepted.
+///
+/// # Errors
+///
+/// Returns the lookup error reading a policy or `implied` raised.
 pub(crate) fn admits<DB: DatabaseLike, C: Columns>(
     database: &DB,
     table: &DB::Table,
     gates: &[RowGate<'_, DB::Policy>],
     columns: &C,
-    implied: impl Fn(&Condition<'_, C::Tested>) -> bool,
+    implied: impl Fn(&Condition<'_, C::Tested>) -> Result<bool, LookupError>,
 ) -> Result<bool, LookupError> {
     let holds = |condition: &Expr| -> Result<bool, LookupError> {
         Ok(is_tautology(database, table, condition)?
-            || implied(&Condition::new(columns, condition)))
+            || implied(&Condition::new(columns, condition))?)
     };
     for gate in gates {
         for term in gate.restrictive() {
@@ -575,7 +633,7 @@ fn array_members(array: &Expr) -> Option<Cow<'_, Expr>> {
 /// column or a row value of columns and values reading none, and the
 /// expression yielding the members of the set. Column types keep one
 /// expression from yielding a value in one spelling and an array in another.
-fn membership(condition: &Expr) -> Option<(&[Expr], Cow<'_, Expr>)> {
+pub(crate) fn membership(condition: &Expr) -> Option<(&[Expr], Cow<'_, Expr>)> {
     match unwrapped(condition) {
         Expr::BinaryOp {
             left,

@@ -1,0 +1,1870 @@
+//! Whether a key a client role writes tells it if a row it cannot read
+//! exists, shared by the foreign key and unique key existence oracles.
+
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, ops::ControlFlow, rc::Rc, slice};
+
+use sql_traits::{
+    errors::{LookupError, RowSecurityError},
+    structs::{
+        ColumnDefinitionScope, ColumnPrivilege, ColumnScope, IdentifierCase, RowGate, RowSecurity,
+        RowStatement, RowVersion, TargetName, WrittenCall,
+    },
+    traits::{ColumnLike, DatabaseLike, FunctionLike, TableLike},
+    utils::identifier_resolution::normalize_identifier,
+};
+use sqlparser::{
+    ast::{
+        BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
+        FunctionSecurity, Ident, InTarget, JoinOperator, ObjectName, Query, Select, SelectItem,
+        SetExpr, SetOperator, TableAlias, TableFactor, Value, VisitMut, VisitorMut,
+        visit_expressions,
+    },
+    dialect::PostgreSqlDialect,
+    parser::Parser,
+};
+
+use crate::{
+    deployment::Deployment,
+    rules::{
+        closed_set_support::{names_cast_column, stored_name},
+        cte_support::stored_table,
+        grant_support::schema_of,
+        implication_support::{
+            Columns, Condition, Operand, admits, clause_implies, is_column, membership,
+        },
+        key_support::{equality_keys, instances, named},
+        policy_read_support::sublink_reads,
+        policy_support::{
+            acting, conjuncts, disjuncts, is_column_reference, is_contradiction, is_tautology,
+            sql_set_body, unwrapped,
+        },
+    },
+};
+
+/// The row security `role` meets running `statement` on `table`, or `None`
+/// when the schema cannot settle it for the role.
+pub(crate) fn row_security<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    table: &'db DB::Table,
+    statement: RowStatement,
+    role: Option<&'db DB::Role>,
+) -> Result<Option<RowSecurity<'db, DB::Policy>>, LookupError> {
+    match table.row_security(statement, acting(role), database) {
+        Ok(security) => Ok(Some(security)),
+        Err(RowSecurityError::Lookup(error)) => Err(error),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Whether the `SELECT` policies of `table` in `security` leave some row out.
+pub(crate) fn hides_rows<DB: DatabaseLike>(
+    database: &DB,
+    table: &DB::Table,
+    security: &RowSecurity<'_, DB::Policy>,
+) -> Result<bool, LookupError> {
+    let Some(gates) = security.gates() else {
+        // An exempt role reads every row, and a refused read reads none.
+        return Ok(security.infinite_recursion().is_some());
+    };
+    for gate in gates {
+        let mut admitted = false;
+        for term in gate.permissive() {
+            if is_tautology(database, table, term.expression().expression())? {
+                admitted = true;
+                break;
+            }
+        }
+        for term in gate.restrictive() {
+            if !is_tautology(database, table, term.expression().expression())? {
+                admitted = false;
+            }
+        }
+        if !admitted {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// What one arm of a query yields in a column of its output.
+#[derive(Clone, Default)]
+struct Origin {
+    /// The row of the arm the value is a column of, and the stored name of
+    /// that column.
+    row: Option<(usize, String)>,
+    /// Sets the value is one of.
+    members: Vec<Expr>,
+}
+
+/// A row an arm of a query reads, with what its filters state of it.
+struct Row<'db, DB: DatabaseLike> {
+    table: &'db DB::Table,
+    /// Conditions the row meets, over the stored names of its columns.
+    facts: Vec<Expr>,
+    /// Whether the row was read under the writer's own policies.
+    read_by_writer: bool,
+}
+
+/// One arm of a query, with where each output column comes from and the
+/// rows the arm reads.
+struct Arm<'db, DB: DatabaseLike> {
+    outputs: Vec<Origin>,
+    rows: Vec<Row<'db, DB>>,
+}
+
+/// A relation the `FROM` of an arm reads.
+struct Source<'db, DB: DatabaseLike> {
+    /// The name the arm reads the relation under.
+    name: String,
+    /// The stored names of its columns, in order.
+    columns: Vec<String>,
+    /// Whether `columns` names every column the relation yields.
+    counted: bool,
+    kind: SourceKind<'db, DB>,
+}
+
+/// What an arm learns of a value it reads from a source.
+enum SourceKind<'db, DB: DatabaseLike> {
+    /// A table, whose row the arm reads at this position among its rows.
+    Table(usize),
+    /// A call yielding one column, the set of values the call expression
+    /// yields.
+    Set(Box<Expr>),
+    /// A helper whose body the arm reads as its arms.
+    Helper(Vec<Arm<'db, DB>>),
+    /// A relation the arm learns nothing of.
+    Opaque,
+}
+
+/// The arms of the helper a check reads the written row from, with the
+/// position of each written item among the helper's outputs.
+struct HelperArms<'db, DB: DatabaseLike> {
+    /// For each key column, the position of the item naming it.
+    positions: Vec<Option<usize>>,
+    arms: Vec<Arm<'db, DB>>,
+}
+
+/// A condition admitting a referenced column into the values one column of
+/// the rows of a table takes.
+struct Sublink<'db, DB: DatabaseLike> {
+    /// The position in the key of the key column the condition admits.
+    position: usize,
+    table: &'db DB::Table,
+    /// The stored name of the column the subquery projects.
+    column: String,
+    /// The subquery's filters, stated of the table's columns.
+    filters: Vec<Expr>,
+}
+
+/// Decides whether the check on a written row confines a key to rows its
+/// writer may point at. A set of key columns is a bit mask over their
+/// positions in the key, which PostgreSQL caps at 32.
+pub(crate) struct Confinement<'a, DB: DatabaseLike> {
+    database: &'a DB,
+    deployment: &'a Deployment,
+    parent: &'a DB::Table,
+    key_columns: Vec<Cow<'a, str>>,
+    /// The referenced column each key column maps onto, by position.
+    referenced_columns: Vec<Cow<'a, str>>,
+    /// The key columns mapped onto each unique key of the referenced table
+    /// whose columns the key references.
+    row_keys: Vec<u64>,
+    /// The helper arms each clause reads, by the clause's address.
+    helpers: RefCell<HashMap<*const Expr, Option<Rc<HelperArms<'a, DB>>>>>,
+}
+
+impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
+    /// A confinement of the written `key_columns` onto `referenced_columns`
+    /// of `parent`, by position.
+    pub(crate) fn new(
+        database: &'a DB,
+        deployment: &'a Deployment,
+        key_columns: Vec<Cow<'a, str>>,
+        parent: &'a DB::Table,
+        referenced_columns: Vec<Cow<'a, str>>,
+    ) -> Result<Self, LookupError> {
+        let row_keys = equality_keys(database, parent)?
+            .into_iter()
+            .filter_map(|key| {
+                key.iter().try_fold(0, |mask, column| {
+                    let name = column.stored_column_name();
+                    let position = referenced_columns
+                        .iter()
+                        .position(|mapped| *mapped == name)?;
+                    Some(mask | 1 << position)
+                })
+            })
+            .collect();
+        Ok(Self {
+            database,
+            deployment,
+            parent,
+            key_columns,
+            referenced_columns,
+            row_keys,
+            helpers: RefCell::new(HashMap::new()),
+        })
+    }
+
+    /// Every key column.
+    fn whole_key(&self) -> u64 {
+        (1 << self.key_columns.len()) - 1
+    }
+
+    /// The key columns `expression` names.
+    fn key_columns_named(&self, expression: &Expr) -> u64 {
+        positions(&self.key_columns, expression)
+    }
+
+    /// The position in the key of the key column `expression` names.
+    fn key_position(&self, expression: &Expr) -> Option<usize> {
+        self.key_columns
+            .iter()
+            .position(|column| names_cast_column(expression, column))
+    }
+
+    /// Whether `query`, a plain `SELECT`, gives every column of a unique key
+    /// of the referenced table from one row it reads under the writer's
+    /// policies, so the key matches that row or none. `pairs` lists each key
+    /// column with the expression of the query that gives its value, and a
+    /// pair counts when that expression names the column the key maps the
+    /// key column onto.
+    fn draws_row_key<'e>(
+        &self,
+        query: &'e Query,
+        pairs: impl FnOnce(
+            &'e Select,
+            &ColumnDefinitionScope<'_, '_, '_, DB>,
+        ) -> Result<Vec<(&'e Expr, &'e Expr)>, LookupError>,
+    ) -> Result<bool, LookupError> {
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            return Ok(false);
+        };
+        let local = ColumnScope::from_query(query, self.database, IdentifierCase::Folded)?;
+        let (Some(instances), Some(scope)) = (
+            instances(self.database, select).filter(|_| query.with.is_none()),
+            local.scope_for_select(select),
+        ) else {
+            return Ok(false);
+        };
+        // The key columns each instance of the referenced table gives, by its name.
+        let mut rows: Vec<(String, u64)> = Vec::new();
+        for (key, referenced) in pairs(select, &scope)? {
+            let (Some(position), Some((relation, column))) =
+                (self.key_position(key), named(&scope, referenced)?)
+            else {
+                continue;
+            };
+            if column != self.referenced_columns[position]
+                || !instances
+                    .iter()
+                    .any(|instance| instance.name == relation && instance.table == self.parent)
+            {
+                continue;
+            }
+            match rows.iter_mut().find(|(row, _)| *row == relation) {
+                Some((_, mask)) => *mask |= 1 << position,
+                None => rows.push((relation, 1 << position)),
+            }
+        }
+        Ok(rows.iter().any(|(_, mask)| self.covers_row_key(*mask)))
+    }
+
+    /// Whether the key columns in `mask` include every column of a unique
+    /// key of the referenced table.
+    fn covers_row_key(&self, mask: u64) -> bool {
+        self.row_keys.iter().any(|key| mask & key == *key)
+    }
+
+    /// Whether every row of `query` gives `items` the values of one row of
+    /// the referenced table it reads under the writer's policies, over the
+    /// columns of a unique key the key maps them onto. Items pair with the
+    /// select list up to its first wildcard, which shifts every later column.
+    fn yields_readable_row<'e>(
+        &self,
+        items: &'e [Expr],
+        query: &'e Query,
+    ) -> Result<bool, LookupError> {
+        self.draws_row_key(query, |select, _| {
+            Ok(items
+                .iter()
+                .zip(&select.projection)
+                .map_while(|(item, projected)| match projected {
+                    SelectItem::UnnamedExpr(value)
+                    | SelectItem::ExprWithAlias { expr: value, .. } => Some((item, value)),
+                    _ => None,
+                })
+                .collect())
+        })
+    }
+
+    /// Whether an `EXISTS` over `query` equates every column of a unique key
+    /// of one row of the referenced table it reads under the writer's
+    /// policies with the key column the key maps onto it.
+    fn matches_readable_row(&self, query: &Query) -> Result<bool, LookupError> {
+        self.draws_row_key(query, |select, scope| {
+            let mut pairs = Vec::new();
+            for conjunct in select.selection.iter().flat_map(conjuncts) {
+                if let Expr::BinaryOp {
+                    left,
+                    op: BinaryOperator::Eq,
+                    right,
+                } = unwrapped(conjunct)
+                    && is_column(left)
+                    && is_column(right)
+                {
+                    for (inner, outer) in [(left, right), (right, left)] {
+                        if scope.resolve_column_binding(outer)?.is_none() {
+                            pairs.push((outer.as_ref(), inner.as_ref()));
+                        }
+                    }
+                }
+            }
+            Ok(pairs)
+        })
+    }
+
+    /// Whether the conjunct leaves the key check nothing hidden to find. It
+    /// forces a key column `NULL`, so PostgreSQL looks up no row under any
+    /// `MATCH`, or it ties the key to one row the writer reads.
+    fn settles_key(&self, conjunct: &Expr) -> Result<bool, LookupError> {
+        match unwrapped(conjunct) {
+            Expr::IsNull(column) => Ok(self.key_position(column).is_some()),
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Eq,
+                right,
+            } => {
+                for (column, value) in [(left, right), (right, left)] {
+                    if let Expr::Subquery(query) = unwrapped(value)
+                        && self.yields_readable_row(slice::from_ref(column), query)?
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Expr::AnyOp {
+                left,
+                compare_op: BinaryOperator::Eq,
+                right,
+                ..
+            } => match unwrapped(right) {
+                Expr::Subquery(query) => self.yields_readable_row(slice::from_ref(left), query),
+                Expr::Function(Function {
+                    name,
+                    args: FunctionArguments::Subquery(query),
+                    ..
+                }) if name.to_string().eq_ignore_ascii_case("array") => {
+                    self.yields_readable_row(slice::from_ref(left), query)
+                }
+                _ => Ok(false),
+            },
+            Expr::In {
+                expr,
+                target: InTarget::Subquery(query),
+                negated: false,
+                ..
+            } => match unwrapped(expr) {
+                Expr::Tuple(items) => self.yields_readable_row(items, query),
+                item => self.yields_readable_row(slice::from_ref(item), query),
+            },
+            Expr::Exists {
+                subquery,
+                negated: false,
+            } => self.matches_readable_row(subquery),
+            _ => Ok(false),
+        }
+    }
+
+    /// Whether `query` yields only rows of the referenced table read under
+    /// the writer's policies.
+    fn confining_query(&self, policy: &DB::Policy, query: &Query) -> Result<bool, LookupError> {
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            return Ok(false);
+        };
+        if select.from.is_empty()
+            && let [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] =
+                select.projection.as_slice()
+        {
+            return self.confining_value(policy, value);
+        }
+        let (_, reads) = sublink_reads(self.database, policy, Some(query))?;
+        Ok(reads.iter().any(|read| read.table == self.parent))
+    }
+
+    /// Whether `value` holds only keys of rows the writer reads.
+    fn confining_value(&self, policy: &DB::Policy, value: &Expr) -> Result<bool, LookupError> {
+        match unwrapped(value) {
+            Expr::Subquery(query) => self.confining_query(policy, query),
+            Expr::Function(function) => match &function.args {
+                FunctionArguments::Subquery(query)
+                    if function.name.to_string().eq_ignore_ascii_case("array") =>
+                {
+                    self.confining_query(policy, query)
+                }
+                _ => Ok(false),
+            },
+            _ => Ok(false),
+        }
+    }
+
+    /// The key columns an `EXISTS` over `query` ties to a column of the
+    /// referenced table it reads under the writer's policies.
+    fn columns_matched_by_exists(
+        &self,
+        policy: &DB::Policy,
+        query: &Query,
+    ) -> Result<u64, LookupError> {
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            return Ok(0);
+        };
+        let Some(selection) = &select.selection else {
+            return Ok(0);
+        };
+        let (_, reads) = sublink_reads(self.database, policy, Some(query))?;
+        if !reads.iter().any(|read| read.table == self.parent) {
+            return Ok(0);
+        }
+        Ok(conjuncts(selection)
+            .into_iter()
+            .filter_map(|conjunct| match unwrapped(conjunct) {
+                Expr::BinaryOp {
+                    left,
+                    op: BinaryOperator::Eq,
+                    right,
+                } if is_column(left) && is_column(right) => {
+                    Some(self.key_columns_named(left) | self.key_columns_named(right))
+                }
+                _ => None,
+            })
+            .fold(0, |mask, matched| mask | matched))
+    }
+
+    /// The key columns the conjunct confines, every one when it settles the
+    /// key.
+    fn columns_confined_by_conjunct(
+        &self,
+        policy: &DB::Policy,
+        conjunct: &Expr,
+    ) -> Result<u64, LookupError> {
+        if self.settles_key(conjunct)? {
+            return Ok(self.whole_key());
+        }
+        match unwrapped(conjunct) {
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Eq,
+                right,
+            } => {
+                let mut confined = 0;
+                for (column, value) in [(left, right), (right, left)] {
+                    let named = self.key_columns_named(column);
+                    if named != 0 && self.confining_value(policy, value)? {
+                        confined |= named;
+                    }
+                }
+                Ok(confined)
+            }
+            Expr::AnyOp {
+                left,
+                compare_op: BinaryOperator::Eq,
+                right,
+                ..
+            } => {
+                let named = self.key_columns_named(left);
+                Ok(if named != 0 && self.confining_value(policy, right)? {
+                    named
+                } else {
+                    0
+                })
+            }
+            Expr::In {
+                expr,
+                target: InTarget::Subquery(query),
+                negated: false,
+                ..
+            } => {
+                let items = match unwrapped(expr) {
+                    Expr::Tuple(items) => items.as_slice(),
+                    item => std::slice::from_ref(item),
+                };
+                if let SetExpr::Select(select) = query.body.as_ref()
+                    && select.from.is_empty()
+                {
+                    // The query yields one row, so each item takes the value in its position.
+                    let mut confined = 0;
+                    for (item, projected) in items.iter().zip(&select.projection) {
+                        let named = self.key_columns_named(item);
+                        if named != 0
+                            && let SelectItem::UnnamedExpr(value)
+                            | SelectItem::ExprWithAlias { expr: value, .. } = projected
+                            && self.confining_value(policy, value)?
+                        {
+                            confined |= named;
+                        }
+                    }
+                    return Ok(confined);
+                }
+                let named = items
+                    .iter()
+                    .fold(0, |mask, item| mask | self.key_columns_named(item));
+                Ok(if named != 0 && self.confining_query(policy, query)? {
+                    named
+                } else {
+                    0
+                })
+            }
+            Expr::Exists {
+                subquery,
+                negated: false,
+            } => self.columns_matched_by_exists(policy, subquery),
+            _ => Ok(0),
+        }
+    }
+
+    /// The key columns the clause confines, which are those one of its
+    /// conjuncts confines or every arm of a disjunction does.
+    fn columns_confined_by_clause(
+        &self,
+        policy: &DB::Policy,
+        clause: &Expr,
+    ) -> Result<u64, LookupError> {
+        let arms = disjuncts(clause);
+        if arms.len() > 1 {
+            let mut confined = self.whole_key();
+            for arm in arms {
+                confined &= self.columns_confined_by_clause(policy, arm)?;
+            }
+            return Ok(confined);
+        }
+        let mut confined = 0;
+        for conjunct in conjuncts(clause) {
+            confined |= if disjuncts(conjunct).len() > 1 {
+                self.columns_confined_by_clause(policy, conjunct)?
+            } else {
+                self.columns_confined_by_conjunct(policy, conjunct)?
+            };
+        }
+        Ok(confined)
+    }
+
+    /// Whether the gate confines every key column for every row it admits:
+    /// each column confined by a restrictive term or by every permissive one.
+    fn confining_gate(&self, gate: &RowGate<'_, DB::Policy>) -> Result<bool, LookupError> {
+        let mut restricted = 0;
+        for term in gate.restrictive() {
+            restricted |=
+                self.columns_confined_by_clause(term.policy(), term.expression().expression())?;
+        }
+        let mut permitted = self.whole_key();
+        for term in gate.permissive() {
+            permitted &=
+                self.columns_confined_by_clause(term.policy(), term.expression().expression())?;
+        }
+        Ok((restricted | permitted) == self.whole_key())
+    }
+
+    /// Whether every row of the referenced table the key can match passes
+    /// the `SELECT` policies `read`, for every row `written` admits.
+    fn reads_matched_rows(
+        &self,
+        written: &RowGate<'_, DB::Policy>,
+        read: &RowSecurity<'_, DB::Policy>,
+        role: Option<&'a DB::Role>,
+    ) -> Result<bool, LookupError> {
+        let Some(gates) = read.gates() else {
+            return Ok(false);
+        };
+        let reading = Reading {
+            confinement: self,
+            role,
+        };
+        admits(self.database, self.parent, gates, &reading, |condition| {
+            reading.gate_implies(written, condition)
+        })
+    }
+
+    /// Whether `clause` draws the key from the rows of a set-returning
+    /// helper every arm of whose body meets `condition`, given `context`.
+    fn helper_implies(
+        &self,
+        clause: &Expr,
+        condition: &Condition<'_, u64>,
+        context: &[&Expr],
+        role: Option<&'a DB::Role>,
+    ) -> Result<bool, LookupError> {
+        let Some(helper) = self.helper_arms(clause)? else {
+            return Ok(false);
+        };
+        for arm in &helper.arms {
+            let origins: Vec<Option<&Origin>> = helper
+                .positions
+                .iter()
+                .map(|position| position.and_then(|position| arm.outputs.get(position)))
+                .collect();
+            if !self.arm_implies(arm, &origins, condition, context, role)? {
+                return Ok(false);
+            }
+        }
+        Ok(!helper.arms.is_empty())
+    }
+
+    /// Whether every row of the referenced table a key drawn from `arm`
+    /// matches meets `condition`. `origins` holds the origin of each key
+    /// column in the arm. The key column is drawn from a set within the one
+    /// the condition tests, or the arm reads the matched row itself and its
+    /// filters imply the condition, or the condition admits the key of rows
+    /// of a table the writer reads and the arm reads such a row.
+    fn arm_implies(
+        &self,
+        arm: &Arm<'a, DB>,
+        origins: &[Option<&Origin>],
+        condition: &Condition<'_, u64>,
+        context: &[&Expr],
+        role: Option<&'a DB::Role>,
+    ) -> Result<bool, LookupError> {
+        if let Some((operands, wider)) = &condition.membership
+            && let [Operand::Tested(mapped)] = operands.as_slice()
+            && origins.iter().enumerate().any(|(position, origin)| {
+                mapped & (1 << position) != 0
+                    && origin.is_some_and(|origin| {
+                        origin
+                            .members
+                            .iter()
+                            .any(|members| self.deployment.is_set_within(members, wider))
+                    })
+            })
+        {
+            return Ok(true);
+        }
+        for (index, row) in arm.rows.iter().enumerate() {
+            if row.table != self.parent {
+                continue;
+            }
+            let drawn = origins
+                .iter()
+                .enumerate()
+                .filter(|(position, origin)| {
+                    origin
+                        .and_then(|origin| origin.row.as_ref())
+                        .is_some_and(|(drawn, column)| {
+                            *drawn == index && *column == self.referenced_columns[*position]
+                        })
+                })
+                .fold(0, |mask, (position, _)| mask | 1 << position);
+            if self.covers_row_key(drawn)
+                && (row.read_by_writer
+                    || self.entails(
+                        &self.row_facts(row, index, origins, context),
+                        condition.original,
+                    ))
+            {
+                return Ok(true);
+            }
+        }
+        let Some(Sublink {
+            position,
+            table,
+            column,
+            filters,
+        }) = self.sublink_membership(condition.original)?
+        else {
+            return Ok(false);
+        };
+        let Some(Some((index, drawn))) = origins
+            .get(position)
+            .map(|origin| origin.and_then(|origin| origin.row.as_ref()))
+        else {
+            return Ok(false);
+        };
+        let row = &arm.rows[*index];
+        if row.table != table || *drawn != column {
+            return Ok(false);
+        }
+        let facts = self.row_facts(row, *index, origins, context);
+        if !filters.iter().all(|filter| self.entails(&facts, filter)) {
+            return Ok(false);
+        }
+        Ok(row.read_by_writer || self.row_readable(table, &facts, role)?)
+    }
+
+    /// What `row`, at `index` among the rows of its arm, is known to meet:
+    /// the filters the arm reads it under, and the conditions of `context`
+    /// on key columns the arm draws from the row, stated of its columns.
+    fn row_facts(
+        &self,
+        row: &Row<'a, DB>,
+        index: usize,
+        origins: &[Option<&Origin>],
+        context: &[&Expr],
+    ) -> Vec<Expr> {
+        let mut facts: Vec<Expr> = row.facts.iter().map(normalized).collect();
+        for condition in context {
+            let Some(stated) = requalified(condition, |reference| {
+                let column = stored_name(reference)?;
+                let position = self.key_columns.iter().position(|key| *key == column)?;
+                let (drawn, source) = origins
+                    .get(position)?
+                    .and_then(|origin| origin.row.as_ref())?;
+                (*drawn == index).then(|| source.clone())
+            }) else {
+                continue;
+            };
+            facts.extend(conjuncts(&normalized(&stated)).into_iter().cloned());
+        }
+        facts
+    }
+
+    /// The condition admitting the referenced column into the values one
+    /// column of the rows of a table takes, as `column = ANY (ARRAY(SELECT
+    /// ...))` or `column IN (SELECT ...)` over one table with no other
+    /// clause.
+    fn sublink_membership(&self, condition: &Expr) -> Result<Option<Sublink<'a, DB>>, LookupError> {
+        let Some((column, query)) = sublink_operands(condition) else {
+            return Ok(None);
+        };
+        let Some(position) = self
+            .referenced_columns
+            .iter()
+            .position(|referenced| names_cast_column(column, referenced))
+        else {
+            return Ok(None);
+        };
+        let Some(select) = plain_select(query) else {
+            return Ok(None);
+        };
+        if query.limit_clause.is_some() || query.fetch.is_some() || select.having.is_some() {
+            return Ok(None);
+        }
+        let Some(instances) = instances(self.database, select) else {
+            return Ok(None);
+        };
+        let ([instance], [from]) = (instances.as_slice(), select.from.as_slice()) else {
+            return Ok(None);
+        };
+        if !from.joins.is_empty() {
+            return Ok(None);
+        }
+        let columns: Vec<String> = instance
+            .table
+            .columns(self.database)?
+            .map(|column| column.stored_column_name().into_owned())
+            .collect();
+        let resolve = |expression: &Expr| -> Option<String> {
+            match expression {
+                Expr::Identifier(name) => Some(normalize_identifier(
+                    &name.value,
+                    name.quote_style.is_some(),
+                )),
+                Expr::CompoundIdentifier(parts) => match parts.as_slice() {
+                    [relation, name]
+                        if normalize_identifier(
+                            &relation.value,
+                            relation.quote_style.is_some(),
+                        ) == instance.name =>
+                    {
+                        Some(normalize_identifier(
+                            &name.value,
+                            name.quote_style.is_some(),
+                        ))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+            .map(Cow::into_owned)
+            .filter(|name| columns.contains(name))
+        };
+        let [
+            SelectItem::UnnamedExpr(projected)
+            | SelectItem::ExprWithAlias {
+                expr: projected, ..
+            },
+        ] = select.projection.as_slice()
+        else {
+            return Ok(None);
+        };
+        let Some(projected) = resolve(without_parentheses(projected)) else {
+            return Ok(None);
+        };
+        let mut filters = Vec::new();
+        for filter in select.selection.iter().flat_map(conjuncts) {
+            let Some(stated) = requalified(filter, |reference| resolve(reference)) else {
+                return Ok(None);
+            };
+            filters.push(normalized(&stated));
+        }
+        Ok(Some(Sublink {
+            position,
+            table: instance.table,
+            column: projected,
+            filters,
+        }))
+    }
+
+    /// Whether a row of `table` meeting `facts` passes the `SELECT`
+    /// policies `role` meets on the table.
+    fn row_readable(
+        &self,
+        table: &'a DB::Table,
+        facts: &[Expr],
+        role: Option<&'a DB::Role>,
+    ) -> Result<bool, LookupError> {
+        let Some(security) = row_security(self.database, table, RowStatement::Select, role)? else {
+            return Ok(false);
+        };
+        let Some(gates) = security.gates() else {
+            return Ok(security.exemption().is_some());
+        };
+        for gate in gates {
+            for term in gate.restrictive() {
+                let condition = term.expression().expression();
+                if !is_tautology(self.database, table, condition)?
+                    && !self.entails(facts, condition)
+                {
+                    return Ok(false);
+                }
+            }
+            let mut admitted = false;
+            for term in gate.permissive() {
+                let condition = term.expression().expression();
+                if is_tautology(self.database, table, condition)? || self.entails(facts, condition)
+                {
+                    admitted = true;
+                    break;
+                }
+            }
+            if !admitted {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether a row meeting every one of `facts`, stated of its columns,
+    /// meets `target`.
+    fn entails(&self, facts: &[Expr], target: &Expr) -> bool {
+        let facts: Vec<Expr> = facts
+            .iter()
+            .flat_map(|fact| conjuncts(fact).into_iter().map(normalized))
+            .collect();
+        self.entails_normalized(&facts, &normalized(target))
+    }
+
+    /// [`Self::entails`] over normalized facts and target.
+    fn entails_normalized(&self, facts: &[Expr], target: &Expr) -> bool {
+        let target = without_parentheses(target);
+        if facts.iter().any(|fact| without_parentheses(fact) == target) {
+            return true;
+        }
+        let parts = conjuncts(target);
+        if parts.len() > 1 {
+            return parts
+                .iter()
+                .all(|part| self.entails_normalized(facts, part));
+        }
+        let arms = disjuncts(target);
+        if arms.len() > 1 && arms.iter().any(|arm| self.entails_normalized(facts, arm)) {
+            return true;
+        }
+        if let Some((items, wider)) = membership(target)
+            && facts.iter().any(|fact| {
+                membership(fact).is_some_and(|(stated, members)| {
+                    stated == items && self.deployment.is_set_within(&members, &wider)
+                })
+            })
+        {
+            return true;
+        }
+        facts.iter().enumerate().any(|(index, fact)| {
+            let arms = disjuncts(fact);
+            arms.len() > 1
+                && arms.iter().all(|arm| {
+                    let mut assumed: Vec<Expr> = facts
+                        .iter()
+                        .enumerate()
+                        .filter(|(other, _)| *other != index)
+                        .map(|(_, other)| other.clone())
+                        .collect();
+                    assumed.extend(conjuncts(arm).into_iter().cloned());
+                    self.entails_normalized(&assumed, target)
+                })
+        })
+    }
+
+    /// The arms of the helper `clause` reads the written key from, as
+    /// `(items) IN (SELECT ... FROM helper() alias)` over one call to a
+    /// set-returning `LANGUAGE sql` function, cached by the clause.
+    fn helper_arms(&self, clause: &Expr) -> Result<Option<Rc<HelperArms<'a, DB>>>, LookupError> {
+        let address: *const Expr = clause;
+        if let Some(cached) = self.helpers.borrow().get(&address) {
+            return Ok(cached.clone());
+        }
+        let found = self.read_helper_arms(clause)?.map(Rc::new);
+        self.helpers.borrow_mut().insert(address, found.clone());
+        Ok(found)
+    }
+
+    /// [`Self::helper_arms`] uncached.
+    fn read_helper_arms(&self, clause: &Expr) -> Result<Option<HelperArms<'a, DB>>, LookupError> {
+        let Expr::In {
+            expr,
+            target: InTarget::Subquery(query),
+            negated: false,
+            ..
+        } = without_parentheses(clause)
+        else {
+            return Ok(None);
+        };
+        let items = match without_parentheses(expr) {
+            Expr::Tuple(items) => items.as_slice(),
+            item => slice::from_ref(item),
+        };
+        let Some(select) = plain_select(query) else {
+            return Ok(None);
+        };
+        let [from] = select.from.as_slice() else {
+            return Ok(None);
+        };
+        if !from.joins.is_empty() || WrittenCall::relation(&from.relation).is_none() {
+            return Ok(None);
+        }
+        let Some(arms) = self.select_arms(select, Reader::Writer)? else {
+            return Ok(None);
+        };
+        // Each left item pairs with the output at its position, which every
+        // arm must yield.
+        let positions = self
+            .key_columns
+            .iter()
+            .map(|column| {
+                items
+                    .iter()
+                    .position(|item| names_cast_column(item, column))
+                    .filter(|position| arms.iter().all(|arm| *position < arm.outputs.len()))
+            })
+            .collect();
+        Ok(Some(HelperArms { positions, arms }))
+    }
+
+    /// The arms of `select`, read by `reader`, or `None` when one of its
+    /// relations cannot be read.
+    fn select_arms(
+        &self,
+        select: &Select,
+        reader: Reader,
+    ) -> Result<Option<Vec<Arm<'a, DB>>>, LookupError> {
+        let mut rows: Vec<Row<'a, DB>> = Vec::new();
+        let Some(mut sources) = self.read_sources(select, reader, &mut rows)? else {
+            return Ok(None);
+        };
+        let resolve = |expression: &Expr| resolve_in(&sources, expression);
+        // Filters on one row become its facts, and memberships of a column
+        // become members of the values the arm draws from it.
+        let mut members: Vec<(usize, String, Expr)> = Vec::new();
+        for filter in select.selection.iter().flat_map(conjuncts) {
+            if let Some((items, set)) = membership(filter)
+                && let [item] = items
+                && let Some((source, column)) = resolve(without_parentheses(item))
+                && self.admissible(&set, reader)?
+            {
+                members.push((source, column, set.into_owned()));
+            }
+            let mut row = None;
+            let Some(stated) = requalified(filter, |reference| {
+                let (source, column) = resolve(reference)?;
+                let SourceKind::Table(index) = sources[source].kind else {
+                    return None;
+                };
+                if row.is_some_and(|row| row != index) {
+                    return None;
+                }
+                row = Some(index);
+                Some(column)
+            }) else {
+                continue;
+            };
+            if let Some(index) = row
+                && self.admissible(&stated, reader)?
+            {
+                rows[index].facts.push(stated);
+            }
+        }
+        // The source and column of each output, when it names one.
+        let Some(projected) = projected_columns(&sources, select) else {
+            return Ok(None);
+        };
+        // A helper the select reads yields one arm per arm of its body.
+        let mut helper = None;
+        for source in &mut sources {
+            if let SourceKind::Helper(arms) = &mut source.kind {
+                if helper.is_some() || !rows.is_empty() {
+                    return Ok(None);
+                }
+                helper = Some(std::mem::take(arms));
+            }
+        }
+        let origin = |entry: &Option<(usize, String)>, arm: Option<&Arm<'a, DB>>| {
+            let Some((index, column)) = entry else {
+                return Origin::default();
+            };
+            let source = &sources[*index];
+            let mut origin = match (&source.kind, arm) {
+                (SourceKind::Table(row), _) => Origin {
+                    row: Some((*row, column.clone())),
+                    members: Vec::new(),
+                },
+                (SourceKind::Set(set), _) => Origin {
+                    row: None,
+                    members: vec![(**set).clone()],
+                },
+                (SourceKind::Helper(_), Some(arm)) => source
+                    .columns
+                    .iter()
+                    .position(|name| name == column)
+                    .and_then(|position| arm.outputs.get(position))
+                    .cloned()
+                    .unwrap_or_default(),
+                _ => Origin::default(),
+            };
+            origin.members.extend(
+                members
+                    .iter()
+                    .filter(|(from, name, _)| from == index && name == column)
+                    .map(|(_, _, set)| set.clone()),
+            );
+            origin
+        };
+        Ok(Some(match helper {
+            None => vec![Arm {
+                outputs: projected.iter().map(|entry| origin(entry, None)).collect(),
+                rows,
+            }],
+            Some(arms) => arms
+                .into_iter()
+                .map(|arm| Arm {
+                    outputs: projected
+                        .iter()
+                        .map(|entry| origin(entry, Some(&arm)))
+                        .collect(),
+                    rows: arm.rows,
+                })
+                .collect(),
+        }))
+    }
+
+    /// The relations the `FROM` of `select` reads, read by `reader`, with
+    /// the rows they add to `rows`, or `None` when one joins other than by a
+    /// cross join or cannot be followed.
+    fn read_sources(
+        &self,
+        select: &Select,
+        reader: Reader,
+        rows: &mut Vec<Row<'a, DB>>,
+    ) -> Result<Option<Vec<Source<'a, DB>>>, LookupError> {
+        let mut sources = Vec::new();
+        for from in &select.from {
+            if from
+                .joins
+                .iter()
+                .any(|join| !matches!(join.join_operator, JoinOperator::CrossJoin(_)))
+            {
+                return Ok(None);
+            }
+            for factor in
+                std::iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation))
+            {
+                let Some(source) = self.source(factor, reader, rows)? else {
+                    return Ok(None);
+                };
+                sources.push(source);
+            }
+        }
+        Ok(Some(sources))
+    }
+
+    /// The relation `factor` reads, with the rows it adds to `rows`, or
+    /// `None` when it is one the arm cannot follow.
+    fn source(
+        &self,
+        factor: &TableFactor,
+        reader: Reader,
+        rows: &mut Vec<Row<'a, DB>>,
+    ) -> Result<Option<Source<'a, DB>>, LookupError> {
+        let alias = match factor {
+            TableFactor::Table { alias, .. }
+            | TableFactor::Function { alias, .. }
+            | TableFactor::Derived { alias, .. }
+            | TableFactor::UNNEST { alias, .. } => alias.as_ref(),
+            _ => return Ok(None),
+        };
+        let renamed_columns: Vec<String> = alias.map_or_else(Vec::new, |alias| {
+            alias
+                .columns
+                .iter()
+                .map(|column| identifier(&column.name))
+                .collect()
+        });
+        // A subquery or an array expansion yields rows the arm learns nothing
+        // of.
+        if let TableFactor::Derived { .. } | TableFactor::UNNEST { .. } = factor {
+            let Some(alias) = alias else {
+                return Ok(None);
+            };
+            return Ok(Some(Source {
+                name: identifier(&alias.name),
+                columns: renamed_columns,
+                counted: false,
+                kind: SourceKind::Opaque,
+            }));
+        }
+        if let TableFactor::Table {
+            name, args: None, ..
+        } = factor
+        {
+            return self.table_source(name, alias, &renamed_columns, reader, rows);
+        }
+        let Some(call) = WrittenCall::relation(factor) else {
+            return Ok(None);
+        };
+        let called: Vec<&DB::Function> = self
+            .database
+            .functions_reached_by(call, IdentifierCase::Folded)?
+            .collect();
+        let function = match called.as_slice() {
+            [function] => Some(*function),
+            _ => None,
+        };
+        let name = call.to_string();
+        let exposed = alias.map(|alias| identifier(&alias.name)).or_else(|| {
+            let (TableFactor::Table { name, .. } | TableFactor::Function { name, .. }) = factor
+            else {
+                return None;
+            };
+            name.0
+                .last()
+                .and_then(|part| part.as_ident())
+                .map(identifier)
+        });
+        let Some(exposed) = exposed else {
+            return Ok(None);
+        };
+        let mut columns: Vec<String> = function.map_or_else(Vec::new, |function| {
+            function
+                .returned_columns(self.database)
+                .map(|(name, _)| {
+                    normalize_identifier(name.name(), name.name_is_quoted()).into_owned()
+                })
+                .collect()
+        });
+        if columns.is_empty() && function.is_some_and(FunctionLike::returns_set) {
+            columns.push(exposed.clone());
+        }
+        let counted =
+            function.is_some() && !columns.is_empty() && renamed_columns.len() <= columns.len();
+        for (column, renamed) in columns.iter_mut().zip(&renamed_columns) {
+            column.clone_from(renamed);
+        }
+        if !counted {
+            columns = renamed_columns;
+        }
+        let set = Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(&name)
+            .and_then(|mut parser| parser.parse_expr())
+            .ok();
+        let kind = match (reader, function) {
+            (Reader::Writer, Some(function)) => match self.helper_body_arms(function)? {
+                Some(arms) => SourceKind::Helper(arms),
+                None => SourceKind::Opaque,
+            },
+            _ => match set {
+                Some(set) if columns.len() == 1 && self.admissible(&set, reader)? => {
+                    SourceKind::Set(Box::new(set))
+                }
+                _ => SourceKind::Opaque,
+            },
+        };
+        Ok(Some(Source {
+            name: exposed,
+            columns,
+            counted,
+            kind,
+        }))
+    }
+
+    /// The table `name` reads under `alias`, renaming its leading columns
+    /// to `renamed_columns`, with the row it adds to `rows`, or `None` when
+    /// it names no table.
+    fn table_source(
+        &self,
+        name: &ObjectName,
+        alias: Option<&TableAlias>,
+        renamed_columns: &[String],
+        reader: Reader,
+        rows: &mut Vec<Row<'a, DB>>,
+    ) -> Result<Option<Source<'a, DB>>, LookupError> {
+        let rendered = name.to_string();
+        let Some(table) = TargetName::parse(&rendered).ok().and_then(|target| {
+            self.database
+                .resolve_target_table(target, IdentifierCase::Folded)
+                .ok()
+                .flatten()
+        }) else {
+            return Ok(None);
+        };
+        let mut columns: Vec<String> = table
+            .columns(self.database)?
+            .map(|column| column.stored_column_name().into_owned())
+            .collect();
+        for (column, alias) in columns.iter_mut().zip(renamed_columns) {
+            alias.clone_into(column);
+        }
+        let exposed = alias.map_or_else(
+            || {
+                name.0
+                    .last()
+                    .and_then(|part| part.as_ident())
+                    .map(identifier)
+            },
+            |alias| Some(identifier(&alias.name)),
+        );
+        let Some(exposed) = exposed else {
+            return Ok(None);
+        };
+        rows.push(Row {
+            table,
+            facts: Vec::new(),
+            read_by_writer: reader == Reader::Writer,
+        });
+        Ok(Some(Source {
+            name: exposed,
+            columns,
+            counted: true,
+            kind: SourceKind::Table(rows.len() - 1),
+        }))
+    }
+
+    /// The arms of the body of the set-returning `LANGUAGE sql` `function`,
+    /// read as its owner when it is a definer, or `None` when its body is
+    /// not one query of plain selects, it sets a parameter other than the
+    /// search path, which may change what its expressions yield, or a name
+    /// in its body reaches another object on the search path it sets than
+    /// on the schema's own.
+    fn helper_body_arms(
+        &self,
+        function: &DB::Function,
+    ) -> Result<Option<Vec<Arm<'a, DB>>>, LookupError> {
+        if function.configuration_parameters().iter().any(|parameter| {
+            !parameter
+                .name
+                .to_string()
+                .eq_ignore_ascii_case("search_path")
+        }) {
+            return Ok(None);
+        }
+        let Some(body) = sql_set_body(self.database, function)? else {
+            return Ok(None);
+        };
+        if body.with.is_some() {
+            return Ok(None);
+        }
+        if let Some(path) = function.search_path(self.database)?
+            && !resolves_alike(self.database, &body, &path)?
+        {
+            return Ok(None);
+        }
+        let reader = Reader::Body {
+            definer: function.security_mode() == FunctionSecurity::Definer,
+        };
+        self.set_arms(&body.body, reader)
+    }
+
+    /// The arms of a `UNION` of plain selects.
+    fn set_arms(
+        &self,
+        body: &SetExpr,
+        reader: Reader,
+    ) -> Result<Option<Vec<Arm<'a, DB>>>, LookupError> {
+        match body {
+            SetExpr::Select(select) => self.select_arms(select, reader),
+            SetExpr::Query(query) if query.with.is_none() => self.set_arms(&query.body, reader),
+            SetExpr::SetOperation {
+                op: SetOperator::Union,
+                left,
+                right,
+                ..
+            } => {
+                let (Some(mut left), Some(right)) =
+                    (self.set_arms(left, reader)?, self.set_arms(right, reader)?)
+                else {
+                    return Ok(None);
+                };
+                left.extend(right);
+                Ok(Some(left))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Whether `expression`, read by `reader`, yields what it yields in a
+    /// policy the writer meets. A helper body that runs as its owner reads no
+    /// table past the writer's policies in it and calls only definers and
+    /// built-ins that read neither the role nor its privileges.
+    fn admissible(&self, expression: &Expr, reader: Reader) -> Result<bool, LookupError> {
+        let Reader::Body { definer } = reader else {
+            return Ok(true);
+        };
+        let mut admissible = true;
+        let mut calls: Vec<Function> = Vec::new();
+        let _ = visit_expressions(expression, |node| {
+            if let Expr::Function(function) = node {
+                calls.push(function.clone());
+            }
+            ControlFlow::<()>::Continue(())
+        });
+        if definer {
+            let _ = sqlparser::ast::visit_relations(expression, |_| {
+                admissible = false;
+                ControlFlow::<()>::Break(())
+            });
+        }
+        for call in &calls {
+            if !admissible {
+                break;
+            }
+            let called: Vec<&DB::Function> = self
+                .database
+                .functions_reached_by(call, IdentifierCase::Folded)?
+                .collect();
+            admissible = !called.is_empty()
+                && called.iter().all(|function| {
+                    let builtin = function.target_name().schema() == Some("pg_catalog");
+                    if builtin {
+                        !(definer && reads_role(&function.stored_name(), call))
+                    } else {
+                        !definer || function.security_mode() == FunctionSecurity::Definer
+                    }
+                });
+        }
+        Ok(admissible)
+    }
+}
+
+/// A confinement read for `role`, which states a condition of the referenced
+/// row through the key columns the key maps onto the referenced ones, a set
+/// of key columns as a mask.
+struct Reading<'c, 'a, DB: DatabaseLike> {
+    confinement: &'c Confinement<'a, DB>,
+    /// The role the helpers a check calls run for, or `None` for no role.
+    role: Option<&'a DB::Role>,
+}
+
+impl<DB: DatabaseLike> Reading<'_, '_, DB> {
+    /// Whether every row `gate` admits meets `condition`, because a
+    /// restrictive term or every permissive one implies it, or each of its
+    /// conjuncts. A term may assume the restrictive terms beside it.
+    fn gate_implies(
+        &self,
+        gate: &RowGate<'_, DB::Policy>,
+        condition: &Condition<'_, u64>,
+    ) -> Result<bool, LookupError> {
+        let restrictive: Vec<&Expr> = gate
+            .restrictive()
+            .iter()
+            .flat_map(|term| conjuncts(term.expression().expression()))
+            .collect();
+        for term in gate.restrictive() {
+            if clause_implies(
+                self,
+                term.expression().expression(),
+                condition,
+                &restrictive,
+            )? {
+                return Ok(true);
+            }
+        }
+        if !gate.permissive().is_empty() {
+            let mut every = true;
+            for term in gate.permissive() {
+                if !clause_implies(
+                    self,
+                    term.expression().expression(),
+                    condition,
+                    &restrictive,
+                )? {
+                    every = false;
+                    break;
+                }
+            }
+            if every {
+                return Ok(true);
+            }
+        }
+        if condition.parts.is_empty() {
+            return Ok(false);
+        }
+        for part in &condition.parts {
+            if !self.gate_implies(gate, part)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+impl<DB: DatabaseLike> Columns for Reading<'_, '_, DB> {
+    type Tested = u64;
+
+    fn deployment(&self) -> &Deployment {
+        self.confinement.deployment
+    }
+
+    fn rename(&self, column: Cow<'_, str>) -> Option<String> {
+        let confinement = self.confinement;
+        confinement
+            .referenced_columns
+            .iter()
+            .position(|referenced| *referenced == column)
+            .map(|position| confinement.key_columns[position].to_string())
+    }
+
+    fn tested(&self, column: &Expr) -> Option<u64> {
+        Some(positions(&self.confinement.referenced_columns, column)).filter(|mapped| *mapped != 0)
+    }
+
+    fn tests(&self, column: &Expr, tested: &u64) -> bool {
+        self.confinement.key_columns_named(column) & tested != 0
+    }
+
+    /// A clause leaving a key column `NULL` skips the check.
+    fn settles(&self, clause: &Expr) -> bool {
+        matches!(clause, Expr::IsNull(column) if self.confinement.key_columns_named(column) != 0)
+    }
+
+    /// A clause drawing the key from a set-returning helper whose every arm
+    /// meets the condition.
+    fn draws_implied(
+        &self,
+        clause: &Expr,
+        condition: &Condition<'_, u64>,
+        context: &[&Expr],
+    ) -> Result<bool, LookupError> {
+        self.confinement
+            .helper_implies(clause, condition, context, self.role)
+    }
+}
+
+/// Who reads a query, which is the writer under its own policies or the
+/// body of a helper it calls.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reader {
+    Writer,
+    Body {
+        /// Whether the helper runs as its owner.
+        definer: bool,
+    },
+}
+
+/// Whether every unqualified relation and function `body` names reaches on
+/// `path` what it reaches on the schema's own search path. A function name
+/// declared in more than one schema counts as reaching another, since
+/// overloads resolve by argument types the paths may order differently.
+fn resolves_alike<DB: DatabaseLike>(
+    database: &DB,
+    body: &Query,
+    path: &[(Cow<'_, str>, bool)],
+) -> Result<bool, LookupError> {
+    let mut names: Vec<ObjectName> = Vec::new();
+    let _ = sqlparser::ast::visit_relations(body, |relation| {
+        names.push(relation.clone());
+        ControlFlow::<()>::Continue(())
+    });
+    let _ = visit_expressions(body, |expression| {
+        if let Expr::Function(call) = expression {
+            names.push(call.name.clone());
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    for name in names.iter().filter(|name| name.0.len() == 1) {
+        let own = stored_table(database, name, None)?;
+        if own.is_some() {
+            if stored_table(database, name, Some(path))? != own {
+                return Ok(false);
+            }
+            continue;
+        }
+        let Some(called) = name.0[0].as_ident().map(identifier) else {
+            return Ok(false);
+        };
+        let mut declaring = database.functions_named(&called).map(|function| {
+            schema_of(database, function.target_name().schema().map(Cow::Borrowed)).into_owned()
+        });
+        let Some(schema) = declaring.next() else {
+            continue;
+        };
+        if declaring.any(|other| other != schema) {
+            return Ok(false);
+        }
+        let session = database
+            .search_path()
+            .any(|(listed, quoted)| normalize_identifier(listed, quoted) == schema);
+        let own = path
+            .iter()
+            .any(|(listed, quoted)| normalize_identifier(listed, *quoted) == schema);
+        // PostgreSQL searches `pg_catalog` on every path.
+        if schema != "pg_catalog" && session != own {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The column `condition` admits into the values a subquery yields, as
+/// `column = ANY (ARRAY(SELECT ...))` or `column IN (SELECT ...)`, with the
+/// subquery.
+fn sublink_operands(condition: &Expr) -> Option<(&Expr, &Query)> {
+    match unwrapped(condition) {
+        Expr::In {
+            expr,
+            target: InTarget::Subquery(query),
+            negated: false,
+            ..
+        } => Some((expr.as_ref(), query.as_ref())),
+        Expr::AnyOp {
+            left,
+            compare_op: BinaryOperator::Eq,
+            right,
+            ..
+        } => match unwrapped(right) {
+            Expr::Function(Function {
+                name,
+                args: FunctionArguments::Subquery(query),
+                ..
+            }) if name.to_string().eq_ignore_ascii_case("array") => {
+                Some((left.as_ref(), query.as_ref()))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The source and column of each output of `select` over `sources`, when
+/// the output names one, or `None` when the outputs cannot be counted.
+fn projected_columns<DB: DatabaseLike>(
+    sources: &[Source<'_, DB>],
+    select: &Select,
+) -> Option<Vec<Option<(usize, String)>>> {
+    /// The columns of the source at `index`, as outputs, or `None` when the
+    /// source does not list them all.
+    fn source_columns<'s, DB: DatabaseLike>(
+        (index, source): (usize, &'s Source<'_, DB>),
+    ) -> Option<impl Iterator<Item = Option<(usize, String)>> + 's> {
+        source.counted.then(|| {
+            source
+                .columns
+                .iter()
+                .map(move |column| Some((index, column.clone())))
+        })
+    }
+    let mut projected = Vec::new();
+    for item in &select.projection {
+        match item {
+            SelectItem::Wildcard(_) => {
+                for source in sources.iter().enumerate() {
+                    projected.extend(source_columns(source)?);
+                }
+            }
+            SelectItem::QualifiedWildcard(kind, _) => {
+                let name = normalize_relation(&kind.to_string());
+                let found = sources
+                    .iter()
+                    .enumerate()
+                    .find(|(_, source)| source.name == name)?;
+                projected.extend(source_columns(found)?);
+            }
+            SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. } => {
+                projected.push(resolve_in(sources, without_parentheses(value)));
+            }
+            SelectItem::ExprWithAliases { .. } => return None,
+        }
+    }
+    Some(projected)
+}
+
+/// The source and column `expression` names among `sources`.
+fn resolve_in<DB: DatabaseLike>(
+    sources: &[Source<'_, DB>],
+    expression: &Expr,
+) -> Option<(usize, String)> {
+    match expression {
+        Expr::Identifier(name) => {
+            let column = identifier(name);
+            let mut found = sources
+                .iter()
+                .enumerate()
+                .filter(|(_, source)| source.columns.contains(&column));
+            let (index, _) = found.next()?;
+            found.next().is_none().then_some((index, column))
+        }
+        Expr::CompoundIdentifier(parts) => match parts.as_slice() {
+            [relation, name] => {
+                let relation = identifier(relation);
+                let column = identifier(name);
+                sources
+                    .iter()
+                    .position(|source| source.name == relation && source.columns.contains(&column))
+                    .map(|index| (index, column))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The stored name of an identifier.
+fn identifier(name: &Ident) -> String {
+    normalize_identifier(&name.value, name.quote_style.is_some()).into_owned()
+}
+
+/// The stored name of a relation written `name`, unquoted.
+fn normalize_relation(name: &str) -> String {
+    normalize_identifier(name, false).into_owned()
+}
+
+/// Whether the built-in `name`, called as `call`, reads the acting role, its
+/// privileges or the search path, which differ inside a definer that sets
+/// it.
+fn reads_role(name: &str, call: &Function) -> bool {
+    name.starts_with("has_")
+        || matches!(
+            name,
+            "pg_has_role"
+                | "row_security_active"
+                | "current_user"
+                | "current_role"
+                | "user"
+                | "session_user"
+                | "current_schema"
+                | "current_schemas"
+        )
+        || (name == "current_setting"
+            && match &call.args {
+                FunctionArguments::List(list) => !matches!(
+                    list.args.first(),
+                    Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))))
+                        if matches!(&value.value, Value::SingleQuotedString(setting) if !setting.eq_ignore_ascii_case("search_path"))
+                ),
+                _ => true,
+            })
+}
+
+/// The plain `SELECT` a query runs, when it has no `WITH`.
+fn plain_select(query: &Query) -> Option<&Select> {
+    match query.body.as_ref() {
+        SetExpr::Select(select) if query.with.is_none() => Some(select),
+        _ => None,
+    }
+}
+
+/// `expression` with every column reference outside its subqueries named by
+/// `rename` of the reference, or `None` when `rename` names none for one or
+/// a subquery mentions a column.
+fn requalified(expression: &Expr, rename: impl FnMut(&Expr) -> Option<String>) -> Option<Expr> {
+    struct Renamer<F> {
+        rename: F,
+        depth: usize,
+    }
+
+    impl<F: FnMut(&Expr) -> Option<String>> VisitorMut for Renamer<F> {
+        type Break = ();
+
+        fn pre_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
+            self.depth += 1;
+            ControlFlow::Continue(())
+        }
+
+        fn post_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
+            self.depth -= 1;
+            ControlFlow::Continue(())
+        }
+
+        fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<()> {
+            if !is_column_reference(expression) {
+                return ControlFlow::Continue(());
+            }
+            if self.depth > 0 {
+                return ControlFlow::Break(());
+            }
+            match (self.rename)(expression) {
+                Some(name) => {
+                    *expression = Expr::Identifier(Ident::new(name));
+                    ControlFlow::Continue(())
+                }
+                None => ControlFlow::Break(()),
+            }
+        }
+    }
+
+    let mut renamed = expression.clone();
+    VisitMut::visit(&mut renamed, &mut Renamer { rename, depth: 0 })
+        .is_continue()
+        .then_some(renamed)
+}
+
+/// `expression` without parentheses, with a scalar subquery selecting one
+/// expression from nothing written as that expression and a qualified
+/// column reference outside subqueries written bare, so that conditions on
+/// one row compare as written.
+fn normalized(expression: &Expr) -> Expr {
+    struct Normalizer {
+        depth: usize,
+    }
+
+    impl VisitorMut for Normalizer {
+        type Break = ();
+
+        fn pre_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
+            self.depth += 1;
+            ControlFlow::Continue(())
+        }
+
+        fn post_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
+            self.depth -= 1;
+            ControlFlow::Continue(())
+        }
+
+        fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<()> {
+            let replaced = match expression {
+                Expr::Nested(inner) => Some(inner.as_ref().clone()),
+                Expr::Subquery(query) => scalar(query).cloned(),
+                Expr::CompoundIdentifier(parts) if self.depth == 0 => {
+                    parts.last().cloned().map(Expr::Identifier)
+                }
+                _ => None,
+            };
+            if let Some(replaced) = replaced {
+                *expression = replaced;
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    let mut normalized = expression.clone();
+    let _ = VisitMut::visit(&mut normalized, &mut Normalizer { depth: 0 });
+    normalized
+}
+
+/// The one expression a query selects from nothing, with no other clause.
+fn scalar(query: &Query) -> Option<&Expr> {
+    let select = plain_select(query)?;
+    match select.projection.as_slice() {
+        [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }]
+            if select.from.is_empty()
+                && select.selection.is_none()
+                && select.having.is_none()
+                && query.limit_clause.is_none()
+                && query.fetch.is_none() =>
+        {
+            Some(value)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `role` may write a key of its choosing through `statement` on
+/// `child`, past its policies and unconfined by them, while `read` holds
+/// the `SELECT` policies it meets on the referenced table, when it may read
+/// it.
+pub(crate) fn writes_free_key<'a, DB: DatabaseLike>(
+    confinement: &Confinement<'a, DB>,
+    child: &'a DB::Table,
+    statement: RowStatement,
+    written: RowVersion,
+    role: Option<&'a DB::Role>,
+    read: Option<&RowSecurity<'_, DB::Policy>>,
+) -> Result<bool, LookupError> {
+    let Some(security) = row_security(confinement.database, child, statement, role)? else {
+        return Ok(false);
+    };
+    let Some(gates) = security.gates() else {
+        return Ok(security.exemption().is_some());
+    };
+    for gate in gates {
+        if admits_nothing(confinement.database, child, gate)? {
+            return Ok(false);
+        }
+    }
+    for gate in gates.iter().filter(|gate| gate.row() == written) {
+        if confinement.confining_gate(gate)? {
+            return Ok(false);
+        }
+        if let Some(read) = read
+            && confinement.reads_matched_rows(gate, read, role)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether `gate` admits no row of `table`, holding no permissive policy, a
+/// restrictive one PostgreSQL proves false, or only permissive ones it
+/// proves false.
+fn admits_nothing<DB: DatabaseLike>(
+    database: &DB,
+    table: &DB::Table,
+    gate: &RowGate<'_, DB::Policy>,
+) -> Result<bool, LookupError> {
+    for term in gate.restrictive() {
+        if is_contradiction(database, table, term.expression().expression())? {
+            return Ok(true);
+        }
+    }
+    for term in gate.permissive() {
+        if !is_contradiction(database, table, term.expression().expression())? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether `privilege` lets its holder write a whole key over `columns` for
+/// PostgreSQL to check. An insert must name every key column, since an
+/// unnamed one takes its default. An update must set one, and every other
+/// column it leaves must be `NOT NULL` when `kept` is set, so that the
+/// stored value completes the key. A generated column follows the others.
+pub(crate) fn writes_whole_key<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    columns: impl IntoIterator<Item = &'db DB::Column>,
+    privilege: &ColumnPrivilege<'_, DB::Column>,
+    kept: bool,
+) -> Result<bool, LookupError> {
+    let mut sets_one = false;
+    for column in columns {
+        if privilege.on_column(column) {
+            sets_one = true;
+        } else if !column.is_generated(database) && (!kept || column.is_nullable(database)?) {
+            return Ok(false);
+        }
+    }
+    Ok(sets_one)
+}
+
+/// The positions among `columns` of the column `expression` names.
+fn positions(columns: &[Cow<'_, str>], expression: &Expr) -> u64 {
+    columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| names_cast_column(expression, column))
+        .fold(0, |mask, (position, _)| mask | 1 << position)
+}
+
+/// Removes parentheses from an expression.
+fn without_parentheses(mut expression: &Expr) -> &Expr {
+    while let Expr::Nested(inner) = expression {
+        expression = inner;
+    }
+    expression
+}
