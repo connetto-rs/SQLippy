@@ -354,7 +354,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             items: WithScopes::default(),
             lineage: &lineage,
         };
-        reads.confines_query(query, &[])
+        reads.confines_query(query, &[], &[])
     }
 
     /// The values each input parameter of `function` may hold, in the order
@@ -618,14 +618,24 @@ struct Reads<'c, 'q, 'a, DB: DatabaseLike> {
 impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
     /// Whether `query` and every query nested in it confine their reads,
     /// where `held` holds for every outer row the result of `query` reaches
-    /// the function's result through.
-    fn confines_query(&mut self, query: &Query, held: &[&Expr]) -> Result<bool, LookupError> {
+    /// the function's result through and `owners` are the queries around it
+    /// whose `WITH` holds items in reach.
+    fn confines_query(
+        &mut self,
+        query: &Query,
+        held: &[&Expr],
+        owners: &[&Query],
+    ) -> Result<bool, LookupError> {
         if !query.locks.is_empty() {
             return Ok(false);
         }
+        let mut owners = owners.to_vec();
+        if query.with.is_some() {
+            owners.push(query);
+        }
         self.items.enter(query);
-        let confined = match self.confines_nested(query, held) {
-            Ok(true) => self.confines(&query.body, held),
+        let confined = match self.confines_nested(query, held, &owners) {
+            Ok(true) => self.confines(&query.body, held, &owners),
             other => other,
         };
         self.items.leave(query);
@@ -635,7 +645,12 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
     /// Whether each query nested directly in `query` confines its reads. One
     /// in a condition of a `WHERE` also holds the other conditions of that
     /// `WHERE`, since the outer row passes them whenever its outcome counts.
-    fn confines_nested(&mut self, query: &Query, held: &[&Expr]) -> Result<bool, LookupError> {
+    fn confines_nested(
+        &mut self,
+        query: &Query,
+        held: &[&Expr],
+        owners: &[&Query],
+    ) -> Result<bool, LookupError> {
         let mut beside = Vec::new();
         conditions_beside(&query.body, &mut beside);
         let outcome = nested_queries(query, 1, |nested| {
@@ -643,7 +658,7 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
             if let Some((_, others)) = beside.iter().find(|(at, _)| ptr::eq(*at, nested)) {
                 within.extend_from_slice(others);
             }
-            match self.confines_query(nested, &within) {
+            match self.confines_query(nested, &within, owners) {
                 Ok(true) => ControlFlow::Continue(()),
                 Ok(false) => ControlFlow::Break(None),
                 Err(error) => ControlFlow::Break(Some(error)),
@@ -658,11 +673,16 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
 
     /// Whether every `SELECT` of `body`, outside nested queries, confines its
     /// reads, a body that writes or reads `TABLE` never.
-    fn confines(&self, body: &SetExpr, held: &[&Expr]) -> Result<bool, LookupError> {
+    fn confines(
+        &self,
+        body: &SetExpr,
+        held: &[&Expr],
+        owners: &[&Query],
+    ) -> Result<bool, LookupError> {
         match body {
-            SetExpr::Select(select) => self.confines_select(select, held),
+            SetExpr::Select(select) => self.confines_select(select, held, owners),
             SetExpr::SetOperation { left, right, .. } => {
-                Ok(self.confines(left, held)? && self.confines(right, held)?)
+                Ok(self.confines(left, held, owners)? && self.confines(right, held, owners)?)
             }
             SetExpr::Query(_) | SetExpr::Values(_) => Ok(true),
             _ => Ok(false),
@@ -672,11 +692,18 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
     /// Whether each relation with row-level security a `SELECT` reads is
     /// confined by the filters that drop its rows and the conditions `held`
     /// of the outer rows.
-    fn confines_select(&self, select: &Select, held: &[&Expr]) -> Result<bool, LookupError> {
+    fn confines_select(
+        &self,
+        select: &Select,
+        held: &[&Expr],
+        owners: &[&Query],
+    ) -> Result<bool, LookupError> {
         let filter: Vec<&Expr> = select.selection.iter().flat_map(conjuncts).collect();
+        let sources = self.sources(select, owners);
         let witnessed: Vec<&Expr> = filter
             .iter()
             .filter_map(|condition| semi_join(condition))
+            .chain(sources.iter().map(|(_, found)| *found))
             .flat_map(|found| found.selection.iter().flat_map(conjuncts))
             .collect();
         let merges = self.merges(select)?;
@@ -687,6 +714,7 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
                 merges: &merges,
                 from,
                 rejected: &rejected,
+                sources: &sources,
             };
             let relations =
                 iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation));
@@ -829,6 +857,55 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
             rejected.push(found);
         }
         Ok(rejected)
+    }
+
+    /// The relations of the `FROM` items of `select` that read a `WITH` item
+    /// or a subquery, each with the `SELECT` of its body that yields each of
+    /// its rows from a row passing its `WHERE`. A body two of them read is
+    /// left out, since their rows come from different rows of it.
+    fn sources<'s>(
+        &self,
+        select: &'s Select,
+        owners: &[&'s Query],
+    ) -> Vec<(&'s TableFactor, &'s Select)> {
+        let mut sources: Vec<(&TableFactor, &Select)> = Vec::new();
+        for from in &select.from {
+            for relation in
+                iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation))
+            {
+                let body = match relation {
+                    TableFactor::Derived { subquery, .. } => Some(subquery.as_ref()),
+                    TableFactor::Table {
+                        name, args: None, ..
+                    } => self
+                        .items
+                        .binding(name)
+                        .filter(|binding| !binding.in_own_body)
+                        .and_then(|binding| {
+                            let owner = owners
+                                .iter()
+                                .find(|owner| ptr::eq(**owner, binding.owner))?;
+                            let with = owner.with.as_ref()?;
+                            Some(with.cte_tables[binding.item].query.as_ref())
+                        }),
+                    _ => None,
+                };
+                if let Some(found) = body.and_then(witnessed) {
+                    sources.push((relation, found));
+                }
+            }
+        }
+        sources
+            .iter()
+            .filter(|(_, found)| {
+                sources
+                    .iter()
+                    .filter(|(_, other)| ptr::eq(*other, *found))
+                    .count()
+                    == 1
+            })
+            .copied()
+            .collect()
     }
 
     /// The position of the first relation of `from`, up to the one at
@@ -1193,7 +1270,7 @@ enum Clause {
     /// The `WHERE` of the `SELECT`.
     Where,
     /// The `WHERE` of a query an `EXISTS` or `IN` of that `WHERE` finds a
-    /// row of.
+    /// row of, or of the body of a `WITH` item or subquery of its `FROM`.
     Witness,
     /// The `ON` condition of the join at this index of the `FROM` item.
     On(usize),
@@ -1209,9 +1286,35 @@ struct Resolver<'r, 'q, 'a, DB: DatabaseLike> {
     /// For each join of `from`, whether the `WHERE` drops the rows it
     /// extends with nulls.
     rejected: &'r [bool],
+    /// The relations of the `SELECT` reading a `WITH` item or subquery, each
+    /// with the `SELECT` of its body every row of it comes from.
+    sources: &'r [(&'r TableFactor, &'r Select)],
 }
 
-impl<'r, DB: DatabaseLike> Resolver<'r, '_, '_, DB> {
+impl<'r, 'q, 'a, DB: DatabaseLike> Resolver<'r, 'q, 'a, DB> {
+    /// The definition and binding of the column `reference`, in a filter of
+    /// `clause`, names, with the clause its binding resolves in. A column a
+    /// source projects from a column reference is that column of the row
+    /// its `SELECT` yields it from.
+    fn reference(
+        &self,
+        clause: Clause,
+        reference: &Expr,
+    ) -> Option<(ColumnDefinition<'r, 'q, 'a, DB>, ColumnBinding<'r>, Clause)> {
+        let (definition, binding) = self.context.reference(reference).ok()??;
+        if let Some(entry) = binding.entry()
+            && let Some((_, found)) = self
+                .sources
+                .iter()
+                .find(|(source, _)| ptr::eq(*source, entry.factor()))
+            && let Some(projected) = projection_at(found, entry.ordinal())
+            && let Some((definition, binding)) = self.context.reference(projected).ok().flatten()
+        {
+            return Some((definition, binding, Clause::Witness));
+        }
+        Some((definition, binding, clause))
+    }
+
     /// The conjuncts of the `ON` conditions of the `FROM` item that drop
     /// rows of its relation at `position`, counted from zero, each with the
     /// index of its join.
@@ -1302,8 +1405,7 @@ impl<'r, DB: DatabaseLike> Resolver<'r, '_, '_, DB> {
         clause: Clause,
         side: &Expr,
     ) -> Result<Option<(Node<'r>, Cow<'r, Identity>)>, LookupError> {
-        let Some((definition, binding)) = self.context.reference(unnested(side)).ok().flatten()
-        else {
+        let Some((definition, binding, clause)) = self.reference(clause, unnested(side)) else {
             return Ok(None);
         };
         let identity = match (self.merge(clause, &binding), definition) {
@@ -1635,7 +1737,30 @@ fn semi_join(condition: &Expr) -> Option<&Select> {
     else {
         return None;
     };
-    let SetExpr::Select(select) = subquery.body.as_ref() else {
+    witnessed(subquery)
+}
+
+/// The expression `select` projects as its output column at `ordinal`,
+/// counted from zero, when no `*` comes before it.
+fn projection_at(select: &Select, ordinal: usize) -> Option<&Expr> {
+    let mut projected = None;
+    for item in select.projection.get(..=ordinal)? {
+        match item {
+            SelectItem::UnnamedExpr(expression)
+            | SelectItem::ExprWithAlias {
+                expr: expression, ..
+            } => projected = Some(expression),
+            _ => return None,
+        }
+    }
+    projected
+}
+
+/// The `SELECT` of `query` each row of which comes from a row of its `FROM`
+/// passing its `WHERE`, with no row when none passes, projecting columns,
+/// constants or `*`.
+fn witnessed(query: &Query) -> Option<&Select> {
+    let SetExpr::Select(select) = query.body.as_ref() else {
         return None;
     };
     let projected = select.projection.iter().all(|item| match item {
@@ -1651,7 +1776,7 @@ fn semi_join(condition: &Expr) -> Option<&Select> {
             SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)
         ),
     });
-    (subquery.order_by.is_none() && plain(select) && projected).then_some(select)
+    (query.order_by.is_none() && plain(select) && projected).then_some(select)
 }
 
 /// The name of the one column `query` yields, given by its leftmost
@@ -1701,9 +1826,9 @@ fn term<'r, DB: DatabaseLike>(
     relation: &TableFactor,
     equalities: &Equalities<'r>,
 ) -> Option<Term> {
-    match resolver.context.reference(reference).ok()?? {
-        (ColumnDefinition::Parameter { ordinal, .. }, _) => Some(Term::Parameter(ordinal)),
-        (_, binding) => match resolver.node(clause, &binding)? {
+    match resolver.reference(clause, reference)? {
+        (ColumnDefinition::Parameter { ordinal, .. }, _, _) => Some(Term::Parameter(ordinal)),
+        (_, binding, clause) => match resolver.node(clause, &binding)? {
             Node::Column { factor, name } if ptr::eq(factor, relation) => {
                 Some(Term::Column(name.into_owned()))
             }
