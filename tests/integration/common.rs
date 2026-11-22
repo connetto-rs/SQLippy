@@ -63,6 +63,15 @@ pub const GUARDED_SUBTYPE: &str = "
       RETURN NEW;
     END $$;
     CREATE TRIGGER users_grantee BEFORE INSERT ON users FOR EACH ROW EXECUTE FUNCTION insert_grantee();
+    CREATE FUNCTION delete_grantee() RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+    BEGIN
+      DELETE FROM grantees WHERE id = OLD.id;
+      RETURN NULL;
+    END $$;
+    CREATE TRIGGER users_grantee_removed AFTER DELETE ON users
+      FOR EACH ROW EXECUTE FUNCTION delete_grantee();
+    CREATE TRIGGER users_grantee_rekeyed AFTER UPDATE ON users
+      FOR EACH ROW WHEN (OLD.id IS DISTINCT FROM NEW.id) EXECUTE FUNCTION delete_grantee();
     CREATE FUNCTION check_grantee_subtype() RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
     BEGIN
       IF EXISTS (SELECT 1 FROM grantees grantee WHERE grantee.id = NEW.id AND grantee.kind = NEW.kind)

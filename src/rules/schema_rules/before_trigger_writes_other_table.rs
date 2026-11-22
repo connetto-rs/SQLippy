@@ -121,7 +121,11 @@ impl<DB: DatabaseLike> FlowVisitor for Returns<'_, '_, DB> {
     }
 
     fn statement(&mut self, statement: &Statement, state: &mut Wrote) {
-        if self.guarded.iter().any(|parent| parent.inserts(statement)) {
+        if self
+            .guarded
+            .iter()
+            .any(|parent| parent.inserts(statement, true))
+        {
             return;
         }
         state.0 |= !self.reach.occurrences(statement).is_empty();
@@ -167,7 +171,7 @@ impl<DB: DatabaseLike> SchemaRule for BeforeTriggerWritesOtherTable<DB> {
             let mut guarded = Vec::new();
             for foreign_key in table.foreign_keys(database)? {
                 let parent = Parent::new(database, table, foreign_key)?;
-                if parent.guarded()? && parent.settled()? {
+                if parent.guarded(false)? && parent.settled()? {
                     guarded.push(parent);
                 }
             }
