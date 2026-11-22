@@ -961,6 +961,46 @@ fn a_where_dropping_null_extended_rows_confines_the_preserved_side_of_an_outer_j
 }
 
 #[test]
+fn a_with_item_or_subquery_carries_its_filter_to_the_rows_equated_to_its_columns() {
+    let chosen = "SELECT resource.organization_id FROM public.resources resource
+                  WHERE resource.organization_id IN (SELECT public.member_organizations())";
+    let equated = "project.organization_id = chosen.organization_id";
+    assert_eq!(
+        exposed_to_app(&format!(
+            "{PROJECTS}
+             CREATE TABLE sites (id INT, organization_id INT);
+             CREATE FUNCTION item_equality() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH chosen AS ({chosen})
+                 SELECT project.id FROM chosen JOIN public.projects project ON {equated} $$;
+             CREATE FUNCTION derived_equality() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM ({chosen}) chosen
+                 JOIN public.projects project ON {equated} $$;
+             CREATE FUNCTION renamed_in_where() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM ({chosen}) chosen (organization), public.projects project
+                 WHERE project.organization_id = chosen.organization $$;
+             CREATE FUNCTION unfiltered_item() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH chosen AS (SELECT site.organization_id FROM public.sites site)
+                 SELECT project.id FROM chosen JOIN public.projects project ON {equated} $$;
+             CREATE FUNCTION item_read_twice() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH chosen AS (SELECT site.organization_id FROM public.sites site)
+                 SELECT project.id FROM chosen picked JOIN chosen other ON true
+                 JOIN public.projects project ON project.organization_id = picked.organization_id
+                 WHERE other.organization_id IN (SELECT public.member_organizations()) $$;
+             CREATE FUNCTION united_item() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH chosen AS ({chosen} UNION SELECT site.organization_id FROM public.sites site)
+                 SELECT project.id FROM chosen JOIN public.projects project ON {equated} $$;"
+        )),
+        ["item_read_twice()", "unfiltered_item()", "united_item()"]
+    );
+}
+
+#[test]
 fn a_using_join_holds_its_merged_column_equal_to_each_side() {
     let confined = "resource.organization_id IN (SELECT public.member_organizations())";
     let merged = "organization_id IN (SELECT public.member_organizations())";
