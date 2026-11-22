@@ -1160,6 +1160,126 @@ fn a_parameter_is_carried_over_every_value_a_strict_definer_takes() {
 }
 
 #[test]
+fn a_key_named_through_a_with_item_in_any_spelling_is_carried() {
+    for body in [
+        format!("WITH found (id) AS ({FOUNDED}) SELECT id FROM found"),
+        format!(
+            "WITH found AS ({}) SELECT key FROM found",
+            FOUNDED.replace("SELECT organization.id", "SELECT organization.id AS key")
+        ),
+        "WITH found AS (
+           SELECT id FROM public.organizations
+           WHERE created_by_id = authz.caller_id()
+             AND founded_at IS NULL
+             AND authz.acting_installation_id() IS NULL
+         )
+         SELECT id FROM found"
+            .to_owned(),
+        format!("WITH found AS (({FOUNDED}) UNION {FOUNDED}) SELECT id FROM found"),
+        format!(
+            "WITH RECURSIVE reached (id) AS ({FOUNDED} UNION SELECT reached.id FROM reached)
+             SELECT id FROM reached"
+        ),
+    ] {
+        assert_eq!(
+            founded(&founded_organizations(&body), "", Deployment::default()),
+            Vec::<String>::new(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_with_item_column_holding_another_value_carries_no_key() {
+    for body in [
+        format!(
+            "WITH found (id, parent_id) AS ({}) SELECT id FROM found",
+            FOUNDED.replace(
+                "SELECT organization.id",
+                "SELECT organization.parent_id, organization.id"
+            )
+        ),
+        format!(
+            "WITH found AS ({}) SELECT coalesce FROM found",
+            FOUNDED.replace(
+                "SELECT organization.id",
+                "SELECT COALESCE(organization.parent_id, organization.id)"
+            )
+        ),
+    ] {
+        assert_eq!(
+            founded(&founded_organizations(&body), "", Deployment::default()),
+            ["founded_organizations()"],
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_definer_returning_every_key_its_policy_admits_through_it_is_not_reported() {
+    assert_eq!(
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "{ORGANIZATIONS}
+                 CREATE FUNCTION authz.every_organization() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+                     SELECT id FROM organizations $$;
+                 CREATE POLICY organizations_select ON public.organizations FOR SELECT TO app
+                   USING (id = ANY (ARRAY(SELECT authz.every_organization())));"
+            ),
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_quoted_definer_name_carries_the_key_as_written() {
+    assert_eq!(
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "{ORGANIZATIONS}
+                 CREATE SCHEMA \"Authz\";
+                 {}
+                 CREATE POLICY organizations_select ON public.organizations FOR SELECT TO app
+                   USING (id = ANY (ARRAY(SELECT \"Authz\".\"Founded organizations\"()))
+                     AND (SELECT authz.acting_installation_id()) IS NULL);",
+                founded_organizations(FOUNDED).replace(
+                    "authz.founded_organizations()",
+                    "\"Authz\".\"Founded organizations\"()"
+                )
+            ),
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_definer_with_an_input_output_parameter_or_returning_its_input_carries_no_key() {
+    let reported = |extra: &str, projected: &str| {
+        founded(
+            &founded_organizations(FOUNDED),
+            &format!(
+                "CREATE FUNCTION {extra} RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     {} $$;",
+                FOUNDED.replace("organization.id FROM", &format!("{projected} FROM"))
+            ),
+            Deployment::default(),
+        )
+    };
+    assert_eq!(
+        reported("authz.founded_from(INOUT wanted INT)", "organization.id"),
+        ["founded_from(INT)"]
+    );
+    assert_eq!(
+        reported("authz.echoed(wanted INT)", "wanted"),
+        ["echoed(INT)"]
+    );
+}
+
+#[test]
 fn a_parameter_compared_directly_confines_only_in_a_strict_function() {
     assert_eq!(
         exposed(
