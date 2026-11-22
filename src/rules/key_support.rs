@@ -499,10 +499,28 @@ pub(crate) fn key_pairs<'db, DB: DatabaseLike>(
         .collect())
 }
 
-/// Whether `holds` is true of `column` or of a column its non-`NULL` values
-/// must equal, followed along chains of foreign keys. A foreign key forces
-/// that equality under `MATCH FULL` or when every other host column is
+/// Whether `foreign_key` checks every row in which `column` is not `NULL`,
+/// which it does under `MATCH FULL` or when every other host column is
 /// `NOT NULL`, since `MATCH SIMPLE` skips a row with a `NULL` in its key.
+pub(crate) fn checked_whenever_set<DB: DatabaseLike>(
+    database: &DB,
+    foreign_key: &DB::ForeignKey,
+    column: &DB::Column,
+) -> Result<bool, LookupError> {
+    if foreign_key.match_full(database) {
+        return Ok(true);
+    }
+    for host in foreign_key.host_columns(database)? {
+        if host != column && host.is_nullable(database)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether `holds` is true of `column` or of a column its non-`NULL` values
+/// must equal, followed along chains of foreign keys that
+/// [`checked_whenever_set`] forces that equality through.
 pub(crate) fn holds_through_references<'db, DB: DatabaseLike>(
     database: &'db DB,
     column: &'db DB::Column,
@@ -518,17 +536,12 @@ pub(crate) fn holds_through_references<'db, DB: DatabaseLike>(
         if holds(current)? {
             return Ok(true);
         }
-        'keys: for foreign_key in current.foreign_keys(database)? {
-            let pairs = key_pairs(database, foreign_key)?;
-            if !foreign_key.match_full(database) {
-                for &(host, _) in &pairs {
-                    if host != current && host.is_nullable(database)? {
-                        continue 'keys;
-                    }
-                }
+        for foreign_key in current.foreign_keys(database)? {
+            if !checked_whenever_set(database, foreign_key, current)? {
+                continue;
             }
             pending.extend(
-                pairs
+                key_pairs(database, foreign_key)?
                     .into_iter()
                     .filter_map(|(host, referenced)| (host == current).then_some(referenced)),
             );
