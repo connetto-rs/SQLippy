@@ -269,6 +269,69 @@ fn a_fixed_column_a_foreign_key_writes_into_is_not_reported() {
     );
 }
 
+#[test]
+fn a_fixed_column_a_before_row_trigger_reads_from_new_is_not_reported() {
+    let fixed = |table: &str| {
+        format!(
+            "CREATE TABLE {table} (id INT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'entry' CHECK (kind = 'entry'));"
+        )
+    };
+    let sql = format!(
+        "{}{}{}{}{}{}{}{}
+         CREATE FUNCTION read_kind() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.kind <> 'entry' THEN RAISE EXCEPTION 'kind'; END IF;
+           RETURN NEW;
+         END $$;
+         CREATE FUNCTION read_qualified() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+         BEGIN
+           INSERT INTO inserted (id, kind) VALUES (NEW.id, read_qualified.new.kind);
+           RETURN NEW;
+         END $$;
+         CREATE FUNCTION read_old() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+         BEGIN
+           PERFORM OLD.kind, NEW.id;
+           RETURN NEW;
+         END $$;
+         CREATE FUNCTION read_shadowed() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+         DECLARE new RECORD;
+         BEGIN
+           SELECT 'entry' AS kind INTO new;
+           PERFORM new.kind;
+           RETURN NULL;
+         END $$;
+         CREATE TRIGGER inserted BEFORE INSERT ON inserted FOR EACH ROW EXECUTE FUNCTION read_kind();
+         CREATE TRIGGER updated BEFORE UPDATE ON updated FOR EACH ROW EXECUTE FUNCTION read_kind();
+         CREATE TRIGGER qualified BEFORE INSERT ON qualified FOR EACH ROW EXECUTE FUNCTION read_qualified();
+         CREATE TRIGGER conditioned BEFORE INSERT ON conditioned FOR EACH ROW WHEN (NEW.kind = 'entry') EXECUTE FUNCTION read_old();
+         CREATE TRIGGER after_insert AFTER INSERT ON after_insert FOR EACH ROW EXECUTE FUNCTION read_kind();
+         CREATE TRIGGER deleted BEFORE DELETE ON deleted FOR EACH ROW EXECUTE FUNCTION read_kind();
+         CREATE TRIGGER old_read BEFORE UPDATE ON old_read FOR EACH ROW EXECUTE FUNCTION read_old();
+         CREATE TRIGGER shadowed BEFORE INSERT ON shadowed FOR EACH ROW EXECUTE FUNCTION read_shadowed();",
+        fixed("inserted"),
+        fixed("updated"),
+        fixed("qualified"),
+        fixed("conditioned"),
+        fixed("after_insert"),
+        fixed("deleted"),
+        fixed("old_read"),
+        fixed("shadowed"),
+    );
+    assert_eq!(
+        objects(
+            ConstantColumnNotGenerated::default(),
+            Deployment::default(),
+            &sql
+        ),
+        [
+            "after_insert.kind",
+            "deleted.kind",
+            "old_read.kind",
+            "shadowed.kind"
+        ]
+    );
+}
+
 const RELATIONS: &str = "CREATE TABLE documents (id INT PRIMARY KEY);
      CREATE VIEW visible_documents AS SELECT id FROM documents;
      CREATE TABLE grants (id INT PRIMARY KEY, relation_name TEXT NOT NULL, kind TEXT NOT NULL, relation REGCLASS);";
