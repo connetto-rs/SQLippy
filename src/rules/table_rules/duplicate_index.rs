@@ -2,7 +2,8 @@
 
 use sql_traits::{
     errors::LookupError,
-    traits::{DatabaseLike, IndexLike, TableLike, ViewLike},
+    structs::ConstraintDeferral,
+    traits::{DatabaseLike, IndexLike, TableIndexLike, TableLike, ViewLike},
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{IndexType, ObjectName, ObjectNamePart, OrderBySort};
@@ -36,6 +37,7 @@ struct Definition {
     unique: bool,
     nulls_distinct: bool,
     includes: Vec<String>,
+    deferral: ConstraintDeferral,
 }
 
 /// An index of a relation, with whether it backs a key constraint and
@@ -52,6 +54,7 @@ impl Entry {
         database: &DB,
         index: &I,
         constraint: bool,
+        deferral: ConstraintDeferral,
     ) -> Result<Self, LookupError> {
         let mut plain = true;
         let keys = index
@@ -92,6 +95,7 @@ impl Entry {
                 unique: constraint || index.is_unique(),
                 nulls_distinct: index.nulls_distinct(),
                 includes,
+                deferral,
             },
         })
     }
@@ -125,9 +129,10 @@ fn folded(name: &ObjectName) -> String {
 ///
 /// Two indexes are identical when they agree on every key, with its
 /// expression, collation, direction, null ordering and operator class, and
-/// on predicate, access method, uniqueness, null treatment and included
-/// columns. An omitted direction is ascending and an omitted null ordering
-/// is the default for the direction. An operator class is compared as
+/// on predicate, access method, uniqueness, null treatment, included
+/// columns and when PostgreSQL checks the key they back. An omitted
+/// direction is ascending and an omitted null ordering is the default for
+/// the direction. An operator class is compared as
 /// written, so a key naming its type's default class differs from one
 /// naming none. Of two identical indexes the later one is reported, and an
 /// index never stands in for a key constraint, which only
@@ -238,10 +243,10 @@ impl<DB: DatabaseLike> TableRule for DuplicateIndex<DB> {
     ) -> Result<(), Interruption> {
         let mut entries = Vec::new();
         for index in table.unique_indices(database)? {
-            entries.push(Entry::of(database, index, true)?);
+            entries.push(Entry::of(database, index, true, index.deferral(database))?);
         }
         for index in table.indices(database)? {
-            entries.push(Entry::of(database, index, false)?);
+            entries.push(Entry::of(database, index, false, index.deferral(database))?);
         }
         duplicates(&entries, true, |entry, earlier| {
             let (message, resolution) = finding(entry, earlier, table.table_name());
@@ -261,7 +266,12 @@ impl<DB: DatabaseLike> SchemaRule for DuplicateIndex<DB> {
         for view in database.materialized_views() {
             let mut entries = Vec::new();
             for index in database.indexes_on_materialized_view(view)? {
-                entries.push(Entry::of(database, index, false)?);
+                entries.push(Entry::of(
+                    database,
+                    index,
+                    false,
+                    ConstraintDeferral::NotDeferrable,
+                )?);
             }
             duplicates(&entries, false, |entry, earlier| {
                 let (message, resolution) = finding(entry, earlier, view.view_name());
