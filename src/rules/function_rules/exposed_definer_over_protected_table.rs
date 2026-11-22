@@ -1,6 +1,6 @@
 //! Submodule providing the `ExposedDefinerOverProtectedTable` rule.
 
-use std::{borrow::Cow, iter, ops::ControlFlow, ptr};
+use std::{borrow::Cow, iter, mem, ops::ControlFlow, ptr};
 
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
@@ -11,10 +11,15 @@ use sql_traits::{
     traits::{DatabaseLike, FunctionLike, Relation, TableLike, UserDefinedTypeLike},
     utils::identifier_resolution::normalize_identifier,
 };
-use sqlparser::ast::{
-    ArgMode, BinaryOperator, Expr, Function, FunctionCalledOnNull, FunctionSecurity,
-    JoinConstraint, JoinOperator, Query, Select, SetExpr, Statement, TableFactor, TableWithJoins,
-    Value, Visitor,
+use sqlparser::{
+    ast::{
+        ArgMode, BinaryOperator, Distinct, Expr, Function, FunctionBehavior, FunctionCalledOnNull,
+        FunctionSecurity, GroupByExpr, Ident, JoinConstraint, JoinOperator, ObjectNamePart, Query,
+        Select, SelectFlavor, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement,
+        TableFactor, TableWithJoins, Value, Visitor, With,
+    },
+    dialect::PostgreSqlDialect,
+    parser::Parser,
 };
 
 use crate::{
@@ -23,7 +28,7 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         closed_set_support::stored_name,
-        cte_support::{WithScopes, stored_relation},
+        cte_support::{WithScopes, same_name, stored_relation},
         grant_support::{function_callers, granted_callers},
         implication_support::{
             Columns, ParameterValues, Term, admits, clause_implies, parameter, renamed,
@@ -75,6 +80,13 @@ use crate::{
 /// Every function of the schema the body calls is held to the same test,
 /// except a `SECURITY DEFINER` function every caller may execute directly,
 /// which this rule judges on its own. Functions in `pg_catalog` are trusted.
+///
+/// A read whose column reaches, unchanged, the result of a function that is
+/// not `VOLATILE` and returns a set, through `UNION` arms and `WITH` items
+/// read whole with nothing grouping, filtering or limiting it on the way,
+/// also tests that column against the function's own call, written
+/// schema-qualified with its arguments. A policy testing the column against
+/// that call, or against a set declared to hold it, is then implied.
 ///
 /// # Example
 ///
@@ -311,6 +323,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             return Ok(false);
         };
         let path = function.search_path(self.database)?;
+        let lineage = Lineage::of(function, query);
         let mut reads = Reads {
             body: Body {
                 parameters: self.parameter_values(function)?,
@@ -319,6 +332,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             context: &context,
             path: path.as_deref(),
             items: WithScopes::default(),
+            lineage: &lineage,
         };
         match walk(query.as_ref(), &mut reads) {
             ControlFlow::Continue(()) => Ok(true),
@@ -573,6 +587,7 @@ struct Reads<'c, 'q, 'a, DB: DatabaseLike> {
     context: &'c ExpressionContext<'q, 'a, DB>,
     path: Option<&'c [(Cow<'c, str>, bool)]>,
     items: WithScopes,
+    lineage: &'c Lineage,
 }
 
 impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
@@ -610,6 +625,14 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
                     {
                         kept.push(stated);
                     }
+                }
+                if let Some(membership) = self.lineage.membership(select, |column| {
+                    match term(self.context, column, &name)? {
+                        Term::Column(column) => Some(column),
+                        Term::Parameter(_) => None,
+                    }
+                }) {
+                    kept.push(membership);
                 }
                 if !self.body.admits_every_caller(table, &conjunction(kept))? {
                     return Ok(false);
@@ -700,6 +723,283 @@ impl<DB: DatabaseLike> Visitor for Reads<'_, '_, '_, DB> {
             Ok(false) => ControlFlow::Break(None),
             Err(error) => ControlFlow::Break(Some(error)),
         }
+    }
+}
+
+/// The `SELECT`s of a function body each of whose rows reaches the
+/// function's result holding the one column it projects, unchanged.
+struct Lineage {
+    /// `"_" IN (SELECT f($1, …))` calling the function with its own
+    /// arguments, `None` when calls need not agree on the set it returns.
+    member: Option<Expr>,
+    selects: Vec<*const Select>,
+}
+
+impl Lineage {
+    /// The lineage of `query`, the body of `function`. A `SECURITY DEFINER`
+    /// function that is not `VOLATILE` returns the same set to a caller as to
+    /// a policy calling it with the same arguments.
+    fn of<F: FunctionLike>(function: &F, query: &Query) -> Self {
+        let member = (function.security_mode() == FunctionSecurity::Definer
+            && function.volatility() != FunctionBehavior::Volatile
+            && function.returns_set())
+        .then(|| member(function))
+        .flatten();
+        let mut carried = Carried::default();
+        if member.is_some() {
+            carried.query(query);
+        }
+        Self {
+            member,
+            selects: carried.selects,
+        }
+    }
+
+    /// `"column" IN (SELECT f($1, …))` when `select` belongs to the lineage
+    /// and `own` names the stored column of the projection.
+    fn membership(
+        &self,
+        select: &Select,
+        own: impl FnOnce(&Expr) -> Option<String>,
+    ) -> Option<Expr> {
+        let template = self.member.as_ref()?;
+        if !self.selects.iter().any(|carried| ptr::eq(*carried, select)) {
+            return None;
+        }
+        let column = own(carried_column(select)?)?;
+        let mut membership = template.clone();
+        if let Expr::In { expr, .. } = &mut membership {
+            **expr = Expr::Identifier(Ident::with_quote('"', column));
+        }
+        Some(membership)
+    }
+}
+
+/// `"_" IN (SELECT schema.name($1, …))` calling `function`, its schema
+/// `public` when its name has none, or `None` when an argument is not an
+/// input.
+fn member<F: FunctionLike>(function: &F) -> Option<Expr> {
+    let mut arguments = Vec::new();
+    for (position, mode) in function.argument_modes().enumerate() {
+        if mode != ArgMode::In {
+            return None;
+        }
+        arguments.push(parameter(position).to_string());
+    }
+    let written = |name: &str, quoted: bool| {
+        let stored = normalize_identifier(name, quoted).into_owned();
+        if quoted {
+            Ident::with_quote('"', stored)
+        } else {
+            Ident::new(stored)
+        }
+    };
+    let target = function.target_name();
+    let schema = target.schema().map_or_else(
+        || Ident::new("public"),
+        |schema| written(schema, target.schema_is_quoted()),
+    );
+    let name = written(target.name(), target.name_is_quoted());
+    Parser::new(&PostgreSqlDialect {})
+        .try_with_sql(&format!(
+            "\"_\" IN (SELECT {schema}.{name}({}))",
+            arguments.join(", ")
+        ))
+        .and_then(|mut parser| parser.parse_expr())
+        .ok()
+}
+
+/// Walks down from a result to the `SELECT`s every row of which reaches it.
+#[derive(Default)]
+struct Carried<'q> {
+    selects: Vec<*const Select>,
+    /// The `WITH` clauses in reach, each with how many of its items, from
+    /// the first, it shows.
+    frames: Vec<(&'q With, usize)>,
+    /// The `WITH` item bodies already followed, so a recursive item is
+    /// followed once.
+    followed: Vec<*const Query>,
+}
+
+impl<'q> Carried<'q> {
+    /// Follows `query` unless a limit, an offset or a lock may leave some of
+    /// its rows behind.
+    fn query(&mut self, query: &'q Query) {
+        if query.limit_clause.is_some()
+            || query.fetch.is_some()
+            || !query.pipe_operators.is_empty()
+            || !query.locks.is_empty()
+        {
+            return;
+        }
+        let depth = self.frames.len();
+        if let Some(with) = &query.with {
+            self.frames.push((with, with.cte_tables.len()));
+        }
+        self.body(&query.body);
+        self.frames.truncate(depth);
+    }
+
+    /// Follows every arm of a `UNION`, which keeps each row of each arm.
+    fn body(&mut self, body: &'q SetExpr) {
+        match body {
+            SetExpr::Select(select) => self.select(select),
+            SetExpr::Query(query) => self.query(query),
+            SetExpr::SetOperation {
+                op: SetOperator::Union,
+                set_quantifier: SetQuantifier::All | SetQuantifier::Distinct | SetQuantifier::None,
+                left,
+                right,
+            } => {
+                self.body(left);
+                self.body(right);
+            }
+            _ => {}
+        }
+    }
+
+    /// Records `select` when its rows each hold its one projected column,
+    /// and follows the `WITH` item it projects whole.
+    fn select(&mut self, select: &'q Select) {
+        let Some(projected) = carried_column(select) else {
+            return;
+        };
+        self.selects.push(select);
+        let ([from], None) = (select.from.as_slice(), &select.selection) else {
+            return;
+        };
+        let TableFactor::Table {
+            name,
+            alias,
+            args: None,
+            ..
+        } = &from.relation
+        else {
+            return;
+        };
+        let ([ObjectNamePart::Identifier(written)], []) =
+            (name.0.as_slice(), from.joins.as_slice())
+        else {
+            return;
+        };
+        let Some((frame, item)) = self.item(written) else {
+            return;
+        };
+        let (with, _) = self.frames[frame];
+        let cte = &with.cte_tables[item];
+        let renamed = alias
+            .as_ref()
+            .map_or(&[][..], |alias| alias.columns.as_slice());
+        let column = match (renamed, cte.alias.columns.as_slice()) {
+            ([column], _) | ([], [column]) => &column.name,
+            ([], []) => match output_name(&cte.query) {
+                Some(name) => name,
+                None => return,
+            },
+            _ => return,
+        };
+        let relation = alias.as_ref().map_or(written, |alias| &alias.name);
+        let body = ptr::from_ref(cte.query.as_ref());
+        if !names(projected, relation, column) || self.followed.contains(&body) {
+            return;
+        }
+        self.followed.push(body);
+        let outer = mem::take(&mut self.frames);
+        self.frames.extend_from_slice(&outer[..frame]);
+        self.frames.push((
+            with,
+            if with.recursive {
+                with.cte_tables.len()
+            } else {
+                item
+            },
+        ));
+        self.query(&cte.query);
+        self.frames = outer;
+    }
+
+    /// The frame and position of the visible `WITH` item `written` names.
+    fn item(&self, written: &Ident) -> Option<(usize, usize)> {
+        self.frames
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(frame, (with, visible))| {
+                with.cte_tables[..*visible]
+                    .iter()
+                    .position(|item| same_name(&item.alias.name, written))
+                    .map(|item| (frame, item))
+            })
+    }
+}
+
+/// The column reference a `SELECT` projects alone when each row its `FROM`
+/// and filters leave yields one row holding it, with no grouping,
+/// aggregate or `DISTINCT ON` choosing among them.
+fn carried_column(select: &Select) -> Option<&Expr> {
+    let [
+        SelectItem::UnnamedExpr(projected)
+        | SelectItem::ExprWithAlias {
+            expr: projected, ..
+        },
+    ] = select.projection.as_slice()
+    else {
+        return None;
+    };
+    let plain = matches!(
+        select.distinct,
+        None | Some(Distinct::All | Distinct::Distinct)
+    ) && select.select_modifiers.is_none()
+        && select.top.is_none()
+        && select.exclude.is_none()
+        && select.into.is_none()
+        && select.lateral_views.is_empty()
+        && select.prewhere.is_none()
+        && select.connect_by.is_empty()
+        && matches!(&select.group_by, GroupByExpr::Expressions(grouped, modifiers) if grouped.is_empty() && modifiers.is_empty())
+        && select.cluster_by.is_empty()
+        && select.distribute_by.is_empty()
+        && select.sort_by.is_empty()
+        && select.having.is_none()
+        && select.named_window.is_empty()
+        && select.qualify.is_none()
+        && select.value_table_mode.is_none()
+        && select.flavor == SelectFlavor::Standard;
+    (plain && matches!(projected, Expr::Identifier(_) | Expr::CompoundIdentifier(_)))
+        .then_some(projected)
+}
+
+/// The name of the one column `query` yields, given by its leftmost
+/// `SELECT`.
+fn output_name(query: &Query) -> Option<&Ident> {
+    let mut body = query.body.as_ref();
+    loop {
+        match body {
+            SetExpr::SetOperation { left, .. } => body = left,
+            SetExpr::Query(query) => body = query.body.as_ref(),
+            SetExpr::Select(select) => {
+                return match select.projection.as_slice() {
+                    [SelectItem::ExprWithAlias { alias, .. }] => Some(alias),
+                    [SelectItem::UnnamedExpr(Expr::Identifier(name))] => Some(name),
+                    [SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts))] => parts.last(),
+                    _ => None,
+                };
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Whether `projected` names `column` of the relation a query names
+/// `relation`.
+fn names(projected: &Expr, relation: &Ident, column: &Ident) -> bool {
+    match projected {
+        Expr::Identifier(name) => same_name(name, column),
+        Expr::CompoundIdentifier(parts) => matches!(
+            parts.as_slice(),
+            [qualifier, name] if same_name(qualifier, relation) && same_name(name, column)
+        ),
+        _ => false,
     }
 }
 

@@ -945,6 +945,220 @@ fn a_parameter_confines_nothing_unless_it_is_an_enum_no_column_shadows() {
     );
 }
 
+const ORGANIZATIONS: &str = "
+    CREATE ROLE app NOLOGIN;
+    CREATE SCHEMA authz;
+    CREATE TYPE authz.role AS ENUM ('reader', 'writer', 'admin');
+    CREATE TABLE public.organizations (id INT PRIMARY KEY, parent_id INT, created_by_id INT, founded_at TIMESTAMP);
+    ALTER TABLE public.organizations ENABLE ROW LEVEL SECURITY;
+    GRANT SELECT ON public.organizations TO app;
+    ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+    ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+    CREATE FUNCTION authz.caller_id() RETURNS INT
+      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT 1 $$;
+    CREATE FUNCTION authz.acting_installation_id() RETURNS INT
+      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT NULL::INT $$;";
+
+const FOUNDED: &str = "SELECT organization.id FROM public.organizations organization
+    WHERE organization.created_by_id = authz.caller_id()
+      AND organization.founded_at IS NULL
+      AND authz.acting_installation_id() IS NULL";
+
+/// Functions the rule reports for `app` once `helper` is defined, with the
+/// policy admitting the organizations `authz.founded_organizations()`
+/// returns outside an installation and the `extra` statements after it.
+fn founded(helper: &str, extra: &str, deployment: Deployment) -> Vec<String> {
+    exposed(
+        deployment.with_app_role("app"),
+        &format!(
+            "{ORGANIZATIONS}
+             {helper}
+             CREATE POLICY organizations_select ON public.organizations FOR SELECT TO app
+               USING (id = ANY (ARRAY(SELECT authz.founded_organizations()))
+                 AND (SELECT authz.acting_installation_id()) IS NULL);
+             {extra}"
+        ),
+    )
+}
+
+/// The definition of `authz.founded_organizations()` running `body`.
+fn founded_organizations(body: &str) -> String {
+    format!(
+        "CREATE FUNCTION authz.founded_organizations() RETURNS SETOF INT
+           LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ {body} $$;"
+    )
+}
+
+#[test]
+fn a_definer_returning_the_keys_its_policy_admits_through_it_is_not_reported() {
+    assert_eq!(
+        founded(&founded_organizations(FOUNDED), "", Deployment::default()),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        founded(
+            &founded_organizations(
+                "SELECT organization.id FROM public.organizations organization
+                 WHERE organization.created_by_id = authz.caller_id()"
+            ),
+            "",
+            Deployment::default()
+        ),
+        ["founded_organizations()"]
+    );
+}
+
+#[test]
+fn a_key_changed_or_dropped_on_its_way_to_the_result_proves_nothing() {
+    for body in [
+        FOUNDED.replace("SELECT organization.id", "SELECT organization.id + 0"),
+        FOUNDED.replace("SELECT organization.id", "SELECT max(organization.id)"),
+        format!("{FOUNDED} LIMIT 1"),
+        format!("{FOUNDED} OFFSET 1"),
+        format!("{FOUNDED} EXCEPT SELECT 0"),
+        format!("WITH found (id) AS ({FOUNDED}) SELECT id FROM found WHERE id > 0"),
+        format!("WITH found (id) AS ({FOUNDED}) SELECT id FROM found LIMIT 1"),
+        format!("WITH found (id) AS ({FOUNDED}) SELECT DISTINCT ON (id) id FROM found"),
+        format!(
+            "WITH found (id) AS ({FOUNDED})
+             SELECT id FROM found WHERE (SELECT count(*) FROM found) > 1"
+        ),
+        FOUNDED.replace(
+            "SELECT organization.id FROM public.organizations organization",
+            "SELECT other.id FROM public.organizations organization
+             JOIN public.organizations other ON other.id = organization.id",
+        ),
+    ] {
+        assert_eq!(
+            founded(&founded_organizations(&body), "", Deployment::default()),
+            ["founded_organizations()"],
+            "{body}"
+        );
+    }
+    assert_eq!(
+        founded(
+            &founded_organizations(FOUNDED).replace("STABLE", "VOLATILE"),
+            "",
+            Deployment::default()
+        ),
+        ["founded_organizations()"]
+    );
+}
+
+#[test]
+fn every_union_arm_and_recursive_step_carries_the_key() {
+    let reached = |step_filter: &str, outer_filter: &str| {
+        founded(
+            &founded_organizations(&format!(
+                "WITH RECURSIVE reached (id) AS (
+                   {FOUNDED}
+                   UNION
+                   SELECT organization.id FROM public.organizations organization
+                   JOIN reached ON organization.parent_id = reached.id
+                   WHERE {step_filter}
+                 )
+                 SELECT reached.id FROM reached {outer_filter}"
+            )),
+            "",
+            Deployment::default(),
+        )
+    };
+    assert_eq!(
+        reached("authz.acting_installation_id() IS NULL", ""),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        reached("organization.founded_at IS NULL", ""),
+        ["founded_organizations()"]
+    );
+    assert_eq!(
+        reached(
+            "authz.acting_installation_id() IS NULL",
+            "WHERE reached.id > 0"
+        ),
+        ["founded_organizations()"]
+    );
+}
+
+#[test]
+fn a_set_declared_within_the_policys_set_carries_the_key() {
+    let helpers = format!(
+        "{}
+         CREATE FUNCTION authz.parentless_founded_organizations() RETURNS SETOF INT
+           LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             {FOUNDED} AND organization.parent_id IS NULL $$;",
+        founded_organizations(FOUNDED)
+    );
+    assert_eq!(
+        founded(&helpers, "", Deployment::default()),
+        ["parentless_founded_organizations()"]
+    );
+    assert_eq!(
+        founded(
+            &helpers,
+            "",
+            Deployment::default()
+                .with_set_within(
+                    "authz.parentless_founded_organizations()",
+                    "authz.founded_organizations()"
+                )
+                .expect("both sets parse")
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_restrictive_policy_still_needs_the_filter_to_imply_it() {
+    let restrictive = |using: &str| {
+        founded(
+            &founded_organizations(FOUNDED),
+            &format!(
+                "CREATE POLICY organizations_restricted ON public.organizations AS RESTRICTIVE
+                   FOR SELECT TO app USING ({using});"
+            ),
+            Deployment::default(),
+        )
+    };
+    assert_eq!(restrictive("founded_at IS NULL"), Vec::<String>::new());
+    assert_eq!(
+        restrictive("parent_id IS NULL"),
+        ["founded_organizations()"]
+    );
+}
+
+#[test]
+fn a_parameter_is_carried_over_every_value_a_strict_definer_takes() {
+    let schema = |strict: &str| {
+        exposed(
+            Deployment::default()
+                .with_app_role("app")
+                .with_set_within(
+                    "authz.organizations_with('admin')",
+                    "authz.organizations_with('writer')",
+                )
+                .and_then(|deployment| {
+                    deployment.with_set_within(
+                        "authz.organizations_with('writer')",
+                        "authz.organizations_with('reader')",
+                    )
+                })
+                .expect("both sets parse"),
+            &format!(
+                "{ORGANIZATIONS}
+                 CREATE FUNCTION authz.organizations_with(min_role authz.role) RETURNS SETOF INT
+                   LANGUAGE sql STABLE {strict} SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     {FOUNDED} $$;
+                 CREATE POLICY organizations_select ON public.organizations FOR SELECT TO app
+                   USING (id = ANY (ARRAY(SELECT authz.organizations_with('reader')))
+                     AND (SELECT authz.acting_installation_id()) IS NULL);"
+            ),
+        )
+    };
+    assert_eq!(schema("STRICT"), Vec::<String>::new());
+    assert_eq!(schema(""), ["organizations_with(authz.role)"]);
+}
+
 #[test]
 fn a_parameter_compared_directly_confines_only_in_a_strict_function() {
     assert_eq!(
