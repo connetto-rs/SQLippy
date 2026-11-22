@@ -762,7 +762,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f03f88beed0b99cac4fa916335285dcdf03011f18dedcf9c0e4f9bd69f560e0f"
 dependencies = [
  "barnes-hut-tree",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.2",
  "lender",
  "multi_ranged",
  "num-traits",
@@ -820,9 +820,9 @@ checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 
 [[package]]
 name = "hashbrown"
-version = "0.17.1"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+checksum = "735eaa21a6a5ffb2e84362faaeb90c05ba8e19797ca30428478cb6ea3a4921bc"
 dependencies = [
  "allocator-api2",
  "equivalent",
@@ -1148,7 +1148,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.2",
  "serde",
  "serde_core",
 ]
@@ -2292,7 +2292,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#5dd0206dc99b5ab8157ff0402ce59cfff09905da"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#296195cb20685cbcfc17180b4a5d5638e7013a56"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -2335,7 +2335,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#e65b9110019d412b7dd0ab8faca8347d3b8be22b"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#0dc4865c54b21cfdd5659896c7cfb785b2378125"
 dependencies = [
  "log",
  "recursive",
@@ -2357,7 +2357,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-expr-eval"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#197fafd3d76a149fe7a4bd105db940d882f80c8a"
+source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#0e7f973b2d0af9f084354adc318958383eaedce3"
 dependencies = [
  "rpds",
  "sql-values",
@@ -2377,7 +2377,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#e65b9110019d412b7dd0ab8faca8347d3b8be22b"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#0dc4865c54b21cfdd5659896c7cfb785b2378125"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -1,7 +1,7 @@
 //! Submodule providing the `NeedlessIndexPredicate` rule.
 
 use sql_traits::{
-    structs::{IdentifierCase, Outcomes},
+    structs::{IdentifierCase, Outcomes, Raising},
     traits::{DatabaseLike, IndexLike, TableLike},
 };
 
@@ -88,7 +88,7 @@ impl<DB: DatabaseLike> TableRule for NeedlessIndexPredicate<DB> {
                 continue;
             };
             let truth = table.expression_truth(database, predicate, IdentifierCase::AsWritten)?;
-            if truth.outcomes != Outcomes::TRUE || truth.may_raise {
+            if truth.outcomes != Outcomes::TRUE || truth.raising != Raising::Never {
                 continue;
             }
             let name = table.table_name();

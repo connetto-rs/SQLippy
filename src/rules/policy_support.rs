@@ -6,7 +6,7 @@ use sql_traits::{
     errors::LookupError,
     structs::{
         ActingRole, ColumnDefinition, ColumnDefinitionScope, ColumnScope, ExpressionTruth,
-        FunctionKind, IdentifierCase, Outcomes, PolicyExpression,
+        FunctionKind, IdentifierCase, Outcomes, PolicyExpression, Raising,
     },
     traits::{DatabaseLike, FunctionLike, PolicyLike, RoleLike, RoleMembershipLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
@@ -658,7 +658,7 @@ pub(crate) fn is_contradiction<DB: DatabaseLike>(
 /// Whether a policy clause of this truth admits every row, being true
 /// without raising.
 pub(crate) fn admits_every_row(truth: ExpressionTruth) -> bool {
-    truth.outcomes == Outcomes::TRUE && !truth.may_raise
+    truth.outcomes == Outcomes::TRUE && truth.raising == Raising::Never
 }
 
 /// Whether a policy clause of this truth admits no row, being never true.
