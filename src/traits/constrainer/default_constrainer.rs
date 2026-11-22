@@ -30,8 +30,8 @@ use crate::{
         LatentPolicyReadCycle, LeakproofUserFunction, MaterializedViewExposed, MisquotedSearchPath,
         MissingPrimaryKey, MixedCaseColumnName, MixedCaseForeignKeyName, MixedCaseTableName,
         MomentStoredAsText, MoneyType, MonotonicFlagReset, MultiplePermissivePolicies,
-        NarrowIntegerKey, NarrowerReferencingColumn, NestedPolicySubquery, NilUuidSentinel,
-        NonFiniteNumberAllowed, NonSnakeCaseColumnName, NonSnakeCaseTableName,
+        NarrowIntegerKey, NarrowerReferencingColumn, NeedlessIndexPredicate, NestedPolicySubquery,
+        NilUuidSentinel, NonFiniteNumberAllowed, NonSnakeCaseColumnName, NonSnakeCaseTableName,
         NonterminatingRecursiveCte, NotInNullList, NotInNullableSubquery, NotInSubquery,
         NullComparison, NullCredentialRead, NullableCompositeForeignKey, NullableConcatenation,
         NullableTenantKey, NullableUniqueColumn, NumberedColumns, OffsetPaging,
@@ -191,13 +191,14 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 58] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 59] = [
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(DuplicateIndex::default()),
         Box::new(RepeatedIndexColumn::default()),
         Box::new(EqualityIndexOnArray::default()),
         Box::new(EmptyPartialIndex::default()),
+        Box::new(NeedlessIndexPredicate::default()),
         Box::new(NumberedColumns::default()),
         Box::new(MissingPrimaryKey::default()),
         Box::new(KeyWithoutExactEquality::default()),

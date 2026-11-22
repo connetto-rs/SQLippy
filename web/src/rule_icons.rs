@@ -180,6 +180,7 @@ rule_icons! {
     "repeated_index_column" => FaClone,
     "equality_index_on_array" => FaListUl,
     "empty_partial_index" => FaFilterCircleXmark,
+    "needless_index_predicate" => FaFilter,
     "numbered_columns" => FaListOl,
     "uncached_policy_call" => FaBolt,
     "uncached_helper_query" => FaBolt,

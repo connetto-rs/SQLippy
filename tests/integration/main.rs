@@ -61,6 +61,7 @@ mod lint_candidates;
 mod lint_levels;
 mod monotonic_flag_resets;
 mod name_type_hints;
+mod needless_index_predicates;
 mod nested_policy_subqueries;
 mod nil_uuid_sentinels;
 mod non_finite_numbers;
