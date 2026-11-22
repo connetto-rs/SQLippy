@@ -151,6 +151,57 @@ fn a_column_fixed_by_its_default_and_check_is_reported_only_when_not_null() {
     );
 }
 
+#[test]
+fn a_fixed_column_a_foreign_key_writes_into_is_not_reported() {
+    let sql = "CREATE TABLE resources (
+                   id INT PRIMARY KEY,
+                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
+                   UNIQUE (id, kind)
+               );
+               CREATE TABLE cascaded (
+                   resource_id INT NOT NULL,
+                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
+                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON UPDATE CASCADE
+               );
+               CREATE TABLE nulled (
+                   resource_id INT,
+                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
+                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON UPDATE SET NULL
+               );
+               CREATE TABLE defaulted (
+                   resource_id INT,
+                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
+                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON UPDATE SET DEFAULT
+               );
+               CREATE TABLE deleted_null (
+                   resource_id INT,
+                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
+                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON DELETE SET NULL
+               );
+               CREATE TABLE deleted_default (
+                   resource_id INT,
+                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
+                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON DELETE SET DEFAULT
+               );
+               CREATE TABLE deleted_cascade (
+                   resource_id INT NOT NULL,
+                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
+                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON DELETE CASCADE ON UPDATE RESTRICT
+               );
+               CREATE TABLE beside (
+                   resource_id INT NOT NULL REFERENCES resources (id) ON UPDATE CASCADE,
+                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project')
+               );";
+    assert_eq!(
+        objects(
+            ConstantColumnNotGenerated::default(),
+            Deployment::default(),
+            sql
+        ),
+        ["beside.kind", "deleted_cascade.kind", "resources.kind"]
+    );
+}
+
 const RELATIONS: &str = "CREATE TABLE documents (id INT PRIMARY KEY);
      CREATE VIEW visible_documents AS SELECT id FROM documents;
      CREATE TABLE grants (id INT PRIMARY KEY, relation_name TEXT NOT NULL, kind TEXT NOT NULL, relation REGCLASS);";
