@@ -120,8 +120,9 @@ impl<'e, T> Condition<'e, T> {
 
 /// Whether every row `clause` admits meets `condition`, as when the clause
 /// settles it, states it, tests the same column against a set within the
-/// condition's, implies it in every arm or in one of its conjuncts, or
-/// implies each conjunct or one arm of `condition`.
+/// condition's, implies it in every arm or for every value of an `IN` list,
+/// implies it in one of its conjuncts, or implies each conjunct or one arm of
+/// `condition`.
 pub(crate) fn clause_implies<C: Columns>(
     columns: &C,
     clause: &Expr,
@@ -152,6 +153,23 @@ pub(crate) fn clause_implies<C: Columns>(
         && arms
             .iter()
             .all(|arm| clause_implies(columns, arm, condition))
+    {
+        return true;
+    }
+    if let Expr::In {
+        expr,
+        target: InTarget::List(list),
+        negated: false,
+        ..
+    } = clause
+        && list.iter().all(|value| {
+            let arm = Expr::BinaryOp {
+                left: expr.clone(),
+                op: BinaryOperator::Eq,
+                right: Box::new(value.clone()),
+            };
+            clause_implies(columns, &arm, condition)
+        })
     {
         return true;
     }
