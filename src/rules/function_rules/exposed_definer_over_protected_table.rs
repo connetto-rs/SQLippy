@@ -6,17 +6,20 @@ use sql_traits::{
     errors::{LookupError, RowSecurityError},
     structs::{
         ColumnDefinition, ExpressionContext, ExpressionScope, IdentifierCase, OperandType,
-        RowStatement, WrittenCall,
+        RangeTableEntry, RowStatement, WrittenCall,
     },
-    traits::{DatabaseLike, FunctionLike, Relation, TableLike, UserDefinedTypeLike},
-    utils::identifier_resolution::normalize_identifier,
+    traits::{
+        ColumnCollation, ColumnLike, DataTypeLike, DatabaseLike, EnumerationKind, FunctionLike,
+        Relation, TableLike, UserDefinedTypeLike,
+    },
+    utils::{identifier_resolution::normalize_identifier, scalar_family::ScalarFamily},
 };
 use sqlparser::{
     ast::{
         ArgMode, BinaryOperator, Distinct, Expr, Function, FunctionBehavior, FunctionCalledOnNull,
         FunctionSecurity, GroupByExpr, Ident, InTarget, JoinConstraint, JoinOperator,
         ObjectNamePart, Query, Select, SelectFlavor, SelectItem, SetExpr, SetOperator,
-        SetQuantifier, Statement, TableFactor, TableWithJoins, Value, Visitor, With,
+        SetQuantifier, Statement, TableFactor, TableWithJoins, Value, Visit, Visitor, With,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -33,7 +36,7 @@ use crate::{
         implication_support::{
             Columns, ParameterValues, Term, admits, clause_implies, parameter, renamed,
         },
-        policy_support::{acting, client_roles, conjuncts, is_role_read, sql_query_body},
+        policy_support::{acting, client_roles, conjuncts, is_role_read, sql_query_body, unnested},
         type_support::user_type_named,
         walk_support::walk,
     },
@@ -80,6 +83,14 @@ use crate::{
 /// Every function of the schema the body calls is held to the same test,
 /// except a `SECURITY DEFINER` function every caller may execute directly,
 /// which this rule judges on its own. Functions in `pg_catalog` are trusted.
+///
+/// A condition on a column also counts for a column the same filters hold
+/// equal to it with `=`, when both are columns of stored tables whose types
+/// hold `=` only between identical values. These are integers, `uuid`,
+/// `boolean`, dates, timestamps, one enum type, and `text` or `varchar` with
+/// no collation. A query nested in a condition of a `WHERE` is filtered by
+/// the other conditions of that `WHERE` too, since its outcome reaches the
+/// result only for outer rows passing them.
 ///
 /// A read whose column reaches, unchanged, the result of a function that is
 /// not `VOLATILE` and returns a set, through `UNION` arms and `WITH` items
@@ -334,11 +345,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             items: WithScopes::default(),
             lineage: &lineage,
         };
-        match walk(query.as_ref(), &mut reads) {
-            ControlFlow::Continue(()) => Ok(true),
-            ControlFlow::Break(None) => Ok(false),
-            ControlFlow::Break(Some(error)) => Err(error),
-        }
+        reads.confines_query(query, &[])
     }
 
     /// The values each input parameter of `function` may hold, in the order
@@ -574,14 +581,13 @@ fn reads_session_state(call: &Function) -> bool {
 enum Read<'a, DB: DatabaseLike> {
     /// No table with row-level security.
     Open,
-    /// The table with row-level security, by the name the query gives it.
-    Protected(&'a DB::Table, String),
+    /// The table with row-level security.
+    Protected(&'a DB::Table),
     /// Something no filter confines, such as a view.
     Unconfined,
 }
 
-/// Walks a body, breaking with `None` at a read the filters around it leave
-/// unconfined, or with a lookup error.
+/// Walks a body for a read the filters around it leave unconfined.
 struct Reads<'c, 'q, 'a, DB: DatabaseLike> {
     body: Body<'c, 'a, DB>,
     context: &'c ExpressionContext<'q, 'a, DB>,
@@ -591,13 +597,53 @@ struct Reads<'c, 'q, 'a, DB: DatabaseLike> {
 }
 
 impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
+    /// Whether `query` and every query nested in it confine their reads,
+    /// where `held` holds for every outer row the result of `query` reaches
+    /// the function's result through.
+    fn confines_query(&mut self, query: &Query, held: &[&Expr]) -> Result<bool, LookupError> {
+        if !query.locks.is_empty() {
+            return Ok(false);
+        }
+        self.items.enter(query);
+        let confined = match self.confines_nested(query, held) {
+            Ok(true) => self.confines(&query.body, held),
+            other => other,
+        };
+        self.items.leave(query);
+        confined
+    }
+
+    /// Whether each query nested directly in `query` confines its reads. One
+    /// in a condition of a `WHERE` also holds the other conditions of that
+    /// `WHERE`, since the outer row passes them whenever its outcome counts.
+    fn confines_nested(&mut self, query: &Query, held: &[&Expr]) -> Result<bool, LookupError> {
+        let mut beside = Vec::new();
+        conditions_beside(&query.body, &mut beside);
+        let outcome = nested_queries(query, 1, |nested| {
+            let mut within = held.to_vec();
+            if let Some((_, others)) = beside.iter().find(|(at, _)| ptr::eq(*at, nested)) {
+                within.extend_from_slice(others);
+            }
+            match self.confines_query(nested, &within) {
+                Ok(true) => ControlFlow::Continue(()),
+                Ok(false) => ControlFlow::Break(None),
+                Err(error) => ControlFlow::Break(Some(error)),
+            }
+        });
+        match outcome {
+            ControlFlow::Continue(()) => Ok(true),
+            ControlFlow::Break(None) => Ok(false),
+            ControlFlow::Break(Some(error)) => Err(error),
+        }
+    }
+
     /// Whether every `SELECT` of `body`, outside nested queries, confines its
     /// reads, a body that writes or reads `TABLE` never.
-    fn confines(&self, body: &SetExpr) -> Result<bool, LookupError> {
+    fn confines(&self, body: &SetExpr, held: &[&Expr]) -> Result<bool, LookupError> {
         match body {
-            SetExpr::Select(select) => self.confines_select(select),
+            SetExpr::Select(select) => self.confines_select(select, held),
             SetExpr::SetOperation { left, right, .. } => {
-                Ok(self.confines(left)? && self.confines(right)?)
+                Ok(self.confines(left, held)? && self.confines(right, held)?)
             }
             SetExpr::Query(_) | SetExpr::Values(_) => Ok(true),
             _ => Ok(false),
@@ -605,33 +651,43 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
     }
 
     /// Whether each relation with row-level security a `SELECT` reads is
-    /// confined by the filters that drop its rows.
-    fn confines_select(&self, select: &Select) -> Result<bool, LookupError> {
+    /// confined by the filters that drop its rows and the conditions `held`
+    /// of the outer rows.
+    fn confines_select(&self, select: &Select, held: &[&Expr]) -> Result<bool, LookupError> {
         let filter: Vec<&Expr> = select.selection.iter().flat_map(conjuncts).collect();
         for from in &select.from {
             let relations =
                 iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation));
             for (position, relation) in relations.enumerate() {
-                let (table, name) = match self.read(relation)? {
+                let table = match self.read(relation)? {
                     Read::Open => continue,
                     Read::Unconfined => return Ok(false),
-                    Read::Protected(table, name) => (table, name),
+                    Read::Protected(table) => table,
                 };
+                let dropping: Vec<&Expr> = held
+                    .iter()
+                    .chain(&filter)
+                    .copied()
+                    .chain(joined_filter(from, position))
+                    .collect();
+                let equalities = Equalities::of(self.context, &dropping)?;
+                let stated =
+                    |reference: &Expr| term(self.context, reference, relation, &equalities);
                 let mut kept = Vec::new();
-                for conjunct in filter.iter().copied().chain(joined_filter(from, position)) {
-                    if let Some(stated) =
-                        renamed(conjunct, |reference| term(self.context, reference, &name))
+                for conjunct in dropping {
+                    if let Some(stated) = renamed(conjunct, stated)
                         && self.body.confinement.reads_alike(conjunct)?
                     {
                         kept.push(stated);
                     }
                 }
-                if let Some(membership) = self.lineage.membership(select, |column| {
-                    match term(self.context, column, &name)? {
-                        Term::Column(column) => Some(column),
-                        Term::Parameter(_) => None,
-                    }
-                }) {
+                if let Some(membership) =
+                    self.lineage
+                        .membership(select, |column| match stated(column)? {
+                            Term::Column(column) => Some(column),
+                            Term::Parameter(_) => None,
+                        })
+                {
                     kept.push(membership);
                 }
                 if !self.body.admits_every_caller(table, &conjunction(kept))? {
@@ -661,19 +717,9 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
                             .as_ref()
                             .is_some_and(|alias| !alias.columns.is_empty())
                         {
-                            return Ok(Read::Unconfined);
-                        }
-                        let exposed = alias
-                            .as_ref()
-                            .map(|alias| &alias.name)
-                            .or_else(|| name.0.last().and_then(|part| part.as_ident()));
-                        match exposed {
-                            Some(exposed) => Read::Protected(
-                                table,
-                                normalize_identifier(&exposed.value, exposed.quote_style.is_some())
-                                    .into_owned(),
-                            ),
-                            None => Read::Unconfined,
+                            Read::Unconfined
+                        } else {
+                            Read::Protected(table)
                         }
                     }
                     Some(Relation::View(_)) => Read::Unconfined,
@@ -702,28 +748,229 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
     }
 }
 
-impl<DB: DatabaseLike> Visitor for Reads<'_, '_, '_, DB> {
-    type Break = Option<LookupError>;
+/// Records, for each query nested in a condition of a `WHERE` of a `SELECT`
+/// of `body`, outside nested queries, the other conditions of that `WHERE`.
+fn conditions_beside<'q>(body: &'q SetExpr, beside: &mut Vec<(*const Query, Vec<&'q Expr>)>) {
+    match body {
+        SetExpr::Select(select) => {
+            let filter: Vec<&Expr> = select.selection.iter().flat_map(conjuncts).collect();
+            for (index, condition) in filter.iter().enumerate() {
+                let _ = nested_queries(*condition, 0, |nested| {
+                    let others = filter
+                        .iter()
+                        .enumerate()
+                        .filter(|(other, _)| *other != index)
+                        .map(|(_, other)| *other);
+                    beside.push((ptr::from_ref(nested), others.collect()));
+                    ControlFlow::<()>::Continue(())
+                });
+            }
+        }
+        SetExpr::SetOperation { left, right, .. } => {
+            conditions_beside(left, beside);
+            conditions_beside(right, beside);
+        }
+        _ => {}
+    }
+}
 
-    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        self.items.enter(query);
-        if query.locks.is_empty() {
+/// Hands `each` every query of `node` that `depth` of its queries enclose,
+/// until `each` breaks.
+fn nested_queries<N: Visit + ?Sized, B>(
+    node: &N,
+    depth: usize,
+    each: impl FnMut(&Query) -> ControlFlow<B>,
+) -> ControlFlow<B> {
+    /// The walk's state, `entered` counting the queries it is inside.
+    struct Nested<F> {
+        depth: usize,
+        entered: usize,
+        each: F,
+    }
+
+    impl<B, F: FnMut(&Query) -> ControlFlow<B>> Visitor for Nested<F> {
+        type Break = B;
+
+        fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<B> {
+            let outcome = if self.entered == self.depth {
+                (self.each)(query)
+            } else {
+                ControlFlow::Continue(())
+            };
+            self.entered += 1;
+            outcome
+        }
+
+        fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<B> {
+            self.entered -= 1;
             ControlFlow::Continue(())
-        } else {
-            ControlFlow::Break(None)
         }
     }
 
-    /// Judges the query once its `WITH` items are in reach.
-    fn post_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        let confined = self.confines(&query.body);
-        self.items.leave(query);
-        match confined {
-            Ok(true) => ControlFlow::Continue(()),
-            Ok(false) => ControlFlow::Break(None),
-            Err(error) => ControlFlow::Break(Some(error)),
+    walk(
+        node,
+        &mut Nested {
+            depth,
+            entered: 0,
+            each,
+        },
+    )
+}
+
+/// The columns of stored tables that the column equalities among some
+/// filters hold equal, where `=` holds only between identical values.
+#[derive(Default)]
+struct Equalities {
+    /// Each column an equality names.
+    columns: Vec<Equated>,
+    /// For each column, the index of one of its class nearer the column
+    /// heading the class, or its own for the head.
+    parents: Vec<usize>,
+}
+
+/// One column an equality names, by its `FROM` item and position there,
+/// with the name the query gives it.
+struct Equated {
+    factor: *const TableFactor,
+    ordinal: usize,
+    name: String,
+}
+
+impl Equalities {
+    /// The classes the conditions `a.x = b.y` among `filters` form.
+    fn of<DB: DatabaseLike>(
+        context: &ExpressionContext<'_, '_, DB>,
+        filters: &[&Expr],
+    ) -> Result<Self, LookupError> {
+        let mut equalities = Self::default();
+        for filter in filters {
+            let Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Eq,
+                right,
+            } = unnested(filter)
+            else {
+                continue;
+            };
+            if let (Some((left, kind)), Some((right, other))) =
+                (equated(context, left)?, equated(context, right)?)
+                && kind == other
+            {
+                let left = equalities.joined(left);
+                let right = equalities.joined(right);
+                equalities.parents[left] = right;
+            }
         }
+        Ok(equalities)
     }
+
+    /// The head of the class of `column`, which forms a class of its own
+    /// when no equality named it yet.
+    fn joined(&mut self, column: Equated) -> usize {
+        let index = self
+            .position(column.factor, column.ordinal)
+            .unwrap_or_else(|| {
+                self.parents.push(self.columns.len());
+                self.columns.push(column);
+                self.columns.len() - 1
+            });
+        self.head(index)
+    }
+
+    /// The index of the column at `ordinal` of `factor`.
+    fn position(&self, factor: *const TableFactor, ordinal: usize) -> Option<usize> {
+        self.columns
+            .iter()
+            .position(|column| ptr::eq(column.factor, factor) && column.ordinal == ordinal)
+    }
+
+    /// The head of the class of the column at `index`.
+    fn head(&self, mut index: usize) -> usize {
+        while self.parents[index] != index {
+            index = self.parents[index];
+        }
+        index
+    }
+
+    /// The name of a column of `relation` held equal to `column`.
+    fn of_relation(&self, column: RangeTableEntry<'_>, relation: &TableFactor) -> Option<&str> {
+        let class = self.head(self.position(column.factor(), column.ordinal())?);
+        self.columns
+            .iter()
+            .enumerate()
+            .find(|(index, equated)| {
+                ptr::eq(equated.factor, relation) && self.head(*index) == class
+            })
+            .map(|(_, equated)| equated.name.as_str())
+    }
+}
+
+/// What `=` compares the values of a column by, when two values it holds
+/// equal are the same value.
+#[derive(PartialEq, Eq)]
+enum Identity {
+    /// A builtin type of this family.
+    Family(ScalarFamily),
+    /// The enum type of this name.
+    Enumeration(String),
+}
+
+/// The column of a stored table `side` names, with what `=` compares its
+/// values by, or `None` when two equal values of it may differ.
+fn equated<DB: DatabaseLike>(
+    context: &ExpressionContext<'_, '_, DB>,
+    side: &Expr,
+) -> Result<Option<(Equated, Identity)>, LookupError> {
+    let Some((
+        ColumnDefinition::Base {
+            column, database, ..
+        },
+        binding,
+    )) = context.reference(unnested(side)).ok().flatten()
+    else {
+        return Ok(None);
+    };
+    let (Some(entry), Some((name, quoted))) = (binding.entry(), binding.exposed()) else {
+        return Ok(None);
+    };
+    let declared = column.data_type(database);
+    let data_type = declared.base_type(database).unwrap_or(declared);
+    let identity = if data_type.array_element(database).is_some() {
+        None
+    } else if let Some(enumeration) = data_type.enumeration(database) {
+        (enumeration.kind() == EnumerationKind::Enum)
+            .then(|| Identity::Enumeration(data_type.name(database).into_owned()))
+    } else {
+        match data_type.scalar_family(database) {
+            Some(
+                family @ (ScalarFamily::Bool
+                | ScalarFamily::Int
+                | ScalarFamily::Uuid
+                | ScalarFamily::Date
+                | ScalarFamily::Timestamp
+                | ScalarFamily::TimestampTz),
+            ) => Some(Identity::Family(family)),
+            Some(ScalarFamily::String)
+                if declared.domain(database).is_none()
+                    && !data_type.normalized_name(database).starts_with("CHAR")
+                    && matches!(
+                        column.collation(database)?,
+                        ColumnCollation::DatabaseDefault
+                    ) =>
+            {
+                Some(Identity::Family(ScalarFamily::String))
+            }
+            _ => None,
+        }
+    };
+    Ok(identity.map(|identity| {
+        let equated = Equated {
+            factor: ptr::from_ref(entry.factor()),
+            ordinal: entry.ordinal(),
+            name: normalize_identifier(name, quoted).into_owned(),
+        };
+        (equated, identity)
+    }))
 }
 
 /// The `SELECT`s of a function body each of whose rows reaches the
@@ -1036,19 +1283,28 @@ fn joined_filter(from: &TableWithJoins, position: usize) -> impl Iterator<Item =
 
 /// The input parameter of the function whose body holds `reference` that
 /// it names where no column of the same name is in reach, or else the stored
-/// name of the column of the relation the query names `relation` it names.
+/// name of the column of `relation` it names or `equalities` hold equal to
+/// the column it names.
 fn term<DB: DatabaseLike>(
     context: &ExpressionContext<'_, '_, DB>,
     reference: &Expr,
-    relation: &str,
+    relation: &TableFactor,
+    equalities: &Equalities,
 ) -> Option<Term> {
     match context.reference(reference).ok()?? {
         (ColumnDefinition::Parameter { ordinal, .. }, _) => Some(Term::Parameter(ordinal)),
         (_, binding) => {
-            let ((named_relation, relation_quoted), (column, column_quoted)) =
-                binding.relation().zip(binding.exposed())?;
-            (normalize_identifier(named_relation, relation_quoted) == relation)
-                .then(|| Term::Column(normalize_identifier(column, column_quoted).into_owned()))
+            let entry = binding.entry()?;
+            if ptr::eq(entry.factor(), relation) {
+                let (column, quoted) = binding.exposed()?;
+                Some(Term::Column(
+                    normalize_identifier(column, quoted).into_owned(),
+                ))
+            } else {
+                equalities
+                    .of_relation(entry, relation)
+                    .map(|column| Term::Column(column.to_owned()))
+            }
         }
     }
 }
