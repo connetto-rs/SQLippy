@@ -85,6 +85,50 @@ fn a_lifecycle_boolean_beside_its_moment_is_not_reported() {
 }
 
 #[test]
+fn a_lifecycle_boolean_a_foreign_key_copies_is_judged_as_its_source() {
+    let sql = "CREATE TABLE resources (
+                   id INT PRIMARY KEY,
+                   archived_at TIMESTAMPTZ,
+                   archived BOOLEAN GENERATED ALWAYS AS (archived_at IS NOT NULL) STORED NOT NULL,
+                   UNIQUE (id, archived)
+               );
+               CREATE TABLE flags (id INT PRIMARY KEY, archived BOOLEAN NOT NULL, UNIQUE (id, archived));
+               CREATE TABLE notes (
+                   id INT PRIMARY KEY,
+                   resource_id INT NOT NULL,
+                   archived BOOLEAN NOT NULL DEFAULT FALSE,
+                   UNIQUE (id, archived),
+                   FOREIGN KEY (resource_id, archived) REFERENCES resources (id, archived) ON UPDATE CASCADE
+               );
+               CREATE TABLE replies (
+                   id INT PRIMARY KEY,
+                   note_id INT NOT NULL,
+                   archived BOOLEAN NOT NULL,
+                   FOREIGN KEY (note_id, archived) REFERENCES notes (id, archived)
+               );
+               CREATE TABLE loose (
+                   id INT PRIMARY KEY,
+                   resource_id INT,
+                   archived BOOLEAN NOT NULL,
+                   FOREIGN KEY (resource_id, archived) REFERENCES resources (id, archived) ON UPDATE CASCADE
+               );
+               CREATE TABLE flagged (
+                   id INT PRIMARY KEY,
+                   flag_id INT NOT NULL,
+                   archived BOOLEAN NOT NULL,
+                   FOREIGN KEY (flag_id, archived) REFERENCES flags (id, archived) ON UPDATE CASCADE
+               );";
+    assert_eq!(
+        objects(
+            BooleanStateWithoutTime::default(),
+            Deployment::default(),
+            sql
+        ),
+        ["flagged.archived", "flags.archived", "loose.archived"]
+    );
+}
+
+#[test]
 fn lifecycle_terms_come_from_the_selected_vocabularies() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, revocato BOOLEAN, revoked BOOLEAN);";
     let italian = Vocabulary::default()

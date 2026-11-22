@@ -1,6 +1,7 @@
 //! Submodule providing the `BooleanStateWithoutTime` rule.
 
 use sql_traits::{
+    errors::LookupError,
     traits::{ColumnLike, DataTypeLike, DatabaseLike, TableLike},
     utils::scalar_family::ScalarFamily,
 };
@@ -10,10 +11,12 @@ use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
+        key_support::holds_through_references,
         name_support::{lifecycle_event, names_moment},
         type_support::underlying_type,
     },
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
+    vocabulary::Vocabulary,
 };
 
 rule_definition!(
@@ -27,7 +30,9 @@ rule_definition!(
     /// domains. Present-state names such as `active` or `enabled` name a
     /// toggle with no event and are not reported. A table that also holds a
     /// moment column named for the same event, such as `revoked_at`, already
-    /// keeps the time and is not reported.
+    /// keeps the time and is not reported. A column a foreign key forces to
+    /// equal a referenced column whenever it is set is a copy that records no
+    /// event of its own, and is judged as the column it copies.
     ///
     /// # Example
     ///
@@ -59,6 +64,29 @@ rule_definition!(
     Basis::Names
 );
 
+/// Whether `column` is named for an event whose moment its table does not
+/// keep in a column named for it, such as `revoked_at`.
+fn names_untimed_event<DB: DatabaseLike>(
+    database: &DB,
+    vocabularies: &[Vocabulary],
+    column: &DB::Column,
+) -> Result<bool, LookupError> {
+    let Some(event) = lifecycle_event(vocabularies, column.column_name()) else {
+        return Ok(false);
+    };
+    for other in column.table(database).columns(database)? {
+        let name = other.column_name();
+        if name.len() > event.len()
+            && name.as_bytes()[event.len()] == b'_'
+            && name[..event.len()].eq_ignore_ascii_case(event)
+            && names_moment(vocabularies, name)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 impl<DB: DatabaseLike> ColumnRule for BooleanStateWithoutTime<DB> {
     type Database = DB;
 
@@ -77,17 +105,12 @@ impl<DB: DatabaseLike> ColumnRule for BooleanStateWithoutTime<DB> {
         {
             return Ok(());
         }
-        let table = column.table(database);
-        for other in table.columns(database)? {
-            let name = other.column_name();
-            if name.len() > event.len()
-                && name.as_bytes()[event.len()] == b'_'
-                && name[..event.len()].eq_ignore_ascii_case(event)
-                && names_moment(vocabularies, name)
-            {
-                return Ok(());
-            }
+        if holds_through_references(database, column, |source| {
+            Ok(!names_untimed_event(database, vocabularies, source)?)
+        })? {
+            return Ok(());
         }
+        let table = column.table(database);
         reporter.column(
             column,
             format!(
