@@ -101,20 +101,15 @@ fn pairs_tenants<DB: DatabaseLike>(
 }
 
 /// Whether `table` has a primary or unique key over exactly `columns`, in
-/// any order, which a foreign key to them requires.
+/// any order, that is not deferrable, which a foreign key to them requires.
 fn has_key_over<DB: DatabaseLike>(
     database: &DB,
     table: &DB::Table,
     columns: &[&DB::Column],
 ) -> Result<bool, LookupError> {
-    let same_set = |key: &[&DB::Column]| {
-        key.len() == columns.len() && columns.iter().all(|column| key.contains(column))
-    };
-    let primary_key: Vec<&DB::Column> = table.primary_key_columns(database)?.collect();
-    Ok(same_set(&primary_key)
-        || equality_keys(database, table)?
-            .iter()
-            .any(|key| same_set(key)))
+    Ok(equality_keys(database, table)?
+        .iter()
+        .any(|key| key.len() == columns.len() && columns.iter().all(|column| key.contains(column))))
 }
 
 /// The names of `columns`, separated by commas.

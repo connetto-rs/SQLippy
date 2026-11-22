@@ -45,6 +45,8 @@ fn a_primary_key_with_no_narrower_unique_key_passes() {
     for sql in [
         "CREATE TABLE entries (id INT PRIMARY KEY, kind TEXT UNIQUE);",
         "CREATE TABLE entries (id INT, kind TEXT, PRIMARY KEY (id, kind));",
+        "CREATE TABLE entries (a INT, b INT, PRIMARY KEY (a, b), UNIQUE (a) DEFERRABLE);",
+        "CREATE TABLE entries (a INT, b INT, PRIMARY KEY (a, b), UNIQUE (a) DEFERRABLE INITIALLY DEFERRED);",
         // A unique key reaching outside the primary key is a key of its own.
         "CREATE TABLE entries (id INT, kind TEXT, tag TEXT, PRIMARY KEY (id, kind), UNIQUE (id, tag));",
         // A partial unique index pins only the rows its predicate admits.

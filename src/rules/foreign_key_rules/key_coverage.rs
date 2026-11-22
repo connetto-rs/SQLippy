@@ -18,7 +18,7 @@ use crate::{
     rules::{
         closed_set_support::stored_name,
         index_support::entry_columns,
-        key_support::{equality_keys, nullable_host_columns},
+        key_support::{indexed_keys, nullable_host_columns},
         policy_support::conjuncts,
     },
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
@@ -299,7 +299,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for UnindexedForeignKey<DB> {
             .zip(foreign_key.referenced_columns(database)?)
             .collect();
         let columns: Vec<&DB::Column> = pairs.iter().map(|(column, _)| *column).collect();
-        let referenced_keys = equality_keys(database, foreign_key.referenced_table(database)?)?;
+        let referenced_keys = indexed_keys(database, foreign_key.referenced_table(database)?)?;
         let serves = |run: &[&DB::Column]| {
             columns.iter().all(|column| run.contains(column))
                 || referenced_keys.iter().any(|key| {
@@ -320,7 +320,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for UnindexedForeignKey<DB> {
                 return Ok(());
             }
         }
-        for key in equality_keys(database, host)? {
+        for key in indexed_keys(database, host)? {
             if key.iter().all(|column| columns.contains(column)) {
                 return Ok(());
             }

@@ -308,6 +308,10 @@ fn an_insert_whose_guarded_before_write_may_adopt_a_parent_is_reported() {
             "      id UUID NOT NULL,\n      kind grantee_kind NOT NULL DEFAULT 'user'",
         )],
         &[(
+            "      id UUID PRIMARY KEY,\n      kind grantee_kind NOT NULL DEFAULT 'user'",
+            "      id UUID PRIMARY KEY DEFERRABLE,\n      kind grantee_kind NOT NULL DEFAULT 'user'",
+        )],
+        &[(
             "ON CONFLICT (id, kind) DO NOTHING",
             "ON CONFLICT (id, kind) DO UPDATE SET kind = EXCLUDED.kind",
         )],

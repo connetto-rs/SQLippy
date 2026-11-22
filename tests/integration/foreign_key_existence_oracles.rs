@@ -427,30 +427,43 @@ fn a_check_pinning_a_unique_referenced_column_to_a_readable_row_is_clean() {
 
 #[test]
 fn a_composite_unique_subset_is_pinned_only_from_one_row() {
-    for (check, expected) in [
-        ("(a, b) IN (SELECT a, b FROM slots)", vec![]),
-        ("(b, a) IN (SELECT s.b, s.a FROM slots s)", vec![]),
+    for (deferral, check, expected) in [
+        ("", "(a, b) IN (SELECT a, b FROM slots)", vec![]),
         (
+            " DEFERRABLE INITIALLY DEFERRED",
+            "(a, b) IN (SELECT a, b FROM slots)",
+            vec!["uses.uses_slot"],
+        ),
+        ("", "(b, a) IN (SELECT s.b, s.a FROM slots s)", vec![]),
+        (
+            "",
             "EXISTS (SELECT 1 FROM slots s WHERE s.a = uses.a AND uses.b = s.b)",
             vec![],
         ),
-        ("(a, b) IN (SELECT b, a FROM slots)", vec!["uses.uses_slot"]),
         (
+            "",
+            "(a, b) IN (SELECT b, a FROM slots)",
+            vec!["uses.uses_slot"],
+        ),
+        (
+            "",
             "a IN (SELECT a FROM slots) AND b IN (SELECT b FROM slots)",
             vec!["uses.uses_slot"],
         ),
         (
+            "",
             "(a, b) IN (SELECT x.a, y.b FROM slots x, slots y)",
             vec!["uses.uses_slot"],
         ),
         (
+            "",
             "EXISTS (SELECT 1 FROM slots x, slots y WHERE x.a = uses.a AND y.b = uses.b)",
             vec!["uses.uses_slot"],
         ),
     ] {
         assert_eq!(
             objects(&format!(
-                "CREATE TABLE slots (a INT, b INT, c INT, UNIQUE (a, b), UNIQUE (a, b, c));
+                "CREATE TABLE slots (a INT, b INT, c INT, UNIQUE (a, b){deferral}, UNIQUE (a, b, c));
                  ALTER TABLE slots ENABLE ROW LEVEL SECURITY;
                  CREATE TABLE uses (a INT, b INT, c INT,
                      CONSTRAINT uses_slot FOREIGN KEY (a, b, c) REFERENCES slots (a, b, c));
@@ -459,7 +472,7 @@ fn a_composite_unique_subset_is_pinned_only_from_one_row() {
                  CREATE POLICY uses_write ON uses FOR INSERT TO app WITH CHECK ({check});"
             )),
             expected,
-            "{check}"
+            "{deferral} {check}"
         );
     }
 }

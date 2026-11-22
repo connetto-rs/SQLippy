@@ -183,6 +183,10 @@ fn a_parent_write_no_check_refuses_when_stray_is_reported() {
              ALTER TABLE grantees DISABLE TRIGGER grantees_subtype_required;",
         ),
         &[("WHEN (NEW.kind IN ('user', 'team'))", "WHEN (NEW.kind IN ('team'))")],
+        &[(
+            "CREATE TABLE grantees (id UUID PRIMARY KEY,",
+            "CREATE TABLE grantees (id UUID PRIMARY KEY DEFERRABLE,",
+        )],
         &[(CHECKED, "WHEN 'user' THEN EXISTS (SELECT 1 FROM users principal)")],
         &[(CHECKED, "WHEN 'user' THEN EXISTS (SELECT 1 FROM users principal WHERE principal.id <> NEW.id)")],
         &[(CHECKED, "WHEN 'user' THEN EXISTS (SELECT 1 FROM teams principal WHERE principal.id = NEW.id)")],

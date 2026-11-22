@@ -19,6 +19,13 @@ const SHOP: &str = "
     CREATE UNIQUE INDEX orders_code ON orders (code) WHERE code IS NOT NULL;
     CREATE UNIQUE INDEX orders_lower_code ON orders (lower(code));
     CREATE TABLE tags (order_id INT NOT NULL, tag TEXT NOT NULL, UNIQUE NULLS NOT DISTINCT (order_id, tag));
+    CREATE TABLE deferred_customers (
+        id INT,
+        login TEXT NOT NULL,
+        team INT,
+        PRIMARY KEY (id) DEFERRABLE,
+        UNIQUE (login) DEFERRABLE INITIALLY DEFERRED
+    );
     CREATE TABLE notes (body TEXT);";
 
 #[test]
@@ -101,6 +108,14 @@ fn a_row_cap_over_rows_the_order_leaves_tied_is_reported() {
             (
                 "SELECT id FROM orders ORDER BY lower(code) LIMIT 5",
                 &["LIMIT 5"],
+            ),
+            (
+                "SELECT team FROM deferred_customers ORDER BY login LIMIT 5",
+                &["LIMIT 5"],
+            ),
+            (
+                "SELECT team FROM deferred_customers ORDER BY id OFFSET 1",
+                &["OFFSET 1"],
             ),
             (
                 "SELECT o.id FROM orders AS o JOIN customers AS c ON c.id = o.customer_id ORDER BY c.id LIMIT 10",
@@ -190,6 +205,14 @@ fn distinct_on_without_an_order_that_breaks_ties_is_reported() {
             (
                 "SELECT DISTINCT ON (prio) prio, id FROM orders ORDER BY prio, code",
                 &["DISTINCT ON (prio)"],
+            ),
+            (
+                "SELECT DISTINCT ON (login) login, team FROM deferred_customers ORDER BY login",
+                &["DISTINCT ON (login)"],
+            ),
+            (
+                "SELECT DISTINCT ON (id) id, team FROM deferred_customers ORDER BY id",
+                &["DISTINCT ON (id)"],
             ),
             (
                 "SELECT DISTINCT ON (prio) prio, id FROM orders ORDER BY prio, id DESC",
@@ -328,6 +351,14 @@ fn an_outer_join_read_nowhere_that_can_repeat_rows_is_reported() {
             (
                 "SELECT c.id FROM customers AS c LEFT JOIN orders AS o ON o.code = c.email",
                 &["orders AS o"],
+            ),
+            (
+                "SELECT o.id FROM orders AS o LEFT JOIN deferred_customers AS c ON c.login = o.code",
+                &["deferred_customers AS c"],
+            ),
+            (
+                "SELECT o.id FROM orders AS o LEFT JOIN deferred_customers AS c ON c.id = o.customer_id",
+                &["deferred_customers AS c"],
             ),
             (
                 "SELECT c.id FROM orders AS o RIGHT JOIN customers AS c ON o.customer_id = c.id",
