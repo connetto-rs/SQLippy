@@ -1,6 +1,6 @@
 //! Write policies through which a client role writes every row.
 
-use crate::common::{ROLES, finding, findings, parse, supabase};
+use crate::common::{GUARDED_SUBTYPE, ROLES, edited, finding, findings, parse, supabase};
 use sqlippy::prelude::*;
 
 const PROTECTED: &str =
@@ -234,4 +234,88 @@ fn a_minting_table_stays_reported_for_updates_and_deletes() {
             "Policy 'a' on 'users' lets role 'authenticated' UPDATE, DELETE every row, since its clause is true whatever the row holds."
         ]
     );
+}
+
+/// `GUARDED_SUBTYPE` under `edits`, with `users` open to inserts by
+/// `authenticated`.
+fn guarded_insert(edits: &[(&str, &str)]) -> String {
+    format!(
+        "{}
+         ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+         GRANT INSERT ON users TO authenticated;
+         {OPEN_INSERT}",
+        edited(GUARDED_SUBTYPE, edits)
+    )
+}
+
+#[test]
+fn an_insert_whose_guarded_before_write_mints_the_key_is_not_reported() {
+    for edits in [
+        &[][..],
+        &[(" ON CONFLICT (id, kind) DO NOTHING", "")],
+        &[(
+            "WHEN (OLD.id IS DISTINCT FROM NEW.id)",
+            "WHEN ((OLD.id, OLD.kind) IS DISTINCT FROM (NEW.id, NEW.kind))",
+        )],
+        &[(
+            "DELETE FROM grantees WHERE id = OLD.id;",
+            "DELETE FROM grantees WHERE id = OLD.id AND kind = OLD.kind;",
+        )],
+    ] {
+        assert_eq!(
+            reported(&guarded_insert(edits)),
+            Vec::<String>::new(),
+            "{edits:?}"
+        );
+    }
+}
+
+#[test]
+fn an_insert_whose_guarded_before_write_may_adopt_a_parent_is_reported() {
+    const REMOVED: &str = "CREATE TRIGGER users_grantee_removed AFTER DELETE ON users
+      FOR EACH ROW EXECUTE FUNCTION delete_grantee();";
+    const REKEYED: &str = "CREATE TRIGGER users_grantee_rekeyed AFTER UPDATE ON users
+      FOR EACH ROW WHEN (OLD.id IS DISTINCT FROM NEW.id) EXECUTE FUNCTION delete_grantee();";
+    const DELETED: &str = "DELETE FROM grantees WHERE id = OLD.id;";
+    for edits in [
+        &[(
+            "AFTER INSERT OR UPDATE ON grantees",
+            "AFTER INSERT ON grantees",
+        )][..],
+        &[(
+            "AFTER INSERT OR UPDATE ON grantees",
+            "AFTER INSERT OR UPDATE OF kind ON grantees",
+        )],
+        &[(REMOVED, "")],
+        &[(REKEYED, "")],
+        &[("AFTER UPDATE ON users", "AFTER UPDATE OF id ON users")],
+        &[(
+            "WHEN (OLD.id IS DISTINCT FROM NEW.id)",
+            "WHEN (OLD.id <> NEW.id)",
+        )],
+        &[(
+            "WHEN (OLD.id IS DISTINCT FROM NEW.id)",
+            "WHEN (OLD.kind IS DISTINCT FROM NEW.kind)",
+        )],
+        &[(DELETED, "DELETE FROM grantees WHERE id = NEW.id;")],
+        &[(DELETED, "DELETE FROM grantees WHERE id <> OLD.id;")],
+        &[(
+            DELETED,
+            "BEGIN DELETE FROM grantees WHERE id = OLD.id; EXCEPTION WHEN OTHERS THEN NULL; END;",
+        )],
+        &[(
+            "      id UUID PRIMARY KEY,\n      kind grantee_kind NOT NULL DEFAULT 'user'",
+            "      id UUID NOT NULL,\n      kind grantee_kind NOT NULL DEFAULT 'user'",
+        )],
+        &[(
+            "ON CONFLICT (id, kind) DO NOTHING",
+            "ON CONFLICT (id, kind) DO UPDATE SET kind = EXCLUDED.kind",
+        )],
+        &[(
+            "DEFERRABLE INITIALLY DEFERRED",
+            "DEFERRABLE INITIALLY IMMEDIATE",
+        )],
+    ] {
+        assert_eq!(reported(&guarded_insert(edits)), ["users.i"], "{edits:?}");
+    }
 }

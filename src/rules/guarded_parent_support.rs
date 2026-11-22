@@ -12,9 +12,9 @@ use sql_traits::{
     utils::scalar_family::ScalarFamily,
 };
 use sqlparser::ast::{
-    BinaryOperator, Expr, GroupByExpr, Ident, InTarget, ObjectNamePart, OnConflict,
-    OnConflictAction, OnInsert, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
-    TableInheritance, TableObject, TriggerPeriod, UnaryOperator, Visit,
+    BinaryOperator, Delete, Expr, FromTable, GroupByExpr, Ident, InTarget, ObjectNamePart,
+    OnConflict, OnConflictAction, OnInsert, Query, Select, SelectItem, SetExpr, Statement,
+    TableFactor, TableInheritance, TableObject, TriggerEvent, TriggerPeriod, UnaryOperator, Visit,
 };
 use sqlparser_plpgsql::embedded::{
     AliasTarget, Block, DeclarationKind, Loop, LoopControl, Node, NodeKind, Target,
@@ -107,20 +107,27 @@ impl<'db, DB: DatabaseLike> Parent<'db, DB> {
         })
     }
 
+    /// The table the foreign key references.
+    pub(crate) const fn referenced(&self) -> &'db DB::Table {
+        self.referenced
+    }
+
     /// Whether `statement` inserts one `VALUES` row into the referenced
     /// table holding `NEW`'s value of each host column in its referenced
-    /// column, failing or doing nothing when a row already holds the key.
-    pub(crate) fn inserts(&self, statement: &Statement) -> bool {
+    /// column, failing when a row already holds the key or, when `skips`,
+    /// doing nothing then.
+    pub(crate) fn inserts(&self, statement: &Statement, skips: bool) -> bool {
         let Statement::Insert(insert) = statement else {
             return false;
         };
-        let conflict = matches!(
-            &insert.on,
-            None | Some(OnInsert::OnConflict(OnConflict {
+        let conflict = match &insert.on {
+            None => true,
+            Some(OnInsert::OnConflict(OnConflict {
                 action: OnConflictAction::DoNothing,
                 ..
-            }))
-        );
+            })) => skips,
+            Some(_) => false,
+        };
         if let TableObject::TableName(name) = &insert.table
             && let Some(source) = insert.source.as_deref()
             && let SetExpr::Values(values) = source.body.as_ref()
@@ -149,17 +156,17 @@ impl<'db, DB: DatabaseLike> Parent<'db, DB> {
                     })
                 };
                 at.and_then(|at| values.get(at))
-                    .is_some_and(|value| self.field(value) == Some(host))
+                    .is_some_and(|value| self.field(value, true) == Some(host))
             });
         }
         false
     }
 
     /// Whether an enabled deferred constraint trigger on the referenced
-    /// table, firing for every inserted row the subtype table can reference,
-    /// raises at commit when such a row survives without a subtype row
-    /// referencing it.
-    pub(crate) fn guarded(&self) -> Result<bool, LookupError> {
+    /// table, firing for every inserted row the subtype table can reference
+    /// and, when `updated`, for every updated one, raises at commit when such
+    /// a row survives without a subtype row referencing it.
+    pub(crate) fn guarded(&self, updated: bool) -> Result<bool, LookupError> {
         if !self.validated {
             return Ok(false);
         }
@@ -167,6 +174,7 @@ impl<'db, DB: DatabaseLike> Parent<'db, DB> {
             if trigger.deferral() == Some(ConstraintDeferral::InitiallyDeferred)
                 && row_trigger(trigger, TriggerPeriod::After)
                 && fires_on_insert(trigger)
+                && (!updated || fires_on_every_update(trigger))
                 && trigger
                     .condition()
                     .is_none_or(|condition| self.holds(condition))
@@ -223,13 +231,141 @@ impl<'db, DB: DatabaseLike> Parent<'db, DB> {
         Ok(true)
     }
 
-    /// The host column `expression` reads as a field of `NEW`, under
-    /// parentheses.
-    fn field(&self, expression: &Expr) -> Option<&'db DB::Column> {
+    /// Whether a referenced row can neither outlive the subtype row
+    /// referencing it nor be referenced by two. A unique key of the subtype
+    /// table lies within the host columns, and enabled `AFTER` row triggers
+    /// of the subtype table delete the referenced row of `OLD`'s key, through
+    /// a function that sees every referenced row, on every `DELETE` and on
+    /// every `UPDATE` changing a host column no check pins.
+    pub(crate) fn kept(&self) -> Result<bool, LookupError> {
+        let within = |column: &&DB::Column| self.pairs.iter().any(|(host, _)| host == column);
+        if !equality_keys(self.database, self.table)?
+            .iter()
+            .any(|key| key.iter().all(within))
+        {
+            return Ok(false);
+        }
+        let unpinned: Vec<&DB::Column> = self
+            .pairs
+            .iter()
+            .filter(|(_, referenced)| !self.pinned.iter().any(|pin| pin.column == *referenced))
+            .map(|&(host, _)| host)
+            .collect();
+        let (mut deleted, mut rekeyed) = (false, unpinned.is_empty());
+        for trigger in self.table.triggers(self.database)? {
+            if !row_trigger(trigger, TriggerPeriod::After)
+                || !fires_for_clients(self.database, trigger)?
+            {
+                continue;
+            }
+            let Some(function) = trigger.function(self.database) else {
+                continue;
+            };
+            if !reads_every_row(self.database, function, self.referenced)?
+                || !plpgsql_block(function).is_some_and(|block| {
+                    always_runs(&block, "old", |statement| self.deletes(statement))
+                })
+            {
+                continue;
+            }
+            let condition = trigger.condition();
+            deleted |= condition.is_none()
+                && trigger
+                    .events()
+                    .iter()
+                    .any(|event| matches!(event, TriggerEvent::Delete));
+            rekeyed |= fires_on_every_update(trigger)
+                && condition.is_none_or(|condition| {
+                    let changed = self.changed(condition);
+                    unpinned.iter().all(|column| changed.contains(column))
+                });
+        }
+        Ok(deleted && rekeyed)
+    }
+
+    /// Whether `statement` deletes the referenced rows whose columns equal
+    /// `OLD`'s values of the host columns naming them, under a conjunction
+    /// of such equalities.
+    fn deletes(&self, statement: &Statement) -> bool {
+        let Statement::Delete(Delete {
+            tables,
+            from: FromTable::WithFromKeyword(from),
+            using: None,
+            selection: Some(selection),
+            limit: None,
+            ..
+        }) = statement
+        else {
+            return false;
+        };
+        let [from] = from.as_slice() else {
+            return false;
+        };
+        let Some(name) = self.relation(&from.relation, self.referenced) else {
+            return false;
+        };
+        tables.is_empty()
+            && from.joins.is_empty()
+            && conjuncts(selection).into_iter().all(|conjunct| {
+                equated(conjunct).is_some_and(|(left, right)| {
+                    [(left, right), (right, left)]
+                        .into_iter()
+                        .any(|(column, value)| {
+                            self.qualified(column, &name, self.referenced)
+                                .zip(self.field(value, false))
+                                .is_some_and(|(referenced, host)| {
+                                    self.pairs.contains(&(host, referenced))
+                                })
+                        })
+                })
+            })
+    }
+
+    /// The host columns whose change makes an `UPDATE` trigger's `WHEN`
+    /// condition true, read from `OLD.column IS DISTINCT FROM NEW.column`
+    /// tests, alone, over rows or under `OR`.
+    fn changed(&self, condition: &Expr) -> Vec<&'db DB::Column> {
+        match condition {
+            Expr::Nested(inner) => self.changed(inner),
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Or,
+                right,
+            } => {
+                let mut changed = self.changed(left);
+                changed.extend(self.changed(right));
+                changed
+            }
+            Expr::IsDistinctFrom(left, right) => match (left.as_ref(), right.as_ref()) {
+                (Expr::Tuple(left), Expr::Tuple(right)) if left.len() == right.len() => left
+                    .iter()
+                    .zip(right)
+                    .map(|(left, right)| self.compared(left, right))
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default(),
+                (left, right) => self.compared(left, right).into_iter().collect(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// The host column `left` and `right` read, one as `OLD` and the other
+    /// as `NEW`.
+    fn compared(&self, left: &Expr, right: &Expr) -> Option<&'db DB::Column> {
+        let (old, new) = match (self.field(left, false), self.field(right, true)) {
+            (Some(old), Some(new)) => (old, new),
+            _ => (self.field(right, false)?, self.field(left, true)?),
+        };
+        (old == new).then_some(old)
+    }
+
+    /// The host column `expression` reads as a field of `NEW` when `new`, of
+    /// `OLD` otherwise, under parentheses.
+    fn field(&self, expression: &Expr, new: bool) -> Option<&'db DB::Column> {
         self.pairs
             .iter()
             .map(|&(host, _)| host)
-            .find(|host| names_row_field(expression, true, *host))
+            .find(|host| names_row_field(expression, new, *host))
     }
 
     /// The referenced column `expression` reads as a field of `NEW`, in the
@@ -513,6 +649,14 @@ impl<'db, DB: DatabaseLike> Parent<'db, DB> {
     }
 }
 
+/// Whether `trigger` fires on every `UPDATE`, naming no columns.
+fn fires_on_every_update<T: TriggerLike>(trigger: &T) -> bool {
+    trigger
+        .events()
+        .iter()
+        .any(|event| matches!(event, TriggerEvent::Update(columns) if columns.is_empty()))
+}
+
 /// Whether `column` is the one `ident` names.
 fn names_column<C: ColumnLike>(column: &C, ident: &Ident) -> bool {
     *stored(ident) == *column.stored_column_name()
@@ -686,6 +830,69 @@ impl<DB: DatabaseLike> FlowVisitor for Settles<'_, '_, DB> {
                 )
             })
         });
+    }
+}
+
+/// Whether every path through a trigger function that returns has run a
+/// statement `runs` accepts, with the trigger row `record` names neither
+/// written nor shadowed anywhere in the body.
+pub(crate) fn always_runs(block: &Block, record: &str, runs: impl Fn(&Statement) -> bool) -> bool {
+    let mut always = Always {
+        runs,
+        record,
+        missed: false,
+        unfollowed: false,
+    };
+    walk_block(&mut always, block, Ran(false));
+    !always.missed && !always.unfollowed
+}
+
+/// Whether every path reaching a step has run the statement sought.
+#[derive(Clone, Copy)]
+struct Ran(bool);
+
+impl FlowState for Ran {
+    fn join(&mut self, other: Self) {
+        self.0 &= other.0;
+    }
+}
+
+/// Follows a trigger function's paths to whether each one returning has run
+/// the statement sought.
+struct Always<'r, F> {
+    runs: F,
+    /// `new` or `old`.
+    record: &'r str,
+    /// Some path returns without having run it.
+    missed: bool,
+    /// The function writes or shadows the record.
+    unfollowed: bool,
+}
+
+impl<F: Fn(&Statement) -> bool> FlowVisitor for Always<'_, F> {
+    type State = Ran;
+
+    fn enter(&mut self, block: &Block, _state: &mut Ran) {
+        self.unfollowed |= shadows(block, self.record);
+    }
+
+    fn repeat(&mut self, repeated: &Loop, _state: &mut Ran) {
+        self.unfollowed |= loop_writes(repeated, self.record);
+    }
+
+    fn query(&mut self, _query: &Query, _state: &mut Ran) {}
+
+    fn statement(&mut self, statement: &Statement, state: &mut Ran) {
+        state.0 |= (self.runs)(statement);
+    }
+
+    fn step(&mut self, node: &Node, state: &mut Ran) {
+        if matches!(node.kind, NodeKind::Return { .. }) {
+            self.missed |= !state.0;
+        }
+        self.unfollowed |= written_targets(node)
+            .iter()
+            .any(|target| names_row(target, self.record));
     }
 }
 
