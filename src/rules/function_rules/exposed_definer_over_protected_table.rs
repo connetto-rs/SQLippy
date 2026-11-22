@@ -4,13 +4,17 @@ use std::{borrow::Cow, iter, ops::ControlFlow, ptr};
 
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
-    structs::{ColumnDefinitionScope, ColumnScope, IdentifierCase, RowStatement, WrittenCall},
-    traits::{DatabaseLike, FunctionLike, Relation, TableLike},
+    structs::{
+        ColumnDefinition, ExpressionContext, ExpressionScope, IdentifierCase, OperandType,
+        RowStatement, WrittenCall,
+    },
+    traits::{DatabaseLike, FunctionLike, Relation, TableLike, UserDefinedTypeLike},
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionSecurity, JoinConstraint, JoinOperator, Query, Select,
-    SetExpr, TableFactor, TableWithJoins, Value, Visitor,
+    ArgMode, BinaryOperator, Expr, Function, FunctionCalledOnNull, FunctionSecurity,
+    JoinConstraint, JoinOperator, Query, Select, SetExpr, Statement, TableFactor, TableWithJoins,
+    Value, Visitor,
 };
 
 use crate::{
@@ -21,9 +25,11 @@ use crate::{
         closed_set_support::stored_name,
         cte_support::{WithScopes, stored_relation},
         grant_support::{function_callers, granted_callers},
-        implication_support::{Columns, admits, clause_implies, renamed},
-        key_support::named,
+        implication_support::{
+            Columns, ParameterValues, Term, admits, clause_implies, parameter, renamed,
+        },
         policy_support::{acting, client_roles, conjuncts, is_role_read, sql_query_body},
+        type_support::user_type_named,
         walk_support::walk,
     },
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
@@ -56,10 +62,16 @@ use crate::{
 /// stating each condition as written, where a scalar subquery reading no
 /// relation such as `(SELECT auth.uid())` stands for its value, or testing
 /// the same column against a set within the policy's, as written or declared
-/// with [`Deployment::with_set_within`]. Only filter terms that read alike
-/// for the caller and the owner count, those reading no relation, no role,
-/// no privilege, no search path and no function running as its caller, and
-/// a table read under an alias renaming its columns confines nothing.
+/// with [`Deployment::with_set_within`]. A set read through an input
+/// parameter of an enum type, such as `resources_with(min_role)`, has to lie
+/// within the policy's for every label of the enum. It has to for `NULL`
+/// too, which holds only when the function is `STRICT` or the call returns
+/// `NULL` for a `NULL` argument, since no declaration states it. A column of
+/// the same name hides the parameter, as in PostgreSQL. Only filter terms
+/// that read alike for the caller and the owner count, those reading no
+/// relation, no role, no privilege, no search path and no function running
+/// as its caller, and a table read under an alias renaming its columns
+/// confines nothing.
 /// Every function of the schema the body calls is held to the same test,
 /// except a `SECURITY DEFINER` function every caller may execute directly,
 /// which this rule judges on its own. Functions in `pg_catalog` are trusted.
@@ -231,7 +243,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// Whether every row of a table with row-level security that `function`
     /// reads, itself or through the functions it calls, is one each caller's
     /// `SELECT` policies admit.
-    fn confines(&mut self, function: &DB::Function) -> Result<bool, LookupError> {
+    fn confines(&mut self, function: &'a DB::Function) -> Result<bool, LookupError> {
         let address = ptr::from_ref(function);
         if self.proved.contains(&address) {
             return Ok(true);
@@ -250,7 +262,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
 
     /// Whether the functions `function` calls confine their reads, and its
     /// own body reads no table with row-level security or confines each read.
-    fn confines_body(&mut self, function: &DB::Function) -> Result<bool, LookupError> {
+    fn confines_body(&mut self, function: &'a DB::Function) -> Result<bool, LookupError> {
         let (tables, callees) = match function
             .referenced_tables(self.database)
             .and_then(|tables| Ok((tables, function.referenced_functions(self.database)?)))
@@ -285,14 +297,26 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         let Some(query) = sql_query_body(self.database, function)? else {
             return Ok(false);
         };
-        let Ok(scope) = ColumnScope::from_query(&query, self.database, IdentifierCase::AsWritten)
-        else {
+        let statement = Statement::Query(Box::new(query.into_owned()));
+        let Statement::Query(query) = &statement else {
+            unreachable!("the statement was built from a query");
+        };
+        let scope = ExpressionScope::FunctionBody(function);
+        let Ok(context) = ExpressionContext::for_statement(
+            &statement,
+            &scope,
+            self.database,
+            IdentifierCase::AsWritten,
+        ) else {
             return Ok(false);
         };
         let path = function.search_path(self.database)?;
         let mut reads = Reads {
-            confinement: self,
-            scope: &scope,
+            body: Body {
+                parameters: self.parameter_values(function)?,
+                confinement: self,
+            },
+            context: &context,
             path: path.as_deref(),
             items: WithScopes::default(),
         };
@@ -301,6 +325,54 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             ControlFlow::Break(None) => Ok(false),
             ControlFlow::Break(Some(error)) => Err(error),
         }
+    }
+
+    /// The values each input parameter of `function` may hold, in the order
+    /// `$n` counts them. A parameter of an enum type holds its labels, and
+    /// `NULL` unless the function is `STRICT`, and one of another type `None`.
+    fn parameter_values(
+        &self,
+        function: &'a DB::Function,
+    ) -> Result<Vec<Option<ParameterValues>>, LookupError> {
+        let null = !matches!(
+            function.null_input_behavior(),
+            FunctionCalledOnNull::Strict | FunctionCalledOnNull::ReturnsNullOnNullInput
+        );
+        let scope = ExpressionScope::FunctionBody(function);
+        let inputs = function
+            .argument_modes()
+            .filter(|mode| !matches!(mode, ArgMode::Out))
+            .count();
+        let mut values = Vec::with_capacity(inputs);
+        for ordinal in 0..inputs {
+            let placeholder = parameter(ordinal);
+            let context = ExpressionContext::for_expression(
+                &placeholder,
+                &scope,
+                self.database,
+                IdentifierCase::AsWritten,
+            )?;
+            let OperandType::Known { type_name, .. } = context.type_of(&placeholder)? else {
+                values.push(None);
+                continue;
+            };
+            values.push(
+                user_type_named(self.database, &type_name)
+                    .and_then(UserDefinedTypeLike::enumeration)
+                    .map(|enumeration| ParameterValues {
+                        labels: enumeration
+                            .into_members()
+                            .map(|member| {
+                                Expr::Value(
+                                    Value::SingleQuotedString(member.label().to_owned()).into(),
+                                )
+                            })
+                            .collect(),
+                        null,
+                    }),
+            );
+        }
+        Ok(values)
     }
 
     /// Whether `callee` runs as its owner and every caller may execute it
@@ -321,36 +393,6 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         Ok(true)
     }
 
-    /// Whether `filter`, stating conditions of the columns of `table` by
-    /// their stored names, admits only rows every caller's `SELECT` policies
-    /// admit, of which every caller may select every column.
-    fn admits_every_caller(&self, table: &DB::Table, filter: &Expr) -> Result<bool, LookupError> {
-        for caller in &self.callers {
-            let security =
-                match table.row_security(RowStatement::Select, acting(*caller), self.database) {
-                    Ok(security) => security,
-                    Err(RowSecurityError::Lookup(error)) => return Err(error),
-                    Err(_) => return Ok(false),
-                };
-            let admitted = match security.gates() {
-                Some(gates) => admits(self.database, table, gates, self, |condition| {
-                    clause_implies(self, filter, condition)
-                })?,
-                None => security.exemption().is_some(),
-            };
-            if !admitted {
-                return Ok(false);
-            }
-            let held = table.privileges(acting(*caller), self.database)?;
-            for column in table.columns(self.database)? {
-                if !held.select.on_column(column) {
-                    return Ok(false);
-                }
-            }
-        }
-        Ok(true)
-    }
-
     /// Whether `expression` evaluates alike for a caller and for the owner,
     /// reading no relation, no role, no privilege and no search path, and
     /// calling no function of the schema that runs as its caller.
@@ -363,13 +405,55 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 }
 
+/// The proof of one function body, whose filters name its input parameters
+/// as `$n`.
+struct Body<'c, 'a, DB: DatabaseLike> {
+    confinement: &'c Confinement<'a, DB>,
+    /// The values each input parameter may hold, in the order `$n` counts
+    /// them.
+    parameters: Vec<Option<ParameterValues>>,
+}
+
+impl<DB: DatabaseLike> Body<'_, '_, DB> {
+    /// Whether `filter`, stating conditions of the columns of `table` by
+    /// their stored names, admits only rows every caller's `SELECT` policies
+    /// admit, of which every caller may select every column.
+    fn admits_every_caller(&self, table: &DB::Table, filter: &Expr) -> Result<bool, LookupError> {
+        let database = self.confinement.database;
+        for caller in &self.confinement.callers {
+            let security = match table.row_security(RowStatement::Select, acting(*caller), database)
+            {
+                Ok(security) => security,
+                Err(RowSecurityError::Lookup(error)) => return Err(error),
+                Err(_) => return Ok(false),
+            };
+            let admitted = match security.gates() {
+                Some(gates) => admits(database, table, gates, self, |condition| {
+                    clause_implies(self, filter, condition)
+                })?,
+                None => security.exemption().is_some(),
+            };
+            if !admitted {
+                return Ok(false);
+            }
+            let held = table.privileges(acting(*caller), database)?;
+            for column in table.columns(database)? {
+                if !held.select.on_column(column) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
 /// A policy condition states the columns of its table by their stored names,
 /// as a confined filter does once renamed.
-impl<DB: DatabaseLike> Columns for Confinement<'_, DB> {
+impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
     type Tested = String;
 
     fn deployment(&self) -> &Deployment {
-        self.deployment
+        self.confinement.deployment
     }
 
     fn rename(&self, column: Cow<'_, str>) -> Option<String> {
@@ -382,6 +466,25 @@ impl<DB: DatabaseLike> Columns for Confinement<'_, DB> {
 
     fn tests(&self, column: &Expr, tested: &String) -> bool {
         stored_name(column).is_some_and(|name| name == *tested)
+    }
+
+    fn parameter_values(&self, ordinal: usize) -> Option<&ParameterValues> {
+        self.parameters.get(ordinal)?.as_ref()
+    }
+
+    fn returns_null_on_null_argument(&self, call: &Function, index: usize) -> bool {
+        let database = self.confinement.database;
+        let Ok(reached) = database.functions_reached_by(call, IdentifierCase::Folded) else {
+            return false;
+        };
+        let mut any = false;
+        for function in reached {
+            if !function.returns_null_on_null_argument(database, index) {
+                return false;
+            }
+            any = true;
+        }
+        any
     }
 }
 
@@ -466,8 +569,8 @@ enum Read<'a, DB: DatabaseLike> {
 /// Walks a body, breaking with `None` at a read the filters around it leave
 /// unconfined, or with a lookup error.
 struct Reads<'c, 'q, 'a, DB: DatabaseLike> {
-    confinement: &'c Confinement<'a, DB>,
-    scope: &'c ColumnScope<'q, 'a, DB>,
+    body: Body<'c, 'a, DB>,
+    context: &'c ExpressionContext<'q, 'a, DB>,
     path: Option<&'c [(Cow<'c, str>, bool)]>,
     items: WithScopes,
 }
@@ -489,9 +592,6 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
     /// Whether each relation with row-level security a `SELECT` reads is
     /// confined by the filters that drop its rows.
     fn confines_select(&self, select: &Select) -> Result<bool, LookupError> {
-        let Some(scope) = self.scope.scope_for_select(select) else {
-            return Ok(false);
-        };
         let filter: Vec<&Expr> = select.selection.iter().flat_map(conjuncts).collect();
         for from in &select.from {
             let relations =
@@ -505,16 +605,13 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
                 let mut kept = Vec::new();
                 for conjunct in filter.iter().copied().chain(joined_filter(from, position)) {
                     if let Some(stated) =
-                        renamed(conjunct, |column| own_column(&scope, column, &name))
-                        && self.confinement.reads_alike(conjunct)?
+                        renamed(conjunct, |reference| term(self.context, reference, &name))
+                        && self.body.confinement.reads_alike(conjunct)?
                     {
                         kept.push(stated);
                     }
                 }
-                if !self
-                    .confinement
-                    .admits_every_caller(table, &conjunction(kept))?
-                {
+                if !self.body.admits_every_caller(table, &conjunction(kept))? {
                     return Ok(false);
                 }
             }
@@ -524,7 +621,7 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
 
     /// What `relation` reads, a `WITH` item and a call nothing.
     fn read(&self, relation: &TableFactor) -> Result<Read<'a, DB>, LookupError> {
-        let database = self.confinement.database;
+        let database = self.body.confinement.database;
         match relation {
             TableFactor::Table {
                 name,
@@ -641,17 +738,23 @@ fn joined_filter(from: &TableWithJoins, position: usize) -> impl Iterator<Item =
         .flat_map(conjuncts)
 }
 
-/// The stored name of the column `column` names when it resolves in `scope`
-/// to the relation the query names `relation`.
-fn own_column<DB: DatabaseLike>(
-    scope: &ColumnDefinitionScope<'_, '_, '_, DB>,
-    column: &Expr,
+/// The input parameter of the function whose body holds `reference` that
+/// it names where no column of the same name is in reach, or else the stored
+/// name of the column of the relation the query names `relation` it names.
+fn term<DB: DatabaseLike>(
+    context: &ExpressionContext<'_, '_, DB>,
+    reference: &Expr,
     relation: &str,
-) -> Option<String> {
-    named(scope, column)
-        .ok()
-        .flatten()
-        .and_then(|(named_relation, column)| (named_relation == relation).then_some(column))
+) -> Option<Term> {
+    match context.reference(reference).ok()?? {
+        (ColumnDefinition::Parameter { ordinal, .. }, _) => Some(Term::Parameter(ordinal)),
+        (_, binding) => {
+            let ((named_relation, relation_quoted), (column, column_quoted)) =
+                binding.relation().zip(binding.exposed())?;
+            (normalize_identifier(named_relation, relation_quoted) == relation)
+                .then(|| Term::Column(normalize_identifier(column, column_quoted).into_owned()))
+        }
+    }
 }
 
 /// The `AND` of `conjuncts`, `TRUE` for none.

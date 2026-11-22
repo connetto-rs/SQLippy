@@ -21,6 +21,7 @@ use crate::{
         literal_support::text_literal,
         not_in_support::null_extended,
         policy_support::{conjuncts, unnested},
+        type_support::user_type_named,
         typed_site_support::{TypedFinder, TypedFinding, check_typed_sites},
         walk_support::walk,
     },
@@ -254,12 +255,7 @@ fn declared_domain<DB: DatabaseLike>(
     let OperandType::Known { type_name, .. } = context.type_of(expression)? else {
         return Ok(None);
     };
-    let Some(user_type) = database.user_defined_types().find(|user_type| {
-        user_type.stored_name() == type_name.name()
-            && type_name.schema().is_none_or(|schema| {
-                user_type.stored_schema().as_deref().unwrap_or("public") == schema
-            })
-    }) else {
+    let Some(user_type) = user_type_named(database, &type_name) else {
         return Ok(None);
     };
     Ok(user_type.enumeration().map(|enumeration| Domain {

@@ -812,6 +812,139 @@ fn a_definer_projecting_a_column_its_callers_cannot_select_is_reported() {
     );
 }
 
+const ROLE_SETS: &str = "
+    CREATE ROLE app NOLOGIN;
+    CREATE SCHEMA authz;
+    CREATE TYPE authz.role AS ENUM ('reader', 'writer', 'admin');
+    CREATE TABLE resources (id INT PRIMARY KEY, role_floor authz.role);
+    ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+    GRANT SELECT ON resources TO app;
+    ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+    ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+    CREATE FUNCTION authz.resources_with(min_role authz.role) RETURNS SETOF INT
+      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+      AS $$ SELECT 1 WHERE min_role IN ('reader', 'writer', 'admin') $$;
+    CREATE POLICY readable_resources ON resources FOR SELECT TO app
+      USING (id = ANY (ARRAY(SELECT authz.resources_with('reader'))));";
+
+/// Functions reported over [`ROLE_SETS`] and `sql` under `deployment`.
+fn exposed_over_role_sets(deployment: Deployment, sql: &str) -> Vec<String> {
+    exposed(
+        deployment.with_app_role("app"),
+        &format!("{ROLE_SETS}{sql}"),
+    )
+}
+
+/// `deployment` declaring each set `within` lists within the next one.
+fn nested(deployment: Deployment, within: &[&str]) -> Deployment {
+    within.windows(2).fold(deployment, |deployment, pair| {
+        deployment
+            .with_set_within(pair[0], pair[1])
+            .expect("both sets parse")
+    })
+}
+
+fn role_ladder() -> Deployment {
+    nested(
+        Deployment::default(),
+        &[
+            "authz.resources_with('admin')",
+            "authz.resources_with('writer')",
+            "authz.resources_with('reader')",
+        ],
+    )
+}
+
+#[test]
+fn an_enum_parameter_confines_when_every_label_is_within_the_policys_set() {
+    let functions = "
+        CREATE FUNCTION named_reach(min_role authz.role) RETURNS SETOF INT
+          LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT resource.id FROM public.resources resource
+            WHERE resource.id IN (SELECT authz.resources_with(min_role)) $$;
+        CREATE FUNCTION qualified_reach(min_role authz.role) RETURNS SETOF INT
+          LANGUAGE sql STABLE RETURNS NULL ON NULL INPUT SECURITY DEFINER
+          SET search_path = pg_catalog, pg_temp AS $$
+            SELECT resource.id FROM public.resources resource
+            WHERE resource.id = ANY (ARRAY(SELECT authz.resources_with(qualified_reach.min_role))) $$;
+        CREATE FUNCTION positional_reach(authz.role) RETURNS SETOF INT
+          LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT resource.id FROM public.resources resource
+            WHERE resource.id IN (SELECT authz.resources_with($1)) $$;";
+    assert_eq!(
+        exposed_over_role_sets(Deployment::default(), functions),
+        [
+            "named_reach(authz.role)",
+            "positional_reach(authz.role)",
+            "qualified_reach(authz.role)"
+        ]
+    );
+    assert_eq!(
+        exposed_over_role_sets(role_ladder(), functions),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_null_parameter_confines_only_through_a_strict_function() {
+    let lenient = "
+        CREATE FUNCTION lenient_reach(min_role authz.role) RETURNS SETOF INT
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT resource.id FROM public.resources resource
+            WHERE resource.id IN (SELECT authz.resources_with(min_role)) $$;";
+    assert_eq!(
+        exposed_over_role_sets(role_ladder(), lenient),
+        ["lenient_reach(authz.role)"]
+    );
+    let strict_helper = format!(
+        "{}{lenient}",
+        "CREATE FUNCTION authz.strict_resources_with(min_role authz.role) RETURNS SETOF INT
+           LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+           AS $$ SELECT 1 $$;"
+    )
+    .replace(
+        "SELECT authz.resources_with(min_role)) $$",
+        "SELECT authz.strict_resources_with(min_role)) $$",
+    );
+    assert_eq!(
+        exposed_over_role_sets(role_ladder(), &strict_helper),
+        ["lenient_reach(authz.role)"]
+    );
+    assert_eq!(
+        exposed_over_role_sets(
+            nested(
+                role_ladder(),
+                &[
+                    "authz.strict_resources_with('admin')",
+                    "authz.strict_resources_with('writer')",
+                    "authz.strict_resources_with('reader')",
+                    "authz.resources_with('reader')",
+                ],
+            ),
+            &strict_helper,
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_parameter_confines_nothing_unless_it_is_an_enum_no_column_shadows() {
+    assert_eq!(
+        exposed_over_role_sets(
+            role_ladder(),
+            "CREATE FUNCTION shadowed_reach(role_floor authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE resource.id IN (SELECT authz.resources_with(role_floor)) $$;
+             CREATE FUNCTION text_reach(min_role TEXT) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE resource.id IN (SELECT authz.resources_with(min_role::authz.role)) $$;"
+        ),
+        ["shadowed_reach(authz.role)", "text_reach(TEXT)"]
+    );
+}
+
 #[test]
 fn the_default_constrainer_runs_the_function_rules_at_their_group_levels() {
     let found = findings(
