@@ -860,6 +860,89 @@ fn a_definer_projecting_a_column_its_callers_cannot_select_is_reported() {
     );
 }
 
+const PROJECTS: &str = "
+    CREATE TABLE projects (id INT, organization_id INT);
+    CREATE TABLE ledgers (id INT, organization_id NUMERIC);
+    ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ledgers ENABLE ROW LEVEL SECURITY;
+    GRANT SELECT ON projects, ledgers TO app;
+    CREATE POLICY member_projects ON projects FOR SELECT TO app
+      USING (organization_id IN (SELECT public.member_organizations()));
+    CREATE POLICY member_ledgers ON ledgers FOR SELECT TO app
+      USING (organization_id IN (SELECT public.member_organizations()));";
+
+#[test]
+fn a_join_equality_carries_a_condition_to_the_rows_it_joins() {
+    let confined = "resource.organization_id IN (SELECT public.member_organizations())";
+    assert_eq!(
+        exposed_to_app(&format!(
+            "{PROJECTS}
+             CREATE FUNCTION joined() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 JOIN public.projects project ON project.organization_id = resource.organization_id
+                 WHERE {confined} $$;
+             CREATE FUNCTION left_joined() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 LEFT JOIN public.projects project ON project.organization_id = resource.organization_id
+                 WHERE {confined} $$;
+             CREATE FUNCTION left_preserved() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.projects project
+                 LEFT JOIN public.resources resource ON project.organization_id = resource.organization_id
+                 WHERE {confined} $$;
+             CREATE FUNCTION numeric_joined() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT ledger.id FROM public.resources resource
+                 JOIN public.ledgers ledger ON ledger.organization_id = resource.organization_id
+                 WHERE {confined} $$;
+             CREATE FUNCTION equated_under_or() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT project.id FROM public.resources resource
+                 JOIN public.projects project
+                   ON project.organization_id = resource.organization_id OR project.id = resource.id
+                 WHERE {confined} $$;"
+        )),
+        ["equated_under_or()", "left_preserved()", "numeric_joined()"]
+    );
+}
+
+#[test]
+fn a_correlated_subquery_holds_the_other_conditions_of_its_where() {
+    let confined = "resource.organization_id IN (SELECT public.member_organizations())";
+    assert_eq!(
+        exposed_to_app(&format!(
+            "{PROJECTS}
+             CREATE FUNCTION without_projects() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE {confined} AND NOT EXISTS (
+                   SELECT 1 FROM public.projects project
+                   WHERE project.organization_id = resource.organization_id AND project.id = resource.id) $$;
+             CREATE FUNCTION through_nested_subqueries() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE {confined} AND resource.id IN (
+                   SELECT project.id FROM public.projects project
+                   WHERE project.organization_id = resource.organization_id
+                     AND EXISTS (SELECT 1 FROM public.projects other
+                       WHERE other.organization_id = project.organization_id)) $$;
+             CREATE FUNCTION same_name_inside() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT item.id FROM public.resources item
+                 WHERE item.organization_id IN (SELECT public.member_organizations())
+                   AND EXISTS (SELECT 1 FROM public.projects item WHERE item.id > 0) $$;
+             CREATE FUNCTION in_the_same_condition() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE {confined} AND resource.id IN (SELECT project.id FROM public.projects project
+                   WHERE project.organization_id = resource.organization_id OR project.id > 0) $$;"
+        )),
+        ["in_the_same_condition()", "same_name_inside()"]
+    );
+}
+
 const ROLE_SETS: &str = "
     CREATE ROLE app NOLOGIN;
     CREATE SCHEMA authz;
@@ -1185,6 +1268,18 @@ fn a_definer_returning_the_keys_its_policy_admits_through_it_is_not_reported() {
     );
     assert_eq!(
         founded(
+            &founded_organizations(&FOUNDED.replace(
+                "SELECT organization.id FROM public.organizations organization",
+                "SELECT other.id FROM public.organizations organization
+                 JOIN public.organizations other ON other.id = organization.id",
+            )),
+            "",
+            Deployment::default()
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        founded(
             &founded_organizations(
                 "SELECT organization.id FROM public.organizations organization
                  WHERE organization.created_by_id = authz.caller_id()"
@@ -1214,7 +1309,7 @@ fn a_key_changed_or_dropped_on_its_way_to_the_result_proves_nothing() {
         FOUNDED.replace(
             "SELECT organization.id FROM public.organizations organization",
             "SELECT other.id FROM public.organizations organization
-             JOIN public.organizations other ON other.id = organization.id",
+             JOIN public.organizations other ON other.parent_id = organization.id",
         ),
     ] {
         assert_eq!(
