@@ -25,6 +25,26 @@ fn reported(sql: &str) -> Vec<String> {
     .collect()
 }
 
+/// Notes cascading from their own `resources` row and referencing their
+/// project there with `NO ACTION`, the two rows told apart by `kind`.
+fn discriminated(
+    kind_type: &str,
+    resource_columns: &str,
+    own_kind: &str,
+    project_kind: &str,
+) -> String {
+    format!(
+        "CREATE TYPE resource_kind AS ENUM ('project', 'note', 'folder');
+         CREATE TABLE resources (id INT PRIMARY KEY, kind {kind_type} NOT NULL{resource_columns}, UNIQUE (id, kind));
+         GRANT DELETE ON resources TO app;
+         CREATE TABLE notes (id INT PRIMARY KEY, kind {kind_type} {own_kind} NOT NULL,
+           project_id INT NOT NULL, project_kind {kind_type} {project_kind} NOT NULL,
+           FOREIGN KEY (id, kind) REFERENCES resources (id, kind) ON DELETE CASCADE,
+           FOREIGN KEY (project_id, project_kind) REFERENCES resources (id, kind));
+         REVOKE DELETE ON notes FROM app;"
+    )
+}
+
 #[test]
 fn a_reference_the_role_cannot_clear_is_reported() {
     for sql in [
@@ -152,6 +172,29 @@ fn a_cascading_ancestor_the_role_cannot_rely_on_is_reported() {
          REVOKE DELETE ON folders FROM app;
          REVOKE DELETE ON docs FROM app;"
             .to_owned(),
+        // A folder may be both a note's own resource and the project another
+        // note references.
+        discriminated(
+            "resource_kind",
+            "",
+            "CHECK (kind IN ('note', 'folder'))",
+            "CHECK (project_kind IN ('project', 'folder'))",
+        ),
+        // Neither text column is confined to the labels the checks name, so
+        // both may hold the same unnamed label.
+        discriminated(
+            "TEXT",
+            "",
+            "CHECK (kind <> 'project')",
+            "CHECK (project_kind <> 'note')",
+        ),
+        // Deleting a note's own resource cascades into other resources.
+        discriminated(
+            "resource_kind",
+            ", parent_id INT REFERENCES resources (id) ON DELETE CASCADE",
+            "GENERATED ALWAYS AS ('note'::resource_kind) STORED",
+            "GENERATED ALWAYS AS ('project'::resource_kind) STORED",
+        ),
     ] {
         assert_eq!(reported(&sql).len(), 1, "{sql}");
     }
@@ -333,6 +376,28 @@ fn a_reference_cleared_by_deleting_a_cascading_ancestor_passes() {
          REVOKE DELETE ON folders FROM app;
          REVOKE DELETE ON docs FROM app;"
             .to_owned(),
+        // An immediate check finds nothing on a note's own resource, which its
+        // generated label keeps apart from every project.
+        discriminated(
+            "resource_kind",
+            "",
+            "GENERATED ALWAYS AS ('note'::resource_kind) STORED",
+            "GENERATED ALWAYS AS ('project'::resource_kind) STORED",
+        ),
+        // Checks pinning the labels keep the rows apart the same way.
+        discriminated(
+            "resource_kind",
+            "",
+            "CHECK (kind = 'note')",
+            "CHECK (project_kind IN ('project', 'folder'))",
+        ),
+        // Text labels listed by checks keep the rows apart too.
+        discriminated(
+            "TEXT",
+            "",
+            "CHECK (kind IN ('note'))",
+            "CHECK (project_kind IN ('project', 'folder'))",
+        ),
     ] {
         assert_eq!(reported(&sql), Vec::<String>::new(), "{sql}");
     }

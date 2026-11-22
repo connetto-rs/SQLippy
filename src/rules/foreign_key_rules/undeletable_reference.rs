@@ -5,11 +5,15 @@ use std::{borrow::Cow, collections::HashSet, ops::ControlFlow};
 use sql_traits::{
     errors::LookupError,
     structs::IdentifierCase,
-    traits::{ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, TableLike, TriggerLike},
+    traits::{
+        CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike, ForeignKeyLike, FunctionLike,
+        TableLike, TriggerLike,
+    },
 };
 use sqlparser::ast::{
-    AssignmentTarget, Expr, FromTable, FunctionSecurity, ObjectName, ReferentialAction, Statement,
-    TableFactor, TableWithJoins, TriggerEvent, TriggerPeriod, Visitor,
+    AssignmentTarget, BinaryOperator, Expr, FromTable, FunctionSecurity, Ident, InTarget,
+    ObjectName, ReferentialAction, Statement, TableFactor, TableWithJoins, TriggerEvent,
+    TriggerPeriod, Value, Visitor, visit_expressions,
 };
 
 use crate::{
@@ -20,6 +24,7 @@ use crate::{
         cte_support::stored_table,
         expression_site_support::{is_null_literal, parsed_body_statements},
         function_rules::unreadable_body,
+        key_support::key_pairs,
         policy_support::{acting, client_roles},
         walk_support::walk,
     },
@@ -44,9 +49,15 @@ use crate::{
 /// runs ahead of the cascades of a chain, and may run ahead of the cascade
 /// removing a referencing row whenever the deletion of its ancestor also
 /// cascades into the referenced table, such as the referenced table's own
-/// row, so such an ancestor counts only when the key is deferrable. A body
-/// that runs dynamic SQL or does not parse counts as clearing. `ON DELETE
-/// RESTRICT` states that the block is intended and is not reported.
+/// row, so such an ancestor counts only when the key is deferrable. The one
+/// exception is a row of the referenced table the referencing row cascades
+/// from directly, when deleting it cascades into no other row of the
+/// referenced table and no row the key holds may reference it. That holds
+/// when, on a referenced column both keys map, the values the two host
+/// columns admit share none, as their types, generated values and checks
+/// decide. A body that runs dynamic SQL or does not parse counts as clearing.
+/// `ON DELETE RESTRICT` states that the block is intended and is not
+/// reported.
 ///
 /// The rule is inactive until the deployment declares a client role.
 ///
@@ -160,12 +171,13 @@ fn cascades<DB: DatabaseLike>(
     Ok(false)
 }
 
-/// Tables whose deletions may cascade into `table`, `table` included.
+/// Tables whose deletions may cascade into `table`, which is among them only
+/// when a chain of cascades leads from it back into it.
 fn cascade_sources<'db, DB: DatabaseLike>(
     database: &'db DB,
     table: &'db DB::Table,
 ) -> Result<Vec<&'db DB::Table>, LookupError> {
-    let mut sources = vec![table];
+    let mut sources = Vec::new();
     let mut pending = vec![table];
     while let Some(table) = pending.pop() {
         for cascading in table.foreign_keys(database)? {
@@ -180,6 +192,136 @@ fn cascade_sources<'db, DB: DatabaseLike>(
         }
     }
     Ok(sources)
+}
+
+/// The values of `referenced` that a host column of a key onto it may equal,
+/// as written. An enumeration lists its labels, under any domains, and any
+/// other type the literals that the generated values and checks of `hosts`
+/// write.
+fn candidate_values<DB: DatabaseLike>(
+    database: &DB,
+    referenced: &DB::Column,
+    hosts: [&DB::Column; 2],
+) -> Result<Vec<Expr>, LookupError> {
+    let mut data_type = referenced.data_type(database);
+    while let Some(base) = data_type.base_type(database) {
+        data_type = base;
+    }
+    if let Some(enumeration) = data_type.enumeration(database) {
+        return Ok(enumeration
+            .into_members()
+            .map(|member| Expr::value(Value::SingleQuotedString(member.label().to_owned())))
+            .collect());
+    }
+    let mut values = Vec::new();
+    let mut collect = |expression: &Expr| {
+        let _ = visit_expressions(expression, |node| {
+            if let Expr::Value(value) = node
+                && value.value != Value::Null
+                && !values.contains(node)
+            {
+                values.push(node.clone());
+            }
+            ControlFlow::<()>::Continue(())
+        });
+    };
+    for host in hosts {
+        if let Some(generated) = host.generation_expression() {
+            collect(generated);
+        }
+        for check in host.check_constraints(database)? {
+            collect(check.expression(database));
+        }
+    }
+    Ok(values)
+}
+
+/// `column` named as the expressions of its table name it.
+fn column_reference<DB: DatabaseLike>(column: &DB::Column) -> Box<Expr> {
+    Box::new(Expr::Identifier(if column.column_name_is_quoted() {
+        Ident::with_quote('"', column.column_name())
+    } else {
+        Ident::new(column.column_name())
+    }))
+}
+
+/// Whether `expression` may be true on a row of the table of `column`.
+fn may_be_true<DB: DatabaseLike>(
+    database: &DB,
+    column: &DB::Column,
+    expression: &Expr,
+) -> Result<bool, LookupError> {
+    Ok(column
+        .table(database)
+        .expression_truth(database, expression, IdentifierCase::AsWritten)?
+        .outcomes
+        .truth)
+}
+
+/// Whether a row of the table of `column` may hold `value` there.
+fn may_equal<DB: DatabaseLike>(
+    database: &DB,
+    column: &DB::Column,
+    value: &Expr,
+) -> Result<bool, LookupError> {
+    let comparison = Expr::BinaryOp {
+        left: column_reference::<DB>(column),
+        op: BinaryOperator::Eq,
+        right: Box::new(value.clone()),
+    };
+    may_be_true(database, column, &comparison)
+}
+
+/// Whether every value of `column` that is not `NULL` equals one of
+/// `values`.
+fn confined<DB: DatabaseLike>(
+    database: &DB,
+    column: &DB::Column,
+    values: &[Expr],
+) -> Result<bool, LookupError> {
+    let outside = Expr::In {
+        expr: column_reference::<DB>(column),
+        target: InTarget::List(values.to_vec()),
+        negated: true,
+        global: false,
+    };
+    Ok(!may_be_true(database, column, &outside)?)
+}
+
+/// Whether no row `cascading` references is a row `foreign_key` may
+/// reference, both keys being on the same table. On a referenced column both
+/// keys map, one of the two host columns holds candidate values only, and no
+/// candidate is a value both may hold.
+fn references_disjoint_rows<DB: DatabaseLike>(
+    database: &DB,
+    cascading: &DB::ForeignKey,
+    foreign_key: &DB::ForeignKey,
+) -> Result<bool, LookupError> {
+    let held = key_pairs(database, foreign_key)?;
+    for (cascading_host, referenced) in key_pairs(database, cascading)? {
+        let Some(&(held_host, _)) = held.iter().find(|(_, other)| *other == referenced) else {
+            continue;
+        };
+        let values = candidate_values(database, referenced, [cascading_host, held_host])?;
+        if values.is_empty()
+            || !(confined(database, cascading_host, &values)?
+                || confined(database, held_host, &values)?)
+        {
+            continue;
+        }
+        let mut shared = false;
+        for value in &values {
+            if may_equal(database, cascading_host, value)? && may_equal(database, held_host, value)?
+            {
+                shared = true;
+                break;
+            }
+        }
+        if !shared {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether every row of its table that is not `NULL` in `held` references a
@@ -206,8 +348,10 @@ fn holds_every_row<DB: DatabaseLike>(
 /// `foreign_key` holds by deleting a row they descend from through `ON
 /// DELETE CASCADE` keys, each row on the way referencing the next through
 /// its key. A deletion that also cascades into `parent` may check a row of
-/// `child` before its own cascade removes it, so such an ancestor counts
-/// only when `foreign_key` is deferrable.
+/// `child` before its own cascade removes it, so such an ancestor counts only
+/// when `foreign_key` is deferrable, or when it is the row of `parent` that
+/// `child` cascades from directly, no row `foreign_key` may reference, and
+/// its deletion cascades into no other row of `parent`.
 fn may_delete_ancestor<DB: DatabaseLike>(
     database: &DB,
     role: Option<&DB::Role>,
@@ -215,10 +359,15 @@ fn may_delete_ancestor<DB: DatabaseLike>(
     child: &DB::Table,
     foreign_key: &DB::ForeignKey,
 ) -> Result<bool, LookupError> {
-    let excluded = if foreign_key.deferral(database).is_deferrable() {
-        Vec::new()
+    let (excluded, cyclic) = if foreign_key.deferral(database).is_deferrable() {
+        (Vec::new(), false)
     } else {
-        cascade_sources(database, parent)?
+        let mut sources = cascade_sources(database, parent)?;
+        let cyclic = sources.contains(&parent);
+        if !cyclic {
+            sources.push(parent);
+        }
+        (sources, cyclic)
     };
     let key_columns: Vec<_> = foreign_key.host_columns(database)?.collect();
     let mut reached = vec![child];
@@ -236,7 +385,13 @@ fn may_delete_ancestor<DB: DatabaseLike>(
                 continue;
             }
             let ancestor = cascading.referenced_table(database)?;
-            if reached.contains(&ancestor) || excluded.contains(&ancestor) {
+            if reached.contains(&ancestor)
+                || excluded.contains(&ancestor)
+                    && !(table == child
+                        && ancestor == parent
+                        && !cyclic
+                        && references_disjoint_rows(database, cascading, foreign_key)?)
+            {
                 continue;
             }
             if ancestor.privileges(acting(role), database)?.delete {
