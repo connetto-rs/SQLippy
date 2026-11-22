@@ -1168,7 +1168,7 @@ checksum = "ad5208a115eaba24916f7456929832e310a81518c641f93fee4f89aa93aa3675"
 dependencies = [
  "cfg-if",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1240,7 +1240,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2482,7 +2482,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2750,7 +2750,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3037,10 +3037,11 @@ checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#eab98f8a726c11fcdd6050652e36c0bb38a2242d"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#ce12aeb5ac411b1ee6103831b937777e0cde453e"
 dependencies = [
  "geometric-traits",
  "once_cell",
+ "recursive",
  "sha2",
  "sql-values",
  "sqlparser",
@@ -3091,7 +3092,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#0dc4865c54b21cfdd5659896c7cfb785b2378125"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#6a37ecb3fd517adee436e56b96e7fce4402a5708"
 dependencies = [
  "log",
  "recursive",
@@ -3132,7 +3133,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#0dc4865c54b21cfdd5659896c7cfb785b2378125"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#6a37ecb3fd517adee436e56b96e7fce4402a5708"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3824,7 +3825,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
