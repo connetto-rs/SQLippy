@@ -38,6 +38,7 @@ use crate::{
         implication_support::{
             Columns, ParameterValues, Term, admits, clause_implies, parameter, renamed,
         },
+        null_support::rejects_null,
         policy_support::{acting, client_roles, conjuncts, is_role_read, sql_query_body, unnested},
         type_support::user_type_named,
         walk_support::walk,
@@ -680,10 +681,12 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
             .collect();
         let merges = self.merges(select)?;
         for from in &select.from {
+            let rejected = self.rejected(from, &filter)?;
             let resolver = Resolver {
                 context: self.context,
                 merges: &merges,
                 from,
+                rejected: &rejected,
             };
             let relations =
                 iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation));
@@ -703,7 +706,8 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
                             .map(|condition| (Clause::Witness, *condition)),
                     )
                     .chain(
-                        joined_filter(from, position)
+                        resolver
+                            .joined_filter(position)
                             .map(|(join, condition)| (Clause::On(join), condition)),
                     )
                     .collect();
@@ -787,6 +791,44 @@ impl<'a, DB: DatabaseLike> Reads<'_, '_, 'a, DB> {
             }
         }
         Ok(merges)
+    }
+
+    /// For each join of `from`, whether a condition of `filter` cannot be
+    /// true on a row it extends with nulls, so that it drops the rows of its
+    /// outer join that find no match.
+    fn rejected(&self, from: &TableWithJoins, filter: &[&Expr]) -> Result<Vec<bool>, LookupError> {
+        let database = self.body.confinement.database;
+        let mut rejected = Vec::with_capacity(from.joins.len());
+        for (index, join) in from.joins.iter().enumerate() {
+            let extended = match join.join_operator {
+                JoinOperator::Left(_) | JoinOperator::LeftOuter(_) => index + 1..index + 2,
+                JoinOperator::Right(_) | JoinOperator::RightOuter(_) => 0..index + 1,
+                _ => {
+                    rejected.push(false);
+                    continue;
+                }
+            };
+            let bound = |expression: &Expr| {
+                Ok(self
+                    .context
+                    .reference(expression)?
+                    .and_then(|(_, binding)| binding.entry())
+                    .is_some_and(|entry| {
+                        extended
+                            .clone()
+                            .any(|position| ptr::eq(entry.factor(), relation_at(from, position)))
+                    }))
+            };
+            let mut found = false;
+            for condition in filter {
+                if rejects_null(condition, &bound, database, self.context)? {
+                    found = true;
+                    break;
+                }
+            }
+            rejected.push(found);
+        }
+        Ok(rejected)
     }
 
     /// The position of the first relation of `from`, up to the one at
@@ -1056,13 +1098,7 @@ impl<'r> Equalities<'r> {
             if merge.sides.contains(&position) {
                 equalities.link(merge.node(), Node::at(from, position, &merge.name));
             }
-            if dropping_constraint(
-                &from.joins[merge.first].join_operator,
-                position,
-                merge.first + 1,
-            )
-            .is_some()
-            {
+            if resolver.dropping(merge.first, position).is_some() {
                 equalities.link(
                     Node::at(from, merge.sides[0], &merge.name),
                     Node::at(from, merge.sides[1], &merge.name),
@@ -1170,9 +1206,63 @@ struct Resolver<'r, 'q, 'a, DB: DatabaseLike> {
     /// The columns the `USING` joins of the `SELECT` merge.
     merges: &'r [Merge],
     from: &'r TableWithJoins,
+    /// For each join of `from`, whether the `WHERE` drops the rows it
+    /// extends with nulls.
+    rejected: &'r [bool],
 }
 
 impl<'r, DB: DatabaseLike> Resolver<'r, '_, '_, DB> {
+    /// The conjuncts of the `ON` conditions of the `FROM` item that drop
+    /// rows of its relation at `position`, counted from zero, each with the
+    /// index of its join.
+    fn joined_filter(&self, position: usize) -> impl Iterator<Item = (usize, &'r Expr)> + '_ {
+        (0..self.from.joins.len())
+            .filter_map(move |index| match self.dropping(index, position) {
+                Some(JoinConstraint::On(condition)) => Some((index, condition)),
+                _ => None,
+            })
+            .flat_map(|(index, condition)| {
+                conjuncts(condition)
+                    .into_iter()
+                    .map(move |conjunct| (index, conjunct))
+            })
+    }
+
+    /// The constraint of the join at `index` of the `FROM` item when it
+    /// drops rows of its relation at `position`. An inner join drops rows of
+    /// the relations up to the one it joins, a left join of the one it joins
+    /// and a right join of those before it. An outer join whose rows
+    /// extended with nulls the `WHERE` drops acts as an inner join.
+    fn dropping(&self, index: usize, position: usize) -> Option<&'r JoinConstraint> {
+        let joined = index + 1;
+        match &self.from.joins[index].join_operator {
+            JoinOperator::Join(constraint) | JoinOperator::Inner(constraint)
+                if position <= joined =>
+            {
+                Some(constraint)
+            }
+            JoinOperator::Left(constraint)
+            | JoinOperator::LeftOuter(constraint)
+            | JoinOperator::Right(constraint)
+            | JoinOperator::RightOuter(constraint)
+                if self.rejected[index] && position <= joined =>
+            {
+                Some(constraint)
+            }
+            JoinOperator::Left(constraint) | JoinOperator::LeftOuter(constraint)
+                if position == joined =>
+            {
+                Some(constraint)
+            }
+            JoinOperator::Right(constraint) | JoinOperator::RightOuter(constraint)
+                if position < joined =>
+            {
+                Some(constraint)
+            }
+            _ => None,
+        }
+    }
+
     /// The column a `USING` join merged that `binding` reached from a
     /// filter of `clause`. A `WHERE` sees the merges of every join of the
     /// `SELECT`, and an `ON` condition those of the joins before its own.
@@ -1590,53 +1680,6 @@ fn output_name(query: &Query) -> Option<&Ident> {
 fn names(parts: &[Ident], relation: &Ident, column: &Ident) -> bool {
     matches!(parts, [name] if same_name(name, column))
         || matches!(parts, [qualifier, name] if same_name(qualifier, relation) && same_name(name, column))
-}
-
-/// The conjuncts of the `ON` conditions of `from` that drop rows of its
-/// relation at `position`, counted from zero, each with the index of its
-/// join.
-fn joined_filter(from: &TableWithJoins, position: usize) -> impl Iterator<Item = (usize, &Expr)> {
-    from.joins
-        .iter()
-        .enumerate()
-        .filter_map(move |(index, join)| {
-            match dropping_constraint(&join.join_operator, position, index + 1) {
-                Some(JoinConstraint::On(condition)) => Some((index, condition)),
-                _ => None,
-            }
-        })
-        .flat_map(|(index, condition)| {
-            conjuncts(condition)
-                .into_iter()
-                .map(move |conjunct| (index, conjunct))
-        })
-}
-
-/// The constraint of the join `operator` joining the relation at `joined`,
-/// when it drops rows of the relation at `position`. An inner join drops
-/// rows of the relations up to the one it joins, a left join of the one it
-/// joins and a right join of those before it.
-fn dropping_constraint(
-    operator: &JoinOperator,
-    position: usize,
-    joined: usize,
-) -> Option<&JoinConstraint> {
-    match operator {
-        JoinOperator::Join(constraint) | JoinOperator::Inner(constraint) if position <= joined => {
-            Some(constraint)
-        }
-        JoinOperator::Left(constraint) | JoinOperator::LeftOuter(constraint)
-            if position == joined =>
-        {
-            Some(constraint)
-        }
-        JoinOperator::Right(constraint) | JoinOperator::RightOuter(constraint)
-            if position < joined =>
-        {
-            Some(constraint)
-        }
-        _ => None,
-    }
 }
 
 /// The relation at `position` of `from`, counted from zero.
