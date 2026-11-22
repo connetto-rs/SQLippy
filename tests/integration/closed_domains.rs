@@ -129,6 +129,29 @@ fn a_lifecycle_boolean_a_foreign_key_copies_is_judged_as_its_source() {
 }
 
 #[test]
+fn a_lifecycle_boolean_copying_a_column_named_for_no_event_is_not_reported() {
+    let sql = "CREATE TABLE resources (
+                   id INT PRIMARY KEY,
+                   hidden BOOLEAN NOT NULL,
+                   UNIQUE (id, hidden)
+               );
+               CREATE TABLE notes (
+                   id INT PRIMARY KEY,
+                   resource_id INT NOT NULL,
+                   archived BOOLEAN NOT NULL,
+                   FOREIGN KEY (resource_id, archived) REFERENCES resources (id, hidden)
+               );";
+    assert_eq!(
+        objects(
+            BooleanStateWithoutTime::default(),
+            Deployment::default(),
+            sql
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn lifecycle_terms_come_from_the_selected_vocabularies() {
     let sql = "CREATE TABLE t (id INT PRIMARY KEY, revocato BOOLEAN, revoked BOOLEAN);";
     let italian = Vocabulary::default()
