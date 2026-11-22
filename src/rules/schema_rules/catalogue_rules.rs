@@ -560,7 +560,9 @@ impl<DB: DatabaseLike> SchemaRule for ReservedKeywordIdentifier<DB> {
 
 schema_rule!(
     /// Struct defining a rule that reports a check or foreign key added
-    /// `NOT VALID` and never validated.
+    /// `NOT VALID` and never validated. A `NOT ENFORCED` constraint is never
+    /// validated either, but PostgreSQL refuses to validate it, so the rule
+    /// leaves it alone.
     ///
     /// # Example
     ///
@@ -603,7 +605,7 @@ impl<DB: DatabaseLike> SchemaRule for UnvalidatedConstraint<DB> {
         for table in database.tables() {
             let name = table.table_name();
             for check in table.check_constraints(database)? {
-                if check.is_validated(database)? {
+                if !check.is_enforced() || check.is_validated(database)? {
                     continue;
                 }
                 reporter.table(
@@ -616,7 +618,7 @@ impl<DB: DatabaseLike> SchemaRule for UnvalidatedConstraint<DB> {
                 )?;
             }
             for foreign_key in table.foreign_keys(database)? {
-                if foreign_key.is_validated(database)? {
+                if !foreign_key.is_enforced(database) || foreign_key.is_validated(database)? {
                     continue;
                 }
                 reporter.foreign_key(
