@@ -8,10 +8,13 @@ use crate::{
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 use sql_traits::errors::LookupError;
-use sql_traits::traits::{DatabaseLike, IndexLike, TableLike};
+use sql_traits::traits::{DatabaseLike, IndexLike, TableIndexLike, TableLike};
 
 /// Struct defining a constraint that enforces that unique indices are unique
 /// per table.
+///
+/// Keys over the same columns that PostgreSQL checks at different times,
+/// immediately or deferred, are not duplicates.
 ///
 /// # Example
 ///
@@ -74,15 +77,20 @@ impl<DB: DatabaseLike> TableRule for DuplicateUniqueIndex<DB> {
         table: &<Self::Database as DatabaseLike>::Table,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let mut expressions = table
+        let mut keys = table
             .unique_indices(database)?
-            .map(|unique_index| unique_index.expression(database))
+            .map(|unique_index| {
+                Ok((
+                    unique_index.expression(database)?,
+                    unique_index.deferral(database),
+                ))
+            })
             .collect::<Result<Vec<_>, LookupError>>()?;
-        expressions.sort_unstable();
-        for window in expressions.windows(2) {
+        keys.sort_unstable();
+        for window in keys.windows(2) {
             if window[0] == window[1] {
                 let table_name = table.table_name();
-                let duplicate_expression = window[0];
+                let duplicate_expression = window[0].0;
                 reporter.table(
                     table,
                     format!(
