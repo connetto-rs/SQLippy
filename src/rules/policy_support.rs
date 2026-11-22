@@ -5,8 +5,8 @@ use std::{borrow::Cow, collections::BTreeSet, ops::ControlFlow};
 use sql_traits::{
     errors::LookupError,
     structs::{
-        ActingRole, ColumnDefinition, ColumnDefinitionScope, ColumnScope, FunctionKind,
-        IdentifierCase, PolicyExpression,
+        ActingRole, ColumnDefinition, ColumnDefinitionScope, ColumnScope, ExpressionTruth,
+        FunctionKind, IdentifierCase, Outcomes, PolicyExpression,
     },
     traits::{DatabaseLike, FunctionLike, PolicyLike, RoleLike, RoleMembershipLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
@@ -634,14 +634,34 @@ pub(crate) fn is_tautology<DB: DatabaseLike>(
     table: &DB::Table,
     expression: &Expr,
 ) -> Result<bool, LookupError> {
-    Ok(table.expression_truth(database, expression, IdentifierCase::AsWritten)? == Some(true))
+    Ok(admits_every_row(table.expression_truth(
+        database,
+        expression,
+        IdentifierCase::AsWritten,
+    )?))
 }
 
-/// Returns whether PostgreSQL can prove the expression false for every row.
+/// Returns whether PostgreSQL can prove the expression never true for any
+/// row.
 pub(crate) fn is_contradiction<DB: DatabaseLike>(
     database: &DB,
     table: &DB::Table,
     expression: &Expr,
 ) -> Result<bool, LookupError> {
-    Ok(table.expression_truth(database, expression, IdentifierCase::AsWritten)? == Some(false))
+    Ok(admits_no_row(table.expression_truth(
+        database,
+        expression,
+        IdentifierCase::AsWritten,
+    )?))
+}
+
+/// Whether a policy clause of this truth admits every row, being true
+/// without raising.
+pub(crate) fn admits_every_row(truth: ExpressionTruth) -> bool {
+    truth.outcomes == Outcomes::TRUE && !truth.may_raise
+}
+
+/// Whether a policy clause of this truth admits no row, being never true.
+pub(crate) fn admits_no_row(truth: ExpressionTruth) -> bool {
+    !truth.outcomes.truth
 }
