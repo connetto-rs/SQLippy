@@ -7,8 +7,8 @@ use sql_traits::{
     traits::{ColumnLike, DatabaseLike, FunctionLike, TableLike},
 };
 use sqlparser::ast::{
-    BinaryOperator, Expr, Ident, JoinConstraint, JoinOperator, Query, Select, TableAlias,
-    TableFactor, TableWithJoins, Visitor,
+    BinaryOperator, Expr, Ident, JoinConstraint, Query, Select, TableAlias, TableFactor,
+    TableWithJoins, Visitor,
 };
 
 use crate::{
@@ -17,27 +17,13 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         authority_support::is_credential_value,
-        cte_support::{WithScopes, same_name, stored_column, stored_table},
+        cte_support::{WithScopes, join_constraint, same_name, stored_column, stored_table},
         function_body_support::{function_body, parameter},
         grant_support::schema_of,
         policy_support::{conjuncts, unwrapped},
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
-
-/// The predicate of an inner or outer join.
-fn join_constraint(operator: &JoinOperator) -> Option<&JoinConstraint> {
-    match operator {
-        JoinOperator::Join(constraint)
-        | JoinOperator::Inner(constraint)
-        | JoinOperator::Left(constraint)
-        | JoinOperator::LeftOuter(constraint)
-        | JoinOperator::Right(constraint)
-        | JoinOperator::RightOuter(constraint)
-        | JoinOperator::FullOuter(constraint) => Some(constraint),
-        _ => None,
-    }
-}
 
 /// A tenant-keyed relation instance in one select.
 struct TenantRelation<'query, 'database, DB: DatabaseLike> {

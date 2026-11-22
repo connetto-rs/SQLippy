@@ -393,6 +393,20 @@ impl<'q> RecursiveItem<'q> {
     }
 }
 
+/// The predicate of an inner or outer join.
+pub(crate) fn join_constraint(operator: &JoinOperator) -> Option<&JoinConstraint> {
+    match operator {
+        JoinOperator::Join(constraint)
+        | JoinOperator::Inner(constraint)
+        | JoinOperator::Left(constraint)
+        | JoinOperator::LeftOuter(constraint)
+        | JoinOperator::Right(constraint)
+        | JoinOperator::RightOuter(constraint)
+        | JoinOperator::FullOuter(constraint) => Some(constraint),
+        _ => None,
+    }
+}
+
 /// The relation `name` reads on `path`, treating a catalog qualifier as the
 /// current database, as required for a valid PostgreSQL relation reference.
 pub(crate) fn stored_relation<'db, DB: DatabaseLike>(
