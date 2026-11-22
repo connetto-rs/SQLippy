@@ -253,6 +253,17 @@ fn single_query(mut statements: Vec<Statement>) -> Option<Query> {
     }
 }
 
+/// Whether `function` sets no configuration parameter besides
+/// `search_path`.
+pub(crate) fn sets_only_search_path<F: FunctionLike>(function: &F) -> bool {
+    function.configuration_parameters().iter().all(|parameter| {
+        parameter
+            .name
+            .to_string()
+            .eq_ignore_ascii_case("search_path")
+    })
+}
+
 /// The query a `LANGUAGE sql` function runs, when its body is one query
 /// written as a string or as a `BEGIN ATOMIC` block.
 pub(crate) fn sql_query_body<'f, F: FunctionLike>(
