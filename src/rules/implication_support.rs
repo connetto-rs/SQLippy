@@ -1,13 +1,14 @@
 //! Whether a filter implies the conditions of row-level-security policies,
 //! compared as written once the columns each tests go by one name.
 
-use std::{borrow::Cow, convert::Infallible, mem, ops::ControlFlow};
+use std::{borrow::Cow, convert::Infallible, mem, ops::ControlFlow, slice};
 
 use sql_traits::{errors::LookupError, structs::RowGate, traits::DatabaseLike};
 use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
-    InTarget, Query, SelectItem, SetExpr, Value, Visit, VisitMut, Visitor, VisitorMut,
-    visit_expressions, visit_expressions_mut,
+    BinaryOperator, Distinct, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
+    FunctionArguments, Ident, InTarget, Query, Select, SelectItem, SetExpr, TableFactor, Value,
+    Visit, VisitMut, Visitor, VisitorMut, WildcardAdditionalOptions, visit_expressions,
+    visit_expressions_mut,
 };
 
 use crate::{
@@ -37,6 +38,14 @@ pub(crate) struct ParameterValues {
     /// Whether the parameter may also be `NULL`, as in a function that runs
     /// on `NULL` input.
     pub(crate) null: bool,
+}
+
+/// One value of the row a policy condition tests against a set.
+enum Operand<'e, T> {
+    /// The condition columns this column names.
+    Tested(T),
+    /// A value that reads no column, met as written.
+    Value(&'e Expr),
 }
 
 /// How the columns a policy condition tests map onto those a filter tests.
@@ -80,9 +89,9 @@ pub(crate) struct Condition<'e, T> {
     /// The condition with each column it tests named as the filter names it,
     /// when the filter names every one.
     renamed: Option<Expr>,
-    /// The columns the condition tests against a set, and the expression
-    /// yielding the members of the set.
-    membership: Option<(T, &'e Expr)>,
+    /// The row the condition tests against a set, value by value, and the
+    /// expression yielding the members of the set.
+    membership: Option<(Vec<Operand<'e, T>>, Cow<'e, Expr>)>,
     /// The conjuncts of an `AND`, each implied for the whole.
     pub(crate) parts: Vec<Self>,
     /// The arms of an `OR`, one implied for the whole.
@@ -110,8 +119,19 @@ impl<'e, T> Condition<'e, T> {
                     .and_then(|name| columns.rename(name))
                     .map(Term::Column)
             }),
-            membership: membership(condition)
-                .and_then(|(column, members)| Some((columns.tested(column)?, members))),
+            membership: membership(condition).and_then(|(row, members)| {
+                let operands = row
+                    .iter()
+                    .map(|operand| {
+                        if is_column(operand) {
+                            columns.tested(operand).map(Operand::Tested)
+                        } else {
+                            Some(Operand::Value(operand))
+                        }
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some((operands, members))
+            }),
             parts: split(conjuncts(condition)),
             arms: split(disjuncts(condition)),
         }
@@ -119,7 +139,7 @@ impl<'e, T> Condition<'e, T> {
 }
 
 /// Whether every row `clause` admits meets `condition`, as when the clause
-/// settles it, states it, tests the same column against a set within the
+/// settles it, states it, tests the same row against a set within the
 /// condition's, implies it in every arm or for every value of an `IN` list,
 /// implies it in one of its conjuncts, or implies each conjunct or one arm of
 /// `condition`.
@@ -141,10 +161,17 @@ pub(crate) fn clause_implies<C: Columns>(
     {
         return true;
     }
-    if let Some((tested, wider)) = &condition.membership
-        && let Some((column, members)) = membership(clause)
-        && columns.tests(column, tested)
-        && is_within(columns, members, wider)
+    if let Some((operands, wider)) = &condition.membership
+        && let Some((row, members)) = membership(clause)
+        && row.len() == operands.len()
+        && row
+            .iter()
+            .zip(operands)
+            .all(|(value, operand)| match operand {
+                Operand::Tested(tested) => is_column(value) && columns.tests(value, tested),
+                Operand::Value(stated) => value == *stated,
+            })
+        && is_within(columns, &members, wider)
     {
         return true;
     }
@@ -432,32 +459,53 @@ fn nothing_on_null<C: Columns>(columns: &C, narrower: &Expr, ordinal: usize) -> 
 
 /// The expression yielding the values `value` holds as the operand of `=`,
 /// when it reads no column.
-fn value_members(value: &Expr) -> Option<&Expr> {
+fn value_members(value: &Expr) -> Option<Cow<'_, Expr>> {
     match unwrapped(value) {
         Expr::Subquery(query) => query_members(query),
-        value => (!references_column(value)).then_some(value),
+        value => (!references_column(value)).then_some(Cow::Borrowed(value)),
     }
 }
 
 /// The expression yielding the rows of `query`, when the query projects it
-/// alone and reads, filters and limits nothing.
-fn query_members(query: &Query) -> Option<&Expr> {
-    sole_item(query).and_then(value_members)
+/// alone or selects every column of one call, and filters and limits
+/// nothing.
+fn query_members(query: &Query) -> Option<Cow<'_, Expr>> {
+    match sole_item(query) {
+        Some(value) => value_members(value),
+        None => sole_call(query).map(Cow::Owned),
+    }
+}
+
+/// The `SELECT` of `query`, when it filters, limits and draws on nothing
+/// and keeps every distinct row, so it yields every row its `FROM` list
+/// does.
+fn unfiltered(query: &Query) -> Option<&Select> {
+    if let SetExpr::Select(select) = query.body.as_ref()
+        && query.with.is_none()
+        && query.limit_clause.is_none()
+        && query.fetch.is_none()
+        && query.pipe_operators.is_empty()
+        && !matches!(select.distinct, Some(Distinct::On(_)))
+        && select.top.is_none()
+        && select.prewhere.is_none()
+        && select.selection.is_none()
+        && select.connect_by.is_empty()
+        && select.having.is_none()
+        && select.qualify.is_none()
+    {
+        Some(select)
+    } else {
+        None
+    }
 }
 
 /// The one expression `query` projects, when it reads, filters and limits
 /// nothing, so it yields that value in one row.
 fn sole_item(query: &Query) -> Option<&Expr> {
-    if let SetExpr::Select(select) = query.body.as_ref()
-        && let [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] =
-            select.projection.as_slice()
-        && query.with.is_none()
-        && query.limit_clause.is_none()
-        && query.fetch.is_none()
-        && query.pipe_operators.is_empty()
+    let select = unfiltered(query)?;
+    if let [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] =
+        select.projection.as_slice()
         && select.from.is_empty()
-        && select.selection.is_none()
-        && select.having.is_none()
     {
         Some(value)
     } else {
@@ -465,9 +513,54 @@ fn sole_item(query: &Query) -> Option<&Expr> {
     }
 }
 
+/// The call `query` selects every column of, written as an expression, when
+/// the query reads that call alone, without ordinality, and filters and
+/// limits nothing, so it yields every row of the call.
+fn sole_call(query: &Query) -> Option<Expr> {
+    let select = unfiltered(query)?;
+    let ([SelectItem::Wildcard(options)], [from]) =
+        (select.projection.as_slice(), select.from.as_slice())
+    else {
+        return None;
+    };
+    if *options != WildcardAdditionalOptions::default() || !from.joins.is_empty() {
+        return None;
+    }
+    let (name, args) = match &from.relation {
+        TableFactor::Table {
+            name,
+            args: Some(args),
+            with_ordinality: false,
+            sample: None,
+            ..
+        } if args.settings.is_none() => (name, &args.args),
+        TableFactor::Function {
+            name,
+            args,
+            with_ordinality: false,
+            ..
+        } => (name, args),
+        _ => return None,
+    };
+    Some(Expr::Function(Function {
+        name: name.clone(),
+        uses_odbc_syntax: false,
+        parameters: FunctionArguments::None,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: args.clone(),
+            clauses: Vec::new(),
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: Vec::new(),
+    }))
+}
+
 /// The expression yielding the elements of `array` as the operand of
 /// `= ANY`, when it reads no column.
-fn array_members(array: &Expr) -> Option<&Expr> {
+fn array_members(array: &Expr) -> Option<Cow<'_, Expr>> {
     let array = unwrapped(array);
     if let Expr::Function(function) = array
         && function.name.to_string().eq_ignore_ascii_case("array")
@@ -475,14 +568,14 @@ fn array_members(array: &Expr) -> Option<&Expr> {
     {
         return query_members(query);
     }
-    (!references_column(array)).then_some(array)
+    (!references_column(array)).then_some(Cow::Borrowed(array))
 }
 
-/// The column `condition` tests against a set with `=`, `= ANY` or `IN`,
-/// and the expression yielding the members of the set. Column types keep
-/// one expression from yielding a value in one spelling and an array in
-/// another.
-fn membership(condition: &Expr) -> Option<(&Expr, &Expr)> {
+/// The row `condition` tests against a set with `=`, `= ANY` or `IN`, one
+/// column or a row value of columns and values reading none, and the
+/// expression yielding the members of the set. Column types keep one
+/// expression from yielding a value in one spelling and an array in another.
+fn membership(condition: &Expr) -> Option<(&[Expr], Cow<'_, Expr>)> {
     match unwrapped(condition) {
         Expr::BinaryOp {
             left,
@@ -492,7 +585,7 @@ fn membership(condition: &Expr) -> Option<(&Expr, &Expr)> {
             .into_iter()
             .find_map(|(column, value)| {
                 if is_column(column) {
-                    Some((column.as_ref(), value_members(value)?))
+                    Some((slice::from_ref(column.as_ref()), value_members(value)?))
                 } else {
                     None
                 }
@@ -502,13 +595,26 @@ fn membership(condition: &Expr) -> Option<(&Expr, &Expr)> {
             compare_op: BinaryOperator::Eq,
             right,
             ..
-        } if is_column(left) => Some((left, array_members(right)?)),
+        } if is_column(left) => Some((slice::from_ref(left.as_ref()), array_members(right)?)),
         Expr::In {
             expr,
             target: InTarget::Subquery(query),
             negated: false,
             ..
-        } if is_column(expr) => Some((expr, query_members(query)?)),
+        } => {
+            let row = match unwrapped(expr) {
+                Expr::Tuple(values)
+                    if values
+                        .iter()
+                        .all(|value| is_column(value) || !references_column(value)) =>
+                {
+                    values.as_slice()
+                }
+                _ if is_column(expr) => slice::from_ref(expr.as_ref()),
+                _ => return None,
+            };
+            Some((row, query_members(query)?))
+        }
         _ => None,
     }
 }
