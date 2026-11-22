@@ -283,6 +283,535 @@ fn a_definer_body_whose_tables_cannot_be_read_is_reported() {
     );
 }
 
+const MEMBERSHIPS: &str = "
+    CREATE ROLE app NOLOGIN;
+    CREATE TABLE memberships (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+    CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL);
+    ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+    GRANT SELECT ON memberships, resources TO app;
+    ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+    ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+    CREATE FUNCTION member_organizations() RETURNS SETOF INT
+      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+        SELECT membership.organization_id FROM public.memberships membership
+        WHERE membership.user_id = current_setting('app.user_id', true) $$;
+    CREATE POLICY own_memberships ON memberships FOR SELECT TO app
+      USING (user_id = current_setting('app.user_id', true));
+    CREATE POLICY member_resources ON resources FOR SELECT TO app
+      USING (organization_id IN (SELECT public.member_organizations()));";
+
+fn exposed_to_app(sql: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!("{MEMBERSHIPS}{sql}"),
+    )
+}
+
+#[test]
+fn a_definer_returning_only_rows_the_callers_policies_show_is_not_reported() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE FUNCTION member_resource_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 JOIN public.memberships membership
+                   ON membership.organization_id = resource.organization_id
+                   AND membership.user_id = current_setting('app.user_id', true)
+                 WHERE resource.organization_id IN (SELECT public.member_organizations()) $$;
+             CREATE FUNCTION resource_exists(resource_id INT) RETURNS BOOLEAN
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT EXISTS (SELECT 1 FROM public.resources resource WHERE resource.id = resource_id) $$;
+             CREATE FUNCTION all_resources() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource $$;
+             CREATE FUNCTION member_or_all_resources() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE resource.organization_id IN (SELECT public.member_organizations())
+                 UNION
+                 SELECT resource.id FROM public.resources resource WHERE resource.id > 0 $$;",
+        ),
+        [
+            "all_resources()",
+            "member_or_all_resources()",
+            "resource_exists(INT)"
+        ]
+    );
+}
+
+#[test]
+fn a_policys_scalar_subquery_reads_as_the_value_it_projects() {
+    assert_eq!(
+        exposed(
+            Deployment::default().with_app_role("app"),
+            "CREATE ROLE app NOLOGIN;
+             CREATE TABLE seats (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+             ALTER TABLE seats ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON seats TO app;
+             CREATE POLICY own_seats ON seats FOR SELECT TO app
+               USING (user_id = (SELECT current_setting('app.user_id', true))
+                 AND ((SELECT current_setting('app.organization_id', true)) IS NULL
+                   OR organization_id = (SELECT current_setting('app.organization_id', true))::INT));
+             CREATE FUNCTION seated_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT seat.organization_id FROM public.seats seat
+                 WHERE seat.user_id = current_setting('app.user_id', true)
+                   AND (current_setting('app.organization_id', true) IS NULL
+                     OR seat.organization_id = current_setting('app.organization_id', true)::INT) $$;
+             CREATE FUNCTION any_seated_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT seat.organization_id FROM public.seats seat
+                 WHERE seat.user_id = current_setting('app.user_id', true) $$;
+             REVOKE EXECUTE ON FUNCTION seated_organizations() FROM PUBLIC;
+             REVOKE EXECUTE ON FUNCTION any_seated_organizations() FROM PUBLIC;
+             GRANT EXECUTE ON FUNCTION seated_organizations() TO app;
+             GRANT EXECUTE ON FUNCTION any_seated_organizations() TO app;",
+        ),
+        ["any_seated_organizations()"]
+    );
+}
+
+#[test]
+fn a_set_declared_within_the_policys_set_confines_a_read() {
+    let helper = "
+        CREATE FUNCTION admin_organizations() RETURNS SETOF INT
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT membership.organization_id FROM public.memberships membership
+            WHERE membership.user_id = current_setting('app.user_id', true)
+              AND membership.organization_id > 100 $$;
+        CREATE FUNCTION administered_resource_ids() RETURNS SETOF INT
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT resource.id FROM public.resources resource
+            WHERE resource.organization_id IN (SELECT public.admin_organizations()) $$;";
+    let schema = format!("{PROTECTED}{MEMBERSHIPS}{helper}");
+    let reported = |deployment: Deployment| -> Vec<String> {
+        let mut constrainer: GenericConstrainer<ParserDB> =
+            ExposedDefinerOverProtectedTable::default().into();
+        constrainer.set_deployment(deployment.with_app_role("app"));
+        findings(&constrainer, &schema)
+            .into_iter()
+            .map(|(_, _, function)| function)
+            .collect()
+    };
+    assert_eq!(
+        reported(Deployment::default()),
+        ["administered_resource_ids()"]
+    );
+    assert_eq!(
+        reported(
+            Deployment::default()
+                .with_set_within(
+                    "public.admin_organizations()",
+                    "public.member_organizations()"
+                )
+                .expect("both sets parse")
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_definer_returning_rows_a_restrictive_policy_hides_is_reported_until_it_repeats_it() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE TABLE blocks (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+             ALTER TABLE blocks ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON blocks TO app;
+             CREATE FUNCTION blocking_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT block.organization_id FROM public.blocks block
+                 WHERE block.user_id = current_setting('app.user_id', true) $$;
+             CREATE POLICY unblocked_memberships ON memberships AS RESTRICTIVE FOR ALL TO app
+               USING (NOT (organization_id = ANY (ARRAY(SELECT public.blocking_organizations()))));
+             CREATE FUNCTION unblocked_member_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT membership.organization_id FROM public.memberships membership
+                 WHERE membership.user_id = current_setting('app.user_id', true)
+                   AND NOT (membership.organization_id = ANY (ARRAY(SELECT public.blocking_organizations()))) $$;",
+        ),
+        ["blocking_organizations()", "member_organizations()"]
+    );
+}
+
+#[test]
+fn a_called_function_counts_unless_each_caller_may_execute_it_directly() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE TABLE grants (user_id TEXT NOT NULL, resource_id INT NOT NULL);
+             ALTER TABLE grants ENABLE ROW LEVEL SECURITY;
+             CREATE FUNCTION granted_resource_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT permission.resource_id FROM public.grants permission
+                 WHERE permission.user_id = current_setting('app.user_id', true) $$;
+             CREATE FUNCTION granted_resources() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE resource.id IN (SELECT public.granted_resource_ids()) $$;
+             CREATE FUNCTION resource_total() RETURNS BIGINT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT count(*) FROM public.resources $$;
+             REVOKE EXECUTE ON FUNCTION resource_total() FROM app;
+             CREATE FUNCTION open_resource_total() RETURNS BIGINT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT count(*) FROM public.resources $$;
+             CREATE FUNCTION resources_with_total() RETURNS TABLE (id INT, total BIGINT)
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id, public.resource_total() FROM public.resources resource
+                 WHERE resource.organization_id IN (SELECT public.member_organizations()) $$;
+             CREATE FUNCTION resources_with_open_total() RETURNS TABLE (id INT, total BIGINT)
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id, public.open_resource_total() FROM public.resources resource
+                 WHERE resource.organization_id IN (SELECT public.member_organizations()) $$;",
+        ),
+        [
+            "granted_resource_ids()",
+            "granted_resources()",
+            "open_resource_total()",
+            "resources_with_total()"
+        ]
+    );
+}
+
+#[test]
+fn a_filter_term_reading_otherwise_as_the_owner_confines_nothing() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE TABLE organization_roles (role_name TEXT, organization_id INT);
+             CREATE FUNCTION role_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT granted.organization_id FROM public.organization_roles granted
+                 WHERE granted.role_name = current_user $$;
+             CREATE TABLE notes (id INT, author TEXT, organization_id INT);
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON notes TO app;
+             CREATE POLICY own_notes ON notes FOR SELECT TO app USING (author = current_user);
+             CREATE POLICY organization_notes ON notes FOR SELECT TO app
+               USING (organization_id IN (SELECT public.role_organizations()));
+             CREATE FUNCTION own_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note WHERE note.author = current_user $$;
+             CREATE FUNCTION organization_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE note.organization_id IN (SELECT public.role_organizations()) $$;",
+        ),
+        ["organization_note_ids()", "own_note_ids()"]
+    );
+}
+
+#[test]
+fn a_filter_term_reading_the_role_or_path_as_the_owner_confines_nothing() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE TABLE notes (id INT, author TEXT, schema_name TEXT);
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON notes TO app;
+             CREATE POLICY own_notes ON notes FOR SELECT TO app USING (author = user);
+             CREATE POLICY schema_notes ON notes FOR SELECT TO app
+               USING (schema_name = current_schema());
+             CREATE FUNCTION own_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note WHERE note.author = user $$;
+             CREATE FUNCTION schema_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note WHERE note.schema_name = current_schema() $$;",
+        ),
+        ["own_note_ids()", "schema_note_ids()"]
+    );
+}
+
+#[test]
+fn a_table_alias_renaming_its_columns_confines_nothing() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE TABLE notes (author TEXT, reviewer TEXT, id INT);
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON notes TO app;
+             CREATE POLICY own_notes ON notes FOR SELECT TO app
+               USING (author = current_setting('app.user_id', true));
+             CREATE FUNCTION reviewed_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes AS note(reviewer, author)
+                 WHERE note.author = current_setting('app.user_id', true) $$;",
+        ),
+        ["reviewed_note_ids()"]
+    );
+}
+
+#[test]
+fn a_condition_comparing_two_columns_confines_as_written() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE TABLE notes (author TEXT, reviewer TEXT, id INT);
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON notes TO app;
+             CREATE POLICY self_reviewed ON notes FOR SELECT TO app USING (reviewer = author);
+             CREATE FUNCTION self_reviewed_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note WHERE note.reviewer = note.author $$;
+             CREATE FUNCTION reviewed_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note WHERE note.reviewer IS NOT NULL $$;",
+        ),
+        ["reviewed_note_ids()"]
+    );
+}
+
+#[test]
+fn a_read_through_a_view_a_lock_a_parenthesized_join_a_write_or_table_is_reported() {
+    let confined = "resource.organization_id IN (SELECT public.member_organizations())";
+    assert_eq!(
+        exposed_to_app(&format!(
+            "CREATE VIEW resource_view AS SELECT * FROM resources;
+             CREATE FUNCTION through_view() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource WHERE {confined}
+                 UNION SELECT seen.id FROM public.resource_view seen $$;
+             CREATE FUNCTION locked() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource WHERE {confined} FOR SHARE $$;
+             CREATE FUNCTION parenthesized() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id
+                 FROM (public.resources resource JOIN public.memberships membership
+                   ON membership.organization_id = resource.organization_id)
+                 WHERE {confined} AND membership.user_id = current_setting('app.user_id', true) $$;
+             CREATE FUNCTION whole_table() RETURNS SETOF resources
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 TABLE public.resources $$;
+             CREATE FUNCTION leaving() RETURNS SETOF INT
+               LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH gone AS (DELETE FROM public.memberships membership
+                   WHERE membership.user_id = current_setting('app.user_id', true)
+                   RETURNING membership.organization_id)
+                 SELECT gone.organization_id FROM gone $$;"
+        )),
+        [
+            "leaving()",
+            "locked()",
+            "parenthesized()",
+            "through_view()",
+            "whole_table()"
+        ]
+    );
+}
+
+#[test]
+fn rows_from_values_a_with_item_or_an_open_parenthesized_join_confine_nothing_away() {
+    let confined = "resource.organization_id IN (SELECT public.member_organizations())";
+    assert_eq!(
+        exposed_to_app(&format!(
+            "CREATE TABLE tags (id INT);
+             CREATE FUNCTION with_values() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource WHERE {confined}
+                 UNION VALUES (0) $$;
+             CREATE FUNCTION through_with_item() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH mine AS (SELECT resource.id FROM public.resources resource WHERE {confined})
+                 SELECT mine.id FROM mine $$;
+             CREATE FUNCTION beside_open_join() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource,
+                   (public.tags tag JOIN public.tags other ON other.id = tag.id)
+                 WHERE {confined} AND tag.id = resource.id $$;"
+        )),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_called_invoker_is_proved_once_and_a_cycle_or_opaque_body_proves_nothing() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE FUNCTION own_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY INVOKER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT membership.organization_id FROM public.memberships membership
+                 WHERE membership.user_id = current_setting('app.user_id', true) $$;
+             CREATE FUNCTION own_first() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY INVOKER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT public.own_organizations() $$;
+             CREATE FUNCTION own_second() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY INVOKER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT public.own_organizations() $$;
+             CREATE FUNCTION both_owned() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT public.own_first() UNION SELECT public.own_second()
+                 UNION SELECT membership.organization_id FROM public.memberships membership
+                 WHERE membership.user_id = current_setting('app.user_id', true) $$;
+             CREATE FUNCTION ping() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY INVOKER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT public.pong() $$;
+             CREATE FUNCTION pong() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY INVOKER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT public.ping() UNION SELECT resource.id FROM public.resources resource $$;
+             CREATE FUNCTION cyclic() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT public.ping() UNION SELECT membership.organization_id
+                 FROM public.memberships membership
+                 WHERE membership.user_id = current_setting('app.user_id', true) $$;
+             CREATE FUNCTION native_ids() RETURNS SETOF INT
+               LANGUAGE c STABLE AS 'native', 'native_ids';
+             CREATE FUNCTION beside_native() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT public.native_ids() UNION SELECT membership.organization_id
+                 FROM public.memberships membership
+                 WHERE membership.user_id = current_setting('app.user_id', true) $$;",
+        ),
+        ["beside_native()", "cyclic()"]
+    );
+}
+
+#[test]
+fn an_exempt_caller_needs_no_filter_and_an_unsettled_policy_role_proves_nothing() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE TABLE drafts (id INT);
+             ALTER TABLE drafts ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE drafts OWNER TO app;
+             CREATE FUNCTION draft_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT draft.id FROM public.drafts draft $$;
+             CREATE TABLE notes (id INT, author TEXT);
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON notes TO app;
+             CREATE POLICY own_notes ON notes FOR SELECT TO CURRENT_USER
+               USING (author = current_setting('app.user_id', true));
+             CREATE FUNCTION own_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE note.author = current_setting('app.user_id', true) $$;",
+        ),
+        ["own_note_ids()"]
+    );
+}
+
+#[test]
+fn a_filter_term_reading_a_relation_counts_only_through_a_definer_call() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE TABLE flags (id INT);
+             CREATE FUNCTION open_flags() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT 1 $$;
+             CREATE FUNCTION caller_flags() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY INVOKER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT 1 $$;
+             CREATE TABLE notes (id INT, kind TEXT);
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON notes TO app;
+             CREATE POLICY flagged ON notes FOR SELECT TO app
+               USING (kind = 'flag' AND EXISTS (SELECT 1 FROM public.open_flags()));
+             CREATE POLICY caller_flagged ON notes FOR SELECT TO app
+               USING (kind = 'caller' AND EXISTS (SELECT 1 FROM public.caller_flags()));
+             CREATE POLICY table_flagged ON notes FOR SELECT TO app
+               USING (kind = 'table' AND EXISTS (SELECT 1 FROM public.flags));
+             CREATE FUNCTION flagged_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE note.kind = 'flag' AND EXISTS (SELECT 1 FROM public.open_flags()) $$;
+             CREATE FUNCTION caller_flagged_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE note.kind = 'caller' AND EXISTS (SELECT 1 FROM public.caller_flags()) $$;
+             CREATE FUNCTION table_flagged_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE note.kind = 'table' AND EXISTS (SELECT 1 FROM public.flags) $$;",
+        ),
+        ["caller_flagged_ids()", "table_flagged_ids()"]
+    );
+}
+
+#[test]
+fn a_quoted_column_confines_by_its_exact_name() {
+    assert_eq!(
+        exposed_to_app(
+            r#"CREATE TABLE posts (id INT, "userId" TEXT);
+               CREATE TABLE entries (id INT, owner TEXT, "Owner" TEXT);
+               ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
+               ALTER TABLE entries ENABLE ROW LEVEL SECURITY;
+               GRANT SELECT ON posts, entries TO app;
+               CREATE POLICY own_posts ON posts FOR SELECT TO app
+                 USING ("userId" = current_setting('app.user_id', true));
+               CREATE POLICY own_entries ON entries FOR SELECT TO app
+                 USING (owner = current_setting('app.user_id', true));
+               CREATE FUNCTION own_post_ids() RETURNS SETOF INT
+                 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                   SELECT post.id FROM public.posts post
+                   WHERE post."userId" = current_setting('app.user_id', true) $$;
+               CREATE FUNCTION capitalized_owner_entry_ids() RETURNS SETOF INT
+                 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                   SELECT entry.id FROM public.entries entry
+                   WHERE entry."Owner" = current_setting('app.user_id', true) $$;"#,
+        ),
+        ["capitalized_owner_entry_ids()"]
+    );
+}
+
+#[test]
+fn a_definer_setting_a_parameter_besides_its_path_is_reported() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE FUNCTION administrator_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER
+               SET search_path = pg_catalog, pg_temp SET app.user_id = 'administrator' AS $$
+                 SELECT membership.organization_id FROM public.memberships membership
+                 WHERE membership.user_id = current_setting('app.user_id', true) $$;",
+        ),
+        ["administrator_organizations()"]
+    );
+}
+
+#[test]
+fn an_outer_join_condition_confines_only_the_side_it_extends_with_nulls() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE FUNCTION left_extended() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.memberships membership
+                 LEFT JOIN public.resources resource
+                   ON resource.organization_id IN (SELECT public.member_organizations())
+                 WHERE membership.user_id = current_setting('app.user_id', true) $$;
+             CREATE FUNCTION left_preserved() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 LEFT JOIN public.memberships membership
+                   ON resource.organization_id IN (SELECT public.member_organizations())
+                   AND membership.user_id = current_setting('app.user_id', true) $$;
+             CREATE FUNCTION right_extended() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 RIGHT JOIN public.memberships membership
+                   ON resource.organization_id IN (SELECT public.member_organizations())
+                 WHERE membership.user_id = current_setting('app.user_id', true) $$;
+             CREATE FUNCTION right_preserved() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.memberships membership
+                 RIGHT JOIN public.resources resource
+                   ON resource.organization_id IN (SELECT public.member_organizations())
+                   AND membership.user_id = current_setting('app.user_id', true) $$;",
+        ),
+        ["left_preserved()", "right_preserved()"]
+    );
+}
+
+#[test]
+fn a_definer_projecting_a_column_its_callers_cannot_select_is_reported() {
+    assert_eq!(
+        exposed_to_app(
+            "REVOKE SELECT ON resources FROM app;
+             GRANT SELECT (id) ON resources TO app;
+             CREATE FUNCTION member_resource_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.organization_id FROM public.resources resource
+                 WHERE resource.organization_id IN (SELECT public.member_organizations()) $$;",
+        ),
+        ["member_resource_organizations()"]
+    );
+}
+
 #[test]
 fn the_default_constrainer_runs_the_function_rules_at_their_group_levels() {
     let found = findings(

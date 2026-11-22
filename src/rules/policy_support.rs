@@ -519,11 +519,12 @@ pub(crate) fn is_column_reference(expression: &Expr) -> bool {
     )
 }
 
-/// Whether the expression reads the current or session role.
+/// Whether the expression reads the current or session role, `user` being
+/// PostgreSQL's spelling of `current_user`.
 pub(crate) fn is_role_read(expression: &Expr) -> bool {
     is_call_to(
         expression,
-        &["current_user", "current_role", "session_user"],
+        &["current_user", "current_role", "session_user", "user"],
         true,
     )
 }
