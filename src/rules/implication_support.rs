@@ -1,7 +1,7 @@
 //! Whether a filter implies the conditions of row-level-security policies,
 //! compared as written once the columns each tests go by one name.
 
-use std::{borrow::Cow, mem, ops::ControlFlow};
+use std::{borrow::Cow, convert::Infallible, mem, ops::ControlFlow};
 
 use sql_traits::{errors::LookupError, structs::RowGate, traits::DatabaseLike};
 use sqlparser::ast::{
@@ -241,11 +241,8 @@ fn parameter_ordinal(expression: &Expr) -> Option<usize> {
     let Value::Placeholder(placeholder) = &value.value else {
         return None;
     };
-    placeholder
-        .strip_prefix('$')?
-        .parse::<usize>()
-        .ok()?
-        .checked_sub(1)
+    let digits = placeholder.strip_prefix('$')?;
+    digits.parse::<usize>().ok()?.checked_sub(1)
 }
 
 /// `expression` with every column reference named, quoted, by the column
@@ -298,9 +295,9 @@ pub(crate) fn renamed(expression: &Expr, rename: impl Fn(&Expr) -> Option<Term>)
     }
 
     impl<I: Iterator<Item = Expr>> VisitorMut for Renamer<I> {
-        type Break = ();
+        type Break = Infallible;
 
-        fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<()> {
+        fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<Infallible> {
             if let Expr::Subquery(query) = expression
                 && sole_item(query).is_some()
                 && let SetExpr::Select(select) = query.body.as_mut()
@@ -309,11 +306,10 @@ pub(crate) fn renamed(expression: &Expr, rename: impl Fn(&Expr) -> Option<Term>)
                 ] = select.projection.as_mut_slice()
             {
                 *expression = mem::replace(value, Expr::Value(Value::Null.into()));
-            } else if is_column_reference(expression) {
-                match self.resolved.next() {
-                    Some(resolved) => *expression = resolved,
-                    None => return ControlFlow::Break(()),
-                }
+            } else if is_column_reference(expression)
+                && let Some(resolved) = self.resolved.next()
+            {
+                *expression = resolved;
             }
             ControlFlow::Continue(())
         }
@@ -328,14 +324,13 @@ pub(crate) fn renamed(expression: &Expr, rename: impl Fn(&Expr) -> Option<Term>)
         return None;
     }
     let mut renamed = expression.clone();
-    VisitMut::visit(
+    let ControlFlow::Continue(()) = VisitMut::visit(
         &mut renamed,
         &mut Renamer {
             resolved: resolver.resolved.into_iter(),
         },
-    )
-    .is_continue()
-    .then_some(renamed)
+    );
+    Some(renamed)
 }
 
 /// Whether every value `narrower` yields is one `wider` yields, whatever
@@ -399,10 +394,13 @@ fn is_within<C: Columns>(columns: &C, narrower: &Expr, wider: &Expr) -> bool {
 /// `ordinal` is `NULL`, as a call does that takes it, through parentheses
 /// and casts, as a positional argument it returns `NULL` for.
 fn nothing_on_null<C: Columns>(columns: &C, narrower: &Expr, ordinal: usize) -> bool {
-    let Expr::Function(call) = unwrapped(narrower) else {
-        return false;
-    };
-    let FunctionArguments::List(list) = &call.args else {
+    let Expr::Function(
+        call @ Function {
+            args: FunctionArguments::List(list),
+            ..
+        },
+    ) = unwrapped(narrower)
+    else {
         return false;
     };
     list.args.iter().enumerate().any(|(index, argument)| {
