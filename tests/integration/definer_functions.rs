@@ -165,6 +165,21 @@ fn a_definer_over_a_protected_table_that_public_can_execute_is_reported() {
 }
 
 #[test]
+fn a_definer_is_named_by_the_arguments_a_revoke_takes() {
+    let owner = "CREATE FUNCTION doc_owner(doc INT, OUT owner TEXT) RETURNS TEXT LANGUAGE sql
+                   SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+                   AS 'SELECT owner FROM public.docs WHERE id = doc';";
+    assert_eq!(exposed(Deployment::default(), owner), ["doc_owner(INT)"]);
+    assert_eq!(
+        exposed(
+            Deployment::default(),
+            &format!("{owner} REVOKE EXECUTE ON FUNCTION doc_owner(INT) FROM PUBLIC;")
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn revoking_from_public_clears_it_unless_an_anonymous_role_still_executes() {
     let revoked = "CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER
                      SET search_path = pg_catalog, pg_temp AS 'SELECT count(*) FROM public.docs';

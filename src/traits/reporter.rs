@@ -11,7 +11,7 @@ use sql_traits::{
         TableLike, UserDefinedTypeLike, ViewLike,
     },
 };
-use sqlparser::ast::Statement;
+use sqlparser::ast::{ArgMode, Statement};
 
 use crate::{
     deployment::Deployment,
@@ -54,10 +54,15 @@ pub(crate) fn index_name<'db, I: IndexLike>(
         .or_else(|| index.name().map(Cow::Borrowed)))
 }
 
-/// A function's name with its argument types as written, which tells overloads
-/// apart.
+/// A function's name with the types of its input arguments as written, which
+/// PostgreSQL identifies it by and tells overloads apart.
 pub(crate) fn signature<DB: DatabaseLike>(function: &DB::Function, database: &DB) -> String {
-    let arguments: Vec<_> = function.argument_type_names(database).collect();
+    let arguments: Vec<_> = function
+        .argument_modes()
+        .zip(function.argument_type_names(database))
+        .filter(|(mode, _)| *mode != ArgMode::Out)
+        .map(|(_, name)| name)
+        .collect();
     format!("{}({})", function.name(), arguments.join(", "))
 }
 
