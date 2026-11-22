@@ -20,7 +20,6 @@ use crate::{
         cte_support::stored_table,
         expression_site_support::{is_null_literal, parsed_body_statements},
         function_rules::unreadable_body,
-        key_support::checks_every_row_of,
         policy_support::{acting, client_roles},
         walk_support::walk,
     },
@@ -38,13 +37,15 @@ use crate::{
 /// a nullable column of the key, when the role may execute a `SECURITY
 /// DEFINER` function, or a `BEFORE DELETE` trigger on the referenced table
 /// runs one, whose body or a function it calls deletes from the referencing
-/// table or sets a key column to `NULL`, and, when the key is deferrable, when
-/// a chain of `ON DELETE CASCADE` foreign keys leads from the referenced table
-/// to the referencing one or a cascading key of the referencing table on the
-/// referenced one checks every row the key holds. An immediate check runs
-/// ahead of the cascades of a chain, and ahead of a cascading key on its own
-/// columns created after it, an order a restore does not keep. A body that
-/// runs dynamic SQL or does not parse counts as clearing. `ON DELETE
+/// table or sets a key column to `NULL`, when the role may delete a row every
+/// referencing row descends from through `ON DELETE CASCADE` keys, and, when
+/// the key is deferrable, when a chain of `ON DELETE CASCADE` foreign keys
+/// leads from the referenced table to the referencing one. An immediate check
+/// runs ahead of the cascades of a chain, and may run ahead of the cascade
+/// removing a referencing row whenever the deletion of its ancestor also
+/// cascades into the referenced table, such as the referenced table's own
+/// row, so such an ancestor counts only when the key is deferrable. A body
+/// that runs dynamic SQL or does not parse counts as clearing. `ON DELETE
 /// RESTRICT` states that the block is intended and is not reported.
 ///
 /// The rule is inactive until the deployment declares a client role.
@@ -120,14 +121,12 @@ REVOKE DELETE ON notes FROM authenticated;",
     }
 }
 
-/// Whether `ON DELETE CASCADE` foreign keys may clear the rows `foreign_key`
-/// holds before its check runs. An immediate check runs ahead of the cascades
-/// of a chain, and ahead of a cascading key of `child` on `parent` created
-/// after it, an order a restore does not keep, so cascades count only when
-/// `foreign_key` is deferrable, which lets the role defer the check to
-/// commit. They then count through a chain leading from `parent` to `child`,
-/// or through a cascading key of `child` on `parent` itself that checks every
-/// row `foreign_key` holds.
+/// Whether a chain of `ON DELETE CASCADE` foreign keys leading from `parent`
+/// to `child` may clear the rows `foreign_key` holds before its check runs.
+/// An immediate check runs ahead of the cascades of a chain, so they count
+/// only when `foreign_key` is deferrable, which lets the role defer the check
+/// to commit. A cascading key of `child` on `parent` itself is left to
+/// [`may_delete_ancestor`], which asks whether it holds every row.
 fn cascades<DB: DatabaseLike>(
     database: &DB,
     parent: &DB::Table,
@@ -148,7 +147,7 @@ fn cascades<DB: DatabaseLike>(
                     continue;
                 }
                 if host == child {
-                    if table != parent || checks_every_row_of(database, cascading, foreign_key)? {
+                    if table != parent {
                         return Ok(true);
                     }
                 } else if !reached.contains(&host) {
@@ -156,6 +155,95 @@ fn cascades<DB: DatabaseLike>(
                     pending.push(host);
                 }
             }
+        }
+    }
+    Ok(false)
+}
+
+/// Tables whose deletions may cascade into `table`, `table` included.
+fn cascade_sources<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    table: &'db DB::Table,
+) -> Result<Vec<&'db DB::Table>, LookupError> {
+    let mut sources = vec![table];
+    let mut pending = vec![table];
+    while let Some(table) = pending.pop() {
+        for cascading in table.foreign_keys(database)? {
+            if cascading.on_delete(database) != ReferentialAction::Cascade {
+                continue;
+            }
+            let source = cascading.referenced_table(database)?;
+            if !sources.contains(&source) {
+                sources.push(source);
+                pending.push(source);
+            }
+        }
+    }
+    Ok(sources)
+}
+
+/// Whether every row of its table that is not `NULL` in `held` references a
+/// row through `cascading`. Each nullable column of `cascading` must be one
+/// of `held`, unless `cascading` is `MATCH FULL` and shares one, which keeps
+/// the rest from being `NULL` too.
+fn holds_every_row<DB: DatabaseLike>(
+    database: &DB,
+    cascading: &DB::ForeignKey,
+    held: &[&DB::Column],
+) -> Result<bool, LookupError> {
+    let (mut shares, mut uncovered) = (false, false);
+    for column in cascading.host_columns(database)? {
+        if held.contains(&column) {
+            shares = true;
+        } else if column.is_nullable(database)? {
+            uncovered = true;
+        }
+    }
+    Ok(!uncovered || shares && cascading.match_full(database))
+}
+
+/// Whether `role`, `PUBLIC` for `None`, may delete the rows of `child` that
+/// `foreign_key` holds by deleting a row they descend from through `ON
+/// DELETE CASCADE` keys, each row on the way referencing the next through
+/// its key. A deletion that also cascades into `parent` may check a row of
+/// `child` before its own cascade removes it, so such an ancestor counts
+/// only when `foreign_key` is deferrable.
+fn may_delete_ancestor<DB: DatabaseLike>(
+    database: &DB,
+    role: Option<&DB::Role>,
+    parent: &DB::Table,
+    child: &DB::Table,
+    foreign_key: &DB::ForeignKey,
+) -> Result<bool, LookupError> {
+    let excluded = if foreign_key.deferral(database).is_deferrable() {
+        Vec::new()
+    } else {
+        cascade_sources(database, parent)?
+    };
+    let key_columns: Vec<_> = foreign_key.host_columns(database)?.collect();
+    let mut reached = vec![child];
+    let mut pending = vec![child];
+    while let Some(table) = pending.pop() {
+        let held = if table == child {
+            key_columns.as_slice()
+        } else {
+            &[]
+        };
+        for cascading in table.foreign_keys(database)? {
+            if cascading.on_delete(database) != ReferentialAction::Cascade
+                || !holds_every_row(database, cascading, held)?
+            {
+                continue;
+            }
+            let ancestor = cascading.referenced_table(database)?;
+            if reached.contains(&ancestor) || excluded.contains(&ancestor) {
+                continue;
+            }
+            if ancestor.privileges(acting(role), database)?.delete {
+                return Ok(true);
+            }
+            reached.push(ancestor);
+            pending.push(ancestor);
         }
     }
     Ok(false)
@@ -337,6 +425,9 @@ fn may_clear<DB: DatabaseLike>(
         if column.is_nullable(database)? && possible.update.on_column(column) {
             return Ok(true);
         }
+    }
+    if may_delete_ancestor(database, role, parent, child, foreign_key)? {
+        return Ok(true);
     }
     let functions = database
         .functions()
