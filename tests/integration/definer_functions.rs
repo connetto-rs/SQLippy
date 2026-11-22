@@ -993,6 +993,146 @@ fn a_parameter_confines_nothing_unless_it_is_an_enum_no_column_shadows() {
     );
 }
 
+const CAPPED_KINDS: &str = "
+    CREATE ROLE app NOLOGIN;
+    CREATE SCHEMA authz;
+    CREATE TYPE authz.role AS ENUM ('reader', 'writer', 'admin');
+    CREATE TYPE authz.resource_kind AS ENUM ('organization', 'team');
+    CREATE TABLE memberships (organization_id INT NOT NULL, team_id INT NOT NULL);
+    CREATE TABLE reader_caps (resource_id INT, kind authz.resource_kind);
+    ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+    GRANT SELECT ON memberships TO app;
+    ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+    ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+    CREATE FUNCTION authz.capped_kinds(min_role authz.role)
+      RETURNS TABLE (resource_id INT, kind authz.resource_kind)
+      LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+      AS $$ SELECT 1, 'organization'::authz.resource_kind WHERE min_role IN ('reader', 'writer', 'admin') $$;";
+
+const READER_CAP: &str = "SELECT * FROM authz.capped_kinds('reader')";
+
+/// Functions reported over [`CAPPED_KINDS`], a policy admitting the
+/// memberships of the organizations `policy` yields, and a definer named
+/// `name` whose read of `memberships` keeps the rows `filter` admits.
+fn capped(deployment: Deployment, policy: &str, name: &str, filter: &str) -> Vec<String> {
+    exposed(
+        deployment.with_app_role("app"),
+        &format!(
+            "{CAPPED_KINDS}
+             CREATE POLICY capped_memberships ON memberships FOR SELECT TO app
+               USING ((organization_id, 'organization'::authz.resource_kind) IN ({policy}));
+             CREATE FUNCTION {name} RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT membership.organization_id FROM public.memberships membership
+                 WHERE {filter} $$;"
+        ),
+    )
+}
+
+fn capped_ladder() -> Deployment {
+    nested(
+        Deployment::default(),
+        &[
+            "authz.capped_kinds('admin')",
+            "authz.capped_kinds('writer')",
+            "authz.capped_kinds('reader')",
+        ],
+    )
+}
+
+#[test]
+fn a_row_value_in_a_call_declared_within_the_policys_call_confines_a_read() {
+    let admin = "(membership.organization_id, 'organization'::authz.resource_kind)
+        IN (SELECT * FROM authz.capped_kinds('admin'))";
+    assert_eq!(
+        capped(Deployment::default(), READER_CAP, "admin_capped()", admin),
+        ["admin_capped()"]
+    );
+    assert_eq!(
+        capped(capped_ladder(), READER_CAP, "admin_capped()", admin),
+        Vec::<String>::new()
+    );
+    for (name, filter) in [
+        (
+            "role_capped(min_role authz.role)",
+            "IN (SELECT * FROM authz.capped_kinds(min_role))",
+        ),
+        (
+            "lateral_capped()",
+            "IN (SELECT * FROM LATERAL authz.capped_kinds('admin'))",
+        ),
+    ] {
+        assert_eq!(
+            capped(
+                capped_ladder(),
+                READER_CAP,
+                name,
+                &format!(
+                    "(membership.organization_id, 'organization'::authz.resource_kind) {filter}"
+                ),
+            ),
+            Vec::<String>::new()
+        );
+    }
+}
+
+#[test]
+fn a_row_value_confines_only_when_it_lines_up_with_the_policys() {
+    for (name, row) in [
+        (
+            "other_kind()",
+            "(membership.organization_id, 'team'::authz.resource_kind)",
+        ),
+        (
+            "other_column()",
+            "(membership.team_id, 'organization'::authz.resource_kind)",
+        ),
+        (
+            "computed_column()",
+            "(membership.organization_id + 0, 'organization'::authz.resource_kind)",
+        ),
+    ] {
+        assert_eq!(
+            capped(
+                capped_ladder(),
+                READER_CAP,
+                name,
+                &format!("{row} IN (SELECT * FROM authz.capped_kinds('admin'))"),
+            ),
+            [name],
+        );
+    }
+    for policy in [
+        "SELECT * FROM authz.capped_kinds('reader') capped WHERE capped.resource_id > 1",
+        "SELECT DISTINCT ON (capped.kind) * FROM authz.capped_kinds('reader') capped",
+        "SELECT * FROM authz.capped_kinds('reader') NATURAL JOIN authz.capped_kinds('admin')",
+    ] {
+        assert_eq!(
+            capped(
+                capped_ladder(),
+                policy,
+                "under_narrowed_policy()",
+                "(membership.organization_id, 'organization'::authz.resource_kind)
+                   IN (SELECT * FROM authz.capped_kinds('admin'))",
+            ),
+            ["under_narrowed_policy()"]
+        );
+    }
+    assert_eq!(
+        capped(
+            nested(
+                capped_ladder(),
+                &["authz.capped_kinds('reader')", "public.reader_caps()"]
+            ),
+            "SELECT * FROM public.reader_caps",
+            "under_table_policy()",
+            "(membership.organization_id, 'organization'::authz.resource_kind)
+               IN (SELECT * FROM authz.capped_kinds('admin'))",
+        ),
+        ["under_table_policy()"]
+    );
+}
+
 const ORGANIZATIONS: &str = "
     CREATE ROLE app NOLOGIN;
     CREATE SCHEMA authz;

@@ -629,7 +629,9 @@ impl Deployment {
     ///
     /// The expressions are matched as written, as the operand of `=` or the
     /// projection of the subquery a policy compares a column with through
-    /// `IN` or `= ANY (ARRAY(...))`.
+    /// `IN` or `= ANY (ARRAY(...))`. A subquery selecting `*` from one call,
+    /// such as `(id, kind) IN (SELECT * FROM authz.capped_kinds('reader'))`,
+    /// yields the set of that call written as an expression.
     ///
     /// # Errors
     ///
