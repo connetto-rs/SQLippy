@@ -12,7 +12,9 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         grant_support::tenant_column,
-        key_support::{KeyPairs, checks_every_row_of, equality_keys, key_pairs},
+        key_support::{
+            KeyPairs, checked_whenever_set, checks_every_row_of, equality_keys, key_pairs,
+        },
     },
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
@@ -27,10 +29,15 @@ rule_definition!(
     /// point at a row of another. Pairing the tenant keys, in any position of
     /// the key, makes PostgreSQL reject that row.
     /// A key is also accepted when a wider key of the same table into the same
-    /// table pairs the tenant keys and checks every row it checks. A table
-    /// without a declared tenant key, such as a global `users` table, is
-    /// never an endpoint of a finding. A key that crosses tenants on purpose
-    /// is excused with [`Constrainer::allow_foreign_key`].
+    /// table pairs the tenant keys and checks every row it checks, or when
+    /// both columns of one of its pairs are bound, each with the tenant key of
+    /// its table, to the same column of a root table that alone tells its rows
+    /// apart, such as `(organization_id, id)` of both tables referencing
+    /// `resources (organization_id, id)`. Equal values then name one row of
+    /// the root, and both rows carry its tenant. A table without a declared
+    /// tenant key, such as a global `users` table, is never an endpoint of a
+    /// finding. A key that crosses tenants on purpose is excused with
+    /// [`Constrainer::allow_foreign_key`].
     ///
     /// [`Deployment::with_tenant_key`](crate::deployment::Deployment::with_tenant_key)
     /// declares the tenant keys, and the rule is inactive until one is
@@ -119,6 +126,51 @@ fn listed<DB: DatabaseLike>(columns: &[&DB::Column]) -> String {
         .join(", ")
 }
 
+/// The `[root tenant column, root column]` pairs that a foreign key of the
+/// table of `column` binds `tenant` and `column` to, among the keys that check
+/// every row in which `column` is set.
+fn root_bindings<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    tenant: &'db DB::Column,
+    column: &'db DB::Column,
+) -> Result<Vec<[&'db DB::Column; 2]>, LookupError> {
+    let mut bindings = Vec::new();
+    for foreign_key in column.foreign_keys(database)? {
+        if !checked_whenever_set(database, foreign_key, column)? {
+            continue;
+        }
+        let pairs = key_pairs(database, foreign_key)?;
+        for &(_, root_tenant) in pairs.iter().filter(|&&(host, _)| host == tenant) {
+            for &(_, root_column) in pairs.iter().filter(|&&(host, _)| host == column) {
+                bindings.push([root_tenant, root_column]);
+            }
+        }
+    }
+    Ok(bindings)
+}
+
+/// Whether `host_column` and `parent_column` are each bound, with the tenant
+/// key of their table, to the same columns of one root table, the second of
+/// which alone is a key of the root. A row whose `host_column` equals
+/// `parent_column` of the row it references then shares that row's root row
+/// and so its tenant.
+fn share_root_row<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    (host_tenant, host_column): (&'db DB::Column, &'db DB::Column),
+    (parent_tenant, parent_column): (&'db DB::Column, &'db DB::Column),
+) -> Result<bool, LookupError> {
+    let parent_bindings = root_bindings(database, parent_tenant, parent_column)?;
+    for binding in root_bindings(database, host_tenant, host_column)? {
+        let [_, root_column] = binding;
+        if parent_bindings.contains(&binding)
+            && has_key_over(database, root_column.table(database), &[root_column])?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The column pairs of `foreign_key` with its tenant keys paired first. The
 /// columns other than the tenant keys keep their order on each side and are
 /// paired by position, which undoes a key that swaps a tenant key with
@@ -179,6 +231,15 @@ impl<DB: DatabaseLike> ForeignKeyRule for TenantLocalReference<DB> {
                 && pairs_tenants(database, wider, host_tenant, parent_tenant)?
                 && checks_every_row_of(database, wider, foreign_key)?
             {
+                return Ok(());
+            }
+        }
+        for (host_column, parent_column) in key_pairs(database, foreign_key)? {
+            if share_root_row(
+                database,
+                (host_tenant, host_column),
+                (parent_tenant, parent_column),
+            )? {
                 return Ok(());
             }
         }

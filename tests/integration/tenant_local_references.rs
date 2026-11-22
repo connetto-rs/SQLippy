@@ -15,6 +15,9 @@ fn deployment() -> Deployment {
         .with_tenant_key("public", "documents", "organization_id")
         .with_tenant_key("public", "apps", "organization_id")
         .with_tenant_key("public", "app_installations", "organization_id")
+        .with_tenant_key("public", "resources", "organization_id")
+        .with_tenant_key("public", "parents", "organization_id")
+        .with_tenant_key("public", "children", "organization_id")
         .with_tenant_key("billing", "Invoices", "Org")
 }
 
@@ -196,6 +199,80 @@ fn a_key_into_the_tenant_table_itself_pairs_the_tenant_with_its_identifier() {
     };
     assert_eq!(objects(&sql("organization_id")), Vec::<String>::new());
     assert_eq!(objects(&sql("publisher_id")).len(), 1);
+}
+
+const RESOURCES: &str = "CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL,
+      UNIQUE (organization_id, id));";
+
+const PARENTS: &str = "CREATE TABLE parents (id INT PRIMARY KEY, organization_id INT NOT NULL,
+      kind INT NOT NULL, UNIQUE (id, kind),
+      FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id));";
+
+#[test]
+fn a_key_between_rows_pinned_to_one_row_of_a_shared_root_is_clean() {
+    for children in [
+        "CREATE TABLE children (id INT PRIMARY KEY REFERENCES parents (id),
+           organization_id INT NOT NULL,
+           FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id));",
+        "CREATE TABLE children (id INT PRIMARY KEY, organization_id INT NOT NULL, kind INT NOT NULL,
+           FOREIGN KEY (id, kind) REFERENCES parents (id, kind),
+           FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id));",
+        "CREATE TABLE children (id INT PRIMARY KEY, organization_id INT NOT NULL,
+           parent_id INT NOT NULL REFERENCES parents (id),
+           FOREIGN KEY (organization_id, parent_id) REFERENCES resources (organization_id, id));",
+        // MATCH FULL checks a row whose tenant key is NULL and whose identifier is not.
+        "CREATE TABLE children (id INT PRIMARY KEY REFERENCES parents (id), organization_id INT,
+           FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id) MATCH FULL);",
+    ] {
+        assert_eq!(
+            objects(&format!("{RESOURCES} {PARENTS} {children}")),
+            Vec::<String>::new(),
+            "{children}"
+        );
+    }
+}
+
+#[test]
+fn a_shared_root_that_does_not_pin_both_rows_to_one_tenant_is_reported() {
+    let extension = "CREATE TABLE children (id INT PRIMARY KEY REFERENCES parents (id),
+        organization_id INT NOT NULL,
+        FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id));";
+    for sql in [
+        format!(
+            "{RESOURCES} {PARENTS} CREATE TABLE children (id INT PRIMARY KEY REFERENCES parents (id),
+               organization_id INT NOT NULL);"
+        ),
+        // Without a key on the identifier alone, one identifier names a row of each tenant.
+        format!(
+            "CREATE TABLE resources (id INT, organization_id INT NOT NULL,
+               PRIMARY KEY (organization_id, id)); {PARENTS} {extension}"
+        ),
+        // MATCH SIMPLE skips a row whose tenant key is NULL.
+        format!(
+            "{RESOURCES} {PARENTS} CREATE TABLE children (id INT PRIMARY KEY REFERENCES parents (id),
+               organization_id INT,
+               FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id));"
+        ),
+        // A column other than the tenant key is bound to the tenant of the root.
+        format!(
+            "{RESOURCES} {PARENTS} CREATE TABLE children (id INT PRIMARY KEY REFERENCES parents (id),
+               organization_id INT NOT NULL, owner_id INT NOT NULL,
+               FOREIGN KEY (owner_id, id) REFERENCES resources (organization_id, id));"
+        ),
+        // Each table is pinned to a row of another root.
+        format!(
+            "{RESOURCES} CREATE TABLE ownables (id INT PRIMARY KEY, organization_id INT NOT NULL,
+               UNIQUE (organization_id, id));
+             CREATE TABLE parents (id INT PRIMARY KEY, organization_id INT NOT NULL,
+               FOREIGN KEY (organization_id, id) REFERENCES ownables (organization_id, id));
+             {extension}"
+        ),
+    ] {
+        assert!(
+            objects(&sql).contains(&"children.children_id_fkey".to_owned()),
+            "{sql}"
+        );
+    }
 }
 
 #[test]
