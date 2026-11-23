@@ -3,7 +3,7 @@
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::key_support::holds_through_references,
+    rules::{json_support::holds_json_document, key_support::holds_through_references},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
 use sql_traits::{
@@ -31,6 +31,10 @@ fn rejects_empty<DB: DatabaseLike>(
 /// constraint verifying it is not empty, its own or that of a column a
 /// foreign key forces its values to equal.
 ///
+/// A textual column a check holds to a JSON document, with `json_valid` or
+/// `IS JSON`, never stores the empty string, since no JSON document is
+/// empty.
+///
 /// # Example
 ///
 /// ```rust
@@ -54,6 +58,10 @@ fn rejects_empty<DB: DatabaseLike>(
 /// )
 /// .unwrap();
 /// assert!(constrainer.validate_schema(&referencing).is_ok());
+///
+/// // Valid: a JSON document, as SQLite stores one
+/// let document = ParserDB::parse::<GenericDialect>("CREATE TABLE events (payload TEXT CHECK (json_valid(payload)));").unwrap();
+/// assert!(constrainer.validate_schema(&document).is_ok());
 /// ```
 pub struct EmptyTextAllowed<DB>(std::marker::PhantomData<DB>);
 
@@ -98,7 +106,9 @@ impl<DB: DatabaseLike> ColumnRule for EmptyTextAllowed<DB> {
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         if !column.data_type(database).is_textual(database)
-            || holds_through_references(database, column, |source| rejects_empty(database, source))?
+            || holds_through_references(database, column, |source| {
+                Ok(rejects_empty(database, source)? || holds_json_document(database, source)?)
+            })?
         {
             return Ok(());
         }
