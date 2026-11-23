@@ -17,8 +17,9 @@ use sqlparser::ast::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{function_rules::readable, walk_support::walk},
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
 };
@@ -36,6 +37,8 @@ rule_definition!(
     /// column named `new` or `old` collides only in a trigger function. A
     /// name that only a relation of unknown columns could hold, such as a
     /// function in `FROM` sql-traits cannot describe, is not reported.
+    ///
+    /// The rule does not run on SQLite, which has no stored functions.
     ///
     /// # Example
     ///
@@ -66,7 +69,9 @@ rule_definition!(
 CREATE FUNCTION find_note(id integer) RETURNS integer LANGUAGE plpgsql AS $$ DECLARE result integer; BEGIN SELECT id INTO result FROM notes WHERE notes.id = find_note.id; RETURN result; END $$;",
         good: "CREATE TABLE notes (id integer PRIMARY KEY);\n\
 CREATE FUNCTION find_note(requested_id integer) RETURNS integer LANGUAGE plpgsql AS $$ DECLARE result integer; BEGIN SELECT notes.id INTO result FROM notes WHERE notes.id = requested_id; RETURN result; END $$;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// A name a column and a variable both answer to.

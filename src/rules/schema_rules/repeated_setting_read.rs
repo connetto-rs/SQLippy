@@ -6,6 +6,7 @@ use sql_traits::traits::DatabaseLike;
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Value, Visitor};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -64,6 +65,8 @@ impl Visitor for Settings {
 /// Policies are not counted because the credential convention spells the
 /// credential inline in each policy. Reads with different literal keys or
 /// missing-value flags are separate, and dynamic arguments are not counted.
+///
+/// The rule does not run on SQLite, which has no configuration settings.
 ///
 /// # Example
 ///
@@ -125,6 +128,10 @@ CREATE FUNCTION second() RETURNS UUID LANGUAGE sql AS $$ SELECT actor_id() $$;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

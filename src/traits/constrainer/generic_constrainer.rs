@@ -206,14 +206,16 @@ fn enabled<'a, R: Rule + ?Sized>(
     })
 }
 
-/// Registered rules above `allow` that do not run for lack of a declaration.
+/// Registered rules that run on `engine` and above `allow` but do not run for
+/// lack of a declaration.
 fn inactive<R: Rule + ?Sized>(
     registered: &[Registered<R>],
     deployment: &Deployment,
+    engine: Engine,
 ) -> impl Iterator<Item = InactiveRule> {
     registered
         .iter()
-        .filter(|entry| entry.level > Level::Allow)
+        .filter(move |entry| entry.level > Level::Allow && entry.rule.engines().contains(&engine))
         .filter_map(|entry| {
             missing_declaration(entry.rule.as_ref(), deployment).map(|missing| InactiveRule {
                 rule: entry.rule.metadata(),
@@ -358,15 +360,15 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         self.deployment = deployment;
     }
 
-    pub(crate) fn inactive_rules(&self) -> Vec<InactiveRule> {
+    pub(crate) fn inactive_rules(&self, engine: Engine) -> Vec<InactiveRule> {
         let deployment = &self.deployment;
-        inactive(&self.tables, deployment)
-            .chain(inactive(&self.columns, deployment))
-            .chain(inactive(&self.foreign_keys, deployment))
-            .chain(inactive(&self.schemas, deployment))
-            .chain(inactive(&self.functions, deployment))
-            .chain(inactive(&self.queries, deployment))
-            .chain(inactive(&self.scripts, deployment))
+        inactive(&self.tables, deployment, engine)
+            .chain(inactive(&self.columns, deployment, engine))
+            .chain(inactive(&self.foreign_keys, deployment, engine))
+            .chain(inactive(&self.schemas, deployment, engine))
+            .chain(inactive(&self.functions, deployment, engine))
+            .chain(inactive(&self.queries, deployment, engine))
+            .chain(inactive(&self.scripts, deployment, engine))
             .collect()
     }
 

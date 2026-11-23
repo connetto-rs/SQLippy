@@ -29,6 +29,7 @@ use sqlparser::{
 
 use crate::{
     deployment::Deployment,
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -146,6 +147,8 @@ use crate::{
 /// the body's filters hold the column the arm returns of that row equal to
 /// the column.
 ///
+/// The rule does not run on SQLite, which has no stored functions.
+///
 /// # Example
 ///
 /// ```rust
@@ -210,6 +213,10 @@ REVOKE EXECUTE ON FUNCTION doc_count() FROM PUBLIC;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

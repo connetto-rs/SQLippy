@@ -4,8 +4,9 @@ use sql_traits::traits::DatabaseLike;
 use sqlparser::ast::Statement;
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::script_support::{Guard, Object, ScriptState, creation},
     traits::{Constrainer, GenericConstrainer, Reporter, ScriptRule},
 };
@@ -22,6 +23,9 @@ rule_definition!(
     /// keeping that owner, who can then rewrite it, and the grants on it.
     /// The order is read from the script, since the built schema keeps only
     /// the last definition.
+    ///
+    /// The rule does not run on SQLite, which has no object replacement through
+    /// `CREATE OR REPLACE`.
     ///
     /// # Example
     ///
@@ -54,7 +58,9 @@ CREATE OR REPLACE VIEW public.answers AS SELECT 42 AS answer;",
 CREATE OR REPLACE FUNCTION application.answer() RETURNS INT\n\
 LANGUAGE sql SET search_path = pg_catalog, pg_temp AS $$ SELECT 42 $$;\n\
 CREATE OR REPLACE VIEW application.answers AS SELECT 42 AS answer;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> ScriptRule for ReplacementWithoutTrustedCreation<DB> {

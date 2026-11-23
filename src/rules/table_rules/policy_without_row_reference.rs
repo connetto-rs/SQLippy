@@ -7,6 +7,7 @@ use sql_traits::{
 use sqlparser::ast::CreatePolicyType;
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -29,6 +30,8 @@ use crate::{
 /// judged, since a session gate there only narrows what permissive policies
 /// grant. Constant clauses are left to `tautological_policy` and
 /// `unsatisfiable_policy`.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -77,6 +80,10 @@ impl<DB> Rule for PolicyWithoutRowReference<DB> {
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

@@ -15,6 +15,7 @@ use sqlparser::{
 use crate::rules::walk_support::walk;
 use crate::{
     deployment::Declaration,
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -95,6 +96,8 @@ impl Visitor for BodyReads<'_> {
 /// `PUBLIC` and the declared anonymous and app roles. The column is matched
 /// by name, so the rule is `pedantic`.
 ///
+/// The rule does not run on SQLite, which has no stored functions.
+///
 /// # Example
 ///
 /// ```rust
@@ -160,6 +163,10 @@ CREATE FUNCTION user_docs() RETURNS SETOF TEXT LANGUAGE sql SECURITY DEFINER SET
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

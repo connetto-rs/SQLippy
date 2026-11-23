@@ -4,6 +4,7 @@ use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::CreatePolicyCommand;
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{is_tautology, reads_row},
@@ -16,6 +17,8 @@ use crate::{
 /// Without `WITH CHECK`, PostgreSQL checks new rows against `USING`. An
 /// explicit `WITH CHECK (true)` replaces that check, so a caller can write
 /// rows `USING` would never show them.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -73,6 +76,10 @@ CREATE POLICY own ON notes FOR UPDATE USING (owner = current_setting('app.user_i
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

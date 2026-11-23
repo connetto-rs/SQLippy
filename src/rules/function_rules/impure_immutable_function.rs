@@ -4,6 +4,7 @@ use sql_traits::traits::{DatabaseLike, FunctionLike, TableLike};
 use sqlparser::ast::FunctionBehavior;
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::function_rules::unreadable_body,
@@ -17,6 +18,8 @@ use crate::{
 /// generated column built on it keeps the value it computed, so a function
 /// whose result can change goes stale there. Bodies whose reads cannot be
 /// known are skipped.
+///
+/// The rule does not run on SQLite, which has no stored functions.
 ///
 /// # Example
 ///
@@ -71,6 +74,10 @@ CREATE FUNCTION rate() RETURNS NUMERIC LANGUAGE sql STABLE SET search_path = pg_
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

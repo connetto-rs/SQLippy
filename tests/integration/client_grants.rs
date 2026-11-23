@@ -348,7 +348,7 @@ fn a_rule_missing_its_declaration_is_listed_once_and_never_runs() {
     assert!(constrainer.validate_schema(&database).is_ok());
 
     constrainer.set_rule_level("truncate_granted_to_app_role", Level::Allow);
-    assert!(constrainer.inactive_rules().is_empty());
+    assert!(constrainer.inactive_rules(Engine::PostgreSql).is_empty());
 }
 
 #[test]
@@ -356,7 +356,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
     let mut constrainer = DefaultConstrainer::<ParserDB>::default();
     assert_eq!(
         constrainer
-            .inactive_rules()
+            .inactive_rules(Engine::PostgreSql)
             .iter()
             .map(|inactive| inactive.rule().name)
             .collect::<Vec<_>>(),
@@ -388,7 +388,7 @@ fn the_default_constrainer_runs_the_grant_rules_at_their_group_levels() {
     constrainer.set_deployment(supabase());
     assert_eq!(
         constrainer
-            .inactive_rules()
+            .inactive_rules(Engine::PostgreSql)
             .iter()
             .map(|inactive| inactive.rule().name)
             .collect::<Vec<_>>(),
@@ -468,10 +468,10 @@ fn a_deployment_declaring_every_fact_empty_leaves_no_rule_inactive() {
             .with_cluster_bootstrap(&parse("")),
     );
     assert!(
-        constrainer.inactive_rules().is_empty(),
+        constrainer.inactive_rules(Engine::PostgreSql).is_empty(),
         "{:?}",
         constrainer
-            .inactive_rules()
+            .inactive_rules(Engine::PostgreSql)
             .iter()
             .map(|inactive| inactive.rule().name)
             .collect::<Vec<_>>()

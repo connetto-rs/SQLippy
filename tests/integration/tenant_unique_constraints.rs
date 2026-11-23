@@ -75,7 +75,7 @@ fn the_rule_waits_for_a_credential_and_warns_by_default() {
     let mut constrainer = DefaultConstrainer::<ParserDB>::default();
     assert!(
         constrainer
-            .inactive_rules()
+            .inactive_rules(Engine::PostgreSql)
             .iter()
             .any(|inactive| inactive.rule().name
                 == "unscoped_unique_constraint_on_row_level_security_table")

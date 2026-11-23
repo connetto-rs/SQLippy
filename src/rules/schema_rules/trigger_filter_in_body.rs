@@ -12,8 +12,9 @@ use sqlparser::ast::{
 use sqlparser_plpgsql::embedded::{DeclarationKind, Node, NodeKind};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         plpgsql_flow_support::plpgsql_block,
         trigger_support::{evaluated, row, row_trigger},
@@ -22,7 +23,7 @@ use crate::{
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a row-level `AFTER` trigger whose
     /// function starts by returning when a condition on `NEW` and `OLD` holds,
     /// a condition the trigger's `WHEN` clause could test instead.
@@ -30,6 +31,8 @@ schema_rule!(
     /// A condition reading anything but `NEW` and `OLD` fields, or holding a
     /// subquery, stays in the body, as does one reading `OLD` for an `INSERT`
     /// trigger or `NEW` for a `DELETE` trigger, which `WHEN` cannot read.
+    ///
+    /// The rule does not run on SQLite, which has no trigger functions.
     ///
     /// # Example
     ///
@@ -54,6 +57,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&in_when).is_ok());
     /// ```
     TriggerFilterInBody,
+    register_schema_rule,
     LintGroup::Perf,
     "A trigger function that returns at once when a condition on NEW and OLD holds is still called for every row, while the same condition in the trigger's WHEN clause skips the call.",
     Some("https://www.postgresql.org/docs/18/sql-createtrigger.html"),
@@ -66,7 +70,9 @@ CREATE TRIGGER record_note AFTER UPDATE ON notes FOR EACH ROW EXECUTE FUNCTION r
 CREATE TABLE audit_events (event_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, note_id integer NOT NULL);\n\
 CREATE FUNCTION record_note() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO audit_events (note_id) VALUES (NEW.id); RETURN NEW; END $$;\n\
 CREATE TRIGGER record_note AFTER UPDATE ON notes FOR EACH ROW WHEN (OLD.body IS DISTINCT FROM NEW.body) EXECUTE FUNCTION record_note();",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// Which trigger rows a condition reads, stopping at anything a `WHEN`

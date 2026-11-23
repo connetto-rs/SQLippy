@@ -5,6 +5,7 @@ use std::{cell::LazyCell, collections::BTreeSet};
 use sql_traits::traits::{DatabaseLike, FunctionLike, GrantLike, RoleMembershipLike, TableLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -21,6 +22,8 @@ use crate::{
 /// on: a privilege on a table or its columns, or `EXECUTE` on a function,
 /// granted to a client role `WITH GRANT OPTION`, and membership in a role
 /// granted to one `WITH ADMIN OPTION`.
+///
+/// The rule does not run on SQLite, which has no roles or privileges.
 ///
 /// # Example
 ///
@@ -78,6 +81,10 @@ GRANT SELECT ON docs TO authenticated;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

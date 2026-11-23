@@ -3,6 +3,7 @@
 use sql_traits::traits::{DatabaseLike, FunctionLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
@@ -16,6 +17,8 @@ use crate::{
 /// first, replaces the relations it names while it runs with its owner's
 /// rights. A body written `RETURN <expression>` or as a `BEGIN ATOMIC` block is
 /// bound when the function is created and is not reported.
+///
+/// The rule does not run on SQLite, which has no stored functions.
 ///
 /// # Example
 ///
@@ -75,6 +78,10 @@ CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER SET sea
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

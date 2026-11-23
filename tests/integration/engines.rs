@@ -86,6 +86,52 @@ fn the_rule_list_names_the_engines_each_rule_runs_on() {
     assert_eq!(engines("unbounded_text_column"), Engine::ALL.as_slice());
 }
 
+#[test]
+fn a_rule_off_on_the_engine_is_not_listed_as_inactive() {
+    let mut constrainer = DefaultConstrainer::<ParserDB>::default();
+    for group in LintGroup::ALL {
+        constrainer.set_group_level(group, Level::Warn);
+    }
+    let schema = "CREATE TABLE t (id INTEGER PRIMARY KEY);";
+    let inactive = |database: &ParserDB| -> Vec<&'static str> {
+        constrainer
+            .diagnostics(database)
+            .into_iter()
+            .filter_map(|error| match error {
+                Error::Inactive(inactive) => Some(inactive.rule().name),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(inactive(&postgresql(schema)).contains(&"nullable_tenant_key"));
+    assert_eq!(inactive(&sqlite(schema)), ["tenant_local_reference"]);
+}
+
+#[test]
+fn a_rule_reading_roles_pooling_or_replication_runs_only_on_postgresql() {
+    let postgresql_only = [
+        Declaration::AppRoles,
+        Declaration::ClientRoles,
+        Declaration::Pooled,
+        Declaration::BinaryReplicationTables,
+        Declaration::ClusterBootstrap,
+    ];
+    for rule in DefaultConstrainer::<ParserDB>::default().rules() {
+        if rule
+            .requires()
+            .iter()
+            .any(|declaration| postgresql_only.contains(declaration))
+        {
+            assert_eq!(
+                rule.engines(),
+                [Engine::PostgreSql].as_slice(),
+                "{}",
+                rule.metadata().name
+            );
+        }
+    }
+}
+
 /// The resolution of the one `unbounded_text_column` finding on `database`.
 fn unbounded_text_resolution(database: &ParserDB) -> String {
     let constrainer: GenericConstrainer<ParserDB> = UnboundedTextColumn::default().into();

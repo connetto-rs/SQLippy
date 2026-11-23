@@ -5,6 +5,7 @@ use sqlparser::ast::CreatePolicyType;
 
 use crate::{
     deployment::Declaration,
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -32,6 +33,8 @@ use crate::{
 /// in `FROM` and the derived tables, views and `WITH` items it joins the same
 /// way, and a `WITH RECURSIVE` item by its non-recursive term. The rule is
 /// inactive until the deployment declares a credential.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -96,6 +99,10 @@ CREATE POLICY d ON posts FOR DELETE USING (owner = current_setting('app.user_id'
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

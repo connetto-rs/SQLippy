@@ -6,6 +6,7 @@ use sql_traits::traits::{DatabaseLike, FunctionLike};
 use sqlparser::ast::{FunctionBehavior, LockType, Query, SetExpr, Statement, Visitor};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{expression_site_support::body_statements, walk_support::walk},
@@ -22,6 +23,8 @@ use crate::{
 /// The rule reads SQL, `BEGIN ATOMIC` and PL/pgSQL bodies, writes inside
 /// `WITH` items included, and skips bodies that do not parse. It sits beside
 /// `impure_immutable_function`, which judges reads.
+///
+/// The rule does not run on SQLite, which has no stored functions.
 ///
 /// # Example
 ///
@@ -72,6 +75,10 @@ impl<DB> Rule for WritingNonVolatileFunction<DB> {
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

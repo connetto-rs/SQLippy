@@ -7,6 +7,7 @@ use sqlparser::ast::{BinaryOperator, Expr, Visitor};
 
 use crate::{
     deployment::{Declaration, Deployment},
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::walk_support::walk,
@@ -24,6 +25,8 @@ use crate::{
 /// there hides rows, nor a credential on the matched side or passed through a
 /// function first, such as one escaping its wildcards. The rule is inactive
 /// until the deployment declares a credential.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -80,6 +83,10 @@ CREATE POLICY own ON docs USING (owner = current_setting('app.user_id', true));"
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

@@ -14,6 +14,7 @@ use sql_traits::{
 use sqlparser::ast::{Expr, Query, SelectItem, SetExpr, TableFactor, Value, Visit, Visitor};
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -547,6 +548,8 @@ impl<DB: DatabaseLike> Visitor for PerRowCalls<'_, '_, '_, '_, DB> {
 /// reaching them. A set-returning function in `FROM` that PostgreSQL inlines
 /// into the query calling it does not count.
 ///
+/// The rule does not run on SQLite, which has no stored functions.
+///
 /// # Example
 ///
 /// ```rust
@@ -613,6 +616,10 @@ CREATE POLICY team_read ON docs USING (team IN (SELECT my_teams()));",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

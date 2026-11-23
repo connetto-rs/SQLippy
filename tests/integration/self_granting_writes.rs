@@ -526,7 +526,7 @@ fn the_rule_waits_for_a_credential_and_warns_by_default() {
     let mut constrainer = DefaultConstrainer::<ParserDB>::default();
     assert!(
         constrainer
-            .inactive_rules()
+            .inactive_rules(Engine::PostgreSql)
             .iter()
             .any(|inactive| inactive.rule().name == "self_granting_write")
     );

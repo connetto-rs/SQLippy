@@ -4,6 +4,7 @@ use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::CreatePolicyType;
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{Command, applied, covers, is_tautology, policy_roles},
@@ -17,6 +18,8 @@ use crate::{
 /// permissive policy decides every command and role it covers. A narrower
 /// permissive policy is dead only when such policies cover every command,
 /// role and clause it applies to.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -77,6 +80,10 @@ CREATE POLICY own ON docs AS RESTRICTIVE FOR SELECT USING (owner = current_setti
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

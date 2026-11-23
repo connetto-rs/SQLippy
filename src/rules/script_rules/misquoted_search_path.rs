@@ -7,8 +7,9 @@ use sqlparser::ast::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::script_support::{is_search_path, misquoted_path},
     traits::{Constrainer, GenericConstrainer, Reporter, ScriptRule},
 };
@@ -22,6 +23,8 @@ rule_definition!(
     /// read. PostgreSQL quotes each string of the list as one name, so
     /// `'pg_catalog, pg_temp'` misquotes as `"pg_catalog, pg_temp"` does.
     /// Allow a schema genuinely named with a comma with `allow_statement`.
+    ///
+    /// The rule does not run on SQLite, which has no configuration settings.
     ///
     /// # Example
     ///
@@ -47,7 +50,9 @@ rule_definition!(
     RuleExample {
         bad: "SET search_path = \"pg_catalog, pg_temp\";",
         good: "SET search_path = pg_catalog, pg_temp;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// The misquoted name of each `search_path` value `statement` sets.

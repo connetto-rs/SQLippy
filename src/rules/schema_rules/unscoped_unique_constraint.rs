@@ -8,6 +8,7 @@ use sql_traits::{
 
 use crate::{
     deployment::{Declaration, Deployment},
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{authority_support::authority_columns, index_support::read_columns},
@@ -89,6 +90,8 @@ fn label<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
 /// `SECURITY DEFINER` function makes for a caller are not considered. The
 /// rule needs declared credentials.
 ///
+/// The rule does not run on SQLite, which has no row-level security.
+///
 /// # Example
 ///
 /// ```rust
@@ -152,6 +155,10 @@ CREATE UNIQUE INDEX users_email ON users (owner, email);",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

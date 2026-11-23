@@ -4,6 +4,7 @@ use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::{CreatePolicyType, Expr, Value};
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{Command, applied, is_tautology},
@@ -23,6 +24,8 @@ use crate::{
 /// true`, admits every row the condition seems to filter. A permissive
 /// `USING (true)` is a deliberate public read and is not reported, and an
 /// always-true permissive `WITH CHECK` is judged by `tautological_with_check`.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -80,6 +83,10 @@ CREATE POLICY own ON docs FOR SELECT USING (owner = current_setting('app.user_id
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

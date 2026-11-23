@@ -4,6 +4,7 @@ use sql_traits::traits::{DatabaseLike, RoleLike, RoleMembershipLike};
 
 use crate::{
     deployment::{ClusterBootstrap, Declaration, Membership, RoleAttributes},
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
@@ -17,8 +18,9 @@ use crate::{
 /// The roles the deployment's cluster bootstrap provisions are the
 /// cluster's. The schema checked is the bootstrap followed by the
 /// database-local schema, and a schema checked without the bootstrap is
-/// reported only for what it creates, grants and sets. The rule is inactive
-/// until the deployment declares a cluster bootstrap.
+/// reported only for what it creates, grants and sets. The rule does not run
+/// on SQLite, which has no roles, and is inactive until the deployment
+/// declares a cluster bootstrap.
 ///
 /// # Example
 ///
@@ -83,6 +85,10 @@ GRANT SELECT ON documents TO authenticated;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

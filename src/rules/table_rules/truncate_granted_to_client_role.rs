@@ -8,6 +8,7 @@ use sqlparser::ast::Action;
 
 use crate::{
     deployment::Declaration,
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::{ClientRoles, grantee_list, grants_privilege},
@@ -19,6 +20,8 @@ const SOURCE: Option<&str> = Some("https://www.postgresql.org/docs/current/ddl-r
 
 /// Struct defining a rule that reports `TRUNCATE` on a row-level-security
 /// table granted to `PUBLIC` or a declared anonymous role.
+///
+/// The rule does not run on SQLite, which has no roles or privileges.
 ///
 /// # Example
 ///
@@ -45,7 +48,8 @@ pub struct TruncateGrantedToAnonymousRole<DB>(std::marker::PhantomData<DB>);
 /// Struct defining a rule that reports `TRUNCATE` on a row-level-security
 /// table granted to a declared app role and to no anonymous role.
 ///
-/// The rule is inactive until the deployment declares an app role.
+/// The rule does not run on SQLite, which has no roles or privileges, and is
+/// inactive until the deployment declares an app role.
 ///
 /// # Example
 ///
@@ -118,6 +122,10 @@ GRANT DELETE ON notes TO anon;",
         };
         &METADATA
     }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
+    }
 }
 
 impl<DB> Rule for TruncateGrantedToAppRole<DB> {
@@ -140,6 +148,10 @@ GRANT DELETE ON notes TO authenticated;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

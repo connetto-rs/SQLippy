@@ -25,8 +25,9 @@ use sqlparser_plpgsql::{
 use sqlstate::pg::INSUFFICIENT_PRIVILEGE;
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         function_reach_support::reachable_functions,
         literal_support::text_literal,
@@ -38,7 +39,7 @@ use crate::{
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a trigger on a table with row
     /// level security that repeats the authorization a policy for the same
     /// command makes, by deciding with the result of a helper the policy
@@ -47,6 +48,9 @@ schema_rule!(
     /// The policy already decides who may run the command on which rows,
     /// so the trigger repeats the decision on a second path, which can
     /// drift from the policy that tools and readers consult.
+    ///
+    /// The rule does not run on SQLite, which has no row-level security
+    /// policies.
     ///
     /// # Example
     ///
@@ -72,6 +76,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&schema("length(NEW.body) > 0")).is_ok());
     /// ```
     AuthorizationInTrigger,
+    register_schema_rule,
     LintGroup::Pedantic,
     "A trigger that repeats the authorization check a row level security policy already makes for the same command is a second authorization path, which can drift from the policy that tools and readers consult and makes the effective access rule harder to read.",
     Some("https://www.postgresql.org/docs/18/ddl-rowsecurity.html"),
@@ -90,7 +95,9 @@ ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
 CREATE FUNCTION owns_note(subject_id uuid) RETURNS boolean LANGUAGE sql STABLE AS $$ SELECT subject_id = NULLIF(current_setting('app.user_id', true), '')::uuid $$;\n\
 CREATE POLICY own_insert ON notes FOR INSERT TO app WITH CHECK (owns_note(owner_id));\n\
 GRANT INSERT ON notes TO app;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// The commands a trigger event runs under.

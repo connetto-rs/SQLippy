@@ -12,6 +12,7 @@ use sqlparser::ast::{BinaryOperator, Expr, Query, Visitor};
 use crate::rules::walk_support::walk;
 use crate::{
     deployment::Deployment,
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{derives_from_caller, walked_clauses},
@@ -101,6 +102,8 @@ impl<DB: DatabaseLike> Visitor for Memberships<'_, '_, DB> {
 /// small set updated with its row is a legitimate use, so the rule is
 /// `pedantic`.
 ///
+/// The rule does not run on SQLite, which has no row-level security policies.
+///
 /// # Example
 ///
 /// ```rust
@@ -155,6 +158,10 @@ CREATE POLICY edit ON docs USING (owner = current_setting('app.user_id', true));
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

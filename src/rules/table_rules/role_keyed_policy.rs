@@ -9,6 +9,7 @@ use sqlparser::ast::{Expr, Owner, Visitor};
 use crate::rules::walk_support::walk;
 use crate::{
     deployment::Declaration,
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{is_role_read, walked_clauses},
@@ -20,6 +21,8 @@ use crate::{
 ///
 /// PostgreSQL resolves those names once, at `CREATE POLICY`, so the policy
 /// applies to whichever role ran the migration and never follows the caller.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -44,8 +47,8 @@ pub struct PolicyToCreatingRole<DB>(std::marker::PhantomData<DB>);
 /// deployment.
 ///
 /// Every caller shares the pooled role, so such a policy admits every caller
-/// or none. The rule is inactive until the deployment declares whether it is
-/// pooled.
+/// or none. The rule does not run on SQLite, which has no roles, and is
+/// inactive until the deployment declares whether it is pooled.
 ///
 /// # Example
 ///
@@ -116,6 +119,10 @@ CREATE POLICY readable ON notes TO authenticated USING (true);",
         };
         &METADATA
     }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
+    }
 }
 
 impl<DB> Rule for RoleKeyedPolicyWhenPooled<DB> {
@@ -136,6 +143,10 @@ CREATE POLICY own ON notes USING (owner = current_setting('app.user_id', true));
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

@@ -5,8 +5,9 @@ use sqlparser::ast::{Query, Statement, TriggerPeriod};
 use sqlparser_plpgsql::embedded::{Node, NodeKind};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         expression_site_support::is_null_literal,
         function_reach_support::Reach,
@@ -19,7 +20,7 @@ use crate::{
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a row-level `BEFORE INSERT`
     /// trigger whose function writes another table.
     ///
@@ -54,6 +55,8 @@ schema_rule!(
     /// `BEFORE INSERT` row trigger of the table, must return `NEW` with its
     /// host columns unwritten, so the row checked is the row written.
     ///
+    /// The rule does not run on SQLite, which has no trigger functions.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -76,6 +79,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&schema("AFTER")).is_ok());
     /// ```
     BeforeTriggerWritesOtherTable,
+    register_schema_rule,
     LintGroup::Suspicious,
     "A row-level BEFORE INSERT trigger runs for rows that are never inserted, such as those ON CONFLICT DO NOTHING skips, and its write to another table stays. A trigger that writes the row elsewhere and returns NULL makes the INSERT report no row, so RETURNING yields nothing and ON CONFLICT never sees it.",
     Some("https://www.postgresql.org/docs/18/trigger-definition.html"),
@@ -88,7 +92,9 @@ CREATE TRIGGER record_note BEFORE INSERT ON notes FOR EACH ROW EXECUTE FUNCTION 
 CREATE TABLE audit_events (event_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, note_id integer NOT NULL);\n\
 CREATE FUNCTION record_note() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO audit_events (note_id) VALUES (NEW.id); RETURN NEW; END $$;\n\
 CREATE TRIGGER record_note AFTER INSERT ON notes FOR EACH ROW EXECUTE FUNCTION record_note();",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// Whether a path has written another table.

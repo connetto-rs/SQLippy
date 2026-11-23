@@ -10,6 +10,7 @@ use sqlparser::ast::{CreatePolicyType, Expr, TriggerPeriod, Value};
 
 use crate::{
     deployment::{Declaration, Deployment},
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -81,6 +82,8 @@ rule_definition!(
     ///
     /// `TRUNCATE` fires no row trigger and is not read.
     ///
+    /// The rule does not run on SQLite, which has no row-level security policies.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -123,7 +126,8 @@ GRANT DELETE ON public.documents TO authenticated;\n\
 CREATE POLICY delete_documents ON public.documents FOR DELETE TO authenticated\n\
 USING (owner_name = current_user);",
     },
-    Basis::Declared
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// The writes judged, with their keyword and the stage whose rows a client

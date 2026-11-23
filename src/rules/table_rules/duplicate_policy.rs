@@ -4,6 +4,7 @@ use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::{CreatePolicyCommand, CreatePolicyType, Expr};
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{policy_support::policy_roles, volatility_support::runs_volatile},
@@ -23,6 +24,8 @@ use crate::{
 /// restrictive policy separately on writes. On PostgreSQL 18.6 a restrictive
 /// `WITH CHECK (random() < 0.5)` accepted 5032 of ten thousand inserts alone
 /// and 2475 with a copy, so such copies are not reported.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -82,6 +85,10 @@ CREATE POLICY tenant_floor ON docs AS RESTRICTIVE USING (tenant = 1);",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

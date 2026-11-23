@@ -14,6 +14,7 @@ use sqlparser::{
 use crate::rules::walk_support::walk;
 use crate::{
     deployment::{Declaration, Deployment},
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::function_reach_support::{Reach, Sought, calls, literal_key},
@@ -184,6 +185,8 @@ impl Sought for Credentials {
 /// calls. A write built in dynamic SQL is not seen. It needs the
 /// deployment's credentials.
 ///
+/// The rule does not run on SQLite, which has no configuration settings.
+///
 /// # Example
 ///
 /// ```rust
@@ -232,6 +235,10 @@ impl<DB> Rule for CredentialSettingWrite<DB> {
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

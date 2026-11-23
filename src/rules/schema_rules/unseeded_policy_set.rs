@@ -10,6 +10,7 @@ use sqlparser::ast::{Expr, JoinConstraint, JoinOperator, Select, TableFactor, Vi
 
 use crate::{
     deployment::{Declaration, Deployment},
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -140,6 +141,8 @@ fn check_body<DB: DatabaseLike, V: Visit + ?Sized>(
 ///
 /// A global seed can return other subjects' authority rows. Reviewed global reference-data sets can use [`Constrainer::allow_function`].
 ///
+/// The rule does not run on SQLite, which has no row-level security policies.
+///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
@@ -188,6 +191,10 @@ impl<DB> Rule for UnseededPolicySet<DB> {
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
     fn requires(&self) -> &'static [Declaration] {
         &[Declaration::Credentials]

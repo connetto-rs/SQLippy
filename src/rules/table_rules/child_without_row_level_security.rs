@@ -6,6 +6,7 @@ use sql_traits::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, TableRule},
@@ -17,6 +18,8 @@ use crate::{
 /// A query naming the child directly applies only the child's own policies.
 /// A foreign child is reported as well, and since PostgreSQL refuses
 /// row-level security on a foreign table, its fix keeps it out of reach.
+///
+/// The rule does not run on SQLite, which has no row-level security.
 ///
 /// # Example
 ///
@@ -70,6 +73,10 @@ ALTER TABLE events_2026 ENABLE ROW LEVEL SECURITY;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

@@ -17,8 +17,9 @@ use sqlparser::ast::{
 use sqlparser_plpgsql::embedded::{Node, NodeKind};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         cte_support::stored_table,
         expression_site_support::body_statements,
@@ -47,6 +48,8 @@ rule_definition!(
     /// `SELECT ... FOR UPDATE` locked, by the same filter, is
     /// exempt. A `STABLE` or `IMMUTABLE` function reads with its caller's
     /// snapshot at every level and is reported whatever it checks.
+    ///
+    /// The rule does not run on SQLite, which has no stored functions.
     ///
     /// # Example
     ///
@@ -85,7 +88,9 @@ BEGIN\n  PERFORM pg_advisory_xact_lock(41001);\n  IF (SELECT count(*) FROM slots
         good: "CREATE TABLE slots (id integer PRIMARY KEY);\n\
 CREATE FUNCTION reserve_slot(slot_id integer) RETURNS void LANGUAGE plpgsql VOLATILE AS $$\n\
 BEGIN\n  IF current_setting('transaction_isolation') <> 'read committed' THEN\n    RAISE EXCEPTION 'read committed required';\n  END IF;\n  PERFORM pg_advisory_xact_lock(41001);\n  IF (SELECT count(*) FROM slots) >= 10 THEN\n    RAISE EXCEPTION 'capacity reached';\n  END IF;\n  INSERT INTO slots VALUES (slot_id);\nEND $$;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// The catalog functions taking an advisory lock.

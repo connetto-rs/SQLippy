@@ -8,6 +8,7 @@ use sql_traits::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{Command, held_by_name, policy_roles},
@@ -98,6 +99,8 @@ fn hidden_from<DB: DatabaseLike>(
 /// naming the caller inside the view, so policies on it, like those on
 /// session settings, work through it.
 ///
+/// The rule does not run on SQLite, which has no row-level security policies.
+///
 /// # Example
 ///
 /// ```rust
@@ -155,6 +158,10 @@ CREATE VIEW doc_ids WITH (security_invoker = true) AS SELECT id FROM docs;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

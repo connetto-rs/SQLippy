@@ -9,6 +9,7 @@ use sql_traits::{
 use sqlparser::ast::{Expr, FunctionBehavior, Query, Visitor};
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{policy_support::walked_clauses, walk_support::walk},
@@ -159,6 +160,8 @@ impl<DB: DatabaseLike> Visitor for Calls<'_, DB> {
 /// and 90.343 ms with one on PostgreSQL 17, and 150.870 ms and 89.093 ms on
 /// PostgreSQL 18.
 ///
+/// The rule does not run on SQLite, which has no row-level security policies.
+///
 /// # Example
 ///
 /// ```rust
@@ -219,6 +222,10 @@ CREATE POLICY own ON docs USING(can_read(owner_id));",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

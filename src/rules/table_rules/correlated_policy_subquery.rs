@@ -3,6 +3,7 @@
 use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{correlated_subqueries, walked_clauses},
@@ -15,6 +16,8 @@ use crate::{
 /// PostgreSQL evaluates a policy expression for each candidate row. A
 /// subquery referencing the row runs again for each of them, while a subquery
 /// that only selects the caller's keys is computed once and compared.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -75,6 +78,10 @@ CREATE POLICY p ON docs USING (team_id IN (SELECT team_id FROM team_user WHERE u
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

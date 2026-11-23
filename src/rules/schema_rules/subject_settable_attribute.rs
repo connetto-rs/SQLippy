@@ -14,6 +14,7 @@ use sqlparser::ast::{
 use crate::rules::walk_support::walk;
 use crate::{
     deployment::{Declaration, Deployment},
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -230,6 +231,8 @@ fn fixed_in_every<DB: DatabaseLike>(
 /// catalog proves it with its access list. A guarding trigger is not
 /// recognised and takes [`Constrainer::allow_policy`].
 ///
+/// The rule does not run on SQLite, which has no row-level security policies.
+///
 /// # Example
 ///
 /// ```rust
@@ -304,6 +307,10 @@ CREATE POLICY own ON profiles FOR UPDATE USING (id = current_setting('app.user_i
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

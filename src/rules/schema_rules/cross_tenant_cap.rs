@@ -13,6 +13,7 @@ use sqlparser::ast::{
 
 use crate::{
     deployment::{Declaration, Deployment},
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -249,6 +250,8 @@ impl<DB: DatabaseLike> Visitor for TenantJoins<'_, '_, DB> {
 
 /// Reports request-selected tenant rows joined without matching tenant keys, allowing another tenant's cap to change authorization.
 ///
+/// The rule does not run on SQLite, which has no stored functions.
+///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
@@ -293,6 +296,10 @@ impl<DB> Rule for CrossTenantCap<DB> {
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

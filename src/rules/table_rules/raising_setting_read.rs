@@ -8,6 +8,7 @@ use sqlparser::{
 };
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::function_reach_support::{Reach, Sought, builtin_schema, literal_key, split},
@@ -128,6 +129,8 @@ impl Sought for RaisingReads {
 /// user's own function and is followed like any other call. A setting named
 /// by an expression and a read built in dynamic SQL are not seen.
 ///
+/// The rule does not run on SQLite, which has no configuration settings.
+///
 /// # Example
 ///
 /// ```rust
@@ -182,6 +185,10 @@ CREATE POLICY own ON notes USING (owner = current_setting('app.user_id', true));
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

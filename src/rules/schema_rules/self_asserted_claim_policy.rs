@@ -12,6 +12,7 @@ use sqlparser::ast::{Expr, Query, SetExpr, Visitor};
 use crate::rules::walk_support::walk;
 use crate::{
     deployment::{Declaration, Deployment},
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -163,6 +164,8 @@ impl<DB: DatabaseLike> Visitor for SelfAssertedRead<'_, '_, DB> {
 /// until one is declared, and a declared column whose table the schema does
 /// not hold fails the lookup.
 ///
+/// The rule does not run on SQLite, which has no row-level security policies.
+///
 /// # Example
 ///
 /// ```rust
@@ -221,6 +224,10 @@ CREATE POLICY own ON docs USING (owner = current_setting('app.user_id', true));"
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

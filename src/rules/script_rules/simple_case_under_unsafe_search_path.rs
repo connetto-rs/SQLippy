@@ -6,8 +6,9 @@ use sql_traits::traits::DatabaseLike;
 use sqlparser::ast::{Expr, Statement, Visitor};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         script_support::{Untrusted, untrusted},
         walk_support::walk,
@@ -24,6 +25,8 @@ rule_definition!(
     /// found through the path, and no syntax qualifies it. The path is
     /// tracked as `unqualified_name_under_unsafe_search_path` tracks it, in
     /// statements and in string function bodies.
+    ///
+    /// The rule does not run on SQLite, which has no configuration settings.
     ///
     /// # Example
     ///
@@ -53,7 +56,9 @@ rule_definition!(
 SELECT CASE 1 WHEN 1 THEN 'matched' ELSE 'other' END;",
         good: "SET search_path = pg_catalog, pg_temp;\n\
 SELECT CASE 1 WHEN 1 THEN 'matched' ELSE 'other' END;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// Collects every simple `CASE` a statement evaluates.

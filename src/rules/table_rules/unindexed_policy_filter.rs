@@ -6,6 +6,7 @@ use sql_traits::{
 };
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -26,6 +27,8 @@ use crate::{
 /// policy subquery filters. A column counts as indexed when an index without
 /// a predicate, a unique constraint or the primary key leads with it. A small
 /// or rarely read table is a legitimate exception.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -84,6 +87,10 @@ CREATE INDEX notes_owner ON notes (owner);",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

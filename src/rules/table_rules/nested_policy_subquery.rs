@@ -10,6 +10,7 @@ use sqlparser::ast::{Expr, Query, Visitor};
 
 use crate::rules::walk_support::walk;
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{Command, held_by_name, policy_roles, reads_row, walked_clauses},
@@ -116,6 +117,8 @@ fn nested_policy<'db, DB: DatabaseLike>(
 /// compare the row to the caller without a subquery is cheap to read and is
 /// not reported.
 ///
+/// The rule does not run on SQLite, which has no row-level security policies.
+///
 /// # Example
 ///
 /// ```rust
@@ -186,6 +189,10 @@ CREATE POLICY members_p ON members USING (member = current_setting('app.user_id'
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

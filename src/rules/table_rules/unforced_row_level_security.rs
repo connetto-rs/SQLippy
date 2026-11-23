@@ -3,6 +3,7 @@
 use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
@@ -10,6 +11,8 @@ use crate::{
 
 /// Struct defining a rule that reports a table whose row-level security its
 /// owner bypasses.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -71,6 +74,10 @@ ALTER TABLE notes FORCE ROW LEVEL SECURITY;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

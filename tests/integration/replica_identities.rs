@@ -72,7 +72,7 @@ fn a_selected_partitioned_table_checks_its_partitions_and_not_itself() {
 #[test]
 fn the_rule_is_inactive_without_binary_replicated_tables() {
     let constrainer: GenericConstrainer<ParserDB> = UnstreamableReplicaIdentity::default().into();
-    let inactive = constrainer.inactive_rules();
+    let inactive = constrainer.inactive_rules(Engine::PostgreSql);
     assert_eq!(inactive.len(), 1);
     assert_eq!(inactive[0].rule().name, "unstreamable_replica_identity");
     assert_eq!(inactive[0].missing(), Declaration::BinaryReplicationTables);

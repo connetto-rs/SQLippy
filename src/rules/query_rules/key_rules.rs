@@ -17,8 +17,9 @@ use sqlparser::ast::{
 
 use crate::rules::walk_support::walk;
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         key_support::{
             Instance, determined, equalities, equality_keys, instances, named, order_of, references,
@@ -188,7 +189,7 @@ impl<DB: DatabaseLike> QueryRule for UnorderedLimit<DB> {
     }
 }
 
-query_rule!(
+rule_definition!(
     /// Struct defining a rule that reports `DISTINCT ON` whose `ORDER BY` is
     /// missing or leaves ties within a group.
     ///
@@ -198,6 +199,8 @@ query_rule!(
     /// both kept different rows before and after an `UPDATE`, and
     /// `ORDER BY prio, id DESC` kept the same rows both times. The rule uses
     /// the unique-key check of [`UnorderedLimit`].
+    ///
+    /// The rule does not run on SQLite, which has no `DISTINCT ON` clause.
     ///
     /// # Example
     ///
@@ -217,6 +220,7 @@ query_rule!(
     /// assert!(check("SELECT DISTINCT ON (prio) id FROM t ORDER BY prio, id").is_ok());
     /// ```
     UnorderedDistinctOn,
+    register_query_rule,
     LintGroup::Suspicious,
     "DISTINCT ON keeps the first row of each group, and an ORDER BY that leaves ties within the group lets that row change between runs.",
     Some("https://www.postgresql.org/docs/current/sql-select.html"),
@@ -225,7 +229,9 @@ query_rule!(
 SELECT DISTINCT ON (priority) id FROM tasks ORDER BY priority;",
         good: "CREATE TABLE tasks (id INT PRIMARY KEY, priority INT);\n\
 SELECT DISTINCT ON (priority) id FROM tasks ORDER BY priority, id;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> QueryRule for UnorderedDistinctOn<DB> {

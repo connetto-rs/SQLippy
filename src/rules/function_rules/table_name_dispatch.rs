@@ -11,8 +11,9 @@ use sqlparser_plpgsql::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         literal_support::text_literal, plpgsql_flow_support::plpgsql_block,
         trigger_support::evaluated, walk_support::walk,
@@ -24,6 +25,8 @@ rule_definition!(
     /// Struct defining a rule that reports a trigger function comparing
     /// `TG_TABLE_NAME` or `TG_RELNAME` with a table name to choose what it
     /// does.
+    ///
+    /// The rule does not run on SQLite, which has no trigger functions.
     ///
     /// # Example
     ///
@@ -65,7 +68,9 @@ CREATE FUNCTION record_note() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSER
 CREATE FUNCTION record_folder() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO events VALUES (NEW.id, 'folder'); RETURN NEW; END $$;\n\
 CREATE TRIGGER record_note AFTER INSERT ON notes FOR EACH ROW EXECUTE FUNCTION record_note();\n\
 CREATE TRIGGER record_folder AFTER INSERT ON folders FOR EACH ROW EXECUTE FUNCTION record_folder();",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// Whether `ident` reaches `TG_TABLE_NAME` or `TG_RELNAME` in `namespace`.

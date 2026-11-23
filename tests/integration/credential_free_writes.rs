@@ -585,7 +585,7 @@ fn the_rule_waits_for_a_declared_credential() {
     let constrainer: GenericConstrainer<ParserDB> = CredentialFreeWrite::default().into();
     assert_eq!(
         constrainer
-            .inactive_rules()
+            .inactive_rules(Engine::PostgreSql)
             .iter()
             .map(InactiveRule::missing)
             .collect::<Vec<_>>(),
@@ -596,7 +596,7 @@ fn the_rule_waits_for_a_declared_credential() {
             .with_credential("current_setting(")
             .is_err()
     );
-    let shown = constrainer.inactive_rules()[0].to_string();
+    let shown = constrainer.inactive_rules(Engine::PostgreSql)[0].to_string();
     assert!(shown.contains("credential expressions"), "{shown}");
 }
 

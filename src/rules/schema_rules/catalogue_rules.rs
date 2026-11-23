@@ -21,8 +21,10 @@ use crate::{
 
 const WIKI: Option<&str> = Some("https://wiki.postgresql.org/wiki/Don%27t_Do_This");
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a `CREATE RULE`.
+    ///
+    /// The rule does not run on SQLite, which has no query rewrite rules.
     ///
     /// # Example
     ///
@@ -40,6 +42,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&ParserDB::parse::<PostgreSqlDialect>(schema).unwrap()).is_ok());
     /// ```
     QueryRewriteRule,
+    register_schema_rule,
     LintGroup::Suspicious,
     "A rule rewrites the query before it runs, so it re-evaluates expressions such as defaults and sequences and does not do what it looks like it does.",
     WIKI,
@@ -51,7 +54,9 @@ CREATE RULE log_insert AS ON INSERT TO entries DO ALSO INSERT INTO audit VALUES 
 CREATE TABLE audit (id INT);\n\
 CREATE FUNCTION record_insert() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN INSERT INTO audit VALUES (NEW.id); RETURN NEW; END $$;\n\
 CREATE TRIGGER log_insert AFTER INSERT ON entries FOR EACH ROW EXECUTE FUNCTION record_insert();",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for QueryRewriteRule<DB> {
@@ -90,9 +95,11 @@ impl<DB: DatabaseLike> SchemaRule for QueryRewriteRule<DB> {
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a table created with `INHERITS`.
     /// A partition is not reported.
+    ///
+    /// The rule does not run on SQLite, which has no table inheritance.
     ///
     /// # Example
     ///
@@ -109,6 +116,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&ParserDB::parse::<PostgreSqlDialect>(schema).unwrap()).is_ok());
     /// ```
     TableInheritance,
+    register_schema_rule,
     LintGroup::Suspicious,
     "Indexes, unique constraints and foreign keys apply to single tables, not to their inheritance children, so a key unique in the parent repeats across children and a foreign key to the parent misses the children's rows.",
     Some("https://www.postgresql.org/docs/current/ddl-inherit.html"),
@@ -117,7 +125,9 @@ schema_rule!(
 CREATE TABLE child () INHERITS (parent);",
         good: "CREATE TABLE parent (id INT PRIMARY KEY);\n\
 CREATE TABLE child (id INT PRIMARY KEY);",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for TableInheritance<DB> {
@@ -558,11 +568,13 @@ impl<DB: DatabaseLike> SchemaRule for ReservedKeywordIdentifier<DB> {
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a check or foreign key added
     /// `NOT VALID` and never validated. A `NOT ENFORCED` constraint is never
     /// validated either, but PostgreSQL refuses to validate it, so the rule
     /// leaves it alone.
+    ///
+    /// The rule does not run on SQLite, which has no `NOT VALID` constraints.
     ///
     /// # Example
     ///
@@ -581,6 +593,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&validated).is_ok());
     /// ```
     UnvalidatedConstraint,
+    register_schema_rule,
     LintGroup::Suspicious,
     "A constraint added NOT VALID checks only rows written afterwards, so rows that existed before it are never checked until it is validated.",
     Some("https://www.postgresql.org/docs/current/sql-altertable.html"),
@@ -590,7 +603,9 @@ ALTER TABLE counts ADD CONSTRAINT positive CHECK (amount > 0) NOT VALID;",
         good: "CREATE TABLE counts (amount INT);\n\
 ALTER TABLE counts ADD CONSTRAINT positive CHECK (amount > 0) NOT VALID;\n\
 ALTER TABLE counts VALIDATE CONSTRAINT positive;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for UnvalidatedConstraint<DB> {
@@ -632,9 +647,11 @@ impl<DB: DatabaseLike> SchemaRule for UnvalidatedConstraint<DB> {
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports `CREATE` on a schema granted to
     /// `PUBLIC`.
+    ///
+    /// The rule does not run on SQLite, which has no schema privileges.
     ///
     /// # Example
     ///
@@ -649,13 +666,16 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&usage).is_ok());
     /// ```
     PublicSchemaCreate,
+    register_schema_rule,
     LintGroup::Suspicious,
     "Any role holding CREATE on a schema can create objects in it that shadow others through search_path.",
     Some("https://www.postgresql.org/docs/current/ddl-schemas.html"),
     RuleExample {
         bad: "GRANT CREATE ON SCHEMA public TO PUBLIC;",
         good: "GRANT USAGE ON SCHEMA public TO PUBLIC;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for PublicSchemaCreate<DB> {
@@ -692,8 +712,10 @@ impl<DB: DatabaseLike> SchemaRule for PublicSchemaCreate<DB> {
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports an `UNLOGGED` table.
+    ///
+    /// The rule does not run on SQLite, which has no `UNLOGGED` tables.
     ///
     /// # Example
     ///
@@ -708,13 +730,16 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&logged).is_ok());
     /// ```
     UnloggedTable,
+    register_schema_rule,
     LintGroup::Pedantic,
     "An unlogged table is truncated after a crash or unclean shutdown, is not replicated to standbys, and is left out of logical replication.",
     Some("https://www.postgresql.org/docs/current/sql-createtable.html"),
     RuleExample {
         bad: "CREATE UNLOGGED TABLE entries (id INT);",
         good: "CREATE TABLE entries (id INT);",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for UnloggedTable<DB> {

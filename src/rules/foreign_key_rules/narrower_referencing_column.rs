@@ -3,6 +3,7 @@
 use sql_traits::traits::{ColumnLike, DataTypeLike, DatabaseLike, ForeignKeyLike, TableLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
@@ -19,6 +20,8 @@ use crate::{
 /// precision rounds a timestamp off its parent. A referencing column without
 /// a limit, or with a wider one, holds every parent key and is not reported,
 /// and columns of different types are left to `incompatible_foreign_key`.
+///
+/// The rule does not run on SQLite, which has no enforced type modifiers.
 ///
 /// # Example
 ///
@@ -72,6 +75,10 @@ impl<DB> Rule for NarrowerReferencingColumn<DB> {
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 
