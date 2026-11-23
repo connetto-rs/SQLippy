@@ -204,7 +204,7 @@ fn a_deployment_declaring_no_source_runs_the_rule_and_finds_nothing() {
     constrainer.set_deployment(deployment().without_self_asserted_sources());
     assert!(
         constrainer
-            .inactive_rules()
+            .inactive_rules(Engine::PostgreSql)
             .iter()
             .all(|inactive| inactive.rule().name != "self_asserted_claim_policy")
     );

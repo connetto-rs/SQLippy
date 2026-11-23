@@ -6,6 +6,7 @@ use sqlparser::ast::{TriggerEvent, TriggerPeriod};
 
 use crate::{
     deployment::{Declaration, WriteEvent},
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::authority_support::authority_columns,
@@ -13,6 +14,8 @@ use crate::{
 };
 
 /// Reports authority tables lacking declared audit coverage because permission changes need an audit trail.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
@@ -69,6 +72,10 @@ CREATE TRIGGER audit_grants AFTER INSERT OR UPDATE OR DELETE ON direct_grants FO
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

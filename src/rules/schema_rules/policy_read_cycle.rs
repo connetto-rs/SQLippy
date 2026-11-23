@@ -11,6 +11,7 @@ use sql_traits::{
 use sqlparser::ast::CreatePolicyCommand;
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -346,6 +347,8 @@ impl<'db, DB: DatabaseLike> Analysis<'db, DB> {
 /// view applies its owner's, and none when the owner bypasses row-level
 /// security, owns the table without `FORCE`, or is not named in the schema.
 ///
+/// The rule does not run on SQLite, which has no row-level security policies.
+///
 /// # Example
 ///
 /// ```rust
@@ -406,6 +409,10 @@ CREATE POLICY own ON memberships USING (member_id = current_setting('app.user_id
         };
         &METADATA
     }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
+    }
 }
 
 impl<DB: DatabaseLike> SchemaRule for PolicyReadCycle<DB> {
@@ -445,6 +452,8 @@ impl<DB: DatabaseLike> SchemaRule for PolicyReadCycle<DB> {
 /// PostgreSQL expands it without error today. A membership the schema does not
 /// show, such as `GRANT role TO role`, can join the roles and turn the cycle
 /// into the recursion error [`PolicyReadCycle`] reports.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -511,6 +520,10 @@ CREATE POLICY o ON owners FOR SELECT TO reader USING (id = current_setting('app.
         };
         &METADATA
     }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
+    }
 }
 
 impl<DB: DatabaseLike> SchemaRule for LatentPolicyReadCycle<DB> {
@@ -552,6 +565,8 @@ impl<DB: DatabaseLike> SchemaRule for LatentPolicyReadCycle<DB> {
 /// function reads as the role expanding the policy, a `SECURITY DEFINER` as its
 /// owner, and nothing when the owner bypasses row-level security, owns the
 /// table without `FORCE`, or is not named in the schema.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -630,6 +645,10 @@ CREATE POLICY pa ON a USING (in_b(id));",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

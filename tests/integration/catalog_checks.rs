@@ -378,10 +378,10 @@ fn bypass_rules_wait_for_a_declared_client_role() {
             ),
         ]
     );
-    let shown = constrainer.inactive_rules()[0].to_string();
+    let shown = constrainer.inactive_rules(Engine::PostgreSql)[0].to_string();
     assert!(shown.contains("anonymous or app roles"), "{shown}");
     constrainer.set_deployment(Deployment::default().with_anonymous_role("anon"));
-    assert!(constrainer.inactive_rules().is_empty());
+    assert!(constrainer.inactive_rules(Engine::PostgreSql).is_empty());
 }
 
 #[test]
@@ -464,13 +464,13 @@ fn a_role_keyed_clause_is_reported_only_when_the_deployment_is_pooled() {
     let constrainer: GenericConstrainer<ParserDB> = RoleKeyedPolicyWhenPooled::default().into();
     assert_eq!(
         constrainer
-            .inactive_rules()
+            .inactive_rules(Engine::PostgreSql)
             .iter()
             .map(InactiveRule::missing)
             .collect::<Vec<_>>(),
         [Declaration::Pooled]
     );
-    let shown = constrainer.inactive_rules()[0].to_string();
+    let shown = constrainer.inactive_rules(Engine::PostgreSql)[0].to_string();
     assert!(shown.contains("pooled"), "{shown}");
 }
 

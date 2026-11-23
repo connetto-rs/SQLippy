@@ -6,6 +6,7 @@ use sql_traits::{
 };
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -32,6 +33,8 @@ use crate::{
 /// cast of a textual column to `text` kept the index and is not reported,
 /// and `CREATE INDEX ON docs (lower(owner))` turned the read into an index
 /// scan.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -91,6 +94,10 @@ CREATE POLICY own ON notes USING (lower(owner) = current_setting('app.user_id', 
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

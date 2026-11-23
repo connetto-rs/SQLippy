@@ -6,6 +6,7 @@ use sql_traits::traits::{DatabaseLike, TableLike};
 use sqlparser::ast::Action;
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::{ClientRoles, column_grants_on, grantee_list, grants_privilege},
@@ -14,6 +15,8 @@ use crate::{
 
 /// Struct defining a rule that reports `REFERENCES` on a row-level-security
 /// table granted to a client role, on the table or on its columns.
+///
+/// The rule does not run on SQLite, which has no roles or privileges.
 ///
 /// # Example
 ///
@@ -69,6 +72,10 @@ GRANT SELECT ON accounts TO anon;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

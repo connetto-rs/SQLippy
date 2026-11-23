@@ -4,6 +4,7 @@ use sql_traits::traits::{DatabaseLike, ForeignKeyLike, PolicyLike, TableLike};
 use sqlparser::ast::{CreatePolicyCommand, ReferentialAction};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
@@ -16,6 +17,8 @@ use crate::{
 ///
 /// Referential actions bypass row-level security, so changing a parent
 /// removes or rewrites child rows those policies would refuse the caller.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -73,6 +76,10 @@ CREATE POLICY children_delete ON children FOR DELETE USING (false);",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

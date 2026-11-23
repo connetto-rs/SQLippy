@@ -544,7 +544,7 @@ fn the_rule_needs_declared_credentials() {
     assert!(constrainer.validate_schema(&database).is_ok());
     assert_eq!(
         constrainer
-            .inactive_rules()
+            .inactive_rules(Engine::PostgreSql)
             .iter()
             .map(|inactive| inactive.rule().name)
             .collect::<Vec<_>>(),

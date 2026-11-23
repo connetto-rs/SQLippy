@@ -9,6 +9,7 @@ use sqlparser::ast::{BinaryOperator, CreatePolicyType, Expr, InTarget};
 
 use crate::{
     deployment::{Declaration, Deployment},
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -304,6 +305,8 @@ fn scopes_another_table<DB: DatabaseLike>(
 /// `PUBLIC`, lack the command's privilege on the column, as
 /// [`SubjectSettableAttribute`](crate::rules::SubjectSettableAttribute) reads it.
 ///
+/// The rule does not run on SQLite, which has no row-level security policies.
+///
 /// # Example
 ///
 /// ```rust
@@ -382,6 +385,10 @@ CREATE POLICY join_team ON members FOR INSERT WITH CHECK (member = current_setti
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

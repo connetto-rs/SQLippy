@@ -19,6 +19,7 @@ use sqlparser::ast::{
 
 use crate::{
     deployment::Declaration,
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -188,6 +189,9 @@ impl<DB: DatabaseLike> Visitor for Maintained<'_, '_, DB> {
 
 /// Reports definer-maintained columns clients can forge with direct writes.
 ///
+/// The rule does not run on SQLite, which has no roles or privileges, and is
+/// inactive until the deployment declares a client role.
+///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
@@ -233,6 +237,10 @@ impl<DB> Rule for DefinerMaintainedColumnClientWritable<DB> {
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

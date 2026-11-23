@@ -7,6 +7,7 @@ use sql_traits::{
 use sqlparser::ast::{CreatePolicyType, Expr, InTarget, UnaryOperator};
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{Command, applied, held_by_name, is_tautology, policy_roles, unnested},
@@ -86,6 +87,8 @@ fn granted_to_everyone<DB: DatabaseLike>(
 /// deliberately public resource with a moderation block list is a legitimate
 /// use.
 ///
+/// The rule does not run on SQLite, which has no row-level security policies.
+///
 /// # Example
 ///
 /// ```rust
@@ -148,6 +151,10 @@ CREATE POLICY access ON docs FOR SELECT USING (owner = current_setting('app.user
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

@@ -5,6 +5,7 @@ use sqlparser::ast::CreatePolicyType;
 
 use crate::{
     deployment::Declaration,
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -29,6 +30,8 @@ use crate::{
 /// `is_public` or `true`, is a deliberate public read and is not reported.
 /// Writes are judged by `credential_free_write`. The rule is inactive until
 /// the deployment declares a credential.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -92,6 +95,10 @@ CREATE POLICY r ON posts FOR SELECT USING (owner = current_setting('app.user_id'
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

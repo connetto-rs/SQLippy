@@ -13,8 +13,9 @@ use sqlparser::ast::{
 };
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         policy_read_support::sublink_reads,
         policy_support::{acting, may_aggregate, walked_clauses},
@@ -260,6 +261,8 @@ rule_definition!(
     /// the table does not enable it or the role is exempt from it. Privileges
     /// count unless revoked, since defaults may grant them outside the schema.
     ///
+    /// The rule does not run on SQLite, which has no row-level security policies.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -302,7 +305,9 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
 ALTER TABLE members ENABLE ROW LEVEL SECURITY;\n\
 CREATE POLICY own ON members FOR SELECT TO authenticated USING (uid = current_user);\n\
 CREATE POLICY team ON docs TO authenticated USING (team IN (SELECT team FROM members WHERE uid = current_user));",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// A table a policy reads, the row changes that let more rows pass and the

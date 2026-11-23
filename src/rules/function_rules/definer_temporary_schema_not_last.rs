@@ -3,6 +3,7 @@
 use sql_traits::traits::{DatabaseLike, FunctionLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
@@ -15,6 +16,8 @@ use crate::{
 /// unless the path places it, so a caller's temporary table shadows a table
 /// the body names without a schema. A path that names no schema, as `SET
 /// search_path = ''` writes it, searches `pg_temp` even before `pg_catalog`.
+///
+/// The rule does not run on SQLite, which has no stored functions.
 ///
 /// # Example
 ///
@@ -76,6 +79,10 @@ CREATE FUNCTION doc_count() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER SET sea
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

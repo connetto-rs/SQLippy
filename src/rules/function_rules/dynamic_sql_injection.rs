@@ -12,6 +12,7 @@ use sql_traits::{
 use sqlparser::ast::{BinaryOperator, Expr, Value};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{function_rules::unreadable_body, policy_support::unnested},
@@ -44,6 +45,8 @@ const QUOTING: [&str; 3] = ["quote_ident", "quote_literal", "quote_nullable"];
 /// EXECUTE s` is reported, and a variable only ever assigned constant or
 /// quoted text is not. A variable an argument, a query or a command fills
 /// is reported as the value it splices in.
+///
+/// The rule does not run on SQLite, which has no stored functions.
 ///
 /// # Example
 ///
@@ -108,6 +111,10 @@ CREATE FUNCTION named(p TEXT) RETURNS BIGINT LANGUAGE plpgsql AS $$ DECLARE r BI
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

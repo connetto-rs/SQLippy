@@ -6,6 +6,7 @@ use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::CreatePolicyType;
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{Command, held_roles, policy_roles},
@@ -27,6 +28,8 @@ use crate::{
 /// condition never decides anything. A restrictive policy over every command
 /// beside a permissive policy for one of them is the usual floor of a
 /// read-only table and is not reported.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -87,6 +90,10 @@ CREATE POLICY everyone ON docs FOR SELECT USING (true);",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

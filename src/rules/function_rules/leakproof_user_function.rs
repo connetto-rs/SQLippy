@@ -3,6 +3,7 @@
 use sql_traits::traits::{DatabaseLike, FunctionLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
@@ -18,6 +19,8 @@ use crate::{
 /// Whether a body is free of such channels cannot be read from its text, so
 /// every marking is reported for audit. PostgreSQL's own functions in
 /// `pg_catalog` are not reported.
+///
+/// The rule does not run on SQLite, which has no stored functions.
 ///
 /// # Example
 ///
@@ -69,6 +72,10 @@ impl<DB> Rule for LeakproofUserFunction<DB> {
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

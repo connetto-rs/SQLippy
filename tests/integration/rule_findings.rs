@@ -95,7 +95,7 @@ pub fn inactive_declarations<C: Constrainer<Database = ParserDB>>(
     constrainer: &C,
 ) -> Vec<(&'static str, Declaration)> {
     constrainer
-        .inactive_rules()
+        .inactive_rules(Engine::PostgreSql)
         .iter()
         .map(|inactive| (inactive.rule().name, inactive.missing()))
         .collect()

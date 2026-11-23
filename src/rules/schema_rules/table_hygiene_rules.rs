@@ -15,9 +15,12 @@ use crate::{
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a table with row-level security
     /// enabled and no policy.
+    ///
+    /// The rule does not run on SQLite, which has no row-level security
+    /// policies.
     ///
     /// # Example
     ///
@@ -36,6 +39,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&covered).is_ok());
     /// ```
     RowLevelSecurityWithoutPolicies,
+    register_schema_rule,
     LintGroup::Suspicious,
     "With row-level security enabled and no policy, PostgreSQL denies every row to every role but the owner, so the table looks empty to the application.",
     Some("https://www.postgresql.org/docs/current/ddl-rowsecurity.html"),
@@ -45,7 +49,9 @@ ALTER TABLE audit ENABLE ROW LEVEL SECURITY;",
         good: "CREATE TABLE audit (id INT);\n\
 ALTER TABLE audit ENABLE ROW LEVEL SECURITY;\n\
 CREATE POLICY audit_read ON audit FOR SELECT USING (true);",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for RowLevelSecurityWithoutPolicies<DB> {
@@ -73,12 +79,15 @@ impl<DB: DatabaseLike> SchemaRule for RowLevelSecurityWithoutPolicies<DB> {
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports two or more permissive policies
     /// applying to the same command for the same role.
     ///
     /// A policy for `PUBLIC` applies to every role, and a policy for a role
     /// applies to the roles that inherit it.
+    ///
+    /// The rule does not run on SQLite, which has no row-level security
+    /// policies.
     ///
     /// # Example
     ///
@@ -101,6 +110,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&merged).is_ok());
     /// ```
     MultiplePermissivePolicies,
+    register_schema_rule,
     LintGroup::Perf,
     "PostgreSQL evaluates every permissive policy that applies to a role and command for each row, so several of them cost more than one policy holding the whole condition.",
     Some(
@@ -114,7 +124,9 @@ CREATE POLICY admin ON orders FOR SELECT USING (is_admin);",
         good: "CREATE TABLE orders (owner TEXT, is_admin BOOL);\n\
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;\n\
 CREATE POLICY own_or_admin ON orders FOR SELECT USING (owner = current_setting('app.user_id', true) OR is_admin);",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for MultiplePermissivePolicies<DB> {
@@ -265,9 +277,12 @@ impl<DB: DatabaseLike> SchemaRule for RegColumnType<DB> {
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a table with the
     /// `autovacuum_enabled` storage parameter turned off.
+    ///
+    /// The rule does not run on SQLite, which has no autovacuum storage
+    /// parameters.
     ///
     /// # Example
     ///
@@ -285,13 +300,16 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&default).is_ok());
     /// ```
     AutovacuumDisabledTable,
+    register_schema_rule,
     LintGroup::Perf,
     "Without autovacuum, dead tuples accumulate and the table bloats, and its statistics go stale.",
     Some("https://github.com/supabase/splinter/blob/main/lints/0030_autovacuum_disabled.sql"),
     RuleExample {
         bad: "CREATE TABLE staging (id INT) WITH (autovacuum_enabled = false);",
         good: "CREATE TABLE staging (id INT);",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for AutovacuumDisabledTable<DB> {

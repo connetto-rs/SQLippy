@@ -3,6 +3,7 @@
 use sql_traits::traits::{DatabaseLike, TableLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::client_reach,
@@ -17,6 +18,8 @@ use crate::{
 /// are `PUBLIC` and the anonymous and app roles of the
 /// [`Deployment`](crate::deployment::Deployment), together with the roles they
 /// inherit.
+///
+/// The rule does not run on SQLite, which has no foreign tables.
 ///
 /// # Example
 ///
@@ -75,6 +78,10 @@ CREATE FOREIGN TABLE private.sales (id INT) SERVER warehouse;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

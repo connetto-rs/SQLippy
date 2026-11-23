@@ -17,6 +17,7 @@ use sqlparser::ast::{
 
 use crate::{
     deployment::Declaration,
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -132,6 +133,9 @@ fn initial_only<DB: DatabaseLike>(
 ///
 /// A policy cannot compare `OLD` with `NEW`, so protecting transitions requires a trigger or excluding set rows in `USING`.
 ///
+/// The rule does not run on SQLite, which has no row-level security policies
+/// or privileges.
+///
 /// ```rust
 /// use sqlippy::prelude::*;
 /// use sqlparser::dialect::PostgreSqlDialect;
@@ -186,6 +190,10 @@ CREATE TRIGGER preserve_revocation BEFORE UPDATE ON tokens FOR EACH ROW EXECUTE 
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

@@ -8,6 +8,7 @@ use sqlparser::ast::Statement;
 
 use crate::{
     deployment::Deployment,
+    engine::Engine,
     error::{AllowedObject, Error, InactiveRule},
     lint::{Level, LintGroup, RegisteredRule},
     traits::{
@@ -88,7 +89,7 @@ pub trait Constrainer: Default {
     ///
     /// An allowance that excuses nothing, because the finding was fixed, the
     /// names do not match, the rule is at [`Level::Allow`] or the rule does
-    /// not run on the schema's [`Engine`](crate::engine::Engine), is reported as
+    /// not run on the schema's [`Engine`], is reported as
     /// [`Error::UnusedAllowance`].
     ///
     /// # Example
@@ -169,7 +170,7 @@ pub trait Constrainer: Default {
     ///
     /// An allowance that excuses nothing, because the policy was fixed, the
     /// names do not match, the rule is at [`Level::Allow`] or the rule does
-    /// not run on the schema's [`Engine`](crate::engine::Engine), is reported as
+    /// not run on the schema's [`Engine`], is reported as
     /// [`Error::UnusedAllowance`].
     fn allow_policy(&mut self, rule: &str, table: TargetName<'_>, policy: &str) {
         self.constrainer_mut()
@@ -209,9 +210,9 @@ pub trait Constrainer: Default {
     /// statement and reports an allowance as [`Error::UnusedAllowance`] when
     /// the rule finds nothing there, because the schema was fixed, the rule
     /// name does not match, the rule is at [`Level::Allow`], the rule does
-    /// not run on the schema's [`Engine`](crate::engine::Engine) or `statement` is not one
-    /// PostgreSQL statement. An application that stops sending
-    /// the statement leaves the allowance unreported.
+    /// not run on the schema's [`Engine`] or `statement` is not one PostgreSQL
+    /// statement. An application that stops sending the statement leaves the
+    /// allowance unreported.
     fn allow_statement(&mut self, rule: &str, statement: &str) {
         self.constrainer_mut().allow_statement(rule, statement);
     }
@@ -233,8 +234,8 @@ pub trait Constrainer: Default {
         self.constrainer_mut().set_deployment(deployment);
     }
 
-    /// Returns every rule above [`Level::Allow`] that does not run because
-    /// the deployment lacks a declaration it reads.
+    /// Returns every rule above [`Level::Allow`] that runs on `engine` and
+    /// does not run because the deployment lacks a declaration it reads.
     ///
     /// # Example
     ///
@@ -243,12 +244,13 @@ pub trait Constrainer: Default {
     ///
     /// let mut constrainer: GenericConstrainer<ParserDB> =
     ///     TruncateGrantedToAppRole::default().into();
-    /// assert_eq!(constrainer.inactive_rules().len(), 1);
+    /// assert_eq!(constrainer.inactive_rules(Engine::PostgreSql).len(), 1);
+    /// assert!(constrainer.inactive_rules(Engine::Sqlite).is_empty());
     /// constrainer.set_deployment(Deployment::default().with_app_role("authenticated"));
-    /// assert!(constrainer.inactive_rules().is_empty());
+    /// assert!(constrainer.inactive_rules(Engine::PostgreSql).is_empty());
     /// ```
-    fn inactive_rules(&self) -> Vec<InactiveRule> {
-        self.constrainer().inactive_rules()
+    fn inactive_rules(&self, engine: Engine) -> Vec<InactiveRule> {
+        self.constrainer().inactive_rules(engine)
     }
 
     /// Returns every registered rule with what it runs on, the level it runs
@@ -288,9 +290,9 @@ pub trait Constrainer: Default {
         self.constrainer().visit(database, sink)
     }
 
-    /// Returns every inactive rule, then every violation raised at `warn` or
-    /// `deny`, every lookup failure and every unused allowance, in traversal
-    /// order.
+    /// Returns every rule inactive on the engine `database` runs on, then
+    /// every violation raised at `warn` or `deny`, every lookup failure and
+    /// every unused allowance, in traversal order.
     ///
     /// # Example
     ///
@@ -307,7 +309,7 @@ pub trait Constrainer: Default {
     /// ```
     fn diagnostics(&self, database: &Self::Database) -> Vec<Error<Self::Database>> {
         let mut diagnostics: Vec<Error<Self::Database>> = self
-            .inactive_rules()
+            .inactive_rules(Engine::of(database))
             .into_iter()
             .map(Error::Inactive)
             .collect();

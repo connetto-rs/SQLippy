@@ -60,10 +60,12 @@ fn reach_reasons<DB: DatabaseLike>(
     reasons
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a `SECURITY DEFINER` function in
     /// an exposed schema that `PUBLIC` or a declared anonymous or app role
     /// can execute.
+    ///
+    /// The rule does not run on SQLite, which has no stored functions.
     ///
     /// # Example
     ///
@@ -84,6 +86,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&closed).is_ok());
     /// ```
     SecurityDefinerFunctionExposed,
+    register_schema_rule,
     LintGroup::Suspicious,
     "A SECURITY DEFINER function runs with its owner's privileges, so a client role that can call it in an exposed schema gets them for whatever the function does.",
     Some(
@@ -93,7 +96,9 @@ schema_rule!(
         bad: "CREATE FUNCTION bump() RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS 'SELECT 1';",
         good: "CREATE FUNCTION bump() RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS 'SELECT 1';\n\
 REVOKE EXECUTE ON FUNCTION bump() FROM PUBLIC;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for SecurityDefinerFunctionExposed<DB> {
@@ -133,7 +138,7 @@ impl<DB: DatabaseLike> SchemaRule for SecurityDefinerFunctionExposed<DB> {
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a schema holding `SECURITY
     /// DEFINER` functions whose owner's default privileges still give
     /// `PUBLIC` `EXECUTE` on the next function it creates there.
@@ -143,6 +148,8 @@ schema_rule!(
     /// built-in grant, since a default limited to a schema can only add to
     /// it. One violation is raised per schema and owner, on its first
     /// definer function.
+    ///
+    /// The rule does not run on SQLite, which has no default privileges.
     ///
     /// # Example
     ///
@@ -165,6 +172,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&revoked_by_default).is_ok());
     /// ```
     DefinerSchemaWithoutDefaultRevoke,
+    register_schema_rule,
     LintGroup::Suspicious,
     "PostgreSQL grants EXECUTE to PUBLIC on every new function unless its creator's default privileges take it away, so revoking each SECURITY DEFINER function one by one leaves the next one callable by every role.",
     Some("https://www.postgresql.org/docs/current/sql-alterdefaultprivileges.html"),
@@ -176,7 +184,9 @@ REVOKE EXECUTE ON FUNCTION private.answer() FROM PUBLIC;",
 CREATE SCHEMA private;\n\
 CREATE FUNCTION private.answer() RETURNS integer LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT 42 $$;\n\
 REVOKE EXECUTE ON FUNCTION private.answer() FROM PUBLIC;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for DefinerSchemaWithoutDefaultRevoke<DB> {
@@ -321,9 +331,11 @@ impl<DB: DatabaseLike> SchemaRule for PublicDefaultPrivilege<DB> {
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports an extension installed in an
     /// exposed schema. `plpgsql` is not reported.
+    ///
+    /// The rule does not run on SQLite, which has no schema-owned extensions.
     ///
     /// # Example
     ///
@@ -343,6 +355,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&private).is_ok());
     /// ```
     ExtensionInExposedSchema,
+    register_schema_rule,
     LintGroup::Suspicious,
     "An extension's functions and objects in a schema clients reach widen what clients can call, and a schema on the search path trusts every role that can create objects in it.",
     Some("https://github.com/supabase/splinter/blob/main/lints/0014_extension_in_public.sql"),
@@ -351,7 +364,9 @@ schema_rule!(
 CREATE EXTENSION pgcrypto WITH SCHEMA public;",
         good: "CREATE SCHEMA extensions;\n\
 CREATE EXTENSION pgcrypto WITH SCHEMA extensions;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for ExtensionInExposedSchema<DB> {
@@ -379,10 +394,12 @@ impl<DB: DatabaseLike> SchemaRule for ExtensionInExposedSchema<DB> {
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a sequence a client role reaches,
     /// through an exposed schema or a `USAGE`, `SELECT` or `UPDATE` grant.
     /// The sequences behind serial and identity columns count too.
+    ///
+    /// The rule does not run on SQLite, which has no sequence objects.
     ///
     /// # Example
     ///
@@ -400,6 +417,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&kept).is_ok());
     /// ```
     ReachableSequence,
+    register_schema_rule,
     LintGroup::Suspicious,
     "SELECT on a sequence reveals its current value and UPDATE or USAGE lets a role advance it, so a client role can read or burn the numbers other tables draw from.",
     Some("https://www.postgresql.org/docs/current/ddl-priv.html"),
@@ -409,7 +427,9 @@ CREATE SEQUENCE private.ticket_seq;\n\
 GRANT USAGE ON SEQUENCE private.ticket_seq TO PUBLIC;",
         good: "CREATE SCHEMA private;\n\
 CREATE SEQUENCE private.ticket_seq;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for ReachableSequence<DB> {
@@ -629,7 +649,7 @@ impl<DB: DatabaseLike> SchemaRule for OwnerRightsViewExposed<DB> {
     }
 }
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a materialized view a client role
     /// reaches, through an exposed schema or a `SELECT` grant, over sources
     /// without row-level security.
@@ -638,6 +658,8 @@ schema_rule!(
     /// reader sees every stored row, whatever grants and policies its sources
     /// carry later. `reachable_materialized_view` reports one reading a
     /// row-level-security table and stays on by default.
+    ///
+    /// The rule does not run on SQLite, which has no materialized views.
     ///
     /// # Example
     ///
@@ -660,6 +682,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&kept).is_ok());
     /// ```
     MaterializedViewExposed,
+    register_schema_rule,
     LintGroup::Restriction,
     "A materialized view cannot have row-level security, so a client reaching it reads every stored row, and later grants or policies on its sources never filter them.",
     Some("https://github.com/supabase/splinter/blob/main/lints/0016_materialized_view_in_api.sql"),
@@ -671,7 +694,9 @@ GRANT SELECT ON public.document_identifiers TO PUBLIC;",
 CREATE TABLE public.documents (identifier INT PRIMARY KEY);\n\
 CREATE MATERIALIZED VIEW private.document_identifiers AS SELECT identifier FROM public.documents;\n\
 REVOKE ALL ON private.document_identifiers FROM PUBLIC;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> SchemaRule for MaterializedViewExposed<DB> {

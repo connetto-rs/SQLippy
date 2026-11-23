@@ -4,6 +4,7 @@ use sql_traits::traits::{DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::{CreatePolicyType, Expr};
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::policy_support::{Command, applied, is_contradiction},
@@ -25,6 +26,8 @@ use crate::{
 /// so neither is reported. A restrictive policy false for every row denies
 /// its commands outright, which is a deliberate lockout, and is not
 /// reported.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -82,6 +85,10 @@ CREATE POLICY own ON docs FOR SELECT USING (owner = current_setting('app.user_id
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

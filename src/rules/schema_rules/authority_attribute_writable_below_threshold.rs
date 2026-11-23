@@ -14,6 +14,7 @@ use sqlparser::ast::{
 
 use crate::{
     deployment::{Declaration, Deployment},
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -372,6 +373,9 @@ fn writable<DB: DatabaseLike>(
 
 /// Reports boolean authority attributes writable at or below the enum threshold they enable, allowing callers to widen their own authority.
 ///
+/// The rule does not run on SQLite, which has no row-level security policies
+/// or privileges.
+///
 /// # Example
 ///
 /// ```rust
@@ -429,6 +433,10 @@ impl<DB> Rule for AuthorityAttributeWritableBelowThreshold<DB> {
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

@@ -18,6 +18,7 @@ use sqlparser::ast::{
 
 use crate::{
     deployment::Declaration,
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
@@ -59,7 +60,8 @@ use crate::{
 /// `ON DELETE RESTRICT` states that the block is intended and is not
 /// reported.
 ///
-/// The rule is inactive until the deployment declares a client role.
+/// The rule does not run on SQLite, which has no roles or privileges, and is
+/// inactive until the deployment declares a client role.
 ///
 /// # Example
 ///
@@ -125,6 +127,10 @@ REVOKE DELETE ON notes FROM authenticated;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

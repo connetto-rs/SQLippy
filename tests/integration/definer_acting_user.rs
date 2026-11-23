@@ -175,7 +175,7 @@ fn the_rule_is_pedantic_and_waits_for_a_credential() {
     let mut constrainer = DefaultConstrainer::<ParserDB>::default();
     assert!(
         constrainer
-            .inactive_rules()
+            .inactive_rules(Engine::PostgreSql)
             .iter()
             .all(|inactive| inactive.rule().name != "definer_takes_acting_user")
     );
@@ -186,7 +186,7 @@ fn the_rule_is_pedantic_and_waits_for_a_credential() {
     constrainer.set_deployment(Deployment::default());
     assert!(
         constrainer
-            .inactive_rules()
+            .inactive_rules(Engine::PostgreSql)
             .iter()
             .any(|inactive| inactive.rule().name == "definer_takes_acting_user")
     );

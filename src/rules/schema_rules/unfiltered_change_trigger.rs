@@ -6,8 +6,9 @@ use sql_traits::traits::{DatabaseLike, Relation, TableLike, TriggerLike};
 use sqlparser::ast::{Expr, Query, Statement, TriggerPeriod, Visitor};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         function_reach_support::Reach,
         plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, walk_block},
@@ -19,7 +20,7 @@ use crate::{
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
 
-schema_rule!(
+rule_definition!(
     /// Struct defining a rule that reports a row-level `AFTER UPDATE`
     /// trigger without a `WHEN` clause whose function writes another table
     /// before any test comparing `OLD` with `NEW`.
@@ -27,6 +28,8 @@ schema_rule!(
     /// An `UPDATE` that leaves a row unchanged still fires the trigger, so
     /// an audit of state changes records a change that did not happen. A
     /// statement-level trigger, which audits the attempt, is not reported.
+    ///
+    /// The rule does not run on SQLite, which has no trigger functions.
     ///
     /// # Example
     ///
@@ -50,6 +53,7 @@ schema_rule!(
     /// assert!(constrainer.validate_schema(&filtered).is_ok());
     /// ```
     UnfilteredChangeTrigger,
+    register_schema_rule,
     LintGroup::Pedantic,
     "An UPDATE that leaves every value unchanged still fires a row-level AFTER UPDATE trigger, so a trigger auditing state changes writes an audit row for a change that did not happen and adds write load.",
     Some("https://www.postgresql.org/docs/18/sql-createtrigger.html"),
@@ -62,7 +66,9 @@ CREATE TRIGGER record_note AFTER UPDATE ON notes FOR EACH ROW EXECUTE FUNCTION r
 CREATE TABLE audit_events (event_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, note_id integer NOT NULL);\n\
 CREATE FUNCTION record_note() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO audit_events (note_id) VALUES (NEW.id); RETURN NEW; END $$;\n\
 CREATE TRIGGER record_note AFTER UPDATE ON notes FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION record_note();",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// Whether a path has passed a test comparing `OLD` with `NEW`.

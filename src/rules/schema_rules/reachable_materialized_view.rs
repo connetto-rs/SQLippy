@@ -7,6 +7,7 @@ use sql_traits::traits::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::grant_support::{ClientRoles, grantee_list, schema_of},
@@ -19,6 +20,8 @@ use crate::{
 ///
 /// PostgreSQL refuses row-level security on a materialized view, so its rows
 /// are whatever the role refreshing it could see.
+///
+/// The rule does not run on SQLite, which has no materialized views.
 ///
 /// # Example
 ///
@@ -76,6 +79,10 @@ CREATE MATERIALIZED VIEW private.doc_owners AS SELECT owner FROM docs;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

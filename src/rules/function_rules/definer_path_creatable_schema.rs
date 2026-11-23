@@ -3,6 +3,7 @@
 use sql_traits::traits::{DatabaseLike, FunctionLike};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
@@ -21,6 +22,8 @@ use crate::{
 /// every named owner differs from it. `pg_catalog`, `pg_temp` and `$user`,
 /// which inside the function names the owner's schema, are not judged, nor are
 /// bodies PostgreSQL binds at creation.
+///
+/// The rule does not run on SQLite, which has no stored functions.
 ///
 /// # Example
 ///
@@ -82,6 +85,10 @@ CREATE FUNCTION app.norm(x TEXT) RETURNS TEXT LANGUAGE sql SECURITY DEFINER SET 
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

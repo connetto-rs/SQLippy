@@ -138,7 +138,7 @@ fn the_resolution_spells_the_alter_role_moving_attribute_changes_to_the_bootstra
 fn the_rule_is_inactive_until_a_cluster_bootstrap_is_declared() {
     let mut constrainer: GenericConstrainer<ParserDB> = RoleDefinedInSchema::default().into();
     constrainer.set_rule_level("role_defined_in_schema", Level::Warn);
-    let inactive = constrainer.inactive_rules();
+    let inactive = constrainer.inactive_rules(Engine::PostgreSql);
     assert_eq!(inactive.len(), 1);
     assert_eq!(inactive[0].missing(), Declaration::ClusterBootstrap);
     let shown = inactive[0].to_string();

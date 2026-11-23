@@ -5,6 +5,7 @@ use sql_traits::traits::{DatabaseLike, RoleLike, RoleMembershipLike};
 
 use crate::{
     deployment::{Declaration, Deployment},
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
@@ -15,8 +16,8 @@ const SOURCE: Option<&str> = Some("https://www.postgresql.org/docs/current/ddl-r
 /// Struct defining a rule that reports a declared anonymous or app role with
 /// `BYPASSRLS` or `SUPERUSER`.
 ///
-/// The rule is inactive until the deployment declares an anonymous or app
-/// role.
+/// The rule does not run on SQLite, which has no roles, and is inactive
+/// until the deployment declares an anonymous or app role.
 ///
 /// # Example
 ///
@@ -39,8 +40,9 @@ pub struct ClientRoleBypassesRowLevelSecurity<DB>(std::marker::PhantomData<DB>);
 ///
 /// Attributes are not inherited, but `SET ROLE` reaches every role along a
 /// chain of memberships granted with the `SET` option, which PostgreSQL
-/// gives a membership unless it is granted `WITH SET FALSE`. The rule is
-/// inactive until the deployment declares an anonymous or app role.
+/// gives a membership unless it is granted `WITH SET FALSE`. The rule does
+/// not run on SQLite, which has no roles, and is inactive until the
+/// deployment declares an anonymous or app role.
 ///
 /// # Example
 ///
@@ -108,6 +110,10 @@ impl<DB> Rule for ClientRoleBypassesRowLevelSecurity<DB> {
         &METADATA
     }
 
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
+    }
+
     fn requires(&self) -> &'static [Declaration] {
         &[Declaration::ClientRoles]
     }
@@ -131,6 +137,10 @@ GRANT bypasser TO authenticated WITH SET FALSE;",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 
     fn requires(&self) -> &'static [Declaration] {

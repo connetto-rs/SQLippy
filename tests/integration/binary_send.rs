@@ -49,7 +49,7 @@ fn configured(deployment: Deployment) -> DefaultConstrainer<ParserDB> {
 /// declaration each lacks.
 fn inactive_binary_rules(constrainer: &DefaultConstrainer<ParserDB>) -> Vec<(&str, Declaration)> {
     constrainer
-        .inactive_rules()
+        .inactive_rules(Engine::PostgreSql)
         .into_iter()
         .filter(|inactive| binary_rule(inactive.rule().name))
         .map(|inactive| (inactive.rule().name, inactive.missing()))
@@ -224,7 +224,7 @@ fn declaring_no_binary_replicated_table_runs_every_binary_replication_rule_witho
         let constrainer = configured(deployment);
         assert!(
             constrainer
-                .inactive_rules()
+                .inactive_rules(Engine::PostgreSql)
                 .iter()
                 .all(|inactive| inactive.missing() != Declaration::BinaryReplicationTables)
         );

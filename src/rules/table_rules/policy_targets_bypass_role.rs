@@ -7,6 +7,7 @@ use sql_traits::{
 use sqlparser::ast::Owner;
 
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
@@ -20,6 +21,8 @@ use crate::{
 /// missing. Role attributes are not inherited, so a member of such a role is
 /// subject to the policy and is not reported. A policy that also names
 /// `PUBLIC` applies to every role and is not reported either.
+///
+/// The rule does not run on SQLite, which has no row-level security policies.
 ///
 /// # Example
 ///
@@ -81,6 +84,10 @@ CREATE POLICY visible ON docs TO app USING (true);",
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

@@ -9,8 +9,9 @@ use sqlparser::ast::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         cte_support::WithScopes,
         script_support::{Untrusted, untrusted},
@@ -33,6 +34,8 @@ rule_definition!(
     /// caller's otherwise. Names bound to a `WITH` item, operators written
     /// `OPERATOR(schema.op)`, `AND`, `OR`, `NOT`, negative literals and types
     /// the grammar qualifies itself, such as `integer`, are not reported.
+    ///
+    /// The rule does not run on SQLite, which has no configuration settings.
     ///
     /// # Example
     ///
@@ -65,7 +68,9 @@ SELECT lower('HELLO'), 1 + 2, identifier::text FROM documents;",
 SET search_path = pg_catalog, pg_temp;\n\
 SELECT pg_catalog.lower('HELLO'), 1 OPERATOR(pg_catalog.+) 2,\n\
 identifier::pg_catalog.text FROM public.documents;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// Type names PostgreSQL's grammar maps to `pg_catalog` types itself, so no

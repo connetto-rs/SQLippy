@@ -12,6 +12,7 @@ use sql_traits::{
 use sqlparser::ast::{Expr, Function, FunctionSecurity, Visitor};
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{function_reach_support::reaches_function, walk_support::walk},
@@ -22,6 +23,8 @@ use crate::{
 ///
 /// Policies, checks, defaults, generated columns and indexes can invoke these bodies under a caller's path or a restricted index-build path.
 /// Views and exclusion constraints are not entry sites, and unreadable bodies are skipped.
+///
+/// The rule does not run on SQLite, which has no stored functions.
 ///
 /// # Example
 ///
@@ -70,6 +73,10 @@ impl<DB> Rule for InvokerWithoutSearchPath<DB> {
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 

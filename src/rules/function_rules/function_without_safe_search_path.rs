@@ -6,6 +6,7 @@ use sql_traits::{
 };
 
 use crate::{
+    engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
@@ -26,6 +27,8 @@ rule_definition!(
     /// one. So are the findings `definer_without_search_path`,
     /// `definer_temporary_schema_not_last`, `definer_path_creatable_schema` and
     /// `invoker_without_search_path` already raise on the same function.
+    ///
+    /// The rule does not run on SQLite, which has no stored functions.
     ///
     /// # Example
     ///
@@ -61,7 +64,8 @@ LANGUAGE sql AS $$ SELECT lower(value) $$;",
 LANGUAGE sql SET search_path = pg_catalog, pg_temp\n\
 AS $$ SELECT pg_catalog.lower(value) $$;",
     },
-    Basis::Declared
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 /// Whether PostgreSQL resolves the names of the function's body with the

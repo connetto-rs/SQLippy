@@ -4,8 +4,9 @@ use sql_traits::traits::DatabaseLike;
 use sqlparser::ast::Statement;
 
 use crate::{
+    engine::Engine,
     error::Interruption,
-    lint::{LintGroup, Rule, RuleExample, RuleMetadata},
+    lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::script_support::is_search_path,
     traits::{Constrainer, GenericConstrainer, Reporter, ScriptRule},
 };
@@ -16,6 +17,8 @@ rule_definition!(
     ///
     /// The function runs with the last clause, which the built schema keeps
     /// alone, so only the statement as written shows the earlier ones.
+    ///
+    /// The rule does not run on SQLite, which has no stored functions.
     ///
     /// # Example
     ///
@@ -49,7 +52,9 @@ AS $$ SELECT 42 $$;",
         good: "CREATE FUNCTION public.answer() RETURNS INT LANGUAGE sql\n\
 SET search_path = pg_catalog, pg_temp\n\
 AS $$ SELECT 42 $$;",
-    }
+    },
+    Basis::Declared,
+    &[Engine::PostgreSql]
 );
 
 impl<DB: DatabaseLike> ScriptRule for RepeatedFunctionSearchPath<DB> {

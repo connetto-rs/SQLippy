@@ -10,6 +10,7 @@ use sqlparser::ast::{Expr, FunctionArguments, FunctionBehavior, Query, Visitor};
 
 use crate::rules::walk_support::walk;
 use crate::{
+    engine::Engine,
     error::{Interruption, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{inline_support::inlined_in_expression, policy_support::walked_clauses},
@@ -126,6 +127,8 @@ impl<DB: DatabaseLike> Visitor for RowIndependentCalls<'_, DB> {
 /// parentheses (`current_user`) do not. A `VOLATILE` call that PostgreSQL
 /// cannot inline also keeps an index from serving the comparison.
 ///
+/// The rule does not run on SQLite, which has no row-level security policies.
+///
 /// # Example
 ///
 /// ```rust
@@ -183,6 +186,10 @@ CREATE POLICY own ON notes USING (owner = (SELECT current_setting('app.user_id',
             },
         };
         &METADATA
+    }
+
+    fn engines(&self) -> &'static [Engine] {
+        &[Engine::PostgreSql]
     }
 }
 
