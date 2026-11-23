@@ -123,6 +123,7 @@ mod guarded_parent_support;
 mod implication_support;
 mod index_support;
 mod inline_support;
+mod json_support;
 mod key_support;
 mod literal_support;
 mod name_support;
