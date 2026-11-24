@@ -15,9 +15,9 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         AccessExpr, BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr,
-        FunctionArguments, FunctionSecurity, Ident, InTarget, JoinOperator, ObjectName, Query,
-        Select, SelectItem, SetExpr, SetOperator, TableAlias, TableFactor, Value, Visit, VisitMut,
-        VisitorMut, visit_expressions,
+        FunctionArguments, FunctionSecurity, Ident, InTarget, JoinConstraint, JoinOperator,
+        ObjectName, Query, Select, SelectItem, SetExpr, SetOperator, TableAlias, TableFactor,
+        Value, Visit, VisitMut, VisitorMut, visit_expressions,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -35,7 +35,7 @@ use crate::{
             query_members, reads_column_or_parameter,
         },
         key_support::{binds, equality_keys, instances, key_pairs, named, no_inheritors},
-        policy_read_support::sublink_reads,
+        policy_read_support::{reads_every_row, sublink_reads},
         policy_support::{
             acting, conjuncts, disjuncts, is_column_reference, is_contradiction, is_tautology,
             sets_only_search_path, sql_set_body, unwrapped,
@@ -105,6 +105,10 @@ struct Row<'db, DB: DatabaseLike> {
     facts: Vec<Expr>,
     /// Whether the row was read under the writer's own policies.
     read_by_writer: bool,
+    /// Each column of the row whose value the arm keeps only when no row of
+    /// the parent holds it, with the stored name of that column of the
+    /// parent.
+    unheld: Vec<(String, String)>,
 }
 
 /// One arm of a query, with where each output column comes from and the
@@ -412,12 +416,10 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// Whether `conjunct` draws a key column from the rows of a
     /// set-returning helper, as `IN (SELECT helper())`, `= ANY
     /// (ARRAY(SELECT helper()))` or `IN (SELECT ... FROM helper())`, every
-    /// arm of whose body yields only rows a consumption leaves rejected by
-    /// the arm's filters once a row holds their key.
+    /// arm of whose body yields only values no row of the parent holds, or
+    /// rows a consumption leaves rejected by the arm's filters once a row
+    /// holds their key.
     fn excludes_held(&self, conjunct: &Expr) -> Result<bool, LookupError> {
-        if self.consumptions.is_empty() {
-            return Ok(false);
-        }
         if let Some(([item], set)) = membership(conjunct)
             && let Some(position) = self.key_position(item)
             && let Expr::Function(call) = set.as_ref()
@@ -452,43 +454,57 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 
     /// Whether every one of `arms` gives the key column at `position` in its
-    /// output at `output` from the row a consumption of that key column
-    /// writes, and reads that row under a filter the written row fails.
+    /// output at `output` from a row it keeps only when no row of the parent
+    /// holds that value in the column the key maps the key column onto, or
+    /// from the row a consumption of that key column writes, read under a
+    /// filter the written row fails.
     fn arms_exclude_held(
         &self,
         position: usize,
         output: usize,
         arms: &[Arm<'a, DB>],
     ) -> Result<bool, LookupError> {
+        if arms.is_empty() {
+            return Ok(false);
+        }
         let column = &self.key_columns[position];
-        'consumptions: for consumption in &self.consumptions {
-            if consumption.column() != column || arms.is_empty() {
+        let referenced = &self.referenced_columns[position];
+        for arm in arms {
+            let Some(Origin {
+                row: Some((index, drawn)),
+                ..
+            }) = arm.outputs.get(output)
+            else {
+                return Ok(false);
+            };
+            let row = &arm.rows[*index];
+            if row
+                .unheld
+                .iter()
+                .any(|(own, held)| own == drawn && held == referenced)
+            {
                 continue;
             }
-            for arm in arms {
-                let Some(Origin {
-                    row: Some((index, drawn)),
-                    ..
-                }) = arm.outputs.get(output)
-                else {
-                    continue 'consumptions;
-                };
-                let row = &arm.rows[*index];
-                if !consumption.names(row.table, drawn) {
-                    continue 'consumptions;
-                }
-                let mut rejected = false;
-                for fact in &row.facts {
-                    if consumption.rejects(&normalized(fact))? {
-                        rejected = true;
-                        break;
-                    }
-                }
-                if !rejected {
-                    continue 'consumptions;
+            if !self.consumed(column, row, drawn)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether a consumption of the key column `column` writes the row of
+    /// `row`'s table its column `drawn` names, and leaves it failing one of
+    /// `row`'s facts.
+    fn consumed(&self, column: &str, row: &Row<'a, DB>, drawn: &str) -> Result<bool, LookupError> {
+        for consumption in &self.consumptions {
+            if consumption.column() != column || !consumption.names(row.table, drawn) {
+                continue;
+            }
+            for fact in &row.facts {
+                if consumption.rejects(&normalized(fact))? {
+                    return Ok(true);
                 }
             }
-            return Ok(true);
         }
         Ok(false)
     }
@@ -1272,7 +1288,12 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         // Filters on one row become its facts, and memberships of a column
         // become members of the values the arm draws from it.
         let mut members: Vec<(usize, String, Expr)> = Vec::new();
-        for filter in select.selection.iter().flat_map(conjuncts) {
+        for filter in filters(select) {
+            if let Some((source, column, held)) = self.unheld(filter, &sources, reader)?
+                && let SourceKind::Table(index) = sources[source].kind
+            {
+                rows[index].unheld.push((column, held));
+            }
             if let Some((items, set)) = membership(filter)
                 && let [item] = items
                 && let Some((source, column)) = resolve(without_parentheses(item))
@@ -1365,9 +1386,167 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         }))
     }
 
+    /// The source and column of the row `filter` keeps only when no row of
+    /// the parent holds the column's value, with the stored name of the
+    /// parent's column holding it, as `NOT EXISTS (SELECT ... FROM parent p
+    /// WHERE p.held = row.column)` or `row.column NOT IN (SELECT held FROM
+    /// parent)`, besides which the subquery may only test `held IS NOT
+    /// NULL`. `reader` reads the subquery, and must read every row of the
+    /// parent.
+    fn unheld(
+        &self,
+        filter: &Expr,
+        sources: &[Source<'a, DB>],
+        reader: Reader,
+    ) -> Result<Option<(usize, String, String)>, LookupError> {
+        let (outer, query) = match without_parentheses(filter) {
+            Expr::Exists {
+                subquery,
+                negated: true,
+            } => (None, subquery.as_ref()),
+            Expr::In {
+                expr,
+                target: InTarget::Subquery(query),
+                negated: true,
+                ..
+            } => (Some(expr.as_ref()), query.as_ref()),
+            _ => return Ok(None),
+        };
+        let Some((select, inner)) = self.parent_read(query, reader)? else {
+            return Ok(None);
+        };
+        let inner_column = |expression: &Expr| {
+            resolve_in(slice::from_ref(&inner), without_parentheses(expression))
+                .map(|(_, column)| column)
+        };
+        // The inner columns the subquery tests `IS NOT NULL`, and its other
+        // conjuncts.
+        let mut tested = Vec::new();
+        let mut others = Vec::new();
+        for conjunct in select.selection.iter().flat_map(conjuncts) {
+            match without_parentheses(conjunct) {
+                Expr::IsNotNull(column) if let Some(column) = inner_column(column) => {
+                    tested.push(column);
+                }
+                other => others.push(other),
+            }
+        }
+        let found = if let Some(outer) = outer {
+            let (
+                [
+                    SelectItem::UnnamedExpr(projected)
+                    | SelectItem::ExprWithAlias {
+                        expr: projected, ..
+                    },
+                ],
+                [],
+            ) = (select.projection.as_slice(), others.as_slice())
+            else {
+                return Ok(None);
+            };
+            inner_column(projected).zip(resolve_in(sources, without_parentheses(outer)))
+        } else {
+            let [
+                Expr::BinaryOp {
+                    left,
+                    op: BinaryOperator::Eq,
+                    right,
+                },
+            ] = others.as_slice()
+            else {
+                return Ok(None);
+            };
+            // An outer column is qualified by a relation the subquery
+            // does not read, so that it names no inner column.
+            let outer_column = |expression: &Expr| match without_parentheses(expression) {
+                qualified @ Expr::CompoundIdentifier(parts)
+                    if parts.len() == 2 && identifier(&parts[0]) != inner.name =>
+                {
+                    resolve_in(sources, qualified)
+                }
+                _ => None,
+            };
+            [(left, right), (right, left)]
+                .into_iter()
+                .find_map(|(held, own)| inner_column(held).zip(outer_column(own)))
+        };
+        let Some((held, (source, column))) = found else {
+            return Ok(None);
+        };
+        if tested.iter().any(|tested| *tested != held) || !self.reads_every_parent_row(reader)? {
+            return Ok(None);
+        }
+        Ok(Some((source, column, held)))
+    }
+
+    /// The select `query` runs and its source, when it reads the parent and
+    /// nothing else under no limit, sample or column renaming, so that every
+    /// row of the parent its reader sees reaches its filter.
+    fn parent_read<'q>(
+        &self,
+        query: &'q Query,
+        reader: Reader,
+    ) -> Result<Option<(&'q Select, Source<'a, DB>)>, LookupError> {
+        let Some(select) = plain_select(query) else {
+            return Ok(None);
+        };
+        let ([from], None, None, None) = (
+            select.from.as_slice(),
+            &query.limit_clause,
+            &query.fetch,
+            &select.having,
+        ) else {
+            return Ok(None);
+        };
+        let TableFactor::Table {
+            name,
+            alias,
+            args: None,
+            sample: None,
+            ..
+        } = &from.relation
+        else {
+            return Ok(None);
+        };
+        if !from.joins.is_empty() {
+            return Ok(None);
+        }
+        let renamed_columns = renamed(alias.as_ref());
+        let mut read = Vec::new();
+        let Some(source) =
+            self.table_source(name, alias.as_ref(), &renamed_columns, reader, &mut read)?
+        else {
+            return Ok(None);
+        };
+        Ok(read
+            .first()
+            .is_some_and(|row| row.table == self.parent)
+            .then_some((select, source)))
+    }
+
+    /// Whether `reader` reads every row of the parent, under the rights of
+    /// the innermost definer it reads within, or else as the writer past no
+    /// row security.
+    fn reads_every_parent_row(&self, reader: Reader) -> Result<bool, LookupError> {
+        let definer = match reader {
+            Reader::Body { definer: true } => self
+                .reading
+                .borrow()
+                .iter()
+                .rev()
+                .copied()
+                .find(|function| function.security_mode() == FunctionSecurity::Definer),
+            _ => None,
+        };
+        match definer {
+            Some(function) => reads_every_row(self.database, function, self.parent),
+            None => Ok(!self.parent.has_row_level_security(self.database)?),
+        }
+    }
+
     /// The relations the `FROM` of `select` reads, read by `reader`, with
     /// the rows they add to `rows`, or `None` when one joins other than by a
-    /// cross join or cannot be followed.
+    /// cross join or an inner join on a condition, or cannot be followed.
     fn read_sources(
         &self,
         select: &Select,
@@ -1376,11 +1555,14 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     ) -> Result<Option<Vec<Source<'a, DB>>>, LookupError> {
         let mut sources = Vec::new();
         for from in &select.from {
-            if from
-                .joins
-                .iter()
-                .any(|join| !matches!(join.join_operator, JoinOperator::CrossJoin(_)))
-            {
+            if from.joins.iter().any(|join| {
+                !matches!(
+                    join.join_operator,
+                    JoinOperator::CrossJoin(_)
+                        | JoinOperator::Join(JoinConstraint::On(_))
+                        | JoinOperator::Inner(JoinConstraint::On(_))
+                )
+            }) {
                 return Ok(None);
             }
             for factor in
@@ -1410,13 +1592,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             | TableFactor::UNNEST { alias, .. } => alias.as_ref(),
             _ => return Ok(None),
         };
-        let renamed_columns: Vec<String> = alias.map_or_else(Vec::new, |alias| {
-            alias
-                .columns
-                .iter()
-                .map(|column| identifier(&column.name))
-                .collect()
-        });
+        let renamed_columns = renamed(alias);
         // A subquery or an array expansion yields rows the arm learns nothing
         // of.
         if let TableFactor::Derived { .. } | TableFactor::UNNEST { .. } = factor {
@@ -1587,6 +1763,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 table,
                 facts: Vec::new(),
                 read_by_writer: reader == Reader::Writer,
+                unheld: Vec::new(),
             });
             SourceKind::Table(rows.len() - 1)
         };
@@ -2026,6 +2203,32 @@ fn reads_role(name: &str, call: &Function) -> bool {
                 ),
                 _ => true,
             })
+}
+
+/// The names `alias` gives the leading columns of the relation it names.
+fn renamed(alias: Option<&TableAlias>) -> Vec<String> {
+    alias.map_or_else(Vec::new, |alias| {
+        alias
+            .columns
+            .iter()
+            .map(|column| identifier(&column.name))
+            .collect()
+    })
+}
+
+/// The conjuncts that keep the rows `select` yields, from its `WHERE` and
+/// from the condition of each inner join, which keeps rows as a filter does.
+fn filters(select: &Select) -> impl Iterator<Item = &Expr> {
+    let joined = select
+        .from
+        .iter()
+        .flat_map(|from| &from.joins)
+        .filter_map(|join| match &join.join_operator {
+            JoinOperator::Join(JoinConstraint::On(condition))
+            | JoinOperator::Inner(JoinConstraint::On(condition)) => Some(condition),
+            _ => None,
+        });
+    select.selection.iter().chain(joined).flat_map(conjuncts)
 }
 
 /// The plain `SELECT` a query runs, when it has no `WITH`.

@@ -671,6 +671,93 @@ fn a_key_another_trigger_form_consumes_is_clean() {
     }
 }
 
+/// The trigger of `INVITATIONS` made to fire on no insert.
+fn untriggered() -> (&'static str, String) {
+    (
+        "AFTER INSERT ON memberships",
+        "AFTER DELETE ON memberships".to_owned(),
+    )
+}
+
+/// The body of `pending()` with its filter replaced by `filter` on the
+/// invitation `i` it selects.
+fn pending_where(filter: &str) -> (&'static str, String) {
+    (
+        "SELECT id FROM invitations WHERE email = current_setting('app.email') AND NOT accepted",
+        format!("SELECT i.id FROM invitations i WHERE {filter}"),
+    )
+}
+
+/// The invitation key of `INVITATIONS` comparing `NULL`s, with no foreign key.
+fn nulls_not_distinct() -> (&'static str, String) {
+    (
+        "invitation_id INT CONSTRAINT memberships_invitation UNIQUE REFERENCES invitations (id)",
+        "invitation_id INT, CONSTRAINT memberships_invitation UNIQUE NULLS NOT DISTINCT (invitation_id)"
+            .to_owned(),
+    )
+}
+
+#[test]
+fn a_key_a_helper_draws_from_values_no_row_holds_is_clean() {
+    let unclaimed = "NOT EXISTS (SELECT 1 FROM memberships m WHERE m.invitation_id = i.id)";
+    for edits in [
+        vec![untriggered(), pending_where(unclaimed)],
+        vec![
+            untriggered(),
+            pending_where(
+                "i.email = current_setting('app.email')
+                 AND NOT EXISTS (SELECT 1 FROM memberships WHERE invitation_id = i.id)",
+            ),
+        ],
+        vec![
+            untriggered(),
+            pending_where(
+                "i.id NOT IN (SELECT invitation_id FROM memberships WHERE invitation_id IS NOT NULL)",
+            ),
+        ],
+        vec![
+            untriggered(),
+            pending_where("i.id NOT IN (SELECT m.invitation_id FROM memberships m)"),
+        ],
+        vec![
+            untriggered(),
+            pending_where(
+                "i.id NOT IN (SELECT invitation_id FROM memberships GROUP BY invitation_id)",
+            ),
+        ],
+        vec![
+            untriggered(),
+            nulls_not_distinct(),
+            ("accepted_by INT);", "accepted_by INT, code INT);".to_owned()),
+            (
+                "SELECT id FROM invitations WHERE email = current_setting('app.email') AND NOT accepted",
+                "SELECT i.code FROM invitations i
+                 WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.invitation_id = i.code)"
+                    .to_owned(),
+            ),
+        ],
+        vec![(
+            "AND NOT accepted",
+            format!(
+                "AND NOT accepted UNION SELECT i.id FROM invitations i WHERE {unclaimed}"
+            ),
+        )],
+        vec![(
+            "SELECT id FROM invitations WHERE email = current_setting('app.email') AND NOT accepted",
+            "SELECT i.id FROM invitations i JOIN invitations j ON j.id = i.id
+             WHERE i.email = current_setting('app.email') AND NOT i.accepted"
+                .to_owned(),
+        )],
+        vec![(
+            "SELECT id FROM invitations WHERE email = current_setting('app.email') AND NOT accepted",
+            "SELECT i.id FROM invitations i INNER JOIN invitations j ON j.id = i.id AND NOT i.accepted"
+                .to_owned(),
+        )],
+    ] {
+        assert!(!reports_invitation_key(&edits), "{edits:?}");
+    }
+}
+
 #[test]
 fn a_key_another_trigger_form_may_leave_unconsumed_is_reported() {
     for edits in [
@@ -802,6 +889,79 @@ fn a_key_a_statement_trigger_may_leave_unconsumed_is_reported() {
             )],
         ]
         .concat(),
+    ] {
+        assert!(reports_invitation_key(&edits), "{edits:?}");
+    }
+}
+
+#[test]
+fn a_key_a_helper_draws_from_values_a_row_may_hold_is_reported() {
+    for edits in [
+        vec![
+            untriggered(),
+            pending_where(
+                "NOT EXISTS (SELECT 1 FROM memberships m WHERE m.invitation_id = i.id AND m.user_id > 5)",
+            ),
+        ],
+        vec![
+            untriggered(),
+            pending_where("NOT EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = i.id)"),
+        ],
+        vec![
+            untriggered(),
+            pending_where("EXISTS (SELECT 1 FROM memberships m WHERE m.invitation_id = i.id)"),
+        ],
+        vec![
+            untriggered(),
+            pending_where(
+                "NOT EXISTS (SELECT 1 FROM memberships m WHERE m.invitation_id = i.id LIMIT 0)",
+            ),
+        ],
+        vec![
+            untriggered(),
+            pending_where("i.id NOT IN (SELECT invitation_id FROM memberships WHERE user_id > 5)"),
+        ],
+        vec![
+            untriggered(),
+            pending_where(
+                "NOT EXISTS (SELECT 1 FROM memberships m JOIN invitations x ON x.email = 'none'
+                 WHERE m.invitation_id = i.id)",
+            ),
+        ],
+        vec![
+            untriggered(),
+            pending_where(
+                "NOT EXISTS (SELECT 1 FROM memberships m (invitation_id, nickname, user_id)
+                 WHERE m.invitation_id = i.id)",
+            ),
+        ],
+        vec![
+            untriggered(),
+            (
+                "LANGUAGE sql STABLE SECURITY DEFINER",
+                "LANGUAGE sql STABLE".to_owned(),
+            ),
+            pending_where("NOT EXISTS (SELECT 1 FROM memberships m WHERE m.invitation_id = i.id)"),
+        ],
+        vec![
+            untriggered(),
+            (
+                "CREATE FUNCTION pending",
+                "CREATE TABLE claims (invitation_id INT); CREATE FUNCTION pending".to_owned(),
+            ),
+            pending_where("NOT EXISTS (SELECT 1 FROM claims c WHERE c.invitation_id = i.id)"),
+        ],
+        vec![
+            untriggered(),
+            ("nickname INT,", "nickname INT, id INT,".to_owned()),
+            pending_where("NOT EXISTS (SELECT 1 FROM memberships i WHERE i.invitation_id = i.id)"),
+        ],
+        vec![(
+            "SELECT id FROM invitations WHERE email = current_setting('app.email') AND NOT accepted",
+            "SELECT i.id FROM invitations i LEFT JOIN invitations j ON NOT i.accepted
+             WHERE i.email = current_setting('app.email')"
+                .to_owned(),
+        )],
     ] {
         assert!(reports_invitation_key(&edits), "{edits:?}");
     }

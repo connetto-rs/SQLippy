@@ -40,9 +40,14 @@ rule_definition!(
     /// when its check draws a key column from a set-returning `LANGUAGE sql`
     /// helper, as `IN (SELECT helper())`, `= ANY (ARRAY(SELECT helper()))` or
     /// `IN (SELECT ... FROM helper())`, and every arm of the helper's body
-    /// yields the column from a row of another table under a filter that an
-    /// `AFTER INSERT` row trigger of the table makes false for the row each
-    /// stored key names. The trigger's PL/pgSQL function must run
+    /// keeps only values no row of the table holds. An arm keeps them when
+    /// it yields the column from a row under `NOT EXISTS (SELECT ... FROM
+    /// table t WHERE t.key = row.column)` or `row.column NOT IN (SELECT key
+    /// FROM table)`, testing nothing else of the table but `key IS NOT
+    /// NULL`, with rights that read every row of the table. It also keeps
+    /// them when it yields the column from a row of another table under a
+    /// filter that an `AFTER INSERT` row trigger of the table makes false for
+    /// the row each stored key names. The trigger's PL/pgSQL function must run
     /// `UPDATE other SET ... WHERE column = NEW.key` on every path that
     /// returns with a non-`NULL` key, write that table nowhere else, set each
     /// tested column from literals and `NEW`'s fields, and read every row of
