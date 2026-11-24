@@ -48,14 +48,25 @@ rule_definition!(
     /// tested column from literals and `NEW`'s fields, and read every row of
     /// that table, and the trigger's `WHEN` may only skip a `NULL` key. A
     /// further `AND` condition of that `WHERE` may read only columns the
-    /// trigger sets, and the filter must imply it. A stored key then fails
-    /// the check before PostgreSQL looks it up, as long as no client role can
-    /// bring the named row back. No client role may update a column the
-    /// trigger sets or the column naming the row, nor update the key unless
-    /// the trigger also fires on that update, and no `BEFORE UPDATE` row
-    /// trigger of the other table may change the write. Where client roles
-    /// can both insert into the other table and delete or truncate its rows,
-    /// one statement could remove a named row and insert it again in its
+    /// trigger sets, and the filter must imply it. The function may run
+    /// `DELETE FROM other WHERE column = NEW.key` in place of the `UPDATE`,
+    /// or `PERFORM` a call to a `LANGUAGE sql` function whose body is one
+    /// such statement, read with the call's arguments in place of its
+    /// parameters and under the called function's rights when it is a
+    /// definer. A strict called function may only take the key as its
+    /// arguments, since it skips its body on a `NULL` one. An `AFTER INSERT`
+    /// statement trigger declaring `REFERENCING NEW TABLE AS new_rows` may
+    /// run the `UPDATE` or `DELETE` with `WHERE column IN (SELECT key FROM
+    /// new_rows)` and literal values, on every path and under no `WHEN`. A
+    /// stored key then fails the check before PostgreSQL looks it up, as
+    /// long as no client role can bring the named row back. No client role
+    /// may update a column the trigger sets or the column naming the row,
+    /// nor update the key unless the trigger also fires on that update, and
+    /// no `BEFORE UPDATE` row trigger of the other table may change the
+    /// write, nor a `BEFORE DELETE` one the deletion. After a deletion, no
+    /// client role may insert into the other table. Where client roles can
+    /// both insert into the other table and delete or truncate its rows, one
+    /// statement could remove a named row and insert it again in its
     /// original state, so the excuse then also needs the naming column to be
     /// unique and a foreign key from the key column onto it with `ON DELETE
     /// RESTRICT`, `CASCADE` or `SET NULL`, since `NO ACTION` accepts the
