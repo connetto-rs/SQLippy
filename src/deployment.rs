@@ -3,7 +3,6 @@
 
 use std::{
     borrow::Cow,
-    convert::Infallible,
     fmt::{self, Display},
     time::Duration,
 };
@@ -782,25 +781,12 @@ impl Deployment {
     }
 
     /// Returns whether every value `narrower` yields is one `wider` yields,
-    /// as written, through identical expressions or the declared sets.
-    #[must_use]
-    pub fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> bool {
-        let Ok(within) = self.is_set_within_unfolding(
-            narrower,
-            wider,
-            |_| Ok::<_, Infallible>(None),
-            |_, _| Ok(false),
-        );
-        within
-    }
-
-    /// Returns whether every value `narrower` yields is one `wider` yields,
     /// where `unfolded` gives another spelling of the set an expression
     /// yields, such as the set a helper's body selects for a call to it, or
     /// `None`, and `inferred` tells whether one set lies within another as
     /// the rule reads the schema. Expressions and declarations compare once
     /// fully unfolded.
-    pub(crate) fn is_set_within_unfolding<E>(
+    pub(crate) fn is_set_within<E>(
         &self,
         narrower: &Expr,
         wider: &Expr,
