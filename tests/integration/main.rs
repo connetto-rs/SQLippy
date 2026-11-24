@@ -88,6 +88,7 @@ mod public_default_privileges;
 mod raising_setting_reads;
 mod recursive_steps_over_unions;
 mod redundant_checks;
+mod redundant_terms;
 mod reference_id_suffixes;
 mod repeated_policy_calls;
 mod repeated_setting_reads;

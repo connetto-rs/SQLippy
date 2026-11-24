@@ -44,12 +44,12 @@ use crate::{
         PublicDefaultPrivilege, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
         RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
         ReachableTableWithoutRowLevelSecurity, RecursiveStepOverUnion, RedundantCheck,
-        RedundantExtensionEdge, ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole,
-        RegColumnType, RepeatedFunctionSearchPath, RepeatedIndexColumn, RepeatedPolicyCall,
-        RepeatedRecursionBound, RepeatedSettingRead, ReplacementWithoutTrustedCreation,
-        ReservedKeywordIdentifier, RestrictiveWithoutPermissive, RoleDefinedInSchema,
-        RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
-        RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
+        RedundantExtensionEdge, RedundantTerm, ReferenceWithoutIdSuffix,
+        ReferencesGrantedToClientRole, RegColumnType, RepeatedFunctionSearchPath,
+        RepeatedIndexColumn, RepeatedPolicyCall, RepeatedRecursionBound, RepeatedSettingRead,
+        ReplacementWithoutTrustedCreation, ReservedKeywordIdentifier, RestrictiveWithoutPermissive,
+        RoleDefinedInSchema, RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies,
+        RustKeywordColumnName, RustKeywordForeignKeyName, RustKeywordTableName, ScaledNumeric,
         SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
         SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SensitiveColumnsExposed,
         SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
@@ -193,7 +193,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 64] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 65] = [
         Box::new(AlwaysRaisingExpression::default()),
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
@@ -218,6 +218,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(RedundantExtensionEdge::default()),
         Box::new(DuplicateCheck::default()),
         Box::new(RedundantCheck::default()),
+        Box::new(RedundantTerm::default()),
         Box::new(DuplicateColumnNameInExtensionGraph::default()),
         Box::new(DuplicateForeignKey::default()),
         Box::new(DuplicateUniqueIndex::default()),
@@ -266,7 +267,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 32] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 33] = [
         Box::new(NullableConcatenation::default()),
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
@@ -299,6 +300,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(AliasShadowedByColumn::default()),
         Box::new(SelfComparison::default()),
         Box::new(UnreadOuterJoin::default()),
+        Box::new(RedundantTerm::default()),
     ];
     for rule in query_rules {
         constrainer.register_query_rule_with_floor(rule, Level::Allow);
@@ -307,9 +309,10 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 76] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 77] = [
         Box::new(DuplicateIndex::default()),
         Box::new(NullableConcatenation::default()),
+        Box::new(RedundantTerm::default()),
         Box::new(UnscopedUniqueConstraintOnRowLevelSecurityTable::default()),
         Box::new(NullableUniqueColumn::default()),
         Box::new(SecurityDefinerFunctionExposed::default()),
