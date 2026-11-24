@@ -736,16 +736,18 @@ fn an_exempt_caller_needs_no_filter_and_an_unsettled_policy_role_proves_nothing(
 }
 
 #[test]
-fn a_filter_term_reading_a_relation_counts_only_through_a_definer_call() {
+fn a_filter_term_reading_a_relation_counts_when_every_caller_reads_it_alike() {
     assert_eq!(
         exposed_to_app(
             "CREATE TABLE flags (id INT);
+             CREATE TABLE granted_flags (id INT);
+             GRANT SELECT ON granted_flags TO app;
              CREATE FUNCTION open_flags() RETURNS SETOF INT
                LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
                  SELECT 1 $$;
              CREATE FUNCTION caller_flags() RETURNS SETOF INT
                LANGUAGE sql STABLE SECURITY INVOKER SET search_path = pg_catalog, pg_temp AS $$
-                 SELECT 1 $$;
+                 SELECT 1 WHERE current_user = 'app' $$;
              CREATE TABLE notes (id INT, kind TEXT);
              ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
              GRANT SELECT ON notes TO app;
@@ -755,6 +757,12 @@ fn a_filter_term_reading_a_relation_counts_only_through_a_definer_call() {
                USING (kind = 'caller' AND EXISTS (SELECT 1 FROM public.caller_flags()));
              CREATE POLICY table_flagged ON notes FOR SELECT TO app
                USING (kind = 'table' AND EXISTS (SELECT 1 FROM public.flags));
+             CREATE POLICY granted_flagged ON notes FOR SELECT TO app
+               USING (kind = 'granted' AND EXISTS (SELECT 1 FROM public.granted_flags));
+             CREATE POLICY shadowed_flagged ON notes FOR SELECT TO app
+               USING (kind = 'shadowed' AND EXISTS (SELECT 1 FROM granted_flags));
+             CREATE POLICY unknown_flagged ON notes FOR SELECT TO app
+               USING (kind = 'unknown' AND EXISTS (SELECT 1 FROM public.unknown_flags));
              CREATE FUNCTION flagged_ids() RETURNS SETOF INT
                LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
                  SELECT note.id FROM public.notes note
@@ -766,9 +774,27 @@ fn a_filter_term_reading_a_relation_counts_only_through_a_definer_call() {
              CREATE FUNCTION table_flagged_ids() RETURNS SETOF INT
                LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
                  SELECT note.id FROM public.notes note
-                 WHERE note.kind = 'table' AND EXISTS (SELECT 1 FROM public.flags) $$;",
+                 WHERE note.kind = 'table' AND EXISTS (SELECT 1 FROM public.flags) $$;
+             CREATE FUNCTION granted_flagged_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE note.kind = 'granted' AND EXISTS (SELECT 1 FROM public.granted_flags) $$;
+             CREATE FUNCTION shadowed_flagged_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_catalog, pg_temp AS $$
+                 WITH granted_flags AS (SELECT 1 AS id)
+                 SELECT note.id FROM public.notes note
+                 WHERE note.kind = 'shadowed' AND EXISTS (SELECT 1 FROM granted_flags) $$;
+             CREATE FUNCTION unknown_flagged_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE note.kind = 'unknown' AND EXISTS (SELECT 1 FROM public.unknown_flags) $$;",
         ),
-        ["caller_flagged_ids()", "table_flagged_ids()"]
+        [
+            "caller_flagged_ids()",
+            "shadowed_flagged_ids()",
+            "table_flagged_ids()",
+            "unknown_flagged_ids()"
+        ]
     );
 }
 
@@ -3277,5 +3303,97 @@ fn a_column_fixed_to_a_literal_stands_for_it_in_a_tested_pair() {
             ["kinded()"],
             "{filter}"
         );
+    }
+}
+
+#[test]
+fn an_invoker_helper_reading_alike_for_every_caller_confines_a_filter() {
+    const READS_PROFILE: &str = "SELECT profile.organization_id FROM public.profiles profile
+        WHERE profile.user_id = current_setting('app.user_id', true)";
+    let reported = |helper: &str, body: &str, tested: &str, granted: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "CREATE ROLE app NOLOGIN;
+                 CREATE SCHEMA authz;
+                 CREATE TABLE profiles (user_id TEXT PRIMARY KEY, organization_id INT NOT NULL);
+                 CREATE TABLE guarded_profiles (user_id TEXT PRIMARY KEY, organization_id INT NOT NULL);
+                 CREATE TABLE private_profiles (user_id TEXT PRIMARY KEY, organization_id INT NOT NULL);
+                 CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL);
+                 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+                 ALTER TABLE guarded_profiles ENABLE ROW LEVEL SECURITY;
+                 ALTER TABLE guarded_profiles FORCE ROW LEVEL SECURITY;
+                 GRANT SELECT ON resources, profiles, guarded_profiles TO app;
+                 CREATE POLICY own_profiles ON guarded_profiles FOR SELECT TO app
+                   USING (user_id = current_setting('app.user_id', true));
+                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+                 CREATE FUNCTION authz.profile_organization() RETURNS INT
+                   {helper} AS $$ {body} $$;
+                 CREATE FUNCTION authz.organization() RETURNS INT
+                   LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT authz.profile_organization() $$;
+                 CREATE POLICY organization_resources ON resources FOR SELECT TO app
+                   USING (organization_id = {tested});
+                 CREATE FUNCTION authz.resource_ids() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource
+                     WHERE resource.organization_id = {tested} $$;
+                 {granted}"
+            ),
+        )
+    };
+    let alike = "LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp";
+    let revoked = "REVOKE EXECUTE ON FUNCTION authz.profile_organization() FROM app;";
+    for tested in [
+        "authz.profile_organization()",
+        "(SELECT authz.profile_organization())",
+        "authz.organization()",
+    ] {
+        for body in [
+            READS_PROFILE,
+            "WITH own AS (SELECT profile.organization_id FROM public.profiles profile
+               WHERE profile.user_id = current_setting('app.user_id', true))
+             SELECT own.organization_id FROM own",
+        ] {
+            assert_eq!(
+                reported(alike, body, tested, ""),
+                Vec::<String>::new(),
+                "{tested} {body}"
+            );
+        }
+        for (helper, body, granted) in [
+            ("LANGUAGE sql STABLE", READS_PROFILE, ""),
+            (
+                "LANGUAGE sql VOLATILE SET search_path = pg_catalog, pg_temp",
+                READS_PROFILE,
+                "",
+            ),
+            (
+                "LANGUAGE plpgsql STABLE SET search_path = pg_catalog, pg_temp",
+                "BEGIN RETURN 1; END",
+                "",
+            ),
+            (alike, "SELECT length(current_user)", ""),
+            (
+                alike,
+                "SELECT profile.organization_id FROM public.guarded_profiles profile
+                 WHERE profile.user_id = current_setting('app.user_id', true)",
+                "",
+            ),
+            (
+                alike,
+                "SELECT profile.organization_id FROM public.private_profiles profile
+                 WHERE profile.user_id = current_setting('app.user_id', true)",
+                "",
+            ),
+            (alike, READS_PROFILE, revoked),
+        ] {
+            assert_eq!(
+                reported(helper, body, tested, granted),
+                ["resource_ids()"],
+                "{tested} {helper} {body} {granted}"
+            );
+        }
     }
 }

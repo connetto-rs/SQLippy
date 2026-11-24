@@ -26,7 +26,7 @@ use sqlparser::{
     ast::{
         ArgMode, BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
         FunctionBehavior, FunctionCalledOnNull, FunctionSecurity, Ident, InTarget, JoinConstraint,
-        JoinOperator, ObjectNamePart, Query, Select, SelectItem, SetExpr, SetOperator,
+        JoinOperator, ObjectName, ObjectNamePart, Query, Select, SelectItem, SetExpr, SetOperator,
         SetQuantifier, Statement, TableAliasColumnDef, TableFactor, TableInheritance,
         TableWithJoins, Value, Visit, Visitor, With, visit_expressions, visit_expressions_mut,
     },
@@ -101,10 +101,14 @@ use crate::{
 /// too, which holds only when the function is `STRICT` or the call returns
 /// `NULL` for a `NULL` argument, since no declaration states it. A column of
 /// the same name hides the parameter, as in PostgreSQL. Only filter terms
-/// that read alike for the caller and the owner count, those reading no
-/// relation, no role, no privilege, no search path and no function running
-/// as its caller, and a table read under an alias renaming its columns
-/// confines nothing.
+/// that read alike for the caller and the owner count. Such a term reads no
+/// role, no privilege and no search path, reads only stored tables without
+/// row-level security of which every caller may select every column, and
+/// calls a function running as its caller only when that function is one
+/// `LANGUAGE sql` query, not `VOLATILE`, setting its own `search_path` and
+/// no other parameter, that every caller may execute and whose body reads
+/// alike in turn. A table read under an alias renaming its columns confines
+/// nothing.
 /// Every function of the schema the body calls is held to the same test,
 /// except a `SECURITY DEFINER` function every caller may execute directly,
 /// which this rule judges on its own. Functions in `pg_catalog` are trusted.
@@ -604,13 +608,16 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// Whether `callee` runs as its owner and every caller may execute it
     /// directly, so calling it discloses nothing a direct call does not.
     fn runs_for_every_caller(&self, callee: &DB::Function) -> Result<bool, LookupError> {
-        if callee.security_mode() != FunctionSecurity::Definer {
-            return Ok(false);
-        }
+        Ok(callee.security_mode() == FunctionSecurity::Definer
+            && self.executable_by_every_caller(callee)?)
+    }
+
+    /// Whether every caller may execute `function`.
+    fn executable_by_every_caller(&self, function: &DB::Function) -> Result<bool, LookupError> {
         for caller in &self.callers {
             let executes = match *caller {
-                Some(role) => callee.can_execute(role, self.database)?,
-                None => callee.is_executable_by_public(self.database)?,
+                Some(role) => function.can_execute(role, self.database)?,
+                None => function.is_executable_by_public(self.database)?,
             };
             if !executes {
                 return Ok(false);
@@ -619,15 +626,17 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         Ok(true)
     }
 
-    /// Whether `expression` evaluates alike for a caller and for the owner,
-    /// reading no relation, no role, no privilege and no search path, and
-    /// calling no function of the schema that runs as its caller.
-    fn reads_alike(&self, expression: &Expr) -> Result<bool, LookupError> {
-        match walk(expression, &mut CallerBound(self.database)) {
-            ControlFlow::Continue(()) => Ok(true),
-            ControlFlow::Break(None) => Ok(false),
-            ControlFlow::Break(Some(error)) => Err(error),
+    /// Whether every caller may select every column of `table`.
+    fn selectable_by_every_caller(&self, table: &DB::Table) -> Result<bool, LookupError> {
+        for caller in &self.callers {
+            let held = table.privileges(acting(*caller), self.database)?;
+            for column in table.columns(self.database)? {
+                if !held.select.on_column(column) {
+                    return Ok(false);
+                }
+            }
         }
+        Ok(true)
     }
 
     /// The rows `function` draws the values it returns from, read once.
@@ -832,14 +841,8 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
             if !admitted {
                 return Ok(false);
             }
-            let held = table.privileges(acting(*caller), database)?;
-            for column in table.columns(database)? {
-                if !held.select.on_column(column) {
-                    return Ok(false);
-                }
-            }
         }
-        Ok(true)
+        self.confinement.selectable_by_every_caller(table)
     }
 }
 
@@ -892,19 +895,115 @@ impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
 
 /// Finds a term that may evaluate otherwise for the caller than for the
 /// owner, breaking with `None`, or with the error resolving a call.
-struct CallerBound<'a, DB: DatabaseLike>(&'a DB);
+struct CallerBound<'r, 'a, DB: DatabaseLike> {
+    confinement: &'r Confinement<'a, DB>,
+    /// The search path the names of the walked body resolve on.
+    path: Option<&'r [(Cow<'r, str>, bool)]>,
+    /// The `WITH` items in reach of the walked term, whose bodies it does
+    /// not hold.
+    around: Option<&'r WithScopes>,
+    /// The `WITH` items of the queries the walk stands in.
+    items: WithScopes,
+    /// The functions whose bodies the walk stands in.
+    reading: Vec<*const DB::Function>,
+}
 
-impl<DB: DatabaseLike> CallerBound<'_, DB> {
-    /// Whether `call` may reach a function of the schema running as its
-    /// caller.
-    fn runs_as_caller<'c>(&self, call: impl Into<WrittenCall<'c>>) -> Result<bool, LookupError> {
-        Ok(self
-            .0
-            .functions_reached_by(call, IdentifierCase::Folded)?
-            .any(|function| {
-                function.target_name().schema() != Some("pg_catalog")
-                    && function.security_mode() != FunctionSecurity::Definer
-            }))
+impl<'r, 'a, DB: DatabaseLike> CallerBound<'r, 'a, DB> {
+    /// The walk over a term of a body whose names resolve on `path`, with the
+    /// `WITH` items `around` in reach.
+    fn new(
+        confinement: &'r Confinement<'a, DB>,
+        path: Option<&'r [(Cow<'r, str>, bool)]>,
+        around: Option<&'r WithScopes>,
+    ) -> Self {
+        Self {
+            confinement,
+            path,
+            around,
+            items: WithScopes::default(),
+            reading: Vec::new(),
+        }
+    }
+
+    /// Whether `node` evaluates alike for a caller and for the owner.
+    fn reads_alike<N: Visit + ?Sized>(&mut self, node: &N) -> Result<bool, LookupError> {
+        match walk(node, self) {
+            ControlFlow::Continue(()) => Ok(true),
+            ControlFlow::Break(found) => found.map_or(Ok(false), Err),
+        }
+    }
+
+    /// Whether `call` may reach a function of the schema that runs as its
+    /// caller and may return otherwise for the caller than for the owner.
+    fn runs_as_caller<'c>(
+        &mut self,
+        call: impl Into<WrittenCall<'c>>,
+    ) -> Result<bool, LookupError> {
+        let database = self.confinement.database;
+        for function in database.functions_reached_by(call, IdentifierCase::Folded)? {
+            if function.target_name().schema() != Some("pg_catalog")
+                && function.security_mode() != FunctionSecurity::Definer
+                && !self.invoked_alike(function)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether `function`, running as its caller, returns alike for the
+    /// caller and the owner. It has to be one `LANGUAGE sql` query that is
+    /// not `VOLATILE`, sets its own `search_path` and no other parameter,
+    /// and that every caller may execute, whose body reads alike in turn.
+    fn invoked_alike(&mut self, function: &'a DB::Function) -> Result<bool, LookupError> {
+        let confinement = self.confinement;
+        let database = confinement.database;
+        let address = ptr::from_ref(function);
+        if self.reading.contains(&address)
+            || function.volatility() == FunctionBehavior::Volatile
+            || !sets_only_search_path(function)
+            || !confinement.executable_by_every_caller(function)?
+        {
+            return Ok(false);
+        }
+        let (Some(path), Some(query)) = (
+            function.search_path(database)?,
+            sql_query_body(database, function)?,
+        ) else {
+            return Ok(false);
+        };
+        let mut within = CallerBound::new(confinement, Some(&path), None);
+        within.reading = mem::take(&mut self.reading);
+        within.reading.push(address);
+        let alike = within.reads_alike(query.as_ref());
+        self.reading = within.reading;
+        self.reading.pop();
+        alike
+    }
+
+    /// Whether the relation `name` may hold other rows for the caller than
+    /// for the owner. A `WITH` item of the walked queries reads what its
+    /// walked body reads, and of the other relations only a stored table
+    /// without row-level security every caller may select every column of
+    /// reads alike.
+    fn reads_otherwise(&self, name: &ObjectName) -> Result<bool, LookupError> {
+        if self.items.binding(name).is_some() {
+            return Ok(false);
+        }
+        if self
+            .around
+            .is_some_and(|around| around.binding(name).is_some())
+        {
+            return Ok(true);
+        }
+        let database = self.confinement.database;
+        Ok(match stored_table(database, name, self.path)? {
+            Some(table) => {
+                table.has_row_level_security(database)?
+                    || !self.confinement.selectable_by_every_caller(table)?
+            }
+            None => true,
+        })
     }
 
     /// The walk's step for whether a term runs as its caller.
@@ -917,8 +1016,18 @@ impl<DB: DatabaseLike> CallerBound<'_, DB> {
     }
 }
 
-impl<DB: DatabaseLike> Visitor for CallerBound<'_, DB> {
+impl<DB: DatabaseLike> Visitor for CallerBound<'_, '_, DB> {
     type Break = Option<LookupError>;
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        self.items.enter(query);
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        self.items.leave(query);
+        ControlFlow::Continue(())
+    }
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
         let Expr::Function(call) = expression else {
@@ -931,8 +1040,11 @@ impl<DB: DatabaseLike> Visitor for CallerBound<'_, DB> {
     }
 
     fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
-        if let TableFactor::Table { args: None, .. } = factor {
-            return ControlFlow::Break(None);
+        if let TableFactor::Table {
+            name, args: None, ..
+        } = factor
+        {
+            return Self::verdict(self.reads_otherwise(name));
         }
         WrittenCall::relation(factor).map_or(ControlFlow::Continue(()), |call| {
             Self::verdict(self.runs_as_caller(call))
@@ -1238,7 +1350,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 term(&resolver, reference, relation, &equalities)
             });
             match stated {
-                Some(stated) if self.body.confinement.reads_alike(conjunct)? => {
+                Some(stated) if self.reads_alike(conjunct)? => {
                     conditions.push(stated);
                 }
                 Some(stated) => {
@@ -1255,6 +1367,13 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             caller_bound,
             whole,
         })
+    }
+
+    /// Whether `expression`, a term of the walked body, evaluates alike for
+    /// a caller and for the owner.
+    fn reads_alike(&self, expression: &Expr) -> Result<bool, LookupError> {
+        CallerBound::new(self.body.confinement, self.path, Some(&self.items))
+            .reads_alike(expression)
     }
 
     /// The stored table `relation` reads every row of under its own column
