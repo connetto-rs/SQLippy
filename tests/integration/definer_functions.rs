@@ -2751,6 +2751,162 @@ fn an_inferred_ladder_composes_with_declared_sets() {
 }
 
 #[test]
+fn a_helper_passed_one_label_spelled_two_ways_yields_one_set() {
+    assert_eq!(
+        exposed_through_ladder(
+            Deployment::default(),
+            ROLE,
+            "SELECT authz.granted(min_role)",
+            "authz.resources_with('writer'::authz.role)"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// [`ROLE`] and helpers over `public.grants` the ladder reads only in part.
+const ROLE_AND_HELPERS: &str = "
+    CREATE TYPE authz.role AS ENUM ('reader', 'writer', 'admin');
+    CREATE FUNCTION authz.volatile_granted(min_role authz.role) RETURNS SETOF INT
+      LANGUAGE sql VOLATILE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+        SELECT permission.resource_id FROM public.grants permission
+        WHERE permission.role >= min_role $$;
+    CREATE FUNCTION authz.procedural_granted(min_role authz.role) RETURNS SETOF INT
+      LANGUAGE plpgsql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+        BEGIN
+          RETURN QUERY SELECT permission.resource_id FROM public.grants permission
+          WHERE permission.role >= min_role;
+        END $$;
+    CREATE FUNCTION authz.granted_in(tenant INT, min_role authz.role) RETURNS SETOF INT
+      LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+        SELECT permission.resource_id FROM public.grants permission
+        WHERE permission.resource_id > tenant AND permission.role >= min_role $$;
+    CREATE FUNCTION authz.granted_rows(min_role authz.role, OUT id INT) RETURNS SETOF INT
+      LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+        SELECT permission.resource_id FROM public.grants permission
+        WHERE permission.role >= min_role $$;
+    CREATE FUNCTION authz.granted_any(VARIADIC roles authz.role[]) RETURNS SETOF INT
+      LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+        SELECT permission.resource_id FROM public.grants permission
+        WHERE permission.role = ANY (roles) $$;";
+
+/// [`exposed_through_ladder`] over [`ROLE_AND_HELPERS`] and a policy
+/// testing `authz.resources_with('reader')`.
+fn exposed_through_helpers(body: &str) -> Vec<String> {
+    exposed_through_ladder(
+        Deployment::default(),
+        ROLE_AND_HELPERS,
+        body,
+        "authz.resources_with('reader')",
+    )
+}
+
+#[test]
+fn a_helper_reading_its_parameter_through_nested_queries_nests_its_sets() {
+    for body in [
+        "SELECT edge.id FROM public.edges edge",
+        "WITH other AS (SELECT edge.id FROM public.edges edge)
+         SELECT granted.id FROM authz.granted(min_role) granted (id)
+         WHERE granted.id IN (SELECT id FROM other)",
+        "(SELECT authz.granted(min_role)) UNION (SELECT authz.granted(min_role))",
+        "SELECT * FROM authz.granted(min_role)",
+        "SELECT sub.id FROM (SELECT authz.granted(min_role) AS id) sub",
+        "SELECT granted.id
+         FROM (authz.granted(min_role) granted (id) JOIN public.edges edge ON edge.id = granted.id)",
+        "SELECT authz.granted_in(1, min_role)",
+        "SELECT authz.granted((min_role))",
+        "SELECT granted.id FROM authz.granted_rows(min_role) granted",
+        "SELECT edge.id FROM public.edges edge
+         WHERE edge.parent_id = ANY (ARRAY(SELECT authz.granted(min_role)))",
+        "SELECT permission.resource_id FROM public.grants permission
+         WHERE permission.role >= (min_role)",
+    ] {
+        assert_eq!(exposed_through_helpers(body), Vec::<String>::new(), "{body}");
+    }
+}
+
+#[test]
+fn a_helper_whose_descent_the_ladder_cannot_read_is_reported() {
+    for body in [
+        "SELECT authz.volatile_granted(min_role)",
+        "SELECT authz.procedural_granted(min_role)",
+        "SELECT authz.resources_with(min_role)",
+        "SELECT authz.granted_any(min_role)",
+        "SELECT authz.missing(min_role)",
+        "SELECT granted.id FROM authz.missing(min_role) granted (id)",
+        "SELECT granted.id FROM authz.granted(min_role) WITH ORDINALITY granted (id, n)",
+        "SELECT authz.other_resources() FROM authz.granted(min_role) granted (id)",
+        "SELECT DISTINCT ON (granted.id) granted.id FROM authz.granted(min_role) granted (id)",
+        "WITH below (id) AS (SELECT authz.granted_below(min_role)) SELECT id FROM below",
+        "SELECT edge.id FROM public.edges edge UNION VALUES ((SELECT 1 WHERE min_role = 'admin'))",
+        "SELECT edge.id FROM public.edges edge
+         JOIN public.grants permission ON permission.role <= min_role",
+        "SELECT edge.id FROM public.edges edge
+         JOIN authz.granted_below(min_role) granted (id) ON granted.id = edge.id",
+        "SELECT listed.id FROM unnest(ARRAY[min_role::text::INT]) listed (id)",
+        "SELECT edge.id FROM public.edges edge WHERE edge.parent_id = ANY (ARRAY[min_role::text::INT])",
+        "SELECT edge.id FROM public.edges edge WHERE edge.parent_id = ANY (array(min_role))",
+        "SELECT listed.id FROM (SELECT permission.resource_id AS id, NULL AS role
+         FROM public.grants permission) listed WHERE listed.role >= min_role",
+        "SELECT permission.resource_id FROM public.grants permission, public.grants other
+         WHERE role >= min_role",
+    ] {
+        assert_eq!(exposed_through_helpers(body), ["writable()"], "{body}");
+    }
+}
+
+#[test]
+fn a_policy_passing_its_label_other_than_as_one_literal_is_not_nested() {
+    for policy_set in [
+        "authz.resources_with(current_setting('app.role')::authz.role)",
+        "authz.resources_with(min_role => 'reader')",
+    ] {
+        assert_eq!(
+            exposed_through_ladder(
+                Deployment::default(),
+                ROLE,
+                "SELECT authz.granted(min_role)",
+                policy_set
+            ),
+            ["writable()"],
+            "{policy_set}"
+        );
+    }
+}
+
+#[test]
+fn a_declared_set_nests_through_a_ladder_over_every_other_argument_alike() {
+    let reported = |within: &str, policy_set: &str| {
+        let declared = Deployment::default()
+            .with_set_within("authz.resources_with('writer')", within)
+            .expect("both sets parse");
+        exposed_through_ladder(
+            declared,
+            ROLE_AND_HELPERS,
+            "SELECT authz.granted(min_role)",
+            policy_set,
+        )
+    };
+    assert_eq!(
+        reported(
+            "authz.granted_in(1, 'writer')",
+            "authz.granted_in(1, 'reader')"
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        reported(
+            "authz.granted_in(1, 'writer')",
+            "authz.granted_in(2, 'reader')"
+        ),
+        ["writable()"]
+    );
+    assert_eq!(
+        reported("authz.missing()", "authz.other_resources()"),
+        ["writable()"]
+    );
+}
+
+#[test]
 fn the_default_constrainer_runs_the_function_rules_at_their_group_levels() {
     let found = findings(
         &DefaultConstrainer::<ParserDB>::default(),

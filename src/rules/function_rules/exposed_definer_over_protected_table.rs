@@ -421,15 +421,15 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             return Ok(None);
         };
         let statement = Statement::Query(Box::new(query.into_owned()));
-        let Statement::Query(query) = &statement else {
-            unreachable!("the statement was built from a query");
-        };
         let scope = ExpressionScope::FunctionBody(function);
-        let Ok(context) = ExpressionContext::for_statement(
+        let (Statement::Query(query), Ok(context)) = (
             &statement,
-            &scope,
-            self.database,
-            IdentifierCase::AsWritten,
+            ExpressionContext::for_statement(
+                &statement,
+                &scope,
+                self.database,
+                IdentifierCase::AsWritten,
+            ),
         ) else {
             return Ok(None);
         };
@@ -690,7 +690,7 @@ impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
 
     fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> Result<bool, LookupError> {
         let ladders = &self.confinement.ladders;
-        self.confinement.deployment.is_set_within_unfolding(
+        self.confinement.deployment.is_set_within(
             narrower,
             wider,
             |_| Ok(None),

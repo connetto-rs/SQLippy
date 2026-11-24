@@ -55,8 +55,8 @@ impl<'a, DB: DatabaseLike> Ladders<'a, DB> {
     /// Whether every value the call `narrower` yields is one the call
     /// `wider` yields: both call one function, passing literals that agree
     /// except at input parameters of an enum type it descends in, where
-    /// `narrower` passes a label the type orders after the one `wider`
-    /// passes.
+    /// `narrower` passes a label the type orders at or after the one
+    /// `wider` passes.
     ///
     /// # Errors
     ///
@@ -79,7 +79,6 @@ impl<'a, DB: DatabaseLike> Ladders<'a, DB> {
         ) else {
             return Ok(false);
         };
-        let mut ordered = false;
         for (position, (low, high)) in lower.into_iter().zip(upper).enumerate() {
             if literal(low).is_none() || literal(high).is_none() {
                 return Ok(false);
@@ -106,16 +105,21 @@ impl<'a, DB: DatabaseLike> Ladders<'a, DB> {
             if low == high {
                 continue;
             }
-            if low < high || !self.descends(function, position)? {
+            if low < high || !self.descends(function, position, labeled)? {
                 return Ok(false);
             }
-            ordered = true;
         }
-        Ok(ordered)
+        Ok(true)
     }
 
-    /// Whether `function` descends in its input parameter at `position`.
-    fn descends(&self, function: &'a DB::Function, position: usize) -> Result<bool, LookupError> {
+    /// Whether `function` descends in its input parameter at `position`, of
+    /// the enum type `ordered`.
+    fn descends(
+        &self,
+        function: &'a DB::Function,
+        position: usize,
+        ordered: &'a DB::UserDefinedType,
+    ) -> Result<bool, LookupError> {
         let key = (ptr::from_ref(function), position);
         if let Some(&(_, known)) = self.read.borrow().iter().find(|(read, _)| *read == key) {
             return Ok(known);
@@ -124,7 +128,7 @@ impl<'a, DB: DatabaseLike> Ladders<'a, DB> {
             return Ok(false);
         }
         self.reading.borrow_mut().push(key);
-        let descends = self.read_descent(function, position);
+        let descends = self.read_descent(function, position, ordered);
         self.reading.borrow_mut().pop();
         let descends = descends?;
         self.read.borrow_mut().push((key, descends));
@@ -138,6 +142,7 @@ impl<'a, DB: DatabaseLike> Ladders<'a, DB> {
         &self,
         function: &'a DB::Function,
         position: usize,
+        ordered: &'a DB::UserDefinedType,
     ) -> Result<bool, LookupError> {
         if function.volatility() == FunctionBehavior::Volatile
             || !function.returns_set()
@@ -145,22 +150,19 @@ impl<'a, DB: DatabaseLike> Ladders<'a, DB> {
         {
             return Ok(false);
         }
-        let Some(ordered) = enumeration(self.database, function, position)? else {
-            return Ok(false);
-        };
         let Some(query) = sql_query_body(self.database, function)? else {
             return Ok(false);
         };
         let statement = Statement::Query(Box::new(query.into_owned()));
-        let Statement::Query(query) = &statement else {
-            unreachable!("the statement was built from a query");
-        };
         let scope = ExpressionScope::FunctionBody(function);
-        let Ok(context) = ExpressionContext::for_statement(
+        let (Statement::Query(query), Ok(context)) = (
             &statement,
-            &scope,
-            self.database,
-            IdentifierCase::AsWritten,
+            ExpressionContext::for_statement(
+                &statement,
+                &scope,
+                self.database,
+                IdentifierCase::AsWritten,
+            ),
         ) else {
             return Ok(false);
         };
@@ -316,8 +318,10 @@ impl<'a, DB: DatabaseLike> Descent<'_, '_, '_, 'a, DB> {
                     Expr::Function(call) => self.call(call)?,
                     _ => false,
                 },
-                SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..) => true,
-                SelectItem::ExprWithAliases { .. } => false,
+                other => matches!(
+                    other,
+                    SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)
+                ),
             };
             if !kept {
                 return Ok(false);
@@ -364,24 +368,21 @@ impl<'a, DB: DatabaseLike> Descent<'_, '_, '_, 'a, DB> {
         if !self.touches(factor) {
             return Ok(true);
         }
+        if let Some(call) = WrittenCall::relation(factor) {
+            let Some(callee) = called(self.ladders.database, call)? else {
+                return Ok(false);
+            };
+            return match relation_arguments(factor, callee) {
+                Some(arguments) => self.passes(callee, &arguments),
+                None => Ok(false),
+            };
+        }
         match factor {
             TableFactor::Table {
                 args: None,
                 sample: None,
                 ..
             } => Ok(true),
-            TableFactor::Table { args: Some(_), .. } | TableFactor::Function { .. } => {
-                let Some(call) = WrittenCall::relation(factor) else {
-                    return Ok(false);
-                };
-                let Some(callee) = called(self.ladders.database, call)? else {
-                    return Ok(false);
-                };
-                match relation_arguments(factor, callee) {
-                    Some(arguments) => self.passes(callee, &arguments),
-                    None => Ok(false),
-                }
-            }
             TableFactor::Derived { subquery, .. } => self.query(subquery),
             TableFactor::NestedJoin {
                 table_with_joins, ..
@@ -421,7 +422,7 @@ impl<'a, DB: DatabaseLike> Descent<'_, '_, '_, 'a, DB> {
             if !self.is_parameter(passed)
                 || !enumeration(self.ladders.database, callee, position)?
                     .is_some_and(|labeled| ptr::eq(labeled, self.ordered))
-                || !self.ladders.descends(callee, position)?
+                || !self.ladders.descends(callee, position, self.ordered)?
             {
                 return Ok(false);
             }
@@ -633,4 +634,40 @@ pub(crate) fn plain(select: &Select) -> bool {
         && select.qualify.is_none()
         && select.value_table_mode.is_none()
         && select.flavor == SelectFlavor::Standard
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::{ast::Expr, dialect::PostgreSqlDialect, parser::Parser};
+
+    use super::listed_arguments;
+
+    /// The arguments [`listed_arguments`] reads from `call`, written for
+    /// PostgreSQL, each as written.
+    fn listed(call: &str) -> Option<Vec<String>> {
+        let call = Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(call)
+            .and_then(|mut parser| parser.parse_expr())
+            .expect("call parses");
+        let Expr::Function(call) = call else {
+            panic!("{call} is not a call");
+        };
+        listed_arguments(&call).map(|arguments| arguments.iter().map(ToString::to_string).collect())
+    }
+
+    #[test]
+    fn only_a_plain_positional_argument_list_is_read() {
+        assert_eq!(
+            listed("granted(1, 'writer')"),
+            Some(vec!["1".to_owned(), "'writer'".to_owned()])
+        );
+        for refused in [
+            "CURRENT_TIMESTAMP",
+            "granted(DISTINCT 'writer')",
+            "granted('writer' ORDER BY 1)",
+            "granted(min_role => 'writer')",
+        ] {
+            assert_eq!(listed(refused), None, "{refused}");
+        }
+    }
 }
