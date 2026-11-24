@@ -18,11 +18,13 @@ use crate::{
         closed_set_support::stored_name,
         cte_support::stored_table,
         function_reach_support::Reach,
-        guarded_parent_support::always_runs,
+        guarded_parent_support::always_runs_unless,
         key_support::{checked_whenever_set, equality_keys, key_pairs},
         plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, walk_block},
         policy_read_support::reads_every_row,
-        policy_support::{acting, client_roles, is_column_reference, is_contradiction, unwrapped},
+        policy_support::{
+            acting, client_roles, conjuncts, is_column_reference, is_contradiction, unwrapped,
+        },
         trigger_support::{
             WritesTable, fires_for_clients, fires_on_insert, names_new_field, new_field, row,
             row_trigger, stored, stored_parts,
@@ -45,6 +47,9 @@ pub(crate) struct Consumption<'db, DB: DatabaseLike> {
     /// Each column of the named row the trigger sets, with the value it
     /// sets, `NEW`'s fields written as columns of the written table.
     assignments: Vec<(String, Expr)>,
+    /// The further conditions of the trigger's `WHERE` on the named row, on
+    /// columns it sets.
+    guards: Vec<Expr>,
 }
 
 impl<DB: DatabaseLike> Consumption<'_, DB> {
@@ -60,12 +65,28 @@ impl<DB: DatabaseLike> Consumption<'_, DB> {
     }
 
     /// Whether no row the trigger has written meets `fact`, a condition on
-    /// the columns of the named row.
+    /// the columns of the named row, and every row meeting it is one the
+    /// trigger writes.
     pub(crate) fn rejects(&self, fact: &Expr) -> Result<bool, LookupError> {
         let Some(substituted) = substituted(fact, &self.assignments) else {
             return Ok(false);
         };
-        is_contradiction(self.database, self.written, &substituted)
+        if !is_contradiction(self.database, self.written, &substituted)? {
+            return Ok(false);
+        }
+        for guard in &self.guards {
+            let skipped = Expr::BinaryOp {
+                left: Box::new(Expr::Nested(Box::new(fact.clone()))),
+                op: BinaryOperator::And,
+                right: Box::new(Expr::IsNotTrue(Box::new(Expr::Nested(Box::new(
+                    guard.clone(),
+                ))))),
+            };
+            if !is_contradiction(self.database, self.table, &skipped)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -114,8 +135,13 @@ pub(crate) fn consumptions<'db, DB: DatabaseLike>(
         if writes_elsewhere
             || !trigger
                 .condition()
-                .is_none_or(|condition| tests_key_set(condition, &consumption.column))
-            || !always_runs(&block, "new", |run| run == statement)
+                .is_none_or(|condition| leaves_key_null(condition, false, &consumption.column))
+            || !always_runs_unless(
+                &block,
+                "new",
+                |run| run == statement,
+                |condition, holds| leaves_key_null(condition, holds, &consumption.column),
+            )
             || !reads_every_row(database, function, consumption.table)?
             || !stays_written(database, deployment, trigger, &consumption)?
         {
@@ -126,15 +152,20 @@ pub(crate) fn consumptions<'db, DB: DatabaseLike>(
     Ok(found)
 }
 
-/// Whether `condition`, under parentheses, is `NEW.column IS NOT NULL`, which
-/// skips only rows whose key no check compares.
-fn tests_key_set(condition: &Expr, column: &str) -> bool {
-    matches!(unwrapped(condition), Expr::IsNotNull(field) if names_new_field(field, column))
+/// Whether a path on which `condition` evaluated to `holds` carries a `NULL`
+/// key in `column`, which no unique key compares.
+fn leaves_key_null(condition: &Expr, holds: bool, column: &str) -> bool {
+    match unwrapped(condition) {
+        Expr::IsNotNull(field) => !holds && names_new_field(field, column),
+        Expr::IsNull(field) => holds && names_new_field(field, column),
+        _ => false,
+    }
 }
 
 /// The consumption `statement` is, as `UPDATE other SET ... WHERE column =
 /// NEW.key` over one table other than `table`, setting each column to a
-/// value built from literals and `NEW`'s fields.
+/// value built from literals and `NEW`'s fields. Further `AND` conjuncts of
+/// the `WHERE` may read only the columns it sets.
 fn consuming_update<'db, DB: DatabaseLike>(
     database: &'db DB,
     table: &'db DB::Table,
@@ -162,17 +193,17 @@ fn consuming_update<'db, DB: DatabaseLike>(
     if named == table {
         return None;
     }
-    let Expr::BinaryOp {
-        left,
-        op: BinaryOperator::Eq,
-        right,
-    } = unwrapped(selection)
-    else {
-        return None;
-    };
-    let (referenced, column) = [(left, right), (right, left)]
-        .into_iter()
-        .find_map(|(referenced, key)| Some((updated_column(referenced)?, new_field(key)?)))?;
+    let parts = conjuncts(selection);
+    let (position, (referenced, column)) = parts
+        .iter()
+        .enumerate()
+        .find_map(|(position, part)| Some((position, key_equality(part)?)))?;
+    let guards = parts
+        .iter()
+        .enumerate()
+        .filter(|(other, _)| *other != position)
+        .map(|(_, part)| updated_condition(part))
+        .collect::<Option<Vec<Expr>>>()?;
     let mut set = Vec::new();
     for assignment in assignments {
         let AssignmentTarget::ColumnName(target) = &assignment.target else {
@@ -183,6 +214,12 @@ fn consuming_update<'db, DB: DatabaseLike>(
             set.push((assigned, value));
         }
     }
+    if guards
+        .iter()
+        .any(|guard| substituted(guard, &set).is_none())
+    {
+        return None;
+    }
     Some(Consumption {
         database,
         written: table,
@@ -190,7 +227,56 @@ fn consuming_update<'db, DB: DatabaseLike>(
         table: named,
         referenced,
         assignments: set,
+        guards,
     })
+}
+
+/// The column of the updated table and the field of `NEW` that `conjunct`,
+/// as `column = NEW.key`, holds equal.
+fn key_equality(conjunct: &Expr) -> Option<(String, Cow<'_, str>)> {
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = unwrapped(conjunct)
+    else {
+        return None;
+    };
+    [(left, right), (right, left)]
+        .into_iter()
+        .find_map(|(referenced, key)| Some((updated_column(referenced)?, new_field(key)?)))
+}
+
+/// `condition` with each column of the updated table written bare by its
+/// stored name, or `None` when it reads a trigger row or a query.
+fn updated_condition(condition: &Expr) -> Option<Expr> {
+    /// Rewrites the updated table's columns, breaking on any other column or
+    /// a query.
+    struct Columns;
+
+    impl VisitorMut for Columns {
+        type Break = ();
+
+        fn pre_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
+            ControlFlow::Break(())
+        }
+
+        fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<()> {
+            if !is_column_reference(expression) {
+                return ControlFlow::Continue(());
+            }
+            let Some(column) = updated_column(expression) else {
+                return ControlFlow::Break(());
+            };
+            *expression = Expr::Identifier(Ident::new(column));
+            ControlFlow::Continue(())
+        }
+    }
+
+    let mut rewritten = condition.clone();
+    VisitMut::visit(&mut rewritten, &mut Columns)
+        .is_continue()
+        .then_some(rewritten)
 }
 
 /// The stored name of the column of the updated table `expression`, under

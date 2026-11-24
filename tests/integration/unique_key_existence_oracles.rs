@@ -317,6 +317,81 @@ fn a_key_a_trigger_takes_out_of_the_checked_set_is_clean() {
     }
 }
 
+/// The trigger's `UPDATE` with `WHERE id = NEW.invitation_id` replaced by `selection`.
+fn keyed(selection: &str) -> (&'static str, String) {
+    ("WHERE id = NEW.invitation_id", format!("WHERE {selection}"))
+}
+
+#[test]
+fn a_key_an_update_guarded_by_its_own_filter_consumes_is_clean() {
+    let pending_by = ("AND NOT accepted", "AND accepted_by IS NULL".to_owned());
+    let stamping = (
+        "SET accepted = true",
+        "SET accepted_by = NEW.user_id".to_owned(),
+    );
+    let update = "UPDATE invitations SET accepted = true WHERE id = NEW.invitation_id;";
+    for edits in [
+        vec![keyed("id = NEW.invitation_id AND NOT accepted")],
+        vec![keyed("NOT accepted AND invitations.id = NEW.invitation_id")],
+        vec![
+            pending_by,
+            stamping,
+            keyed("id = NEW.invitation_id AND accepted_by IS NULL"),
+        ],
+        vec![(
+            update,
+            format!("IF NEW.invitation_id IS NOT NULL THEN {update} END IF;"),
+        )],
+        vec![(
+            update,
+            format!("IF (NEW.invitation_id IS NOT NULL) THEN {update} END IF;"),
+        )],
+        vec![(
+            update,
+            format!("IF NEW.invitation_id IS NULL THEN RETURN NULL; END IF; {update}"),
+        )],
+    ] {
+        let edits: Vec<(&str, &str)> = edits
+            .iter()
+            .map(|(from, to)| (*from, to.as_str()))
+            .collect();
+        assert!(!reports_invitation_key(&edits), "{edits:?}");
+    }
+}
+
+#[test]
+fn a_key_an_update_skips_while_the_check_admits_it_is_reported() {
+    let update = "UPDATE invitations SET accepted = true WHERE id = NEW.invitation_id;";
+    for edits in [
+        vec![keyed("id = NEW.invitation_id AND email = 'x@y'")],
+        vec![
+            (
+                "SET accepted = true",
+                "SET accepted = true, accepted_by = NEW.user_id".to_owned(),
+            ),
+            keyed("id = NEW.invitation_id AND accepted_by = 5"),
+        ],
+        vec![(
+            update,
+            format!("IF NEW.invitation_id IS NULL THEN {update} END IF;"),
+        )],
+        vec![(
+            update,
+            format!("IF NEW.nickname IS NULL THEN RETURN NULL; END IF; {update}"),
+        )],
+        vec![(
+            update,
+            format!("IF NEW.nickname IS NOT NULL THEN {update} END IF;"),
+        )],
+    ] {
+        let edits: Vec<(&str, &str)> = edits
+            .iter()
+            .map(|(from, to)| (*from, to.as_str()))
+            .collect();
+        assert!(reports_invitation_key(&edits), "{edits:?}");
+    }
+}
+
 #[test]
 fn a_key_drawn_from_another_set_than_the_readable_one_is_reported() {
     for (read, check) in [
