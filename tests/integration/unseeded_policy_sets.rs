@@ -284,3 +284,35 @@ fn helpers_without_a_caller_term_leave_the_seed_unconstrained() {
         );
     }
 }
+
+#[test]
+fn subqueries_reading_only_tables_do_not_constrain_the_seed() {
+    assert_eq!(
+        reported(&schema(
+            "SELECT id FROM memberships WHERE id IN (SELECT id FROM resources)",
+            "",
+            ""
+        )),
+        1
+    );
+    assert_eq!(
+        reported(&schema(
+            "SELECT id FROM memberships WHERE actor_id = current_setting('app.user_id', true) AND id IN (SELECT id FROM resources)",
+            "",
+            ""
+        )),
+        0
+    );
+}
+
+#[test]
+fn helpers_the_seed_reaches_on_another_search_path_are_not_followed() {
+    let helpers = "CREATE SCHEMA private; CREATE FUNCTION private.caller_ids() RETURNS SETOF INT LANGUAGE sql AS $$ SELECT id FROM memberships $$; CREATE FUNCTION caller_ids() RETURNS SETOF INT LANGUAGE sql AS $$ SELECT id FROM memberships WHERE actor_id = current_setting('app.user_id', true) $$;";
+    let seed = "SELECT id FROM memberships WHERE id IN (SELECT caller_ids())";
+    assert_eq!(reported(&with_helpers(helpers, seed)), 0);
+    let elsewhere = with_helpers(helpers, seed).replace(
+        "RETURNS SETOF INT LANGUAGE sql AS $$ WITH RECURSIVE",
+        "RETURNS SETOF INT LANGUAGE sql SET search_path = private, public AS $$ WITH RECURSIVE",
+    );
+    assert_eq!(reported(&elsewhere), 1);
+}

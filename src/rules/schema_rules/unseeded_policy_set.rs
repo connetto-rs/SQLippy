@@ -18,6 +18,7 @@ use crate::{
         authority_support::is_credential_value,
         credential_support::CredentialTerm,
         cte_support::{recursive_items, stored_table},
+        existence_oracle_support::resolves_alike,
         function_body_support::{BodyNode, function_body, parameter},
         function_reach_support::{policy_functions, reachable_functions},
         function_rules::readable,
@@ -35,6 +36,10 @@ struct SeedInput<'input, 'database, DB: DatabaseLike> {
     deployment: &'input Deployment,
     database: &'database DB,
     function: &'database DB::Function,
+    /// Whether every name in the seed reaches on the function's search path
+    /// what it reaches on the schema's own, which the calls it follows are
+    /// resolved on.
+    follows_calls: bool,
 }
 
 impl<'database, DB: DatabaseLike> SeedInput<'_, 'database, DB> {
@@ -53,6 +58,9 @@ impl<'database, DB: DatabaseLike> SeedInput<'_, 'database, DB> {
         &self,
         call: impl Into<WrittenCall<'call>>,
     ) -> Result<bool, LookupError> {
+        if !self.follows_calls {
+            return Ok(false);
+        }
         let mut reached = false;
         for called in self
             .database
@@ -196,6 +204,10 @@ fn check_body<DB: DatabaseLike, V: Visit + ?Sized>(
 ) -> Result<(), Interruption> {
     let path = function.search_path(database)?;
     recursive_items(body, |item, recursive| {
+        let follows_calls = match path.as_deref() {
+            Some(path) => resolves_alike(database, recursive.seed, path)?,
+            None => true,
+        };
         let mut seed = Seed {
             database,
             path: path.as_deref(),
@@ -203,6 +215,7 @@ fn check_body<DB: DatabaseLike, V: Visit + ?Sized>(
                 deployment: reporter.deployment(),
                 database,
                 function,
+                follows_calls,
             },
             reads_table: false,
             constrained: false,
@@ -221,7 +234,7 @@ fn check_body<DB: DatabaseLike, V: Visit + ?Sized>(
 ///
 /// A global seed can return other subjects' authority rows. Reviewed global reference-data sets can use [`Constrainer::allow_function`].
 ///
-/// A seed predicate calling a helper counts as the helper's body would count inlined there, so it is constrained when that body or the body of a function it reaches holds a declared credential. The helper's own parameters stand for the arguments of the call, which the predicate already holds.
+/// A seed predicate calling a helper counts as the helper's body would count inlined there, so it is constrained when that body or the body of a function it reaches holds a declared credential. The helper's own parameters stand for the arguments of the call, which the predicate already holds. Calls are not followed from a seed whose names reach other objects on the function's search path than on the schema's own.
 ///
 /// The rule does not run on SQLite, which has no row-level security policies.
 ///
