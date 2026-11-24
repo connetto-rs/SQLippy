@@ -217,11 +217,11 @@ const INVITATIONS: &str = "CREATE TABLE invitations (id INT PRIMARY KEY, email T
 
 /// Whether the invitation key of `INVITATIONS`, with each `(from, to)`
 /// replacement applied once, is reported.
-fn reports_invitation_key(edits: &[(&str, &str)]) -> bool {
+fn reports_invitation_key<To: AsRef<str>>(edits: &[(&str, To)]) -> bool {
     let mut sql = INVITATIONS.to_owned();
     for (from, to) in edits {
         assert!(sql.contains(from), "{from}");
-        sql = sql.replacen(from, to, 1);
+        sql = sql.replacen(from, to.as_ref(), 1);
     }
     objects(&sql).contains(&"memberships.memberships_invitation".to_owned())
 }
@@ -351,10 +351,6 @@ fn a_key_an_update_guarded_by_its_own_filter_consumes_is_clean() {
             format!("IF NEW.invitation_id IS NULL THEN RETURN NULL; END IF; {update}"),
         )],
     ] {
-        let edits: Vec<(&str, &str)> = edits
-            .iter()
-            .map(|(from, to)| (*from, to.as_str()))
-            .collect();
         assert!(!reports_invitation_key(&edits), "{edits:?}");
     }
 }
@@ -384,10 +380,6 @@ fn a_key_an_update_skips_while_the_check_admits_it_is_reported() {
             format!("IF NEW.nickname IS NOT NULL THEN {update} END IF;"),
         )],
     ] {
-        let edits: Vec<(&str, &str)> = edits
-            .iter()
-            .map(|(from, to)| (*from, to.as_str()))
-            .collect();
         assert!(reports_invitation_key(&edits), "{edits:?}");
     }
 }
@@ -667,10 +659,6 @@ fn a_key_another_trigger_form_consumes_is_clean() {
         ]
         .concat(),
     ] {
-        let edits: Vec<(&str, &str)> = edits
-            .iter()
-            .map(|(from, to)| (*from, to.as_str()))
-            .collect();
         assert!(!reports_invitation_key(&edits), "{edits:?}");
     }
 }
@@ -740,10 +728,6 @@ fn a_key_another_trigger_form_may_leave_unconsumed_is_reported() {
         ]
         .concat(),
     ] {
-        let edits: Vec<(&str, &str)> = edits
-            .iter()
-            .map(|(from, to)| (*from, to.as_str()))
-            .collect();
         assert!(reports_invitation_key(&edits), "{edits:?}");
     }
 }
@@ -811,10 +795,6 @@ fn a_key_a_statement_trigger_may_leave_unconsumed_is_reported() {
         ]
         .concat(),
     ] {
-        let edits: Vec<(&str, &str)> = edits
-            .iter()
-            .map(|(from, to)| (*from, to.as_str()))
-            .collect();
         assert!(reports_invitation_key(&edits), "{edits:?}");
     }
 }
