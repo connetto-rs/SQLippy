@@ -44,9 +44,11 @@ rule_definition!(
     /// `AFTER INSERT` row trigger of the table makes false for the row each
     /// stored key names. The trigger's PL/pgSQL function must run
     /// `UPDATE other SET ... WHERE column = NEW.key` on every path that
-    /// returns, write that table nowhere else, set each tested column from
-    /// literals and `NEW`'s fields, and read every row of that table, and the
-    /// trigger's `WHEN` may only skip a `NULL` key. A stored key then fails
+    /// returns with a non-`NULL` key, write that table nowhere else, set each
+    /// tested column from literals and `NEW`'s fields, and read every row of
+    /// that table, and the trigger's `WHEN` may only skip a `NULL` key. A
+    /// further `AND` condition of that `WHERE` may read only columns the
+    /// trigger sets, and the filter must imply it. A stored key then fails
     /// the check before PostgreSQL looks it up, as long as no client role can
     /// bring the named row back. No client role may update a column the
     /// trigger sets or the column naming the row, nor update the key unless

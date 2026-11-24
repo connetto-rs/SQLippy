@@ -837,8 +837,20 @@ impl<DB: DatabaseLike> FlowVisitor for Settles<'_, '_, DB> {
 /// statement `runs` accepts, with the trigger row `record` names neither
 /// written nor shadowed anywhere in the body.
 pub(crate) fn always_runs(block: &Block, record: &str, runs: impl Fn(&Statement) -> bool) -> bool {
+    always_runs_unless(block, record, runs, |_, _| false)
+}
+
+/// [`always_runs`], also accepting a path that has gone on past a condition
+/// evaluated to a truth `excused` accepts.
+pub(crate) fn always_runs_unless(
+    block: &Block,
+    record: &str,
+    runs: impl Fn(&Statement) -> bool,
+    excused: impl Fn(&Expr, bool) -> bool,
+) -> bool {
     let mut always = Always {
         runs,
+        excused,
         record,
         missed: false,
         unfollowed: false,
@@ -859,8 +871,10 @@ impl FlowState for Ran {
 
 /// Follows a trigger function's paths to whether each one returning has run
 /// the statement sought.
-struct Always<'r, F> {
+struct Always<'r, F, E> {
     runs: F,
+    /// Accepts a path past a condition evaluated to the given truth.
+    excused: E,
     /// `new` or `old`.
     record: &'r str,
     /// Some path returns without having run it.
@@ -869,7 +883,7 @@ struct Always<'r, F> {
     unfollowed: bool,
 }
 
-impl<F: Fn(&Statement) -> bool> FlowVisitor for Always<'_, F> {
+impl<F: Fn(&Statement) -> bool, E: Fn(&Expr, bool) -> bool> FlowVisitor for Always<'_, F, E> {
     type State = Ran;
 
     fn enter(&mut self, block: &Block, _state: &mut Ran) {
@@ -881,6 +895,10 @@ impl<F: Fn(&Statement) -> bool> FlowVisitor for Always<'_, F> {
     }
 
     fn query(&mut self, _query: &Query, _state: &mut Ran) {}
+
+    fn assume(&mut self, condition: &Query, holds: bool, state: &mut Ran) {
+        state.0 |= evaluated(condition).is_some_and(|condition| (self.excused)(condition, holds));
+    }
 
     fn statement(&mut self, statement: &Statement, state: &mut Ran) {
         state.0 |= (self.runs)(statement);
