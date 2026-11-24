@@ -236,3 +236,51 @@ fn unused_function_allowance_identifies_the_reviewed_exception() {
         "Unused allowance: the allowance for unseeded_policy_set on function 'public.visible_ids' excuses no violation"
     );
 }
+
+/// Builds the schema for `seed` with `helpers` created before the recursive set.
+fn with_helpers(helpers: &str, seed: &str) -> String {
+    schema(seed, "", "").replacen(
+        "CREATE FUNCTION visible_ids",
+        &format!("{helpers} CREATE FUNCTION visible_ids"),
+        1,
+    )
+}
+
+#[test]
+fn membership_in_a_caller_constrained_helper_constrains_the_seed() {
+    let caller_ids = "CREATE FUNCTION caller_ids() RETURNS SETOF INT LANGUAGE sql AS $$ SELECT id FROM memberships WHERE actor_id = current_setting('app.user_id', true) $$;";
+    for seed in [
+        "SELECT id FROM memberships WHERE id IN (SELECT caller_ids())",
+        "SELECT id FROM memberships WHERE id IN (SELECT caller.id FROM caller_ids() caller(id))",
+    ] {
+        assert_eq!(reported(&with_helpers(caller_ids, seed)), 0, "{seed}");
+    }
+    let wrapped = format!(
+        "{caller_ids} CREATE FUNCTION wrapped_ids() RETURNS SETOF INT LANGUAGE sql AS $$ SELECT id FROM resources WHERE id IN (SELECT caller_ids()) $$;"
+    );
+    assert_eq!(
+        reported(&with_helpers(
+            &wrapped,
+            "SELECT id FROM memberships WHERE id = ANY (ARRAY(SELECT wrapped_ids()))"
+        )),
+        0
+    );
+}
+
+#[test]
+fn helpers_without_a_caller_term_leave_the_seed_unconstrained() {
+    for helpers in [
+        "CREATE FUNCTION caller_ids() RETURNS SETOF INT LANGUAGE sql AS $$ SELECT id FROM memberships WHERE actor_id = 'fixed' $$;",
+        "CREATE FUNCTION caller_ids() RETURNS SETOF INT LANGUAGE sql AS $$ SELECT actor_ids('fixed') $$; CREATE FUNCTION actor_ids(actor TEXT) RETURNS SETOF INT LANGUAGE sql AS $$ SELECT id FROM memberships WHERE actor_id = actor $$;",
+        "CREATE FUNCTION caller_ids() RETURNS SETOF INT LANGUAGE sql AS $$ SELECT other_ids() $$; CREATE FUNCTION other_ids() RETURNS SETOF INT LANGUAGE sql AS $$ SELECT caller_ids() $$;",
+    ] {
+        assert_eq!(
+            reported(&with_helpers(
+                helpers,
+                "SELECT id FROM memberships WHERE id IN (SELECT caller_ids())"
+            )),
+            1,
+            "{helpers}"
+        );
+    }
+}

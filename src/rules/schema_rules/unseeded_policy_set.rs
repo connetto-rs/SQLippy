@@ -4,6 +4,7 @@ use std::{borrow::Cow, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
+    structs::{IdentifierCase, WrittenCall},
     traits::{DatabaseLike, FunctionLike},
 };
 use sqlparser::ast::{Expr, JoinConstraint, JoinOperator, Select, TableFactor, Visit, Visitor};
@@ -15,38 +16,104 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         authority_support::is_credential_value,
+        credential_support::CredentialTerm,
         cte_support::{recursive_items, stored_table},
         function_body_support::{BodyNode, function_body, parameter},
-        function_reach_support::policy_functions,
+        function_reach_support::{policy_functions, reachable_functions},
+        function_rules::readable,
         walk_support::walk,
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
 
-/// Finds a credential or input parameter in a seed predicate.
+/// Finds a credential or input parameter in a seed predicate, or a call to a
+/// helper reaching a credential. A helper counts as its body would count
+/// inlined in the predicate, where its parameters stand for the arguments
+/// the walk visits at the call, so it counts when its body or the body of a
+/// function it reaches holds a declared credential.
 struct SeedInput<'input, 'database, DB: DatabaseLike> {
     deployment: &'input Deployment,
     database: &'database DB,
     function: &'database DB::Function,
 }
 
-impl<DB: DatabaseLike> SeedInput<'_, '_, DB> {
+impl<'database, DB: DatabaseLike> SeedInput<'_, 'database, DB> {
     /// Whether a predicate refers to an input parameter or credential.
-    fn present(&mut self, expression: &Expr) -> bool {
-        walk(expression, self).is_break()
+    fn present(&mut self, expression: &Expr) -> Result<bool, LookupError> {
+        match walk(expression, self) {
+            ControlFlow::Break(None) => Ok(true),
+            ControlFlow::Break(Some(error)) => Err(error),
+            ControlFlow::Continue(()) => Ok(false),
+        }
+    }
+
+    /// Whether `call` reaches at least one function and the body of each, or
+    /// of a function it reaches, holds a declared credential.
+    fn reaches_credential<'call>(
+        &self,
+        call: impl Into<WrittenCall<'call>>,
+    ) -> Result<bool, LookupError> {
+        let mut reached = false;
+        for called in self
+            .database
+            .functions_reached_by(call, IdentifierCase::Folded)?
+        {
+            reached = true;
+            if !self.body_reaches_credential(called)? {
+                return Ok(false);
+            }
+        }
+        Ok(reached)
+    }
+
+    /// Whether the body of `function` or of a function it reaches holds a
+    /// declared credential.
+    fn body_reaches_credential(
+        &self,
+        function: &'database DB::Function,
+    ) -> Result<bool, LookupError> {
+        for reached in reachable_functions(self.database, function)? {
+            let mut holds = false;
+            readable(function_body(self.database, reached, |node| {
+                holds = holds || node.walk(&mut CredentialTerm(self.deployment)).is_break();
+                Ok::<(), LookupError>(())
+            }))?;
+            if holds {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Ends the walk when `found` holds or raised an error.
+    fn decide(found: Result<bool, LookupError>) -> ControlFlow<Option<LookupError>> {
+        match found {
+            Ok(true) => ControlFlow::Break(None),
+            Ok(false) => ControlFlow::Continue(()),
+            Err(error) => ControlFlow::Break(Some(error)),
+        }
     }
 }
 
 impl<DB: DatabaseLike> Visitor for SeedInput<'_, '_, DB> {
-    type Break = ();
+    type Break = Option<LookupError>;
 
-    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
         if parameter(self.database, self.function, expression).is_some()
             || is_credential_value(self.deployment, expression)
         {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
+            return ControlFlow::Break(None);
+        }
+        match expression {
+            Expr::Function(call) => Self::decide(self.reaches_credential(call)),
+            _ => ControlFlow::Continue(()),
+        }
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+        match WrittenCall::relation(factor) {
+            Some(call) => Self::decide(self.reaches_credential(call)),
+            None => ControlFlow::Continue(()),
         }
     }
 }
@@ -60,14 +127,27 @@ struct Seed<'input, 'db, DB: DatabaseLike> {
     path: Option<&'input [(Cow<'input, str>, bool)]>,
 }
 
+impl<DB: DatabaseLike> Seed<'_, '_, DB> {
+    /// Records whether `predicate` constrains the seed, once no earlier one
+    /// did.
+    fn constrain(&mut self, predicate: &Expr) -> ControlFlow<LookupError> {
+        if !self.constrained {
+            match self.input.present(predicate) {
+                Ok(found) => self.constrained = found,
+                Err(error) => return ControlFlow::Break(error),
+            }
+        }
+        ControlFlow::Continue(())
+    }
+}
+
 impl<DB: DatabaseLike> Visitor for Seed<'_, '_, DB> {
     type Break = LookupError;
 
     fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Self::Break> {
-        self.constrained |= select
-            .selection
-            .as_ref()
-            .is_some_and(|predicate| self.input.present(predicate));
+        if let Some(predicate) = &select.selection {
+            self.constrain(predicate)?;
+        }
         for join in select.from.iter().flat_map(|from| &from.joins) {
             let constraint = match &join.join_operator {
                 JoinOperator::Join(constraint)
@@ -86,7 +166,7 @@ impl<DB: DatabaseLike> Visitor for Seed<'_, '_, DB> {
                 _ => None,
             };
             if let Some(JoinConstraint::On(predicate)) = constraint {
-                self.constrained |= self.input.present(predicate);
+                self.constrain(predicate)?;
             }
         }
         ControlFlow::Continue(())
@@ -140,6 +220,8 @@ fn check_body<DB: DatabaseLike, V: Visit + ?Sized>(
 /// Reports policy-reachable recursive sets whose table-reading seeds lack a parameter or credential predicate.
 ///
 /// A global seed can return other subjects' authority rows. Reviewed global reference-data sets can use [`Constrainer::allow_function`].
+///
+/// A seed predicate calling a helper counts as the helper's body would count inlined there, so it is constrained when that body or the body of a function it reaches holds a declared credential. The helper's own parameters stand for the arguments of the call, which the predicate already holds.
 ///
 /// The rule does not run on SQLite, which has no row-level security policies.
 ///
