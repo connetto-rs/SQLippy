@@ -69,6 +69,7 @@ mod nonterminating_recursive_ctes;
 mod not_in_null_lists;
 mod null_comparisons;
 mod null_credential_reads;
+mod null_only_checks;
 mod nullable_concatenation;
 mod nullable_tenant_keys;
 mod nullable_unique;

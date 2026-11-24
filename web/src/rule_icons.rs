@@ -68,6 +68,7 @@ rule_icons! {
     "leakproof_user_function" => FaFaucetDrip,
     "dynamic_sql_injection" => FaSyringe,
     "unsatisfiable_check" => FaCircleXmark,
+    "null_only_check" => FaCircleXmark,
     "surrogate_primary_key_in_extension" => FaPuzzlePiece,
     "tautological_check" => FaEquals,
     "outer_column_capture" => FaMagnet,

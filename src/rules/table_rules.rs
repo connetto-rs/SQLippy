@@ -20,6 +20,8 @@ mod rust_keyword_table_name;
 pub use rust_keyword_table_name::RustKeywordTableName;
 mod unsatisfiable_check;
 pub use unsatisfiable_check::UnsatisfiableCheck;
+mod null_only_check;
+pub use null_only_check::NullOnlyCheck;
 mod redundant_extension_edge;
 pub use redundant_extension_edge::RedundantExtensionEdge;
 mod duplicate_column_name_in_extension_graph;
