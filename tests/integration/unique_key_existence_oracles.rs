@@ -563,6 +563,262 @@ fn a_trigger_or_helper_the_rule_cannot_read_leaves_the_key_reported() {
     }
 }
 
+/// The trigger's `UPDATE` replaced by `PERFORM {call}` of the function
+/// `{signature} ... AS $$ {body} $$`.
+fn calling(signature: &str, body: &str, call: &str) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "CREATE FUNCTION accept_invitation",
+            format!(
+                "CREATE FUNCTION {signature} AS $$ {body} $$; CREATE FUNCTION accept_invitation"
+            ),
+        ),
+        (
+            "UPDATE invitations SET accepted = true WHERE id = NEW.invitation_id;",
+            format!("PERFORM {call};"),
+        ),
+    ]
+}
+
+/// The trigger's `UPDATE` replaced by `statement`, over invitations no
+/// foreign key references.
+fn removing(statement: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("REFERENCES invitations (id)", String::new()),
+        (
+            "UPDATE invitations SET accepted = true WHERE id = NEW.invitation_id;",
+            format!("{statement};"),
+        ),
+    ]
+}
+
+/// The trigger made a statement trigger reading the inserted rows as
+/// `new_rows`, its `UPDATE` selecting the named rows by `selection`.
+fn per_statement(selection: &str) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "FOR EACH ROW EXECUTE",
+            "REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE".to_owned(),
+        ),
+        keyed(selection),
+    ]
+}
+
+const MARK: &str = "mark_accepted(invitation INT) RETURNS VOID LANGUAGE sql SECURITY DEFINER";
+const MARKING: &str = "UPDATE invitations SET accepted = true WHERE id = invitation";
+
+#[test]
+fn a_key_another_trigger_form_consumes_is_clean() {
+    for edits in [
+        calling(MARK, MARKING, "mark_accepted(NEW.invitation_id)"),
+        calling(
+            MARK,
+            "UPDATE invitations SET accepted = true WHERE id = $1",
+            "mark_accepted(NEW.invitation_id)",
+        ),
+        calling(
+            MARK,
+            "UPDATE invitations SET accepted = true WHERE mark_accepted.invitation = id",
+            "mark_accepted(NEW.invitation_id)",
+        ),
+        calling(
+            "mark_accepted(invitation INT) RETURNS VOID LANGUAGE sql STRICT",
+            MARKING,
+            "mark_accepted(NEW.invitation_id)",
+        ),
+        [
+            vec![("AND NOT accepted", "AND accepted_by IS NULL".to_owned())],
+            calling(
+                "mark_accepted(invitation INT, accepter INT) RETURNS VOID LANGUAGE sql",
+                "UPDATE invitations SET accepted_by = accepter WHERE id = invitation",
+                "mark_accepted(NEW.invitation_id, NEW.user_id)",
+            ),
+        ]
+        .concat(),
+        removing("DELETE FROM invitations WHERE id = NEW.invitation_id"),
+        removing("DELETE FROM invitations WHERE NEW.invitation_id = invitations.id"),
+        per_statement("id IN (SELECT invitation_id FROM new_rows)"),
+        per_statement("id IN (SELECT inserted.invitation_id FROM new_rows AS inserted)"),
+        [
+            removing("DELETE FROM invitations WHERE id IN (SELECT invitation_id FROM new_rows)"),
+            vec![(
+                "FOR EACH ROW EXECUTE",
+                "REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE".to_owned(),
+            )],
+        ]
+        .concat(),
+        calling(
+            "mark_accepted(id INT) RETURNS VOID LANGUAGE sql SECURITY DEFINER",
+            "UPDATE invitations AS mark_accepted SET accepted = true WHERE mark_accepted.id = $1",
+            "mark_accepted(NEW.invitation_id)",
+        ),
+        calling(
+            "mark_accepted(id INT) RETURNS VOID LANGUAGE sql SECURITY DEFINER",
+            "UPDATE invitations SET accepted = true WHERE invitations.id = mark_accepted.id",
+            "mark_accepted(NEW.invitation_id)",
+        ),
+        [
+            vec![("REFERENCES invitations (id)", String::new())],
+            calling(
+                "drop_invitation(invitation INT) RETURNS VOID LANGUAGE sql",
+                "DELETE FROM invitations WHERE id = invitation",
+                "drop_invitation(NEW.invitation_id)",
+            ),
+        ]
+        .concat(),
+    ] {
+        let edits: Vec<(&str, &str)> = edits
+            .iter()
+            .map(|(from, to)| (*from, to.as_str()))
+            .collect();
+        assert!(!reports_invitation_key(&edits), "{edits:?}");
+    }
+}
+
+#[test]
+fn a_key_another_trigger_form_may_leave_unconsumed_is_reported() {
+    for edits in [
+        calling(MARK, MARKING, "mark_accepted(NEW.user_id)"),
+        calling(
+            "mark_accepted(invitation INT, accepted BOOLEAN) RETURNS VOID LANGUAGE sql SECURITY DEFINER",
+            "UPDATE invitations SET accepted = accepted WHERE id = invitation",
+            "mark_accepted(NEW.invitation_id, true)",
+        ),
+        calling(
+            "mark_accepted(invitation INT, note INT) RETURNS VOID LANGUAGE sql STRICT",
+            MARKING,
+            "mark_accepted(NEW.invitation_id, NEW.nickname)",
+        ),
+        calling(
+            MARK,
+            "UPDATE invitations SET accepted = true WHERE id = invitation;
+             UPDATE invitations SET accepted = false WHERE id = invitation",
+            "mark_accepted(NEW.invitation_id)",
+        ),
+        calling(
+            "mark_accepted(invitation INT) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER",
+            &format!("BEGIN {MARKING}; END"),
+            "mark_accepted(NEW.invitation_id)",
+        ),
+        calling(
+            "mark_accepted(invitation INT, flag BOOLEAN DEFAULT false) RETURNS VOID LANGUAGE sql",
+            "UPDATE invitations SET accepted = flag WHERE id = invitation",
+            "mark_accepted(NEW.invitation_id)",
+        ),
+        removing("DELETE FROM invitations WHERE id = NEW.user_id"),
+        removing("DELETE FROM invitations WHERE id = NEW.invitation_id AND email = 'x@y'"),
+        [
+            removing("DELETE FROM invitations WHERE id = NEW.invitation_id"),
+            vec![(
+                "GRANT SELECT, INSERT ON memberships",
+                "GRANT INSERT ON invitations TO app; GRANT SELECT, INSERT ON memberships"
+                    .to_owned(),
+            )],
+        ]
+        .concat(),
+        [
+            removing("DELETE FROM invitations WHERE id = NEW.invitation_id"),
+            vec![(
+                "CREATE TRIGGER memberships_accept",
+                "CREATE FUNCTION keep() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+                 CREATE TRIGGER invitations_keep BEFORE DELETE ON invitations
+                   FOR EACH ROW EXECUTE FUNCTION keep();
+                 CREATE TRIGGER memberships_accept"
+                    .to_owned(),
+            )],
+        ]
+        .concat(),
+        [
+            calling(MARK, MARKING, "mark_accepted(NEW.invitation_id)"),
+            vec![(
+                "ALTER TABLE memberships",
+                "CREATE ROLE writer; ALTER FUNCTION mark_accepted(INT) OWNER TO writer;
+                 GRANT SELECT, UPDATE (accepted) ON invitations TO writer;
+                 ALTER TABLE invitations ENABLE ROW LEVEL SECURITY; ALTER TABLE memberships"
+                    .to_owned(),
+            )],
+        ]
+        .concat(),
+    ] {
+        let edits: Vec<(&str, &str)> = edits
+            .iter()
+            .map(|(from, to)| (*from, to.as_str()))
+            .collect();
+        assert!(reports_invitation_key(&edits), "{edits:?}");
+    }
+}
+
+#[test]
+fn a_key_a_statement_trigger_may_leave_unconsumed_is_reported() {
+    for edits in [
+        per_statement("id IN (SELECT user_id FROM new_rows)"),
+        per_statement("id IN (SELECT invitation_id FROM new_rows WHERE user_id > 5)"),
+        per_statement("id NOT IN (SELECT invitation_id FROM new_rows)"),
+        [
+            per_statement("id IN (SELECT invitation_id FROM new_rows)"),
+            vec![
+                ("AND NOT accepted", "AND accepted_by IS NULL".to_owned()),
+                (
+                    "SET accepted = true",
+                    "SET accepted_by = NEW.user_id".to_owned(),
+                ),
+            ],
+        ]
+        .concat(),
+        vec![
+            (
+                "FOR EACH ROW EXECUTE",
+                "REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT
+                   WHEN (current_user <> 'app') EXECUTE"
+                    .to_owned(),
+            ),
+            keyed("id IN (SELECT invitation_id FROM new_rows)"),
+        ],
+        vec![
+            (
+                "FOR EACH ROW EXECUTE",
+                "FOR EACH STATEMENT EXECUTE".to_owned(),
+            ),
+            (
+                "CREATE FUNCTION accept_invitation",
+                "CREATE TABLE new_rows (invitation_id INT); CREATE FUNCTION accept_invitation"
+                    .to_owned(),
+            ),
+            keyed("id IN (SELECT invitation_id FROM new_rows)"),
+        ],
+        per_statement(
+            "id IN (SELECT new_rows.invitation_id FROM new_rows
+               JOIN invitations other ON other.id = new_rows.user_id)",
+        ),
+        per_statement(
+            "id IN (SELECT invitation_id FROM new_rows AS inserted (invitation_id, nickname, original))",
+        ),
+        [
+            per_statement("id IN (SELECT invitation_id FROM earlier)"),
+            vec![(
+                "CREATE FUNCTION accept_invitation",
+                "CREATE TABLE earlier (invitation_id INT); CREATE FUNCTION accept_invitation"
+                    .to_owned(),
+            )],
+        ]
+        .concat(),
+        [
+            per_statement("id IN (SELECT invitations.invitation_id FROM new_rows)"),
+            vec![(
+                "accepted_by INT);",
+                "accepted_by INT, invitation_id INT);".to_owned(),
+            )],
+        ]
+        .concat(),
+    ] {
+        let edits: Vec<(&str, &str)> = edits
+            .iter()
+            .map(|(from, to)| (*from, to.as_str()))
+            .collect();
+        assert!(reports_invitation_key(&edits), "{edits:?}");
+    }
+}
+
 const GRANTS: &str = "CREATE TABLE resources (organization_id INT NOT NULL, owner_id INT NOT NULL,
        id INT PRIMARY KEY, UNIQUE (organization_id, id));
      CREATE TABLE blocks (organization_id INT NOT NULL, user_id INT NOT NULL,
