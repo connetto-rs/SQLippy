@@ -464,9 +464,6 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         output: usize,
         arms: &[Arm<'a, DB>],
     ) -> Result<bool, LookupError> {
-        if arms.is_empty() {
-            return Ok(false);
-        }
         let column = &self.key_columns[position];
         let referenced = &self.referenced_columns[position];
         for arm in arms {
