@@ -1,7 +1,7 @@
 //! Whether a key a client role writes tells it if a row it cannot read
 //! exists, shared by the foreign key and unique key existence oracles.
 
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, ops::ControlFlow, rc::Rc, slice};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, ops::ControlFlow, ptr, rc::Rc, slice};
 
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
@@ -9,7 +9,7 @@ use sql_traits::{
         ColumnDefinitionScope, ColumnPrivilege, ColumnScope, IdentifierCase, RowGate, RowSecurity,
         RowStatement, RowVersion, TargetName, WrittenCall,
     },
-    traits::{ColumnLike, DatabaseLike, FunctionLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::{
@@ -26,7 +26,7 @@ use sqlparser::{
 use crate::{
     deployment::Deployment,
     rules::{
-        closed_set_support::{names_cast_column, stored_name},
+        closed_set_support::{names_cast_column, same_identity, stored_name},
         consumed_key_support::Consumption,
         cte_support::stored_table,
         grant_support::schema_of,
@@ -34,7 +34,7 @@ use crate::{
             Columns, Condition, Operand, admits, clause_implies, column_of, is_column, membership,
             query_members, reads_column_or_parameter,
         },
-        key_support::{equality_keys, instances, named},
+        key_support::{binds, equality_keys, instances, key_pairs, named, no_inheritors},
         policy_read_support::sublink_reads,
         policy_support::{
             acting, conjuncts, disjuncts, is_column_reference, is_contradiction, is_tautology,
@@ -181,6 +181,9 @@ pub(crate) struct Confinement<'a, DB: DatabaseLike> {
     /// Triggers taking each held key out of the sets a check may draw it
     /// from.
     consumptions: Vec<Consumption<'a, DB>>,
+    /// The helpers whose bodies are being read, outermost first, so that a
+    /// helper reaching itself is read as opaque.
+    reading: RefCell<Vec<&'a DB::Function>>,
 }
 
 impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
@@ -218,6 +221,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             helpers: RefCell::new(HashMap::new()),
             unfoldings: RefCell::new(HashMap::new()),
             consumptions: Vec::new(),
+            reading: RefCell::new(Vec::new()),
         })
     }
 
@@ -423,12 +427,14 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 .functions_reached_by(call, IdentifierCase::Folded)?
                 .collect();
             return Ok(match called.as_slice() {
-                [function] if function.returns_set() => match self.helper_body_arms(function)? {
-                    Some(arms) if arms.iter().all(|arm| arm.outputs.len() == 1) => {
-                        self.arms_exclude_held(position, 0, &arms)?
+                [function] if function.returns_set() => {
+                    match self.helper_body_arms(function, Reader::Writer)? {
+                        Some(arms) if arms.iter().all(|arm| arm.outputs.len() == 1) => {
+                            self.arms_exclude_held(position, 0, &arms)?
+                        }
+                        _ => false,
                     }
-                    _ => false,
-                },
+                }
                 _ => false,
             });
         }
@@ -724,8 +730,10 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// matches meets `condition`. `origins` holds the origin of each key
     /// column in the arm. The key column is drawn from a set within the one
     /// the condition tests, or the arm reads the matched row itself and its
-    /// filters imply the condition, or the condition admits the key of rows
-    /// of a table the writer reads and the arm reads such a row.
+    /// filters imply the condition, or a foreign key of the matched row pins
+    /// what the condition reads to a row the arm reads whose filters imply
+    /// it, or the condition admits the key of rows of a table the writer
+    /// reads and the arm reads such a row.
     fn arm_implies(
         &self,
         arm: &Arm<'a, DB>,
@@ -773,6 +781,9 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 return Ok(true);
             }
         }
+        if self.pinned_implies(arm, origins, condition, context)? {
+            return Ok(true);
+        }
         let Some(Sublink {
             position,
             table,
@@ -799,6 +810,84 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             }
         }
         Ok(row.read_by_writer || self.row_readable(table, &facts, role)?)
+    }
+
+    /// Whether a foreign key of the referenced table pins every column
+    /// `condition` reads in the matched row to a column of one row `arm`
+    /// reads, whose facts imply the condition so stated. The key columns the
+    /// arm draws from that row through the foreign key cover a unique key of
+    /// its table, so the foreign key references that very row from the
+    /// matched row, which it binds since those key columns hold a value. Each
+    /// column pair of the foreign key compares by identity, so the pinned
+    /// values are the same values.
+    fn pinned_implies(
+        &self,
+        arm: &Arm<'a, DB>,
+        origins: &[Option<&Origin>],
+        condition: &Condition<'_, u64>,
+        context: &[&Expr],
+    ) -> Result<bool, LookupError> {
+        let database = self.database;
+        for foreign_key in self.parent.foreign_keys(database)? {
+            let referenced = foreign_key.referenced_table(database)?;
+            let pairs = key_pairs(database, foreign_key)?;
+            for (index, row) in arm.rows.iter().enumerate() {
+                if row.table != referenced {
+                    continue;
+                }
+                // The columns of `row` the arm draws key columns from through
+                // the foreign key, and one host column holding such a key column.
+                let mut drawn = Vec::new();
+                let mut bound = None;
+                for &(host, target) in &pairs {
+                    let name = host.stored_column_name();
+                    if self
+                        .referenced_columns
+                        .iter()
+                        .position(|column| *column == name)
+                        .and_then(|position| origins.get(position).copied().flatten())
+                        .and_then(|origin| origin.row.as_ref())
+                        .is_some_and(|(from, column)| {
+                            *from == index && *column == target.stored_column_name()
+                        })
+                    {
+                        drawn.push(target);
+                        bound = Some(host);
+                    }
+                }
+                let Some(bound) = bound else {
+                    continue;
+                };
+                if !binds(database, foreign_key, bound)?
+                    || !no_inheritors(database, referenced)?
+                    || !equality_keys(database, referenced)?
+                        .iter()
+                        .any(|key| key.iter().all(|column| drawn.contains(column)))
+                {
+                    continue;
+                }
+                let mut alike = true;
+                for &(host, target) in &pairs {
+                    alike &= same_identity(database, host, target)?;
+                }
+                if !alike {
+                    continue;
+                }
+                let Some(stated) = requalified(condition.original, |reference| {
+                    let name = stored_name(reference)?;
+                    pairs
+                        .iter()
+                        .find(|(host, _)| host.stored_column_name() == name)
+                        .map(|(_, target)| target.stored_column_name().into_owned())
+                }) else {
+                    continue;
+                };
+                if self.entails(&self.row_facts(row, index, origins, context), &stated)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// What `row`, at `index` among the rows of its arm, is known to meet:
@@ -1215,14 +1304,17 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         let Some(projected) = projected_columns(&sources, select) else {
             return Ok(None);
         };
-        // A helper the select reads yields one arm per arm of its body.
+        // A helper the select reads yields one arm per arm of its body, when
+        // the select reads no other helper and no table, and is opaque
+        // otherwise.
         let mut helper = None;
         for source in &mut sources {
             if let SourceKind::Helper(arms) = &mut source.kind {
-                if helper.is_some() || !rows.is_empty() {
-                    return Ok(None);
+                if helper.is_none() && rows.is_empty() {
+                    helper = Some(std::mem::take(arms));
+                } else {
+                    source.kind = SourceKind::Opaque;
                 }
-                helper = Some(std::mem::take(arms));
             }
         }
         let origin = |entry: &Option<(usize, String)>, arm: Option<&Arm<'a, DB>>| {
@@ -1396,11 +1488,11 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             columns = renamed_columns;
         }
         let kind = match function {
-            Some(function) if reader == Reader::Writer => match self.helper_body_arms(function)? {
+            Some(function) => match self.helper_body_arms(function, reader)? {
                 Some(arms) => SourceKind::Helper(arms),
                 None => SourceKind::Opaque,
             },
-            _ => SourceKind::Opaque,
+            None => SourceKind::Opaque,
         };
         Ok(Some(Source {
             name: exposed,
@@ -1445,7 +1537,9 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
 
     /// The table `name` reads under `alias`, renaming its leading columns
     /// to `renamed_columns`, with the row it adds to `rows`, or `None` when
-    /// it names no table.
+    /// it names no table. A table read with a column renamed to another name
+    /// yields rows the arm learns nothing of, since facts and origins name
+    /// the stored columns.
     fn table_source(
         &self,
         name: &ObjectName,
@@ -1467,6 +1561,10 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             .columns(self.database)?
             .map(|column| column.stored_column_name().into_owned())
             .collect();
+        let renames = columns
+            .iter()
+            .zip(renamed_columns)
+            .any(|(column, renamed)| column != renamed);
         for (column, alias) in columns.iter_mut().zip(renamed_columns) {
             alias.clone_into(column);
         }
@@ -1482,31 +1580,44 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         let Some(exposed) = exposed else {
             return Ok(None);
         };
-        rows.push(Row {
-            table,
-            facts: Vec::new(),
-            read_by_writer: reader == Reader::Writer,
-        });
+        let kind = if renames {
+            SourceKind::Opaque
+        } else {
+            rows.push(Row {
+                table,
+                facts: Vec::new(),
+                read_by_writer: reader == Reader::Writer,
+            });
+            SourceKind::Table(rows.len() - 1)
+        };
         Ok(Some(Source {
             name: exposed,
             columns,
             counted: true,
             sets: Vec::new(),
-            kind: SourceKind::Table(rows.len() - 1),
+            kind,
         }))
     }
 
     /// The arms of the body of the set-returning `LANGUAGE sql` `function`,
-    /// read as its owner when it is a definer, or `None` when its body is
-    /// not one query of plain selects, it sets a parameter other than the
-    /// search path, which may change what its expressions yield, or a name
-    /// in its body reaches another object on the search path it sets than
-    /// on the schema's own.
+    /// called by `reader`, read as its owner when it or a helper enclosing
+    /// the call is a definer, or `None` when its body is not one query of
+    /// plain selects, it sets a parameter other than the search path, which
+    /// may change what its expressions yield, a name in its body reaches
+    /// another object on the search path it sets than on the schema's own,
+    /// or the call is within its own body.
     fn helper_body_arms(
         &self,
-        function: &DB::Function,
+        function: &'a DB::Function,
+        reader: Reader,
     ) -> Result<Option<Vec<Arm<'a, DB>>>, LookupError> {
-        if !sets_only_search_path(function) {
+        if !sets_only_search_path(function)
+            || self
+                .reading
+                .borrow()
+                .iter()
+                .any(|reading| ptr::eq(*reading, function))
+        {
             return Ok(None);
         }
         let Some(body) = sql_set_body(self.database, function)? else {
@@ -1521,9 +1632,13 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             return Ok(None);
         }
         let reader = Reader::Body {
-            definer: function.security_mode() == FunctionSecurity::Definer,
+            definer: function.security_mode() == FunctionSecurity::Definer
+                || reader == Reader::Body { definer: true },
         };
-        self.set_arms(&body.body, reader)
+        self.reading.borrow_mut().push(function);
+        let arms = self.set_arms(&body.body, reader);
+        self.reading.borrow_mut().pop();
+        arms
     }
 
     /// The arms of a `UNION` of plain selects.
@@ -1564,7 +1679,12 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         let mut admissible = true;
         let mut calls: Vec<Function> = Vec::new();
         let _ = visit_expressions(expression, |node| {
-            if let Expr::Function(function) = node {
+            // `ARRAY(SELECT ...)` constructs an array, calling nothing beyond
+            // the calls its subquery holds, which the walk visits.
+            if let Expr::Function(function) = node
+                && !(matches!(function.args, FunctionArguments::Subquery(_))
+                    && function.name.to_string().eq_ignore_ascii_case("array"))
+            {
                 calls.push(function.clone());
             }
             ControlFlow::<()>::Continue(())

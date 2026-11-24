@@ -252,6 +252,17 @@ pub(crate) fn identity<DB: DatabaseLike>(
     })
 }
 
+/// Whether `=` holds between `left` and `right` only for identical values,
+/// compared alike for both.
+pub(crate) fn same_identity<DB: DatabaseLike>(
+    database: &DB,
+    left: &DB::Column,
+    right: &DB::Column,
+) -> Result<bool, LookupError> {
+    let left = identity(left, database)?;
+    Ok(left.is_some() && left == identity(right, database)?)
+}
+
 /// The values every row of its table holds `column` to, the expression it is
 /// generated as or the values [`checked_values`] reads.
 pub(crate) fn held_values<'a, DB: DatabaseLike>(
