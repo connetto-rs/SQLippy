@@ -2,6 +2,8 @@
 //! the row-level security rules read and never guess.
 
 use std::{
+    borrow::Cow,
+    convert::Infallible,
     fmt::{self, Display},
     time::Duration,
 };
@@ -140,6 +142,22 @@ fn parse_expression(expression: &str) -> Result<Expr, ParserError> {
     Parser::new(&PostgreSqlDialect {})
         .try_with_sql(expression)?
         .parse_expr()
+}
+
+/// `set` unfolded by `unfolded` until it gives no other spelling or one it
+/// gave before, as a helper calling itself does.
+fn fully_unfolded<'e, E>(
+    set: &'e Expr,
+    unfolded: &mut impl FnMut(&Expr) -> Result<Option<Expr>, E>,
+) -> Result<Cow<'e, Expr>, E> {
+    let mut spellings: Vec<Expr> = Vec::new();
+    while let Some(next) = unfolded(spellings.last().unwrap_or(set))? {
+        if next == *set || spellings.contains(&next) {
+            break;
+        }
+        spellings.push(next);
+    }
+    Ok(spellings.pop().map_or(Cow::Borrowed(set), Cow::Owned))
 }
 
 impl Deployment {
@@ -631,7 +649,12 @@ impl Deployment {
     /// projection of the subquery a policy compares a column with through
     /// `IN` or `= ANY (ARRAY(...))`. A subquery selecting `*` from one call,
     /// such as `(id, kind) IN (SELECT * FROM authz.capped_kinds('reader'))`,
-    /// yields the set of that call written as an expression.
+    /// yields the set of that call written as an expression. A subquery
+    /// selecting one column of one call through its alias, such as
+    /// `id IN (SELECT share.resource_id FROM authz.grants() share)`, yields
+    /// `(authz.grants()).resource_id`. The existence oracles read a call
+    /// taking no argument to a set-returning `LANGUAGE sql` helper as the
+    /// set its body selects, so a declaration on either spelling serves both.
     ///
     /// # Errors
     ///
@@ -647,20 +670,44 @@ impl Deployment {
     /// as written, through identical expressions or the declared sets.
     #[must_use]
     pub fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> bool {
-        let mut reached = vec![narrower];
+        let Ok(within) =
+            self.is_set_within_unfolding(narrower, wider, |_| Ok::<_, Infallible>(None));
+        within
+    }
+
+    /// Returns whether every value `narrower` yields is one `wider` yields,
+    /// where `unfolded` gives another spelling of the set an expression
+    /// yields, such as the set a helper's body selects for a call to it, or
+    /// `None`. Expressions and declarations compare once fully unfolded.
+    pub(crate) fn is_set_within_unfolding<E>(
+        &self,
+        narrower: &Expr,
+        wider: &Expr,
+        mut unfolded: impl FnMut(&Expr) -> Result<Option<Expr>, E>,
+    ) -> Result<bool, E> {
+        let wider = fully_unfolded(wider, &mut unfolded)?;
+        let mut declared = Vec::with_capacity(self.sets_within.len());
+        for (inner, outer) in &self.sets_within {
+            declared.push((
+                fully_unfolded(inner, &mut unfolded)?,
+                fully_unfolded(outer, &mut unfolded)?,
+            ));
+        }
+        let narrower = fully_unfolded(narrower, &mut unfolded)?;
+        let mut reached: Vec<&Expr> = vec![&narrower];
         let mut next = 0;
         while let Some(&set) = reached.get(next) {
-            if set == wider {
-                return true;
+            if *set == *wider {
+                return Ok(true);
             }
-            for (inner, outer) in &self.sets_within {
-                if inner == set && !reached.contains(&outer) {
+            for (inner, outer) in &declared {
+                if **inner == *set && !reached.contains(&&**outer) {
                     reached.push(outer);
                 }
             }
             next += 1;
         }
-        false
+        Ok(false)
     }
 
     /// Returns whether `expression` is a declared credential, as written.

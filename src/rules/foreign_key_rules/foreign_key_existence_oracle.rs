@@ -66,7 +66,8 @@ use crate::{
 /// match readable, which holds when every restrictive and at least one
 /// permissive `SELECT` policy of the referenced table tests the columns the
 /// key maps onto as the check tests their key columns, or tests one against a
-/// set the check confines its key column within, as written or declared with
+/// set the check confines its key column within, as written, as the body of
+/// a helper taking no argument selects it, or declared with
 /// [`Deployment::with_set_within`](crate::deployment::Deployment::with_set_within).
 /// A check may draw the key from the rows of a set-returning `LANGUAGE sql`
 /// helper with `IN (SELECT ... FROM
