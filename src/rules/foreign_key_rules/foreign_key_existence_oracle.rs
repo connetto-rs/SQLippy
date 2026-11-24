@@ -33,8 +33,8 @@ use crate::{
         plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, walk_block},
         policy_support::{acting, client_roles},
         trigger_support::{
-            WritesTable, Written, evaluated, fires_for_clients, fires_on_insert, names_record,
-            new_field_write, row_trigger, shadows_new, stored, stored_parts,
+            WritesTable, Written, evaluated, fires_for_clients, fires_on_insert, names_new_field,
+            names_record, new_field_write, row_trigger, shadows_new, stored, stored_parts,
         },
         type_support::underlying_type,
     },
@@ -171,18 +171,6 @@ CREATE POLICY notes_insert ON notes FOR INSERT TO authenticated WITH CHECK (secr
 
     fn engines(&self) -> &'static [Engine] {
         &[Engine::PostgreSql]
-    }
-}
-
-/// Whether `expression`, under parentheses, is `NEW.column`.
-fn names_new_field(expression: &Expr, column: &str) -> bool {
-    match expression {
-        Expr::Nested(inner) => names_new_field(inner, column),
-        Expr::CompoundIdentifier(parts) => matches!(
-            parts.as_slice(),
-            [record, field] if stored(record) == "new" && stored(field) == column
-        ),
-        _ => false,
     }
 }
 

@@ -12,6 +12,7 @@ use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
+        consumed_key_support::consumptions,
         existence_oracle_support::{
             Confinement, hides_rows, row_security, writes_free_key, writes_whole_key,
         },
@@ -35,7 +36,29 @@ rule_definition!(
     /// through. A write is excused when its check confines the key to rows
     /// the role reads, as
     /// [`ForeignKeyExistenceOracle`](crate::prelude::ForeignKeyExistenceOracle)
-    /// excuses a foreign key into the same table. A unique key over an
+    /// excuses a foreign key into the same table. A write is also excused
+    /// when its check draws a key column from a set-returning `LANGUAGE sql`
+    /// helper, as `IN (SELECT helper())`, `= ANY (ARRAY(SELECT helper()))` or
+    /// `IN (SELECT ... FROM helper())`, and every arm of the helper's body
+    /// yields the column from a row of another table under a filter that an
+    /// `AFTER INSERT` row trigger of the table makes false for the row each
+    /// stored key names. The trigger's PL/pgSQL function must run
+    /// `UPDATE other SET ... WHERE column = NEW.key` on every path that
+    /// returns, write that table nowhere else, set each tested column from
+    /// literals and `NEW`'s fields, and read every row of that table, and the
+    /// trigger's `WHEN` may only skip a `NULL` key. A stored key then fails
+    /// the check before PostgreSQL looks it up, as long as no client role can
+    /// bring the named row back. No client role may update a column the
+    /// trigger sets or the column naming the row, nor update the key unless
+    /// the trigger also fires on that update, and no `BEFORE UPDATE` row
+    /// trigger of the other table may change the write. Where client roles
+    /// can both insert into the other table and delete or truncate its rows,
+    /// one statement could remove a named row and insert it again in its
+    /// original state, so the excuse then also needs the naming column to be
+    /// unique and a foreign key from the key column onto it with `ON DELETE
+    /// RESTRICT`, `CASCADE` or `SET NULL`, since `NO ACTION` accepts the
+    /// re-created row at the end of the statement. A function a client calls
+    /// that writes the other table is not followed. A unique key over an
     /// expression is not checked. The rule does not run on SQLite.
     ///
     /// # Example
@@ -132,7 +155,8 @@ fn probes<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
         table,
         names,
         key.nulls_distinct(),
-    )?;
+    )?
+    .with_consumptions(consumptions(database, deployment, table)?);
     let mut probes = Vec::new();
     for (name, role) in client_roles(database, deployment) {
         let held = table.privileges(acting(role), database)?;

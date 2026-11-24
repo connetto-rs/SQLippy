@@ -27,6 +27,7 @@ use crate::{
     deployment::Deployment,
     rules::{
         closed_set_support::{names_cast_column, stored_name},
+        consumed_key_support::Consumption,
         cte_support::stored_table,
         grant_support::schema_of,
         implication_support::{
@@ -177,6 +178,9 @@ pub(crate) struct Confinement<'a, DB: DatabaseLike> {
     helpers: RefCell<HashMap<*const Expr, Option<Rc<HelperArms<'a, DB>>>>>,
     /// The spelling each set unfolds to, by the set.
     unfoldings: RefCell<HashMap<Expr, Option<Expr>>>,
+    /// Triggers taking each held key out of the sets a check may draw it
+    /// from.
+    consumptions: Vec<Consumption<'a, DB>>,
 }
 
 impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
@@ -213,7 +217,17 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             null_skips,
             helpers: RefCell::new(HashMap::new()),
             unfoldings: RefCell::new(HashMap::new()),
+            consumptions: Vec::new(),
         })
+    }
+
+    /// This confinement, also settling a key column a check draws from a
+    /// set that `consumptions` take every held key out of.
+    pub(crate) fn with_consumptions(self, consumptions: Vec<Consumption<'a, DB>>) -> Self {
+        Self {
+            consumptions,
+            ..self
+        }
     }
 
     /// Every key column.
@@ -336,9 +350,12 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
 
     /// Whether the conjunct leaves the key check nothing hidden to find. It
     /// forces a key column `NULL` under a check that `NULL` skips, so
-    /// PostgreSQL looks up no row, or it ties the key to one row the writer
-    /// reads.
+    /// PostgreSQL looks up no row, it ties the key to one row the writer
+    /// reads, or it draws a key column from a set no held key is in.
     fn settles_key(&self, conjunct: &Expr) -> Result<bool, LookupError> {
+        if self.excludes_held(conjunct)? {
+            return Ok(true);
+        }
         match unwrapped(conjunct) {
             Expr::IsNull(column) => Ok(self.null_skips && self.key_position(column).is_some()),
             Expr::BinaryOp {
@@ -386,6 +403,88 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             } => self.matches_readable_row(subquery),
             _ => Ok(false),
         }
+    }
+
+    /// Whether `conjunct` draws a key column from the rows of a
+    /// set-returning helper, as `IN (SELECT helper())`, `= ANY
+    /// (ARRAY(SELECT helper()))` or `IN (SELECT ... FROM helper())`, every
+    /// arm of whose body yields only rows a consumption leaves rejected by
+    /// the arm's filters once a row holds their key.
+    fn excludes_held(&self, conjunct: &Expr) -> Result<bool, LookupError> {
+        if self.consumptions.is_empty() {
+            return Ok(false);
+        }
+        if let Some(([item], set)) = membership(conjunct)
+            && let Some(position) = self.key_position(item)
+            && let Expr::Function(call) = set.as_ref()
+        {
+            let called: Vec<&DB::Function> = self
+                .database
+                .functions_reached_by(call, IdentifierCase::Folded)?
+                .collect();
+            return Ok(match called.as_slice() {
+                [function] if function.returns_set() => match self.helper_body_arms(function)? {
+                    Some(arms) if arms.iter().all(|arm| arm.outputs.len() == 1) => {
+                        self.arms_exclude_held(position, 0, &arms)?
+                    }
+                    _ => false,
+                },
+                _ => false,
+            });
+        }
+        let Some(helper) = self.helper_arms(conjunct)? else {
+            return Ok(false);
+        };
+        for (position, output) in helper.positions.iter().enumerate() {
+            if let Some(output) = output
+                && self.arms_exclude_held(position, *output, &helper.arms)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether every one of `arms` gives the key column at `position` in its
+    /// output at `output` from the row a consumption of that key column
+    /// writes, and reads that row under a filter the written row fails.
+    fn arms_exclude_held(
+        &self,
+        position: usize,
+        output: usize,
+        arms: &[Arm<'a, DB>],
+    ) -> Result<bool, LookupError> {
+        let column = &self.key_columns[position];
+        'consumptions: for consumption in &self.consumptions {
+            if consumption.column() != column || arms.is_empty() {
+                continue;
+            }
+            for arm in arms {
+                let Some(Origin {
+                    row: Some((index, drawn)),
+                    ..
+                }) = arm.outputs.get(output)
+                else {
+                    continue 'consumptions;
+                };
+                let row = &arm.rows[*index];
+                if !consumption.names(row.table, drawn) {
+                    continue 'consumptions;
+                }
+                let mut rejected = false;
+                for fact in &row.facts {
+                    if consumption.rejects(&normalized(fact))? {
+                        rejected = true;
+                        break;
+                    }
+                }
+                if !rejected {
+                    continue 'consumptions;
+                }
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Whether `query` yields only rows of the referenced table read under

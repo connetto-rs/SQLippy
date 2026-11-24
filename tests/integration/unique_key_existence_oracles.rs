@@ -194,6 +194,113 @@ fn a_key_drawn_from_the_projected_helper_column_it_is_read_through_is_clean() {
     }
 }
 
+const INVITATIONS: &str = "CREATE TABLE invitations (id INT PRIMARY KEY, email TEXT NOT NULL,
+        accepted BOOLEAN NOT NULL DEFAULT false, accepted_by INT);
+    CREATE TABLE memberships (user_id INT PRIMARY KEY, nickname INT,
+        invitation_id INT CONSTRAINT memberships_invitation UNIQUE REFERENCES invitations (id));
+    CREATE FUNCTION pending() RETURNS SETOF INT LANGUAGE sql STABLE SECURITY DEFINER AS $$
+      SELECT id FROM invitations WHERE email = current_setting('app.email') AND NOT accepted
+    $$;
+    CREATE FUNCTION accept_invitation() RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+    BEGIN
+      UPDATE invitations SET accepted = true WHERE id = NEW.invitation_id;
+      RETURN NULL;
+    END $$;
+    CREATE TRIGGER memberships_accept AFTER INSERT ON memberships
+      FOR EACH ROW EXECUTE FUNCTION accept_invitation();
+    ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY memberships_read ON memberships FOR SELECT TO app
+      USING (user_id = current_setting('app.user_id')::int);
+    CREATE POLICY memberships_write ON memberships FOR INSERT TO app
+      WITH CHECK (user_id = current_setting('app.user_id')::int AND invitation_id IN (SELECT pending()));
+    GRANT SELECT, INSERT ON memberships TO app;";
+
+/// Whether the invitation key of `INVITATIONS`, with each `(from, to)`
+/// replacement applied once, is reported.
+fn reports_invitation_key(edits: &[(&str, &str)]) -> bool {
+    let mut sql = INVITATIONS.to_owned();
+    for (from, to) in edits {
+        assert!(sql.contains(from), "{from}");
+        sql = sql.replacen(from, to, 1);
+    }
+    objects(&sql).contains(&"memberships.memberships_invitation".to_owned())
+}
+
+const RENAMING: (&str, &str) = (
+    "GRANT SELECT, INSERT ON memberships TO app",
+    "CREATE POLICY memberships_rename ON memberships FOR UPDATE TO app
+       USING (true) WITH CHECK (invitation_id IN (SELECT pending()));
+     GRANT SELECT, INSERT, UPDATE (invitation_id) ON memberships TO app",
+);
+
+const RE_CREATING: (&str, &str) = (
+    "GRANT SELECT, INSERT ON memberships",
+    "GRANT DELETE, INSERT ON invitations TO app; GRANT SELECT, INSERT ON memberships",
+);
+
+#[test]
+fn a_key_a_trigger_takes_out_of_the_checked_set_is_clean() {
+    for edits in [
+        &[][..],
+        &[(
+            "invitation_id IN (SELECT pending())",
+            "invitation_id IN (SELECT pending_id FROM pending() AS pending_id)",
+        )],
+        &[
+            ("AND NOT accepted", "AND accepted_by IS NULL"),
+            ("SET accepted = true", "SET accepted_by = NEW.user_id"),
+            (
+                "FOR EACH ROW EXECUTE",
+                "FOR EACH ROW WHEN (NEW.invitation_id IS NOT NULL) EXECUTE",
+            ),
+            (
+                "invitation_id IN (SELECT pending())",
+                "(invitation_id IS NULL OR invitation_id = ANY (ARRAY(SELECT pending())))",
+            ),
+        ],
+        &[
+            (
+                "REFERENCES invitations (id)",
+                "REFERENCES invitations (id) ON DELETE RESTRICT",
+            ),
+            RE_CREATING,
+        ],
+        &[
+            (
+                "AFTER INSERT ON memberships",
+                "AFTER INSERT OR UPDATE OF invitation_id ON memberships",
+            ),
+            RENAMING,
+        ],
+        &[(
+            "WHERE id = NEW.invitation_id",
+            "WHERE invitations.id = NEW.invitation_id",
+        )],
+        &[
+            (
+                "CREATE FUNCTION accept_invitation",
+                "CREATE TABLE audit (id INT); CREATE FUNCTION accept_invitation",
+            ),
+            (
+                "RETURN NULL;",
+                "INSERT INTO audit VALUES (NEW.user_id); RETURN NULL;",
+            ),
+        ],
+        &[(
+            "CREATE TRIGGER memberships_accept",
+            "CREATE FUNCTION stamp() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+             CREATE TRIGGER invitations_stamp BEFORE INSERT ON invitations FOR EACH ROW EXECUTE FUNCTION stamp();
+             CREATE TRIGGER memberships_accept",
+        )],
+        &[(
+            "GRANT SELECT, INSERT ON memberships",
+            "GRANT INSERT ON invitations TO app; GRANT SELECT, INSERT ON memberships",
+        )],
+    ] {
+        assert!(!reports_invitation_key(edits), "{edits:?}");
+    }
+}
+
 #[test]
 fn a_key_drawn_from_another_set_than_the_readable_one_is_reported() {
     for (read, check) in [
@@ -222,4 +329,98 @@ fn a_projected_helper_column_is_declared_within_a_set_as_a_field_of_the_call() {
         objects_under(deployment, &grants(RESOURCES, OTHER)),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn a_key_the_trigger_leaves_in_the_checked_set_is_reported() {
+    for edits in [
+        &[("SET accepted = true", "SET accepted = false")][..],
+        &[("WHERE id = NEW.invitation_id", "WHERE id = NEW.user_id")],
+        &[(
+            "UPDATE invitations SET accepted = true WHERE id = NEW.invitation_id;",
+            "IF NEW.user_id > 0 THEN UPDATE invitations SET accepted = true WHERE id = NEW.invitation_id; END IF;",
+        )],
+        &[(
+            "RETURN NULL;",
+            "UPDATE invitations SET accepted = false WHERE id = NEW.invitation_id; RETURN NULL;",
+        )],
+        &[(
+            "FOR EACH ROW EXECUTE",
+            "FOR EACH ROW WHEN (NEW.user_id > 0) EXECUTE",
+        )],
+        &[("AND NOT accepted", "")],
+        &[
+            ("AND NOT accepted", "AND accepted_by IS NULL"),
+            ("SET accepted = true", "SET accepted_by = NEW.nickname"),
+        ],
+        &[(
+            "GRANT SELECT, INSERT ON memberships",
+            "GRANT UPDATE (accepted) ON invitations TO app; GRANT SELECT, INSERT ON memberships",
+        )],
+        &[RE_CREATING],
+        &[RENAMING],
+        &[(
+            "ALTER TABLE memberships",
+            "CREATE ROLE writer; ALTER FUNCTION accept_invitation() OWNER TO writer;
+             GRANT SELECT, UPDATE (accepted) ON invitations TO writer;
+             ALTER TABLE invitations ENABLE ROW LEVEL SECURITY; ALTER TABLE memberships",
+        )],
+        &[(
+            "CREATE TRIGGER memberships_accept",
+            "CREATE FUNCTION keep() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN RETURN OLD; END $$;
+             CREATE TRIGGER invitations_keep BEFORE UPDATE ON invitations FOR EACH ROW EXECUTE FUNCTION keep();
+             CREATE TRIGGER memberships_accept",
+        )],
+        &[(
+            "SELECT id FROM invitations WHERE",
+            "SELECT accepted_by FROM invitations WHERE",
+        )],
+        &[("AFTER INSERT ON memberships", "AFTER UPDATE ON memberships")],
+        &[("WHERE id = NEW.invitation_id", "WHERE id = OLD.invitation_id")],
+        &[
+            ("nickname INT,", "nickname INT, id INT,"),
+            (
+                "WHERE id = NEW.invitation_id",
+                "WHERE NEW.id = NEW.invitation_id",
+            ),
+        ],
+        &[
+            (
+                "CREATE FUNCTION accept_invitation",
+                "CREATE FUNCTION reopen(INT) RETURNS VOID LANGUAGE sql AS $$
+                   UPDATE invitations SET accepted = false WHERE id = $1 $$;
+                 CREATE FUNCTION accept_invitation",
+            ),
+            (
+                "RETURN NULL;",
+                "PERFORM reopen(NEW.invitation_id); RETURN NULL;",
+            ),
+        ],
+        &[
+            (
+                "CREATE FUNCTION accept_invitation",
+                "CREATE FUNCTION reopened(INT) RETURNS BOOLEAN LANGUAGE sql AS $$
+                   UPDATE invitations SET accepted = false WHERE id = $1 RETURNING true $$;
+                 CREATE FUNCTION accept_invitation",
+            ),
+            ("BEGIN", "DECLARE done BOOLEAN; BEGIN"),
+            (
+                "RETURN NULL;",
+                "done := reopened(NEW.invitation_id); RETURN NULL;",
+            ),
+        ],
+        &[(
+            "RETURN NULL;",
+            "EXECUTE 'UPDATE invitations SET accepted = false'; RETURN NULL;",
+        )],
+        &[
+            ("REFERENCES invitations (id)", ""),
+            (
+                "GRANT SELECT, INSERT ON memberships",
+                "GRANT TRUNCATE, INSERT ON invitations TO app; GRANT SELECT, INSERT ON memberships",
+            ),
+        ],
+    ] {
+        assert!(reports_invitation_key(edits), "{edits:?}");
+    }
 }
