@@ -3113,7 +3113,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-expr-eval"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#1cf4d47bfdf7cc73403b5f2427eabc9f1001f629"
+source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#1ec72234469ef6b0ab3ca24c871574409f6fd054"
 dependencies = [
  "rpds",
  "sql-values",
