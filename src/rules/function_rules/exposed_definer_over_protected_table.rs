@@ -5,8 +5,8 @@ use std::{borrow::Cow, cell::RefCell, iter, mem, ops::ControlFlow, ptr, rc::Rc, 
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
     structs::{
-        ColumnBinding, ColumnDefinition, ConstraintDeferral, ExpressionContext, ExpressionScope,
-        IdentifierCase, OperandType, RowStatement, WrittenCall,
+        ColumnBinding, ColumnDefinition, ExpressionContext, ExpressionScope, IdentifierCase,
+        OperandType, RowStatement, WrittenCall,
     },
     traits::{
         ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, PolicyLike, Relation, TableLike,
@@ -33,7 +33,9 @@ use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        closed_set_support::{Identity, fixed_by, held_values, identity, pin, stored_name},
+        closed_set_support::{
+            Identity, fixed_by, held_values, identity, pin, same_identity, stored_name,
+        },
         cte_support::{
             WithScopes, join_constraint, same_name, stored_column, stored_relation, stored_table,
         },
@@ -42,7 +44,7 @@ use crate::{
             Columns, Condition, ParameterValues, Term, admits, clause_implies, membership,
             parameter, renamed,
         },
-        key_support::{checked_whenever_set, equality_keys, key_pairs},
+        key_support::{binds, equality_keys, key_pairs, no_inheritors},
         literal_support::literal,
         null_support::rejects_null,
         policy_support::{
@@ -2207,32 +2209,6 @@ fn reads_parameter(condition: &Expr) -> bool {
     .is_break()
 }
 
-/// Whether `=` holds between `left` and `right` only for identical values,
-/// compared alike for both.
-fn same_identity<DB: DatabaseLike>(
-    database: &DB,
-    left: &DB::Column,
-    right: &DB::Column,
-) -> Result<bool, LookupError> {
-    let left = identity(left, database)?;
-    Ok(left.is_some() && left == identity(right, database)?)
-}
-
-/// Whether every row of the table holding `foreign_key` with a value in
-/// `column` references a row at the end of every statement.
-fn binds<DB: DatabaseLike>(
-    database: &DB,
-    foreign_key: &DB::ForeignKey,
-    column: &DB::Column,
-) -> Result<bool, LookupError> {
-    Ok(
-        foreign_key.deferral(database) == ConstraintDeferral::NotDeferrable
-            && foreign_key.is_validated(database)?
-            && checked_whenever_set(database, foreign_key, column)?
-            && no_inheritors(database, foreign_key.host_table(database))?,
-    )
-}
-
 /// Whether `column` alone is a unique key of `table`.
 fn unique_alone<DB: DatabaseLike>(
     database: &DB,
@@ -2243,13 +2219,6 @@ fn unique_alone<DB: DatabaseLike>(
         && equality_keys(database, table)?
             .iter()
             .any(|key| matches!(key.as_slice(), [only] if *only == column)))
-}
-
-/// Whether no table inherits from `table`, whose keys and constraints would
-/// leave the rows of such a table unchecked although a read of `table`
-/// yields them.
-fn no_inheritors<DB: DatabaseLike>(database: &DB, table: &DB::Table) -> Result<bool, LookupError> {
-    Ok(table.inheritors(database)?.next().is_none())
 }
 
 /// The conditions of `drawn` that hold of the row of `table` whose `column`

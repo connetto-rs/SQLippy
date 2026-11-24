@@ -5,7 +5,7 @@ use std::{iter, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ColumnDefinitionScope, ColumnScope, IdentifierCase, TargetName},
+    structs::{ColumnDefinitionScope, ColumnScope, ConstraintDeferral, IdentifierCase, TargetName},
     traits::{ColumnLike, DatabaseLike, ForeignKeyLike, IndexLike, TableIndexLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
@@ -550,6 +550,31 @@ pub(crate) fn checked_whenever_set<DB: DatabaseLike>(
         }
     }
     Ok(true)
+}
+
+/// Whether every row of the table holding `foreign_key` with a value in
+/// `column` references a row at the end of every statement.
+pub(crate) fn binds<DB: DatabaseLike>(
+    database: &DB,
+    foreign_key: &DB::ForeignKey,
+    column: &DB::Column,
+) -> Result<bool, LookupError> {
+    Ok(
+        foreign_key.deferral(database) == ConstraintDeferral::NotDeferrable
+            && foreign_key.is_validated(database)?
+            && checked_whenever_set(database, foreign_key, column)?
+            && no_inheritors(database, foreign_key.host_table(database))?,
+    )
+}
+
+/// Whether no table inherits from `table`, whose keys and constraints would
+/// leave the rows of such a table unchecked although a read of `table`
+/// yields them.
+pub(crate) fn no_inheritors<DB: DatabaseLike>(
+    database: &DB,
+    table: &DB::Table,
+) -> Result<bool, LookupError> {
+    Ok(table.inheritors(database)?.next().is_none())
 }
 
 /// Whether `holds` is true of `column` or of a column its non-`NULL` values
