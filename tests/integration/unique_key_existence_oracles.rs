@@ -937,6 +937,29 @@ fn a_key_a_helper_draws_from_values_a_row_may_hold_is_reported() {
         ],
         vec![
             untriggered(),
+            pending_where(
+                "NOT EXISTS (SELECT 1 FROM memberships m WHERE m.invitation_id = i.id EXCEPT SELECT 1)",
+            ),
+        ],
+        vec![
+            untriggered(),
+            pending_where(
+                "NOT EXISTS (SELECT 1 FROM (SELECT invitation_id FROM memberships WHERE user_id > 50) m
+                 WHERE m.invitation_id = i.id)",
+            ),
+        ],
+        vec![
+            untriggered(),
+            (
+                "CREATE FUNCTION pending",
+                "CREATE VIEW recent AS SELECT * FROM memberships WHERE user_id > 50;
+                 CREATE FUNCTION pending"
+                    .to_owned(),
+            ),
+            pending_where("NOT EXISTS (SELECT 1 FROM recent m WHERE m.invitation_id = i.id)"),
+        ],
+        vec![
+            untriggered(),
             (
                 "LANGUAGE sql STABLE SECURITY DEFINER",
                 "LANGUAGE sql STABLE".to_owned(),
