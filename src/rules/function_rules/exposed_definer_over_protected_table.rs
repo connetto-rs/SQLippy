@@ -639,8 +639,8 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
 impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
     type Tested = String;
 
-    fn deployment(&self) -> &Deployment {
-        self.confinement.deployment
+    fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> Result<bool, LookupError> {
+        Ok(self.confinement.deployment.is_set_within(narrower, wider))
     }
 
     fn rename(&self, column: Cow<'_, str>) -> Option<String> {

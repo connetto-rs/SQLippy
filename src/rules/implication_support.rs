@@ -3,23 +3,23 @@
 
 use std::{borrow::Cow, convert::Infallible, mem, ops::ControlFlow, slice};
 
-use sql_traits::{errors::LookupError, structs::RowGate, traits::DatabaseLike};
+use sql_traits::{
+    errors::LookupError, structs::RowGate, traits::DatabaseLike,
+    utils::identifier_resolution::normalize_identifier,
+};
 use sqlparser::ast::{
-    BinaryOperator, Distinct, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
-    FunctionArguments, Ident, InTarget, Query, Select, SelectItem, SetExpr, TableFactor, Value,
-    Visit, VisitMut, Visitor, VisitorMut, WildcardAdditionalOptions, visit_expressions,
-    visit_expressions_mut,
+    AccessExpr, BinaryOperator, Distinct, Expr, Function, FunctionArg, FunctionArgExpr,
+    FunctionArgumentList, FunctionArguments, Ident, InTarget, Query, Select, SelectItem, SetExpr,
+    TableAlias, TableFactor, Value, Visit, VisitMut, Visitor, VisitorMut,
+    WildcardAdditionalOptions, visit_expressions, visit_expressions_mut,
 };
 
-use crate::{
-    deployment::Deployment,
-    rules::{
-        closed_set_support::stored_name,
-        policy_support::{
-            conjuncts, disjuncts, is_column_reference, is_tautology, unnested, unwrapped,
-        },
-        walk_support::walk,
+use crate::rules::{
+    closed_set_support::stored_name,
+    policy_support::{
+        conjuncts, disjuncts, is_column_reference, is_tautology, unnested, unwrapped,
     },
+    walk_support::walk,
 };
 
 /// What a name a filter writes like a column's stands for.
@@ -53,8 +53,13 @@ pub(crate) trait Columns {
     /// The condition columns a set membership tests.
     type Tested;
 
-    /// The deployment declaring which sets lie within which.
-    fn deployment(&self) -> &Deployment;
+    /// Whether every value the set expression `narrower` yields is one
+    /// `wider` yields.
+    ///
+    /// # Errors
+    ///
+    /// Returns the lookup error reading what either expression yields raised.
+    fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> Result<bool, LookupError>;
 
     /// The name the filter gives the condition column stored as `column`.
     fn rename(&self, column: Cow<'_, str>) -> Option<String>;
@@ -195,7 +200,7 @@ pub(crate) fn clause_implies<C: Columns>(
                 Operand::Tested(tested) => is_column(value) && columns.tests(value, tested),
                 Operand::Value(stated) => value == *stated,
             })
-        && is_within(columns, &members, wider)
+        && is_within(columns, &members, wider)?
     {
         return Ok(true);
     }
@@ -329,6 +334,19 @@ fn references_column<V: Visit>(node: &V) -> bool {
     .is_break()
 }
 
+/// Whether `expression` mentions a column or reads an input parameter as
+/// `$n`, either of which may hold another value where it is read again.
+pub(crate) fn reads_column_or_parameter(expression: &Expr) -> bool {
+    visit_expressions(expression, |expression| {
+        if is_column(expression) || parameter_ordinal(expression).is_some() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+}
+
 /// The numbered placeholder `$n` PostgreSQL reads as the input parameter at
 /// `ordinal`, counted from zero.
 pub(crate) fn parameter(ordinal: usize) -> Expr {
@@ -441,7 +459,7 @@ pub(crate) fn renamed(expression: &Expr, rename: impl Fn(&Expr) -> Option<Term>)
 /// takes each label in turn, and a `NULL` one passes only to a call returning
 /// `NULL` on `NULL` input, which yields no value. A parameter of any other
 /// type proves nothing.
-fn is_within<C: Columns>(columns: &C, narrower: &Expr, wider: &Expr) -> bool {
+fn is_within<C: Columns>(columns: &C, narrower: &Expr, wider: &Expr) -> Result<bool, LookupError> {
     let mut ordinals = Vec::new();
     let _ = visit_expressions(narrower, |expression| {
         if let Some(ordinal) = parameter_ordinal(expression)
@@ -452,21 +470,21 @@ fn is_within<C: Columns>(columns: &C, narrower: &Expr, wider: &Expr) -> bool {
         ControlFlow::<()>::Continue(())
     });
     if ordinals.is_empty() {
-        return columns.deployment().is_set_within(narrower, wider);
+        return columns.is_set_within(narrower, wider);
     }
     let Some(values) = ordinals
         .iter()
         .map(|&ordinal| columns.parameter_values(ordinal))
         .collect::<Option<Vec<_>>>()
     else {
-        return false;
+        return Ok(false);
     };
     if ordinals
         .iter()
         .zip(&values)
         .any(|(&ordinal, values)| values.null && !nothing_on_null(columns, narrower, ordinal))
     {
-        return false;
+        return Ok(false);
     }
     let mut choice = vec![0; ordinals.len()];
     loop {
@@ -480,13 +498,13 @@ fn is_within<C: Columns>(columns: &C, narrower: &Expr, wider: &Expr) -> bool {
             }
             ControlFlow::<()>::Continue(())
         });
-        if !columns.deployment().is_set_within(&expanded, wider) {
-            return false;
+        if !columns.is_set_within(&expanded, wider)? {
+            return Ok(false);
         }
         let Some(position) = (0..choice.len())
             .find(|&position| choice[position] + 1 < values[position].labels.len())
         else {
-            return true;
+            return Ok(true);
         };
         choice[position] += 1;
         choice[..position].fill(0);
@@ -525,12 +543,14 @@ fn value_members(value: &Expr) -> Option<Cow<'_, Expr>> {
 }
 
 /// The expression yielding the rows of `query`, when the query projects it
-/// alone or selects every column of one call, and filters and limits
-/// nothing.
-fn query_members(query: &Query) -> Option<Cow<'_, Expr>> {
+/// alone, selects every column of one call or one column of one call, and
+/// filters and limits nothing.
+pub(crate) fn query_members(query: &Query) -> Option<Cow<'_, Expr>> {
     match sole_item(query) {
         Some(value) => value_members(value),
-        None => sole_call(query).map(Cow::Owned),
+        None => sole_call(query)
+            .or_else(|| sole_column(query))
+            .map(Cow::Owned),
     }
 }
 
@@ -576,31 +596,94 @@ fn sole_item(query: &Query) -> Option<&Expr> {
 /// limits nothing, so it yields every row of the call.
 fn sole_call(query: &Query) -> Option<Expr> {
     let select = unfiltered(query)?;
-    let ([SelectItem::Wildcard(options)], [from]) =
-        (select.projection.as_slice(), select.from.as_slice())
+    let [SelectItem::Wildcard(options)] = select.projection.as_slice() else {
+        return None;
+    };
+    if *options != WildcardAdditionalOptions::default() {
+        return None;
+    }
+    sole_relation_call(select).map(|(call, _)| call)
+}
+
+/// The column of one call `query` projects, written `(call).column`, when
+/// the query reads that call alone under an alias renaming no column, names
+/// the column through the alias, and filters and limits nothing, so it
+/// yields every value of the column. The call reads no column or parameter,
+/// which could stand for another row's value.
+fn sole_column(query: &Query) -> Option<Expr> {
+    let select = unfiltered(query)?;
+    let [
+        SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts))
+        | SelectItem::ExprWithAlias {
+            expr: Expr::CompoundIdentifier(parts),
+            ..
+        },
+    ] = select.projection.as_slice()
     else {
         return None;
     };
-    if *options != WildcardAdditionalOptions::default() || !from.joins.is_empty() {
+    let [relation, column] = parts.as_slice() else {
+        return None;
+    };
+    let (call, Some(alias)) = sole_relation_call(select)? else {
+        return None;
+    };
+    if !alias.columns.is_empty()
+        || normalize_identifier(&alias.name.value, alias.name.quote_style.is_some())
+            != normalize_identifier(&relation.value, relation.quote_style.is_some())
+        || reads_column_or_parameter(&call)
+    {
         return None;
     }
-    let (name, args) = match &from.relation {
+    Some(column_of(
+        call,
+        &normalize_identifier(&column.value, column.quote_style.is_some()),
+    ))
+}
+
+/// The values the column stored as `column` takes among the rows `call`
+/// yields, written `(call).column`, the column quoted unless its stored name
+/// is folded.
+pub(crate) fn column_of(call: Expr, column: &str) -> Expr {
+    let field = if normalize_identifier(column, false) == column {
+        Ident::new(column)
+    } else {
+        Ident::with_quote('"', column)
+    };
+    Expr::CompoundFieldAccess {
+        root: Box::new(Expr::Nested(Box::new(call))),
+        access_chain: vec![AccessExpr::Dot(Expr::Identifier(field))],
+    }
+}
+
+/// The call `select` reads alone, without ordinality, written as an
+/// expression, with the alias it reads the call under.
+fn sole_relation_call(select: &Select) -> Option<(Expr, Option<&TableAlias>)> {
+    let [from] = select.from.as_slice() else {
+        return None;
+    };
+    if !from.joins.is_empty() {
+        return None;
+    }
+    let (name, args, alias) = match &from.relation {
         TableFactor::Table {
             name,
             args: Some(args),
             with_ordinality: false,
             sample: None,
+            alias,
             ..
-        } if args.settings.is_none() => (name, &args.args),
+        } if args.settings.is_none() => (name, &args.args, alias),
         TableFactor::Function {
             name,
             args,
             with_ordinality: false,
+            alias,
             ..
-        } => (name, args),
+        } => (name, args, alias),
         _ => return None,
     };
-    Some(Expr::Function(Function {
+    let call = Expr::Function(Function {
         name: name.clone(),
         uses_odbc_syntax: false,
         parameters: FunctionArguments::None,
@@ -613,7 +696,8 @@ fn sole_call(query: &Query) -> Option<Expr> {
         null_treatment: None,
         over: None,
         within_group: Vec::new(),
-    }))
+    });
+    Some((call, alias.as_ref()))
 }
 
 /// The expression yielding the elements of `array` as the operand of

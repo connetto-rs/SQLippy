@@ -6,8 +6,14 @@ use sqlippy::prelude::*;
 
 /// Object and message of every finding on `sql`.
 fn reported(sql: &str) -> Vec<(String, String)> {
+    reported_under(Deployment::default(), sql)
+}
+
+/// Object and message of every finding on `sql` under `deployment`, with
+/// `app` an app role.
+fn reported_under(deployment: Deployment, sql: &str) -> Vec<(String, String)> {
     let mut constrainer: GenericConstrainer<ParserDB> = UniqueKeyExistenceOracle::default().into();
-    constrainer.set_deployment(Deployment::default().with_app_role("app"));
+    constrainer.set_deployment(deployment.with_app_role("app"));
     findings(
         &constrainer,
         "unique_key_existence_oracle",
@@ -20,7 +26,12 @@ fn reported(sql: &str) -> Vec<(String, String)> {
 
 /// Objects of every finding on `sql`.
 fn objects(sql: &str) -> Vec<String> {
-    reported(sql)
+    objects_under(Deployment::default(), sql)
+}
+
+/// Objects of every finding on `sql` under `deployment`.
+fn objects_under(deployment: Deployment, sql: &str) -> Vec<String> {
+    reported_under(deployment, sql)
         .into_iter()
         .map(|(object, _)| object)
         .collect()
@@ -135,4 +146,80 @@ fn a_null_key_a_unique_key_compares_reaches_the_key() {
             "{nulls}"
         );
     }
+}
+
+/// A `grants` table whose rows `app` reads under `read` and inserts under
+/// `check`, beside helpers projecting the resources a caller may share.
+fn grants(read: &str, check: &str) -> String {
+    format!(
+        "CREATE TABLE resources (id INT PRIMARY KEY, owner_id INT NOT NULL);
+         CREATE FUNCTION sharable_grants() RETURNS TABLE (resource_id INT, role TEXT)
+           LANGUAGE sql STABLE SECURITY DEFINER AS $$ SELECT resource.id, 'writer'::text
+           FROM resources resource WHERE resource.owner_id = current_setting('app.user_id')::int $$;
+         CREATE FUNCTION other_grants() RETURNS TABLE (resource_id INT, role TEXT)
+           LANGUAGE sql STABLE SECURITY DEFINER AS $$ SELECT resource.id, 'reader'::text
+           FROM resources resource $$;
+         CREATE FUNCTION sharable_resources() RETURNS SETOF INT LANGUAGE sql STABLE SECURITY DEFINER
+           AS $$ SELECT share.resource_id FROM sharable_grants() share $$;
+         CREATE FUNCTION shared_by(owner INT) RETURNS SETOF INT LANGUAGE sql STABLE STRICT
+           SECURITY DEFINER AS $$ SELECT share.resource_id FROM sharable_grants() share $$;
+         CREATE TABLE grants (resource_id INT, grantee_id INT, role TEXT,
+           PRIMARY KEY (resource_id, grantee_id));
+         ALTER TABLE grants ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY grants_read ON grants FOR SELECT TO app USING ({read});
+         CREATE POLICY grants_write ON grants FOR INSERT TO app WITH CHECK ({check});
+         GRANT SELECT, INSERT ON grants TO app;"
+    )
+}
+
+const SHARED: &str = "resource_id IN (SELECT share.resource_id FROM sharable_grants() share)";
+const OTHER: &str = "resource_id IN (SELECT share.resource_id FROM other_grants() share)";
+const RESOURCES: &str = "resource_id IN (SELECT sharable_resources())";
+
+#[test]
+fn a_key_drawn_from_the_projected_helper_column_it_is_read_through_is_clean() {
+    let pair = "(resource_id, role) IN (SELECT share.resource_id, share.role FROM sharable_grants() share)";
+    for (read, check) in [
+        (SHARED, SHARED),
+        (RESOURCES, pair),
+        (SHARED, RESOURCES),
+        (RESOURCES, SHARED),
+        (RESOURCES, RESOURCES),
+    ] {
+        assert_eq!(
+            objects(&grants(read, check)),
+            Vec::<String>::new(),
+            "{read} / {check}"
+        );
+    }
+}
+
+#[test]
+fn a_key_drawn_from_another_set_than_the_readable_one_is_reported() {
+    for (read, check) in [
+        (SHARED, OTHER),
+        (OTHER, RESOURCES),
+        (
+            "resource_id IN (SELECT share.resource_id FROM sharable_grants() share WHERE share.role = 'reader')",
+            SHARED,
+        ),
+        ("resource_id IN (SELECT shared_by(NULL))", SHARED),
+    ] {
+        assert_eq!(
+            objects(&grants(read, check)),
+            vec!["grants.grants_pkey"],
+            "{read} / {check}"
+        );
+    }
+}
+
+#[test]
+fn a_projected_helper_column_is_declared_within_a_set_as_a_field_of_the_call() {
+    let deployment = Deployment::default()
+        .with_set_within("(other_grants()).resource_id", "sharable_resources()")
+        .unwrap();
+    assert_eq!(
+        objects_under(deployment, &grants(RESOURCES, OTHER)),
+        Vec::<String>::new()
+    );
 }

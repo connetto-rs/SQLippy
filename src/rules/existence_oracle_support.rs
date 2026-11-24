@@ -14,10 +14,10 @@ use sql_traits::{
 };
 use sqlparser::{
     ast::{
-        BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-        FunctionSecurity, Ident, InTarget, JoinOperator, ObjectName, Query, Select, SelectItem,
-        SetExpr, SetOperator, TableAlias, TableFactor, Value, VisitMut, VisitorMut,
-        visit_expressions,
+        AccessExpr, BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr,
+        FunctionArguments, FunctionSecurity, Ident, InTarget, JoinOperator, ObjectName, Query,
+        Select, SelectItem, SetExpr, SetOperator, TableAlias, TableFactor, Value, VisitMut,
+        VisitorMut, visit_expressions,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -30,7 +30,8 @@ use crate::{
         cte_support::stored_table,
         grant_support::schema_of,
         implication_support::{
-            Columns, Condition, Operand, admits, clause_implies, is_column, membership,
+            Columns, Condition, Operand, admits, clause_implies, column_of, is_column, membership,
+            query_members, reads_column_or_parameter,
         },
         key_support::{equality_keys, instances, named},
         policy_read_support::sublink_reads,
@@ -120,6 +121,9 @@ struct Source<'db, DB: DatabaseLike> {
     columns: Vec<String>,
     /// Whether `columns` names every column the relation yields.
     counted: bool,
+    /// The set each column's values lie in, by position, which a call
+    /// yielding there what it yields to the writer names.
+    sets: Vec<Expr>,
     kind: SourceKind<'db, DB>,
 }
 
@@ -127,9 +131,6 @@ struct Source<'db, DB: DatabaseLike> {
 enum SourceKind<'db, DB: DatabaseLike> {
     /// A table, whose row the arm reads at this position among its rows.
     Table(usize),
-    /// A call yielding one column, the set of values the call expression
-    /// yields.
-    Set(Box<Expr>),
     /// A helper whose body the arm reads as its arms.
     Helper(Vec<Arm<'db, DB>>),
     /// A relation the arm learns nothing of.
@@ -174,6 +175,8 @@ pub(crate) struct Confinement<'a, DB: DatabaseLike> {
     null_skips: bool,
     /// The helper arms each clause reads, by the clause's address.
     helpers: RefCell<HashMap<*const Expr, Option<Rc<HelperArms<'a, DB>>>>>,
+    /// The spelling each set unfolds to, by the set.
+    unfoldings: RefCell<HashMap<Expr, Option<Expr>>>,
 }
 
 impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
@@ -209,6 +212,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             row_keys,
             null_skips,
             helpers: RefCell::new(HashMap::new()),
+            unfoldings: RefCell::new(HashMap::new()),
         })
     }
 
@@ -633,17 +637,17 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     ) -> Result<bool, LookupError> {
         if let Some((operands, wider)) = &condition.membership
             && let [Operand::Tested(mapped)] = operands.as_slice()
-            && origins.iter().enumerate().any(|(position, origin)| {
-                mapped & (1 << position) != 0
-                    && origin.is_some_and(|origin| {
-                        origin
-                            .members
-                            .iter()
-                            .any(|members| self.deployment.is_set_within(members, wider))
-                    })
-            })
         {
-            return Ok(true);
+            for (position, origin) in origins.iter().enumerate() {
+                if mapped & (1 << position) == 0 {
+                    continue;
+                }
+                for members in origin.iter().flat_map(|origin| &origin.members) {
+                    if self.is_set_within(members, wider)? {
+                        return Ok(true);
+                    }
+                }
+            }
         }
         for (index, row) in arm.rows.iter().enumerate() {
             if row.table != self.parent {
@@ -665,7 +669,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                     || self.entails(
                         &self.row_facts(row, index, origins, context),
                         condition.original,
-                    ))
+                    )?)
             {
                 return Ok(true);
             }
@@ -690,8 +694,10 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             return Ok(false);
         }
         let facts = self.row_facts(row, *index, origins, context);
-        if !filters.iter().all(|filter| self.entails(&facts, filter)) {
-            return Ok(false);
+        for filter in &filters {
+            if !self.entails(&facts, filter)? {
+                return Ok(false);
+            }
         }
         Ok(row.read_by_writer || self.row_readable(table, &facts, role)?)
     }
@@ -828,7 +834,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             for term in gate.restrictive() {
                 let condition = term.expression().expression();
                 if !is_tautology(self.database, table, condition)?
-                    && !self.entails(facts, condition)
+                    && !self.entails(facts, condition)?
                 {
                     return Ok(false);
                 }
@@ -836,7 +842,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             let mut admitted = false;
             for term in gate.permissive() {
                 let condition = term.expression().expression();
-                if is_tautology(self.database, table, condition)? || self.entails(facts, condition)
+                if is_tautology(self.database, table, condition)?
+                    || self.entails(facts, condition)?
                 {
                     admitted = true;
                     break;
@@ -851,7 +858,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
 
     /// Whether a row meeting every one of `facts`, stated of its columns,
     /// meets `target`.
-    fn entails(&self, facts: &[Expr], target: &Expr) -> bool {
+    fn entails(&self, facts: &[Expr], target: &Expr) -> Result<bool, LookupError> {
         let facts: Vec<Expr> = facts
             .iter()
             .flat_map(|fact| conjuncts(fact).into_iter().map(normalized))
@@ -860,43 +867,150 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 
     /// [`Self::entails`] over normalized facts and target.
-    fn entails_normalized(&self, facts: &[Expr], target: &Expr) -> bool {
+    fn entails_normalized(&self, facts: &[Expr], target: &Expr) -> Result<bool, LookupError> {
         let target = without_parentheses(target);
         if facts.iter().any(|fact| without_parentheses(fact) == target) {
-            return true;
+            return Ok(true);
         }
         let parts = conjuncts(target);
         if parts.len() > 1 {
-            return parts
-                .iter()
-                .all(|part| self.entails_normalized(facts, part));
+            for part in parts {
+                if !self.entails_normalized(facts, part)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
         }
         let arms = disjuncts(target);
-        if arms.len() > 1 && arms.iter().any(|arm| self.entails_normalized(facts, arm)) {
-            return true;
+        if arms.len() > 1 {
+            for arm in arms {
+                if self.entails_normalized(facts, arm)? {
+                    return Ok(true);
+                }
+            }
         }
-        if let Some((items, wider)) = membership(target)
-            && facts.iter().any(|fact| {
-                membership(fact).is_some_and(|(stated, members)| {
-                    stated == items && self.deployment.is_set_within(&members, &wider)
-                })
-            })
-        {
-            return true;
+        if let Some((items, wider)) = membership(target) {
+            for fact in facts {
+                if let Some((stated, members)) = membership(fact)
+                    && stated == items
+                    && self.is_set_within(&members, &wider)?
+                {
+                    return Ok(true);
+                }
+            }
         }
-        facts.iter().enumerate().any(|(index, fact)| {
+        for (index, fact) in facts.iter().enumerate() {
             let arms = disjuncts(fact);
-            arms.len() > 1
-                && arms.iter().all(|arm| {
-                    let mut assumed: Vec<Expr> = facts
-                        .iter()
-                        .enumerate()
-                        .filter(|(other, _)| *other != index)
-                        .map(|(_, other)| other.clone())
-                        .collect();
-                    assumed.extend(conjuncts(arm).into_iter().cloned());
-                    self.entails_normalized(&assumed, target)
-                })
+            if arms.len() < 2 {
+                continue;
+            }
+            let mut every = true;
+            for arm in arms {
+                let mut assumed: Vec<Expr> = facts
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| *other != index)
+                    .map(|(_, other)| other.clone())
+                    .collect();
+                assumed.extend(conjuncts(arm).into_iter().cloned());
+                if !self.entails_normalized(&assumed, target)? {
+                    every = false;
+                    break;
+                }
+            }
+            if every {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether every value the set expression `narrower` yields is one
+    /// `wider` yields, through the declared sets once each set is spelled
+    /// as the helpers it calls unfold it.
+    fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> Result<bool, LookupError> {
+        self.deployment
+            .is_set_within_unfolding(narrower, wider, |set| self.unfolded(set))
+    }
+
+    /// Another spelling of the set `set` yields, read from the helper it
+    /// calls, cached by the set.
+    fn unfolded(&self, set: &Expr) -> Result<Option<Expr>, LookupError> {
+        if let Some(cached) = self.unfoldings.borrow().get(set) {
+            return Ok(cached.clone());
+        }
+        let found = self.read_unfolded(set)?;
+        self.unfoldings
+            .borrow_mut()
+            .insert(set.clone(), found.clone());
+        Ok(found)
+    }
+
+    /// [`Self::unfolded`] uncached. The one column of a call, written
+    /// `(call).column`, is the call. A call taking no argument to a
+    /// set-returning `LANGUAGE sql` helper is the set its body selects, when
+    /// the body selects one set expression that yields there what it yields
+    /// to the writer, it sets no parameter besides the search path, and the
+    /// names in it reach on that path what they reach on the schema's own.
+    fn read_unfolded(&self, set: &Expr) -> Result<Option<Expr>, LookupError> {
+        if let Expr::CompoundFieldAccess { root, access_chain } = set
+            && let (Expr::Nested(call), [AccessExpr::Dot(Expr::Identifier(column))]) =
+                (root.as_ref(), access_chain.as_slice())
+            && let Expr::Function(function_call) = call.as_ref()
+        {
+            let Some(function) = self.sole_function(function_call)? else {
+                return Ok(None);
+            };
+            let mut returned = function.returned_columns(self.database);
+            return Ok(match (returned.next(), returned.next()) {
+                (Some((name, _)), None)
+                    if normalize_identifier(name.name(), name.name_is_quoted())
+                        == identifier(column) =>
+                {
+                    Some(call.as_ref().clone())
+                }
+                _ => None,
+            });
+        }
+        let Expr::Function(call) = set else {
+            return Ok(None);
+        };
+        if !matches!(&call.args, FunctionArguments::List(list) if list.args.is_empty()) {
+            return Ok(None);
+        }
+        let Some(function) = self.sole_function(call)? else {
+            return Ok(None);
+        };
+        if !sets_only_search_path(function) {
+            return Ok(None);
+        }
+        let Some(body) = sql_set_body(self.database, function)? else {
+            return Ok(None);
+        };
+        if let Some(path) = function.search_path(self.database)?
+            && !resolves_alike(self.database, &body, &path)?
+        {
+            return Ok(None);
+        }
+        let Some(members) = query_members(&body) else {
+            return Ok(None);
+        };
+        let reader = Reader::Body {
+            definer: function.security_mode() == FunctionSecurity::Definer,
+        };
+        Ok(self
+            .admissible(&members, reader)?
+            .then(|| members.into_owned()))
+    }
+
+    /// The one function `call` reaches.
+    fn sole_function(&self, call: &Function) -> Result<Option<&'a DB::Function>, LookupError> {
+        let mut called = self
+            .database
+            .functions_reached_by(call, IdentifierCase::Folded)?;
+        Ok(match (called.next(), called.next()) {
+            (Some(function), None) => Some(function),
+            _ => None,
         })
     }
 
@@ -1017,24 +1131,23 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 return Origin::default();
             };
             let source = &sources[*index];
+            let position = source.columns.iter().position(|name| name == column);
             let mut origin = match (&source.kind, arm) {
                 (SourceKind::Table(row), _) => Origin {
                     row: Some((*row, column.clone())),
                     members: Vec::new(),
                 },
-                (SourceKind::Set(set), _) => Origin {
-                    row: None,
-                    members: vec![(**set).clone()],
-                },
-                (SourceKind::Helper(_), Some(arm)) => source
-                    .columns
-                    .iter()
-                    .position(|name| name == column)
+                (SourceKind::Helper(_), Some(arm)) => position
                     .and_then(|position| arm.outputs.get(position))
                     .cloned()
                     .unwrap_or_default(),
                 _ => Origin::default(),
             };
+            origin.members.extend(
+                position
+                    .and_then(|position| source.sets.get(position))
+                    .cloned(),
+            );
             origin.members.extend(
                 members
                     .iter()
@@ -1123,6 +1236,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 name: identifier(&alias.name),
                 columns: renamed_columns,
                 counted: false,
+                sets: Vec::new(),
                 kind: SourceKind::Opaque,
             }));
         }
@@ -1170,34 +1284,64 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         }
         let counted =
             function.is_some() && !columns.is_empty() && renamed_columns.len() <= columns.len();
+        let width = if counted {
+            columns.len()
+        } else {
+            renamed_columns.len()
+        };
+        let sets = self.call_sets(&name, counted.then_some(columns.as_slice()), width, reader)?;
         for (column, renamed) in columns.iter_mut().zip(&renamed_columns) {
             column.clone_from(renamed);
         }
         if !counted {
             columns = renamed_columns;
         }
-        let set = Parser::new(&PostgreSqlDialect {})
-            .try_with_sql(&name)
-            .and_then(|mut parser| parser.parse_expr())
-            .ok();
-        let kind = match (reader, function) {
-            (Reader::Writer, Some(function)) => match self.helper_body_arms(function)? {
+        let kind = match function {
+            Some(function) if reader == Reader::Writer => match self.helper_body_arms(function)? {
                 Some(arms) => SourceKind::Helper(arms),
                 None => SourceKind::Opaque,
             },
-            _ => match set {
-                Some(set) if columns.len() == 1 && self.admissible(&set, reader)? => {
-                    SourceKind::Set(Box::new(set))
-                }
-                _ => SourceKind::Opaque,
-            },
+            _ => SourceKind::Opaque,
         };
         Ok(Some(Source {
             name: exposed,
             columns,
             counted,
+            sets,
             kind,
         }))
+    }
+
+    /// The set each column of the call written `call` takes its values in,
+    /// by position. The call itself is the set of its only column when
+    /// `width`, the number of its columns, is one, and `(call).column` the
+    /// set of each column `names` lists by stored name otherwise. None when
+    /// the call reads a column or parameter, or yields to `reader` what it
+    /// does not yield the writer.
+    fn call_sets(
+        &self,
+        call: &str,
+        names: Option<&[String]>,
+        width: usize,
+        reader: Reader,
+    ) -> Result<Vec<Expr>, LookupError> {
+        let Ok(call) = Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(call)
+            .and_then(|mut parser| parser.parse_expr())
+        else {
+            return Ok(Vec::new());
+        };
+        if reads_column_or_parameter(&call) || !self.admissible(&call, reader)? {
+            return Ok(Vec::new());
+        }
+        Ok(match names {
+            _ if width == 1 => vec![call],
+            Some(names) => names
+                .iter()
+                .map(|column| column_of(call.clone(), column))
+                .collect(),
+            None => Vec::new(),
+        })
     }
 
     /// The table `name` reads under `alias`, renaming its leading columns
@@ -1248,6 +1392,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             name: exposed,
             columns,
             counted: true,
+            sets: Vec::new(),
             kind: SourceKind::Table(rows.len() - 1),
         }))
     }
@@ -1418,8 +1563,8 @@ impl<DB: DatabaseLike> Reading<'_, '_, DB> {
 impl<DB: DatabaseLike> Columns for Reading<'_, '_, DB> {
     type Tested = u64;
 
-    fn deployment(&self) -> &Deployment {
-        self.confinement.deployment
+    fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> Result<bool, LookupError> {
+        self.confinement.is_set_within(narrower, wider)
     }
 
     fn rename(&self, column: Cow<'_, str>) -> Option<String> {
