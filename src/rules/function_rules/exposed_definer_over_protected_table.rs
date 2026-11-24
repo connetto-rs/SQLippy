@@ -13,8 +13,8 @@ use std::{
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
     structs::{
-        ColumnBinding, ColumnDefinition, ExpressionContext, ExpressionScope, IdentifierCase,
-        OperandType, RowStatement, WrittenCall,
+        ColumnBinding, ColumnDefinition, ExpressionContext, ExpressionScope, FunctionResultType,
+        IdentifierCase, OperandType, RowStatement, WrittenCall,
     },
     traits::{
         ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, PolicyLike, Relation, TableLike,
@@ -165,7 +165,11 @@ use crate::{
 /// reads whole in its `FROM` states the same of the argument that call
 /// passes, and states nothing otherwise. The value drawn through a
 /// `SECURITY DEFINER` function also lies in the set of its own call, with
-/// the arguments the call passes.
+/// the arguments the call passes. A column held equal with `=` to the only
+/// column a call of such a function returns in a `FROM` item lies in the
+/// set of that call, written schema-qualified, when the call passes each
+/// argument positionally as a literal or a parameter. Of an `OR` of such
+/// tests and other conditions, what every arm states holds.
 /// When the function draws the value from the tested column itself, unique
 /// in its table, the row drawn is the tested row and every condition holds
 /// of it. Otherwise a condition on the returned column holds of the tested
@@ -1255,8 +1259,11 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     ..
                 } = self.stated(&filters, from, position)?;
                 let mut drawn = Vec::new();
-                for condition in conditions.iter().chain(&caller_bound) {
+                for condition in &conditions {
                     drawn.extend(self.drawn_condition(table, condition, &conditions)?);
+                }
+                for condition in &caller_bound {
+                    drawn.extend(self.implied(table, condition, &conditions)?);
                 }
                 conditions.extend(drawn);
                 let witnessed = self.witnessed_sets(
@@ -1359,6 +1366,13 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 }
                 None => whole &= !matches!(clause, Clause::Where),
             }
+            if let Some(membership) = self.joined_set(&resolver, &equalities, relation, conjunct) {
+                if self.reads_alike(&membership)? {
+                    conditions.push(membership);
+                } else {
+                    caller_bound.push(membership);
+                }
+            }
         }
         Ok(Stated {
             resolver,
@@ -1374,6 +1388,89 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     fn reads_alike(&self, expression: &Expr) -> Result<bool, LookupError> {
         CallerBound::new(self.body.confinement, self.path, Some(&self.items))
             .reads_alike(expression)
+    }
+
+    /// `column IN (SELECT schema.f(…))` when `conjunct` holds the `column` of
+    /// `relation` equal to the only column a call `f(…)` in a `FROM` item
+    /// returns, passing each argument as a literal or a parameter. A row
+    /// an outer join fills with `NULL`s never holds it equal.
+    fn joined_set<'r>(
+        &self,
+        resolver: &Resolver<'r, '_, 'a, DB>,
+        equalities: &Equalities<'r>,
+        relation: &TableFactor,
+        conjunct: &Expr,
+    ) -> Option<Expr> {
+        let (left, right) = match unnested(conjunct) {
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Eq,
+                right,
+            } => (left.as_ref(), right.as_ref()),
+            Expr::In { expr, .. } => (
+                expr.as_ref(),
+                semi_join(conjunct).and_then(carried_column)?.0,
+            ),
+            _ => return None,
+        };
+        [(left, right), (right, left)]
+            .into_iter()
+            .find_map(|(tested, drawn)| {
+                let Term::Column(column) = term(resolver, tested, relation, equalities)? else {
+                    return None;
+                };
+                let (
+                    ColumnDefinition::FunctionResult {
+                        function,
+                        data_type: FunctionResultType::Scalar { .. },
+                    },
+                    binding,
+                ) = resolver.reference(unnested(drawn))?
+                else {
+                    return None;
+                };
+                let arguments: Vec<String> = self
+                    .passed(binding.entry()?.factor(), function)?
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                Some(in_set(&column, call_of(function, &arguments)?))
+            })
+    }
+
+    /// What `condition`, stated of the columns of `table` besides its
+    /// `conditions`, implies of the row through the sets it tests columns
+    /// against. A term reading alike implies itself, a test against a set
+    /// the conditions [`Self::drawn_condition`] carries over, `AND` what
+    /// either side implies and `OR` what each side does.
+    fn implied(
+        &self,
+        table: &'a DB::Table,
+        condition: &Expr,
+        conditions: &[Expr],
+    ) -> Result<Option<Expr>, LookupError> {
+        if let Expr::BinaryOp {
+            left,
+            op: op @ (BinaryOperator::And | BinaryOperator::Or),
+            right,
+        } = unnested(condition)
+        {
+            let left = self.implied(table, left, conditions)?;
+            let right = self.implied(table, right, conditions)?;
+            return Ok(match (left, right) {
+                (Some(left), Some(right)) => Some(Expr::BinaryOp {
+                    left: Box::new(left),
+                    op: op.clone(),
+                    right: Box::new(right),
+                }),
+                (left, right) if *op == BinaryOperator::And => left.or(right),
+                _ => None,
+            });
+        }
+        if self.reads_alike(condition)? {
+            return Ok(Some(condition.clone()));
+        }
+        self.drawn_condition(table, condition, conditions)
     }
 
     /// The stored table `relation` reads every row of under its own column
@@ -2848,6 +2945,12 @@ fn member<F: FunctionLike>(function: &F) -> Option<Box<Query>> {
         }
         arguments.push(parameter(position).to_string());
     }
+    call_of(function, &arguments)
+}
+
+/// `SELECT schema.name(arguments)` calling `function`, its schema `public`
+/// when its name has none.
+fn call_of<F: FunctionLike>(function: &F, arguments: &[String]) -> Option<Box<Query>> {
     let written = |name: &str, quoted: bool| {
         let stored = normalize_identifier(name, quoted).into_owned();
         if quoted {

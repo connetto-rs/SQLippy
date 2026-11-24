@@ -3031,6 +3031,69 @@ fn a_row_drawn_through_invoker_helpers_keeps_their_conditions() {
 }
 
 #[test]
+fn a_row_held_equal_to_a_helper_value_keeps_the_conditions_it_is_drawn_under() {
+    let reported = |condition: &str, read: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "CREATE ROLE app NOLOGIN;
+                 CREATE SCHEMA authz;
+                 CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL,
+                   hidden BOOLEAN NOT NULL);
+                 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+                 GRANT SELECT ON resources TO app;
+                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+                 CREATE POLICY readable_resources ON resources FOR SELECT TO app USING (NOT hidden);
+                 CREATE FUNCTION authz.listed() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource WHERE {condition} $$;
+                 CREATE FUNCTION authz.organizations_reaching() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.organization_id FROM public.resources resource {read} $$;"
+            ),
+        )
+    };
+    for read in [
+        "JOIN authz.listed() listed (id) ON listed.id = resource.id",
+        "CROSS JOIN authz.listed() listed (id) WHERE resource.id = listed.id",
+        "WHERE resource.id IN (SELECT listed.id FROM authz.listed() listed (id))",
+        "WHERE EXISTS (SELECT 1 FROM authz.listed() listed (id) WHERE listed.id = resource.id)",
+        "LEFT JOIN authz.listed() listed (id) ON TRUE WHERE listed.id = resource.id",
+        "WHERE resource.id IN (SELECT authz.listed())
+           OR (NOT resource.hidden AND resource.id > 5)",
+        "WHERE (resource.id IN (SELECT authz.listed())
+             AND resource.organization_id = length(current_user))
+           OR NOT resource.hidden",
+    ] {
+        assert_eq!(
+            reported("NOT resource.hidden", read),
+            Vec::<String>::new(),
+            "{read}"
+        );
+        assert_eq!(
+            reported("resource.organization_id > 0", read),
+            ["organizations_reaching()"],
+            "{read}"
+        );
+    }
+    for read in [
+        "LEFT JOIN authz.listed() listed (id) ON listed.id = resource.id",
+        "WHERE NOT EXISTS (SELECT 1 FROM authz.listed() listed (id) WHERE listed.id = resource.id)",
+        "WHERE resource.id IN (SELECT authz.listed()) OR resource.id > 5",
+        "WHERE resource.id IN (SELECT authz.listed())
+           OR resource.organization_id = length(current_user)",
+        "JOIN authz.listed() listed (id) ON listed.id > resource.id",
+    ] {
+        assert_eq!(
+            reported("NOT resource.hidden", read),
+            ["organizations_reaching()"],
+            "{read}"
+        );
+    }
+}
+
+#[test]
 fn a_helper_passed_one_label_spelled_two_ways_yields_one_set() {
     assert_eq!(
         exposed_through_ladder(
