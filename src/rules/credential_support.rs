@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// Finds a declared credential.
-struct CredentialTerm<'a>(&'a Deployment);
+pub(crate) struct CredentialTerm<'a>(pub(crate) &'a Deployment);
 
 impl Visitor for CredentialTerm<'_> {
     type Break = ();
