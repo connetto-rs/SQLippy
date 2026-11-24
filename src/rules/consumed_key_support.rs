@@ -8,7 +8,7 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     AssignmentTarget, BinaryOperator, Expr, Ident, Query, ReferentialAction, Statement,
-    TableFactor, TriggerEvent, TriggerPeriod, Update, VisitMut, VisitorMut,
+    TableFactor, TableWithJoins, TriggerEvent, TriggerPeriod, Update, VisitMut, VisitorMut,
 };
 use sqlparser_plpgsql::embedded::{Node, NodeKind};
 
@@ -84,10 +84,10 @@ pub(crate) fn consumptions<'db, DB: DatabaseLike>(
         {
             continue;
         }
-        let Some(function) = trigger.function(database) else {
-            continue;
-        };
-        let Some(block) = plpgsql_block(function) else {
+        let Some((function, block)) = trigger
+            .function(database)
+            .and_then(|function| Some((function, plpgsql_block(function)?)))
+        else {
             continue;
         };
         let mut body = Body::default();
@@ -141,7 +141,14 @@ fn consuming_update<'db, DB: DatabaseLike>(
     statement: &Statement,
 ) -> Option<Consumption<'db, DB>> {
     let Statement::Update(Update {
-        table: target,
+        table:
+            TableWithJoins {
+                relation:
+                    TableFactor::Table {
+                        name, args: None, ..
+                    },
+                ..
+            },
         assignments,
         from: None,
         selection: Some(selection),
@@ -151,15 +158,6 @@ fn consuming_update<'db, DB: DatabaseLike>(
     else {
         return None;
     };
-    let TableFactor::Table {
-        name, args: None, ..
-    } = &target.relation
-    else {
-        return None;
-    };
-    if !target.joins.is_empty() {
-        return None;
-    }
     let named = stored_table(database, name, None).ok()??;
     if named == table {
         return None;
