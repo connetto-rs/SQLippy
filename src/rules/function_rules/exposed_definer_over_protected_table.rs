@@ -21,7 +21,7 @@ use sqlparser::{
         Ident, InTarget, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SelectFlavor,
         SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableAliasColumnDef,
         TableFactor, TableInheritance, TableWithJoins, Value, Visit, Visitor, With,
-        visit_expressions,
+        visit_expressions, visit_expressions_mut,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -42,14 +42,14 @@ use crate::{
         grant_support::{function_callers, granted_callers},
         implication_support::{
             Columns, Condition, ParameterValues, Term, admits, clause_implies, membership,
-            parameter, renamed,
+            parameter, parameter_ordinal, renamed,
         },
         key_support::{binds, equality_keys, key_pairs, no_inheritors},
         literal_support::literal,
         null_support::rejects_null,
         policy_support::{
             acting, client_roles, conjuncts, is_role_read, sets_only_search_path, sql_query_body,
-            unnested,
+            unnested, unwrapped,
         },
         type_support::user_type_named,
         walk_support::walk,
@@ -123,9 +123,16 @@ use crate::{
 /// is not `VOLATILE`, sets no parameter besides `search_path` and returns
 /// one column of rows of stored tables, through `UNION` arms, `WITH` items
 /// and calls of such functions, also meets what the function's filters
-/// state of the row it draws the value from. A condition on the returned
-/// column holds of the tested column when `=` compares both by the same
-/// identity. A condition on another column holds of the tested row when a
+/// state of the row it draws the value from. A filter of the function
+/// reading one of its parameters states it of the argument the tested call
+/// passes, when that call passes each positionally as a literal or as a
+/// parameter of the calling function. It states nothing otherwise, nor does
+/// one of a function its body calls reading that function's parameters.
+/// When the function draws the value from the tested column itself, unique
+/// in its table, the row drawn is the tested row and every condition holds
+/// of it. Otherwise a condition on the returned column holds of the tested
+/// column when `=` compares both by the same identity. A condition on
+/// another column holds of the tested row when a
 /// foreign key that is `NOT DEFERRABLE`, validated and checking every row
 /// holding a value maps the returned column onto the tested one, unique in
 /// its table, and maps that column onto one compared by the same identity.
@@ -144,10 +151,11 @@ use crate::{
 /// owner the body runs as and, if `STRICT`, the policy passes a literal
 /// other than `NULL` for every parameter. An arm of it has to read one table alone,
 /// every row and with no sample, and return the column of every row of it
-/// meeting its filter. A row the body reads of that table, not filled with
-/// `NULL`s by an outer join, has to meet every condition of the filter, and
-/// the body's filters hold the column the arm returns of that row equal to
-/// the column.
+/// meeting its filter, where a condition reading a parameter states it of
+/// the literal the policy passes, and of no other argument. A row the body
+/// reads of that table, not filled with `NULL`s by an outer join, has to
+/// meet every condition of the filter, and the body's filters hold the
+/// column the arm returns of that row equal to the column.
 ///
 /// The rule does not run on SQLite, which has no stored functions.
 ///
@@ -572,7 +580,8 @@ impl<DB: DatabaseLike> Default for Arms<'_, DB> {
 struct Arm<'a, DB: DatabaseLike> {
     drawn: Rc<Drawn<'a, DB>>,
     /// Whether the function returns the column of every row of the table
-    /// meeting the conditions.
+    /// meeting the conditions, those reading a parameter for the values the
+    /// call passes.
     exhaustive: bool,
 }
 
@@ -584,6 +593,27 @@ struct Drawn<'a, DB: DatabaseLike> {
     /// Conditions the row meets, over the stored names of the columns of
     /// `table`, each evaluating alike for every role.
     conditions: Vec<Expr>,
+    /// Further such conditions reading the function's input parameters as
+    /// `$n`, which the row meets for the values a call passes.
+    bound: Vec<Expr>,
+}
+
+impl<DB: DatabaseLike> Drawn<'_, DB> {
+    /// The conditions the row meets for a call passing `arguments` for the
+    /// input parameters in order, or `None` when one reads a parameter and
+    /// the call's values are not known.
+    fn under(&self, arguments: Option<&[&Expr]>) -> Option<Cow<'_, [Expr]>> {
+        if self.bound.is_empty() {
+            return Some(Cow::Borrowed(&self.conditions));
+        }
+        let arguments = arguments?;
+        let mut conditions = Vec::with_capacity(self.conditions.len() + self.bound.len());
+        conditions.extend_from_slice(&self.conditions);
+        for condition in &self.bound {
+            conditions.push(bound_to(condition, arguments)?);
+        }
+        Some(Cow::Owned(conditions))
+    }
 }
 
 /// The leaf `SELECT`s of a function body not read yet, and the rows read.
@@ -1064,7 +1094,9 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     /// when it tests a column against the set of a function, besides the
     /// `conditions` of the row: one of the rows the function may draw the
     /// value from that the keys do not keep apart from the row meets its
-    /// conditions that carry over to the row.
+    /// conditions that carry over to the row, those reading a parameter
+    /// stated of the argument the call passes when each is a literal or a
+    /// parameter.
     fn drawn_condition(
         &self,
         table: &'a DB::Table,
@@ -1089,6 +1121,11 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         if !arms.complete {
             return Ok(None);
         }
+        let arguments = positional_arguments(call, function).filter(|arguments| {
+            arguments.iter().all(|argument| {
+                literal(argument).is_some() || parameter_ordinal(unwrapped(argument)).is_some()
+            })
+        });
         let tested_kinds = discriminators(database, table, column, conditions)?;
         let mut alternatives = Vec::new();
         for arm in &arms.arms {
@@ -1098,7 +1135,10 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             if apart(&tested_kinds, &kinds) {
                 continue;
             }
-            let carried = carried_conditions(database, drawn, source, table, column)?;
+            let met = drawn
+                .under(arguments.as_deref())
+                .unwrap_or(Cow::Borrowed(&drawn.conditions));
+            let carried = carried_conditions(database, drawn, &met, table, column)?;
             if carried.is_empty() {
                 return Ok(None);
             }
@@ -1116,7 +1156,8 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     /// `column IN (SELECT helper())` for `relation`, a read of `table` its
     /// filters state `conditions` of, for each helper a policy of the table
     /// tests a column against, when a row of a table `select` reads meets
-    /// every condition of an exhaustive arm of the helper over that table
+    /// every condition of an exhaustive arm of the helper over that table,
+    /// those reading a parameter stated of the literal the policy passes,
     /// and the filters hold the column the arm returns equal to `column`.
     fn witnessed_sets(
         &self,
@@ -1132,6 +1173,10 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         if sets.is_empty() {
             return Ok(witnessed);
         }
+        let arguments: Vec<Option<Vec<&Expr>>> = sets
+            .iter()
+            .map(|set| set.literals.then(|| listed_arguments(&set.call)).flatten())
+            .collect();
         for from in &select.from {
             for (position, joined) in relations(from).enumerate() {
                 let same = ptr::eq(joined, relation);
@@ -1141,13 +1186,18 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 if !same && !present(from, position) {
                     continue;
                 }
-                let arms: Vec<(&Expr, &Drawn<'a, DB>)> = sets
+                let arms: Vec<_> = sets
                     .iter()
-                    .flat_map(|(members, arms)| {
-                        arms.arms
+                    .zip(&arguments)
+                    .flat_map(|(set, arguments)| {
+                        set.arms
+                            .arms
                             .iter()
                             .filter(|arm| arm.exhaustive && arm.drawn.table == joined_table)
-                            .map(move |arm| (members, arm.drawn.as_ref()))
+                            .filter_map(move |arm| {
+                                let met = arm.drawn.under(arguments.as_deref())?;
+                                Some((&set.call, arm.drawn.as_ref(), met))
+                            })
                     })
                     .collect();
                 if arms.is_empty() {
@@ -1161,8 +1211,8 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     stated.conditions.as_slice()
                 };
                 let clause = conjunction(row.to_vec());
-                for (members, drawn) in arms {
-                    if !self.implies_every(&clause, &drawn.conditions)? {
+                for (members, drawn, met) in arms {
+                    if !self.implies_every(&clause, &met)? {
                         continue;
                     }
                     let column = if same {
@@ -1206,8 +1256,9 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     /// The calls of `SECURITY DEFINER` functions the policies of `table` test
     /// a column against, as written, each with the rows it draws from, when
     /// the function runs as the owner this body runs as, so that it sees the
-    /// rows the body reads, some arm of it is exhaustive, and a `STRICT`
-    /// function gets no argument that may be `NULL`.
+    /// rows the body reads, some arm of it is exhaustive for the literals
+    /// the call passes, and a `STRICT` function gets no argument that may be
+    /// `NULL`.
     fn policy_sets(&self, table: &'a DB::Table) -> Result<Vec<SetCall<'a, DB>>, LookupError> {
         let confinement = self.body.confinement;
         let database = confinement.database;
@@ -1245,9 +1296,19 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             {
                 continue;
             }
+            let literals = positional_arguments(&written, helper)
+                .is_some_and(|passed| passed.iter().all(|argument| literal(argument).is_some()));
             let arms = confinement.arms(helper)?;
-            if arms.arms.iter().any(|arm| arm.exhaustive) {
-                sets.push((Expr::Function(written), arms));
+            if arms
+                .arms
+                .iter()
+                .any(|arm| arm.exhaustive && (arm.drawn.bound.is_empty() || literals))
+            {
+                sets.push(SetCall {
+                    call: written,
+                    literals,
+                    arms,
+                });
             }
         }
         Ok(sets)
@@ -1297,8 +1358,9 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
 
     /// Adds to `arms` the row of a stored table whose column the leaf
     /// `select` returns, with what its filters state of the row, or the rows
-    /// of the function whose call it returns the value of, and marks `arms`
-    /// incomplete for any other leaf.
+    /// of the function whose call it returns the value of, less what those
+    /// state of that function's parameters, and marks `arms` incomplete for
+    /// any other leaf.
     fn draw_select(&self, select: &Select, arms: &mut Arms<'a, DB>) -> Result<(), LookupError> {
         let projected = carried_column(select).map(|(projected, _)| projected);
         let factor = projected
@@ -1319,24 +1381,21 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 let Stated {
                     resolver,
                     equalities,
-                    mut conditions,
+                    conditions,
                     whole: stated,
                 } = self.stated(&filters, from, position)?;
                 if let Some(Term::Column(name)) = term(&resolver, projected, relation, &equalities)
                     && let Some(column) =
                         column_named(self.body.confinement.database, table, &name)?
                 {
-                    let written = conditions.len();
-                    conditions.retain(|condition| !reads_parameter(condition));
+                    let (bound, conditions) = conditions.into_iter().partition(reads_parameter);
                     arms.arms.push(Arm {
-                        exhaustive: stated
-                            && conditions.len() == written
-                            && select.from.len() == 1
-                            && from.joins.is_empty(),
+                        exhaustive: stated && select.from.len() == 1 && from.joins.is_empty(),
                         drawn: Rc::new(Drawn {
                             table,
                             column,
                             conditions,
+                            bound,
                         }),
                     });
                     return Ok(());
@@ -1347,7 +1406,16 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 let called = self.body.confinement.arms(function)?;
                 arms.complete &= called.complete;
                 arms.arms.extend(called.arms.iter().map(|arm| Arm {
-                    drawn: Rc::clone(&arm.drawn),
+                    drawn: if arm.drawn.bound.is_empty() {
+                        Rc::clone(&arm.drawn)
+                    } else {
+                        Rc::new(Drawn {
+                            table: arm.drawn.table,
+                            column: arm.drawn.column,
+                            conditions: arm.drawn.conditions.clone(),
+                            bound: Vec::new(),
+                        })
+                    },
                     exhaustive: false,
                 }));
                 return Ok(());
@@ -1950,7 +2018,12 @@ struct Stated<'r, 'q, 'a, DB: DatabaseLike> {
 
 /// The call of a function a policy tests a column against, as written,
 /// with the rows the function draws from.
-type SetCall<'a, DB> = (Expr, Rc<Arms<'a, DB>>);
+struct SetCall<'a, DB: DatabaseLike> {
+    call: Function,
+    /// Whether the call passes a literal for each input parameter.
+    literals: bool,
+    arms: Rc<Arms<'a, DB>>,
+}
 
 /// A function, by its address, with the rows it draws from.
 type ReadArms<'a, DB> = (*const <DB as DatabaseLike>::Function, Rc<Arms<'a, DB>>);
@@ -2166,7 +2239,7 @@ fn in_set(column: &str, query: Box<Query>) -> Expr {
 
 /// `"column" IN (SELECT members)`, testing `column` against the set
 /// `members` yields.
-fn set_membership(column: &str, members: &Expr) -> Option<Expr> {
+fn set_membership(column: &str, members: &Function) -> Option<Expr> {
     Parser::new(&PostgreSqlDialect {})
         .try_with_sql(&format!("SELECT {members}"))
         .and_then(|mut parser| parser.parse_query())
@@ -2221,24 +2294,31 @@ fn unique_alone<DB: DatabaseLike>(
             .any(|key| matches!(key.as_slice(), [only] if *only == column)))
 }
 
-/// The conditions of `drawn` that hold of the row of `table` whose `column`
-/// equals the `source` column of the row drawn, over the columns of `table`.
-/// The value drawn carries the conditions on `source` when `=` compares both
+/// The `conditions` the row `drawn` meets that hold of the row of `table`
+/// whose `column` equals the `source` column of the row drawn, over the
+/// columns of `table`. When `source` is `column` and unique in `table`, the
+/// row drawn is that row and each condition holds of it. Otherwise the
+/// value drawn carries the conditions on `source` when `=` compares both
 /// columns by the same identity. When `column` is unique in `table`, a
 /// foreign key of the drawn row that binds it maps `source` onto `column`
 /// carries those on each column it maps onto one compared alike.
 fn carried_conditions<DB: DatabaseLike>(
     database: &DB,
     drawn: &Drawn<'_, DB>,
-    source: &DB::Column,
+    conditions: &[Expr],
     table: &DB::Table,
     column: &DB::Column,
 ) -> Result<Vec<Expr>, LookupError> {
+    let source = drawn.column;
+    let unique = unique_alone(database, table, column)?;
+    if unique && source == column {
+        return Ok(conditions.to_vec());
+    }
     let mut renames: Vec<(&str, &str)> = Vec::new();
     if same_identity(database, source, column)? {
         renames.push((source.column_name(), column.column_name()));
     }
-    if unique_alone(database, table, column)? {
+    if unique {
         for foreign_key in drawn.table.foreign_keys(database)? {
             if !ptr::eq(foreign_key.referenced_table(database)?, table)
                 || !binds(database, foreign_key, source)?
@@ -2259,8 +2339,7 @@ fn carried_conditions<DB: DatabaseLike>(
             }
         }
     }
-    Ok(drawn
-        .conditions
+    Ok(conditions
         .iter()
         .filter_map(|condition| {
             renamed(condition, |reference| {
@@ -2349,6 +2428,61 @@ fn discriminators<'a, DB: DatabaseLike>(
         }
     }
     Ok(pinned)
+}
+
+/// The arguments `call` passes `function`, each positionally, one for each
+/// input parameter in the order `$n` counts them, leaving none to a default
+/// and none to a `VARIADIC` parameter.
+fn positional_arguments<'c, F: FunctionLike>(
+    call: &'c Function,
+    function: &F,
+) -> Option<Vec<&'c Expr>> {
+    let mut inputs = 0;
+    for mode in function.argument_modes() {
+        match mode {
+            ArgMode::In | ArgMode::InOut => inputs += 1,
+            ArgMode::Out => {}
+            ArgMode::Variadic => return None,
+        }
+    }
+    listed_arguments(call).filter(|arguments| arguments.len() == inputs)
+}
+
+/// The arguments `call` passes, when it passes each positionally, with no
+/// `DISTINCT`, `ORDER BY` or other clause among them.
+fn listed_arguments(call: &Function) -> Option<Vec<&Expr>> {
+    let FunctionArguments::List(list) = &call.args else {
+        return None;
+    };
+    if list.duplicate_treatment.is_some() || !list.clauses.is_empty() {
+        return None;
+    }
+    list.args
+        .iter()
+        .map(|argument| match argument {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(value)) => Some(value),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `condition` with each input parameter it reads as `$n` replaced by the
+/// argument `arguments` holds for it, or `None` when one holds none.
+fn bound_to(condition: &Expr, arguments: &[&Expr]) -> Option<Expr> {
+    let mut bound = condition.clone();
+    let unbound = visit_expressions_mut(&mut bound, |expression| {
+        let Some(ordinal) = parameter_ordinal(expression) else {
+            return ControlFlow::Continue(());
+        };
+        match arguments.get(ordinal) {
+            Some(argument) => {
+                *expression = (*argument).clone();
+                ControlFlow::Continue(())
+            }
+            None => ControlFlow::Break(()),
+        }
+    });
+    unbound.is_continue().then_some(bound)
 }
 
 /// Whether `call` passes `function` a literal other than `NULL` for each of

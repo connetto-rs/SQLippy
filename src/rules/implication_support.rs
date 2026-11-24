@@ -355,7 +355,7 @@ pub(crate) fn parameter(ordinal: usize) -> Expr {
 
 /// The position, counted from zero, of the input parameter `expression`
 /// reads as `$n`.
-fn parameter_ordinal(expression: &Expr) -> Option<usize> {
+pub(crate) fn parameter_ordinal(expression: &Expr) -> Option<usize> {
     let Expr::Value(value) = expression else {
         return None;
     };
