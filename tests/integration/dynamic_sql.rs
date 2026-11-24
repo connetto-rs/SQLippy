@@ -314,3 +314,26 @@ fn a_variable_holding_constant_or_quoted_text_is_not_reported() {
         );
     }
 }
+
+/// A procedure `CALL` runs outside a transaction block goes on after `COMMIT`
+/// and `ROLLBACK`, except inside a block with handlers, where they raise.
+#[test]
+fn a_procedure_executes_spliced_text_after_it_commits() {
+    for (body, expected) in [
+        (
+            "BEGIN COMMIT; EXECUTE 'DELETE FROM ' || p; END",
+            ["f(TEXT)"].as_slice(),
+        ),
+        (
+            "DECLARE s TEXT; BEGIN ROLLBACK; s := 'DELETE FROM ' || p; EXECUTE s; END",
+            &["f(TEXT)"],
+        ),
+        (
+            "BEGIN BEGIN COMMIT; EXECUTE 'DELETE FROM ' || p; EXCEPTION WHEN OTHERS THEN NULL; END; END",
+            &[],
+        ),
+    ] {
+        let procedure = format!("CREATE PROCEDURE f(p TEXT) LANGUAGE plpgsql AS $$ {body} $$;");
+        assert_eq!(reported(&procedure), expected, "{body}");
+    }
+}
