@@ -1,6 +1,14 @@
 //! Submodule providing the `ExposedDefinerOverProtectedTable` rule.
 
-use std::{borrow::Cow, cell::RefCell, iter, mem, ops::ControlFlow, ptr, rc::Rc, slice};
+use std::{
+    borrow::Cow,
+    cell::{Cell, RefCell},
+    iter, mem,
+    ops::ControlFlow,
+    ptr,
+    rc::Rc,
+    slice,
+};
 
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
@@ -44,7 +52,9 @@ use crate::{
             parameter, parameter_ordinal, renamed,
         },
         key_support::{binds, equality_keys, key_pairs, no_inheritors},
-        ladder_support::{Ladders, called, listed_arguments, plain, positional_arguments},
+        ladder_support::{
+            Ladders, called, listed_arguments, plain, positional_arguments, relation_arguments,
+        },
         literal_support::literal,
         null_support::rejects_null,
         policy_support::{
@@ -98,6 +108,12 @@ use crate::{
 /// Every function of the schema the body calls is held to the same test,
 /// except a `SECURITY DEFINER` function every caller may execute directly,
 /// which this rule judges on its own. Functions in `pg_catalog` are trusted.
+/// A `SECURITY DEFINER` function the callers may not execute counts too
+/// when neither it nor a function it reaches is `VOLATILE`, so none writes,
+/// and the function the callers execute is one whose every value is the
+/// column of a row each caller's `SELECT` policies admit for lying in that
+/// function's own set. The callers then learn of the rows the helper reads
+/// only which of the rows they read the function returns.
 ///
 /// A call `f(a)` passing a label of an enum lies within `f(b)` passing a
 /// lower label of the same enum, all other arguments alike, when `f` is a
@@ -141,8 +157,11 @@ use crate::{
 /// state of the row it draws the value from. A filter of the function
 /// reading one of its parameters states it of the argument the tested call
 /// passes, when that call passes each positionally as a literal or as a
-/// parameter of the calling function. It states nothing otherwise, nor does
-/// one of a function its body calls reading that function's parameters.
+/// parameter of the calling function. A filter of a function the body
+/// reads whole in its `FROM` states the same of the argument that call
+/// passes, and states nothing otherwise. The value drawn through a
+/// `SECURITY DEFINER` function also lies in the set of its own call, with
+/// the arguments the call passes.
 /// When the function draws the value from the tested column itself, unique
 /// in its table, the row drawn is the tested row and every condition holds
 /// of it. Otherwise a condition on the returned column holds of the tested
@@ -317,6 +336,11 @@ struct Confinement<'a, DB: DatabaseLike> {
     /// The functions whose rows are being read, so a cycle reads none.
     drawing: RefCell<Vec<*const DB::Function>>,
     ladders: Ladders<'a, DB>,
+    /// The function the callers execute.
+    exposed: &'a DB::Function,
+    /// Whether every value `exposed` returns lies in a set a `SELECT` policy
+    /// of the table it is drawn from tests, once read.
+    released: Cell<Option<bool>>,
 }
 
 impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
@@ -326,7 +350,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     fn new(
         database: &'a DB,
         deployment: &'a Deployment,
-        function: &DB::Function,
+        function: &'a DB::Function,
     ) -> Result<Self, LookupError> {
         let callers = if function.is_executable_by_public(database)? {
             client_roles(database, deployment)
@@ -348,6 +372,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             arms: RefCell::default(),
             drawing: RefCell::default(),
             ladders: Ladders::new(database),
+            exposed: function,
+            released: Cell::new(None),
         })
     }
 
@@ -386,6 +412,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             if callee.target_name().schema() != Some("pg_catalog")
                 && !self.runs_for_every_caller(callee)?
                 && !self.confines(callee)?
+                && !self.releases_through_policy_sets(callee)?
             {
                 return Ok(false);
             }
@@ -406,6 +433,83 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             |reads, query| reads.confines_query(query, &[], &[]),
         )
         .map(|confined| confined == Some(true))
+    }
+
+    /// Whether `callee`, a `SECURITY DEFINER` function that neither writes
+    /// nor calls a function that may, reaches the callers only through the
+    /// values the exposed function returns, each of which a `SELECT` policy
+    /// of the table it is drawn from admits through the exposed function's
+    /// own set. The callers then learn which of the rows they read it
+    /// returns, and nothing of a row they cannot read.
+    fn releases_through_policy_sets(&self, callee: &'a DB::Function) -> Result<bool, LookupError> {
+        if callee.security_mode() != FunctionSecurity::Definer
+            || !self.reads_only(callee, &mut Vec::new())?
+        {
+            return Ok(false);
+        }
+        if let Some(released) = self.released.get() {
+            return Ok(released);
+        }
+        let released = self.releases_policy_sets()?;
+        self.released.set(Some(released));
+        Ok(released)
+    }
+
+    /// Whether neither `function` nor a function it reaches is `VOLATILE`,
+    /// so none writes, with `seen` holding the functions already read.
+    fn reads_only(
+        &self,
+        function: &'a DB::Function,
+        seen: &mut Vec<*const DB::Function>,
+    ) -> Result<bool, LookupError> {
+        let address = ptr::from_ref(function);
+        if seen.contains(&address) {
+            return Ok(true);
+        }
+        seen.push(address);
+        if function.volatility() == FunctionBehavior::Volatile {
+            return Ok(false);
+        }
+        if function.target_name().schema() == Some("pg_catalog") {
+            return Ok(true);
+        }
+        let callees = match function.referenced_functions(self.database) {
+            Ok(callees) => callees,
+            Err(error) if super::unreadable_body(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        for callee in callees {
+            if !self.reads_only(callee, seen)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether every value the exposed function returns is the column of a
+    /// row each caller's `SELECT` policies admit by testing that column
+    /// against the function's own set.
+    fn releases_policy_sets(&self) -> Result<bool, LookupError> {
+        let function = self.exposed;
+        let Some(member) = member(function) else {
+            return Ok(false);
+        };
+        let arms = self.arms(function)?;
+        if !arms.complete || arms.arms.is_empty() {
+            return Ok(false);
+        }
+        let body = Body {
+            parameters: self.parameter_values(function)?,
+            confinement: self,
+            function,
+        };
+        for arm in &arms.arms {
+            let tested = in_set(arm.drawn.column.column_name(), member.clone());
+            if !body.admits_every_caller(arm.drawn.table, &tested)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// What `walk` finds reading the body of `function`, one `LANGUAGE sql`
@@ -566,6 +670,9 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                         arms: Vec::new(),
                         complete: carried.complete,
                     },
+                    member: (function.security_mode() == FunctionSecurity::Definer)
+                        .then(|| member(function))
+                        .flatten(),
                 };
                 reads.draw_query(query, &mut drawing)?;
                 drawing.arms.complete &= drawing.leaves.is_empty();
@@ -613,6 +720,11 @@ struct Drawn<'a, DB: DatabaseLike> {
     /// Further such conditions reading the function's input parameters as
     /// `$n`, which the row meets for the values a call passes.
     bound: Vec<Expr>,
+    /// `"column" IN (SELECT f($1, …))`, the column in the set of the
+    /// function, a `SECURITY DEFINER` one, that returns it. The row meets it
+    /// once drawn, though the function need not return the column of a row
+    /// only for meeting it.
+    member: Option<Expr>,
 }
 
 impl<DB: DatabaseLike> Drawn<'_, DB> {
@@ -631,6 +743,23 @@ impl<DB: DatabaseLike> Drawn<'_, DB> {
         }
         Some(Cow::Owned(conditions))
     }
+
+    /// What the row is known to meet once drawn by a call passing
+    /// `arguments`, [`Self::under`] those, or the conditions reading no
+    /// parameter, and the membership.
+    fn known(&self, arguments: Option<&[&Expr]>) -> Cow<'_, [Expr]> {
+        let mut known = self
+            .under(arguments)
+            .unwrap_or(Cow::Borrowed(&self.conditions));
+        let member = self.member.as_ref().and_then(|member| match arguments {
+            Some(arguments) => bound_to(member, arguments),
+            None => (!reads_parameter(member)).then(|| member.clone()),
+        });
+        if let Some(member) = member {
+            known.to_mut().push(member);
+        }
+        known
+    }
 }
 
 /// The leaf `SELECT`s of a function body not read yet, and the rows read.
@@ -638,6 +767,37 @@ struct Drawing<'a, DB: DatabaseLike> {
     /// Each leaf not read yet. Every row of a leaf reaches the result.
     leaves: Vec<*const Select>,
     arms: Arms<'a, DB>,
+    /// `SELECT f($1, …)` calling the function, a `SECURITY DEFINER` one, with
+    /// its own arguments. A policy calling it with the same arguments gets
+    /// the same set, which holds the column of each row drawn.
+    member: Option<Box<Query>>,
+}
+
+impl<'a, DB: DatabaseLike> Drawing<'a, DB> {
+    /// Adds the row of `table` whose `column` the function returns, meeting
+    /// `conditions`, with its membership in the function's own set.
+    fn push(
+        &mut self,
+        table: &'a DB::Table,
+        column: &'a DB::Column,
+        conditions: Vec<Expr>,
+        exhaustive: bool,
+    ) {
+        let (bound, conditions) = conditions.into_iter().partition(reads_parameter);
+        self.arms.arms.push(Arm {
+            drawn: Rc::new(Drawn {
+                table,
+                column,
+                conditions,
+                bound,
+                member: self
+                    .member
+                    .as_ref()
+                    .map(|member| in_set(column.column_name(), member.clone())),
+            }),
+            exhaustive,
+        });
+    }
 }
 
 /// The proof of one function body, whose filters name its input parameters
@@ -1158,9 +1318,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             if apart(&tested_kinds, &kinds) {
                 continue;
             }
-            let met = drawn
-                .under(arguments.as_deref())
-                .unwrap_or(Cow::Borrowed(&drawn.conditions));
+            let met = drawn.known(arguments.as_deref());
             let carried = carried_conditions(database, drawn, &met, table, column)?;
             if carried.is_empty() {
                 return Ok(None);
@@ -1366,7 +1524,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 let address = ptr::from_ref(select.as_ref());
                 if let Some(position) = drawing.leaves.iter().position(|leaf| *leaf == address) {
                     drawing.leaves.swap_remove(position);
-                    self.draw_select(select, &mut drawing.arms)?;
+                    self.draw_select(select, drawing)?;
                 }
                 Ok(())
             }
@@ -1379,12 +1537,16 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         }
     }
 
-    /// Adds to `arms` the row of a stored table whose column the leaf
+    /// Adds to `drawing` the row of a stored table whose column the leaf
     /// `select` returns, with what its filters state of the row, or the rows
-    /// of the function whose call it returns the value of, less what those
-    /// state of that function's parameters, and marks `arms` incomplete for
-    /// any other leaf.
-    fn draw_select(&self, select: &Select, arms: &mut Arms<'a, DB>) -> Result<(), LookupError> {
+    /// of the function whose call it returns the value of, with what those
+    /// state of that function's parameters for the arguments the call passes,
+    /// and marks the arms incomplete for any other leaf.
+    fn draw_select(
+        &self,
+        select: &Select,
+        drawing: &mut Drawing<'a, DB>,
+    ) -> Result<(), LookupError> {
         let projected = carried_column(select).map(|(projected, _)| projected);
         let factor = projected
             .and_then(|projected| self.context.reference(projected).ok().flatten())
@@ -1411,41 +1573,58 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     && let Some(column) =
                         column_named(self.body.confinement.database, table, &name)?
                 {
-                    let (bound, conditions) = conditions.into_iter().partition(reads_parameter);
-                    arms.arms.push(Arm {
-                        exhaustive: stated && select.from.len() == 1 && from.joins.is_empty(),
-                        drawn: Rc::new(Drawn {
-                            table,
-                            column,
-                            conditions,
-                            bound,
-                        }),
-                    });
+                    drawing.push(
+                        table,
+                        column,
+                        conditions,
+                        stated && select.from.len() == 1 && from.joins.is_empty(),
+                    );
                     return Ok(());
                 }
             } else if let Some(call) = whole_call(relation)
                 && let Some(function) = called(self.body.confinement.database, call)?
             {
                 let called = self.body.confinement.arms(function)?;
-                arms.complete &= called.complete;
-                arms.arms.extend(called.arms.iter().map(|arm| Arm {
-                    drawn: if arm.drawn.bound.is_empty() {
-                        Rc::clone(&arm.drawn)
-                    } else {
-                        Rc::new(Drawn {
-                            table: arm.drawn.table,
-                            column: arm.drawn.column,
-                            conditions: arm.drawn.conditions.clone(),
-                            bound: Vec::new(),
-                        })
-                    },
-                    exhaustive: false,
-                }));
+                let passed = self.passed(relation, function);
+                let passed: Option<Vec<&Expr>> =
+                    passed.as_ref().map(|passed| passed.iter().collect());
+                drawing.arms.complete &= called.complete;
+                for arm in &called.arms {
+                    let drawn = &arm.drawn;
+                    if drawing.member.is_none() && drawn.bound.is_empty() && drawn.member.is_none()
+                    {
+                        drawing.arms.arms.push(Arm {
+                            drawn: Rc::clone(drawn),
+                            exhaustive: false,
+                        });
+                        continue;
+                    }
+                    let conditions = drawn.known(passed.as_deref()).into_owned();
+                    drawing.push(drawn.table, drawn.column, conditions, false);
+                }
                 return Ok(());
             }
         }
-        arms.complete = false;
+        drawing.arms.complete = false;
         Ok(())
+    }
+
+    /// The arguments `relation`, a call to `function`, passes it, each a
+    /// literal or an input parameter of the body read as `$n`, or `None`
+    /// when one is neither.
+    fn passed(&self, relation: &TableFactor, function: &DB::Function) -> Option<Vec<Expr>> {
+        relation_arguments(relation, function)?
+            .into_iter()
+            .map(|argument| {
+                if literal(argument).is_some() || parameter_ordinal(argument).is_some() {
+                    return Some(argument.clone());
+                }
+                match self.context.reference(argument).ok().flatten()? {
+                    (ColumnDefinition::Parameter { ordinal, .. }, _) => Some(parameter(ordinal)),
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     /// The columns the `USING` joins of `select` merge.
