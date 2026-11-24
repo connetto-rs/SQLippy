@@ -785,20 +785,27 @@ impl Deployment {
     /// as written, through identical expressions or the declared sets.
     #[must_use]
     pub fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> bool {
-        let Ok(within) =
-            self.is_set_within_unfolding(narrower, wider, |_| Ok::<_, Infallible>(None));
+        let Ok(within) = self.is_set_within_unfolding(
+            narrower,
+            wider,
+            |_| Ok::<_, Infallible>(None),
+            |_, _| Ok(false),
+        );
         within
     }
 
     /// Returns whether every value `narrower` yields is one `wider` yields,
     /// where `unfolded` gives another spelling of the set an expression
     /// yields, such as the set a helper's body selects for a call to it, or
-    /// `None`. Expressions and declarations compare once fully unfolded.
+    /// `None`, and `inferred` tells whether one set lies within another as
+    /// the rule reads the schema. Expressions and declarations compare once
+    /// fully unfolded.
     pub(crate) fn is_set_within_unfolding<E>(
         &self,
         narrower: &Expr,
         wider: &Expr,
         mut unfolded: impl FnMut(&Expr) -> Result<Option<Expr>, E>,
+        mut inferred: impl FnMut(&Expr, &Expr) -> Result<bool, E>,
     ) -> Result<bool, E> {
         let wider = fully_unfolded(wider, &mut unfolded)?;
         let mut declared = Vec::with_capacity(self.sets_within.len());
@@ -812,11 +819,11 @@ impl Deployment {
         let mut reached: Vec<&Expr> = vec![&narrower];
         let mut next = 0;
         while let Some(&set) = reached.get(next) {
-            if *set == *wider {
+            if *set == *wider || inferred(set, &wider)? {
                 return Ok(true);
             }
             for (inner, outer) in &declared {
-                if **inner == *set && !reached.contains(&&**outer) {
+                if (**inner == *set || inferred(set, inner)?) && !reached.contains(&&**outer) {
                     reached.push(outer);
                 }
             }

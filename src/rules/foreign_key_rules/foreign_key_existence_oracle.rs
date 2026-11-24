@@ -67,8 +67,11 @@ use crate::{
 /// permissive `SELECT` policy of the referenced table tests the columns the
 /// key maps onto as the check tests their key columns, or tests one against a
 /// set the check confines its key column within, as written, as the body of
-/// a helper taking no argument selects it, or declared with
-/// [`Deployment::with_set_within`](crate::deployment::Deployment::with_set_within).
+/// a helper taking no argument selects it, declared with
+/// [`Deployment::with_set_within`](crate::deployment::Deployment::with_set_within),
+/// or read off a ladder of the schema, where a helper called with a higher
+/// label of an enum parameter returns only rows it returns for a lower one,
+/// as the rule `exposed_definer_over_protected_table` reads it.
 /// A check may draw the key from the rows of a set-returning `LANGUAGE sql`
 /// helper with `IN (SELECT ... FROM
 /// helper())`. Every arm of the helper's body must then draw the key column

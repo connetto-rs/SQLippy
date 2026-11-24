@@ -16,12 +16,11 @@ use sql_traits::{
 };
 use sqlparser::{
     ast::{
-        ArgMode, BinaryOperator, Distinct, Expr, Function, FunctionArg, FunctionArgExpr,
-        FunctionArguments, FunctionBehavior, FunctionCalledOnNull, FunctionSecurity, GroupByExpr,
-        Ident, InTarget, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SelectFlavor,
-        SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableAliasColumnDef,
-        TableFactor, TableInheritance, TableWithJoins, Value, Visit, Visitor, With,
-        visit_expressions, visit_expressions_mut,
+        ArgMode, BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
+        FunctionBehavior, FunctionCalledOnNull, FunctionSecurity, Ident, InTarget, JoinConstraint,
+        JoinOperator, ObjectNamePart, Query, Select, SelectItem, SetExpr, SetOperator,
+        SetQuantifier, Statement, TableAliasColumnDef, TableFactor, TableInheritance,
+        TableWithJoins, Value, Visit, Visitor, With, visit_expressions, visit_expressions_mut,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -45,6 +44,7 @@ use crate::{
             parameter, parameter_ordinal, renamed,
         },
         key_support::{binds, equality_keys, key_pairs, no_inheritors},
+        ladder_support::{Ladders, called, listed_arguments, plain, positional_arguments},
         literal_support::literal,
         null_support::rejects_null,
         policy_support::{
@@ -83,10 +83,11 @@ use crate::{
 /// The filter has to imply every restrictive policy and one permissive one,
 /// stating each condition as written, where a scalar subquery reading no
 /// relation such as `(SELECT auth.uid())` stands for its value, or testing
-/// the same column against a set within the policy's, as written or declared
-/// with [`Deployment::with_set_within`]. A set read through an input
-/// parameter of an enum type, such as `resources_with(min_role)`, has to lie
-/// within the policy's for every label of the enum. It has to for `NULL`
+/// the same column against a set within the policy's, as written, declared
+/// with [`Deployment::with_set_within`] or read off a ladder of the schema.
+/// A set read through an input parameter of an enum type, such as
+/// `resources_with(min_role)`, has to lie within the policy's for every
+/// label of the enum. It has to for `NULL`
 /// too, which holds only when the function is `STRICT` or the call returns
 /// `NULL` for a `NULL` argument, since no declaration states it. A column of
 /// the same name hides the parameter, as in PostgreSQL. Only filter terms
@@ -97,6 +98,18 @@ use crate::{
 /// Every function of the schema the body calls is held to the same test,
 /// except a `SECURITY DEFINER` function every caller may execute directly,
 /// which this rule judges on its own. Functions in `pg_catalog` are trusted.
+///
+/// A call `f(a)` passing a label of an enum lies within `f(b)` passing a
+/// lower label of the same enum, all other arguments alike, when `f` is a
+/// `LANGUAGE sql` function that is not `VOLATILE`, sets no parameter besides
+/// `search_path` and returns a set whose rows only drop as the parameter
+/// grows. Its body passes that when every use of the parameter compares a
+/// column of the enum's type with `>=` or `>` to it, or passes it as it
+/// stands to such a function, from `WITH` items, `UNION` and `INTERSECT`
+/// arms, the left arm of `EXCEPT`, inner and cross joins, and `AND`, `OR`,
+/// `IN`, `= ANY (ARRAY(…))` and `EXISTS` conditions that are not negated,
+/// with nothing grouping or limiting rows. Such a ladder holds for the
+/// existence oracle rules too, and composes with declared sets.
 ///
 /// A condition on a column also counts for a column the same filters hold
 /// equal to it with `=`, when both are columns of stored tables whose types
@@ -303,6 +316,7 @@ struct Confinement<'a, DB: DatabaseLike> {
     arms: RefCell<Vec<ReadArms<'a, DB>>>,
     /// The functions whose rows are being read, so a cycle reads none.
     drawing: RefCell<Vec<*const DB::Function>>,
+    ladders: Ladders<'a, DB>,
 }
 
 impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
@@ -333,6 +347,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             proved: Vec::new(),
             arms: RefCell::default(),
             drawing: RefCell::default(),
+            ladders: Ladders::new(database),
         })
     }
 
@@ -674,7 +689,13 @@ impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
     type Tested = String;
 
     fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> Result<bool, LookupError> {
-        Ok(self.confinement.deployment.is_set_within(narrower, wider))
+        let ladders = &self.confinement.ladders;
+        self.confinement.deployment.is_set_within_unfolding(
+            narrower,
+            wider,
+            |_| Ok(None),
+            |narrower, wider| ladders.within(narrower, wider),
+        )
     }
 
     fn rename(&self, column: Cow<'_, str>) -> Option<String> {
@@ -2249,18 +2270,6 @@ fn set_membership(column: &str, members: &Function) -> Option<Expr> {
         .map(|query| in_set(column, query))
 }
 
-/// The one function of the schema `call` reaches.
-fn called<'db, 'c, DB: DatabaseLike>(
-    database: &'db DB,
-    call: impl Into<WrittenCall<'c>>,
-) -> Result<Option<&'db DB::Function>, LookupError> {
-    let mut reached = database.functions_reached_by(call, IdentifierCase::Folded)?;
-    Ok(match (reached.next(), reached.next()) {
-        (Some(function), None) => Some(function),
-        _ => None,
-    })
-}
-
 /// The column of `table` whose stored name is `name`.
 fn column_named<'db, DB: DatabaseLike>(
     database: &'db DB,
@@ -2430,42 +2439,6 @@ fn discriminators<'a, DB: DatabaseLike>(
         }
     }
     Ok(pinned)
-}
-
-/// The arguments `call` passes `function`, each positionally, one for each
-/// input parameter in the order `$n` counts them, leaving none to a default
-/// and none to a `VARIADIC` parameter.
-fn positional_arguments<'c, F: FunctionLike>(
-    call: &'c Function,
-    function: &F,
-) -> Option<Vec<&'c Expr>> {
-    let mut inputs = 0;
-    for mode in function.argument_modes() {
-        match mode {
-            ArgMode::In | ArgMode::InOut => inputs += 1,
-            ArgMode::Out => {}
-            ArgMode::Variadic => return None,
-        }
-    }
-    listed_arguments(call).filter(|arguments| arguments.len() == inputs)
-}
-
-/// The arguments `call` passes, when it passes each positionally, with no
-/// `DISTINCT`, `ORDER BY` or other clause among them.
-fn listed_arguments(call: &Function) -> Option<Vec<&Expr>> {
-    let FunctionArguments::List(list) = &call.args else {
-        return None;
-    };
-    if list.duplicate_treatment.is_some() || !list.clauses.is_empty() {
-        return None;
-    }
-    list.args
-        .iter()
-        .map(|argument| match argument {
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(value)) => Some(value),
-            _ => None,
-        })
-        .collect()
 }
 
 /// `condition` with each input parameter it reads as `$n` replaced by the
@@ -2751,30 +2724,6 @@ fn carried_column(select: &Select) -> Option<(&Expr, &[Ident])> {
         _ => return None,
     };
     plain(select).then_some((projected, parts))
-}
-
-/// Whether each row the `FROM` and filters of `select` leave yields at
-/// most one row, with no grouping or `DISTINCT ON` choosing among them.
-fn plain(select: &Select) -> bool {
-    matches!(
-        select.distinct,
-        None | Some(Distinct::All | Distinct::Distinct)
-    ) && select.select_modifiers.is_none()
-        && select.top.is_none()
-        && select.exclude.is_none()
-        && select.into.is_none()
-        && select.lateral_views.is_empty()
-        && select.prewhere.is_none()
-        && select.connect_by.is_empty()
-        && matches!(&select.group_by, GroupByExpr::Expressions(grouped, modifiers) if grouped.is_empty() && modifiers.is_empty())
-        && select.cluster_by.is_empty()
-        && select.distribute_by.is_empty()
-        && select.sort_by.is_empty()
-        && select.having.is_none()
-        && select.named_window.is_empty()
-        && select.qualify.is_none()
-        && select.value_table_mode.is_none()
-        && select.flavor == SelectFlavor::Standard
 }
 
 /// The `SELECT` that `condition`, an `EXISTS` or `IN` over a query, finds
