@@ -10,6 +10,8 @@ mod singular_table_name;
 pub use singular_table_name::SingularTableName;
 mod duplicate_check;
 pub use duplicate_check::DuplicateCheck;
+mod redundant_check;
+pub use redundant_check::RedundantCheck;
 mod duplicate_unique_index;
 pub use duplicate_unique_index::DuplicateUniqueIndex;
 mod duplicate_foreign_key;

@@ -195,6 +195,7 @@ rule_icons! {
     "policy_expression_defeats_index" => FaShieldHalved,
     "redundant_extension_edge" => FaBezierCurve,
     "duplicate_check" => FaCopy,
+    "redundant_check" => FaCopy,
     "duplicate_foreign_key" => FaPaperclip,
     "duplicate_unique_index" => FaClone,
     "duplicate_policy" => FaCopy,

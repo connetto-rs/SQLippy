@@ -43,9 +43,9 @@ use crate::{
         PolicyWithoutRowReference, PrefixRedundantIndex, PrimaryKeyNotNamedId,
         PublicDefaultPrivilege, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
         RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
-        ReachableTableWithoutRowLevelSecurity, RecursiveStepOverUnion, RedundantExtensionEdge,
-        ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole, RegColumnType,
-        RepeatedFunctionSearchPath, RepeatedIndexColumn, RepeatedPolicyCall,
+        ReachableTableWithoutRowLevelSecurity, RecursiveStepOverUnion, RedundantCheck,
+        RedundantExtensionEdge, ReferenceWithoutIdSuffix, ReferencesGrantedToClientRole,
+        RegColumnType, RepeatedFunctionSearchPath, RepeatedIndexColumn, RepeatedPolicyCall,
         RepeatedRecursionBound, RepeatedSettingRead, ReplacementWithoutTrustedCreation,
         ReservedKeywordIdentifier, RestrictiveWithoutPermissive, RoleDefinedInSchema,
         RoleKeyedPolicyWhenPooled, RowLevelSecurityWithoutPolicies, RustKeywordColumnName,
@@ -193,7 +193,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 63] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 64] = [
         Box::new(AlwaysRaisingExpression::default()),
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
@@ -217,6 +217,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(ForbiddenColumnInExtension::new("most_concrete_table")),
         Box::new(RedundantExtensionEdge::default()),
         Box::new(DuplicateCheck::default()),
+        Box::new(RedundantCheck::default()),
         Box::new(DuplicateColumnNameInExtensionGraph::default()),
         Box::new(DuplicateForeignKey::default()),
         Box::new(DuplicateUniqueIndex::default()),
