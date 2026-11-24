@@ -488,98 +488,121 @@ fn a_trigger_or_helper_the_rule_cannot_read_leaves_the_key_reported() {
     }
 }
 
-/// A `grants` table whose foreign key references `resources` with
-/// `organization`, whose key `app` inserts with a role drawn from
-/// `sharable_grants()` and reads through `sharable_resources()`, while a
-/// restrictive policy hides grants in blocked organizations. One arm of
-/// `sharable_grants()` draws resources from `resources_with(role)`, whose
-/// body reads `from` under `filter`, and the other reads `resources` itself
-/// outside blocked organizations.
-fn pinned_grants(resources_key: &str, organization: &str, from: &str, filter: &str) -> String {
-    format!(
-        "CREATE TABLE resources (organization_id INT NOT NULL, owner_id INT NOT NULL,
-           {resources_key}, UNIQUE (organization_id, id));
-         CREATE TABLE blocks (organization_id INT NOT NULL, user_id INT NOT NULL,
-           PRIMARY KEY (organization_id, user_id));
-         CREATE FUNCTION blocking() RETURNS SETOF INT LANGUAGE sql STABLE SECURITY DEFINER AS $$
-           SELECT block.organization_id FROM blocks block
-           WHERE block.user_id = current_setting('app.user_id')::int $$;
-         CREATE FUNCTION resources_with(min_role TEXT) RETURNS SETOF INT
-           LANGUAGE sql STABLE STRICT SECURITY DEFINER AS $$ SELECT resource.id FROM {from}
-           WHERE resource.owner_id = current_setting('app.user_id')::int AND min_role <> 'none'
-             AND {filter} $$;
-         CREATE FUNCTION sharable_grants() RETURNS TABLE (resource_id INT, role TEXT)
-           LANGUAGE sql STABLE SECURITY DEFINER AS $$
-           SELECT resource.id, allowed.role FROM resources_with('admin') resource(id)
-             CROSS JOIN unnest(ARRAY['reader', 'writer']) allowed(role)
-           UNION SELECT resource.id, 'reader' FROM resources resource
-             WHERE resource.id IN (SELECT resources_with('writer'))
-               AND {UNBLOCKED} $$;
-         CREATE FUNCTION sharable_resources() RETURNS SETOF INT LANGUAGE sql STABLE
-           SECURITY DEFINER AS $$ SELECT share.resource_id FROM sharable_grants() share $$;
-         CREATE TABLE grants (resource_id INT NOT NULL, organization_id INT {organization},
-           grantee_id INT NOT NULL, role TEXT NOT NULL,
-           CONSTRAINT grants_pkey PRIMARY KEY (resource_id, grantee_id),
-           FOREIGN KEY (organization_id, resource_id) REFERENCES resources (organization_id, id));
-         ALTER TABLE grants ENABLE ROW LEVEL SECURITY;
-         CREATE POLICY grants_read ON grants FOR SELECT TO app
-           USING (resource_id = ANY (ARRAY(SELECT sharable_resources())));
-         CREATE POLICY grants_write ON grants FOR INSERT TO app WITH CHECK (
-           (resource_id, role) IN (SELECT share.resource_id, share.role FROM sharable_grants() share));
-         CREATE POLICY grants_blocked ON grants AS RESTRICTIVE FOR ALL TO app
-           USING (NOT (organization_id = ANY (ARRAY(SELECT blocking()))))
-           WITH CHECK (NOT (organization_id = ANY (ARRAY(SELECT blocking()))));
-         GRANT SELECT, INSERT ON grants TO app;"
-    )
-}
+const GRANTS: &str = "CREATE TABLE resources (organization_id INT NOT NULL, owner_id INT NOT NULL,
+       id INT PRIMARY KEY, UNIQUE (organization_id, id));
+     CREATE TABLE blocks (organization_id INT NOT NULL, user_id INT NOT NULL,
+       PRIMARY KEY (organization_id, user_id));
+     CREATE FUNCTION blocking() RETURNS SETOF INT LANGUAGE sql STABLE SECURITY DEFINER AS $$
+       SELECT block.organization_id FROM blocks block
+       WHERE block.user_id = current_setting('app.user_id')::int $$;
+     CREATE FUNCTION resources_with(min_role TEXT) RETURNS SETOF INT
+       LANGUAGE sql STABLE STRICT SECURITY DEFINER AS $$ SELECT resource.id FROM resources resource
+       WHERE resource.owner_id = current_setting('app.user_id')::int AND min_role <> 'none'
+         AND NOT (resource.organization_id = ANY (ARRAY(SELECT blocking()))) $$;
+     CREATE FUNCTION sharable_grants() RETURNS TABLE (resource_id INT, role TEXT)
+       LANGUAGE sql STABLE SECURITY DEFINER AS $$
+       SELECT resource.id, allowed.role FROM resources_with('admin') resource(id)
+         CROSS JOIN unnest(ARRAY['reader', 'writer']) allowed(role)
+       UNION SELECT shared.id, 'reader' FROM resources shared
+         WHERE shared.id IN (SELECT resources_with('writer'))
+           AND NOT (shared.organization_id = ANY (ARRAY(SELECT blocking()))) $$;
+     CREATE FUNCTION sharable_resources() RETURNS SETOF INT LANGUAGE sql STABLE
+       SECURITY DEFINER AS $$ SELECT share.resource_id FROM sharable_grants() share $$;
+     CREATE TABLE grants (resource_id INT NOT NULL, organization_id INT NOT NULL,
+       grantee_id INT NOT NULL, role TEXT NOT NULL,
+       CONSTRAINT grants_pkey PRIMARY KEY (resource_id, grantee_id),
+       FOREIGN KEY (organization_id, resource_id) REFERENCES resources (organization_id, id));
+     ALTER TABLE grants ENABLE ROW LEVEL SECURITY;
+     CREATE POLICY grants_read ON grants FOR SELECT TO app
+       USING (resource_id = ANY (ARRAY(SELECT sharable_resources())));
+     CREATE POLICY grants_write ON grants FOR INSERT TO app WITH CHECK (
+       (resource_id, role) IN (SELECT share.resource_id, share.role FROM sharable_grants() share));
+     CREATE POLICY grants_blocked ON grants AS RESTRICTIVE FOR ALL TO app
+       USING (NOT (organization_id = ANY (ARRAY(SELECT blocking()))))
+       WITH CHECK (NOT (organization_id = ANY (ARRAY(SELECT blocking()))));
+     GRANT SELECT, INSERT ON grants TO app;";
 
-const UNIQUE_ID: &str = "id INT PRIMARY KEY";
-const RESOURCE: &str = "resources resource";
-const UNBLOCKED: &str = "NOT (resource.organization_id = ANY (ARRAY(SELECT blocking())))";
+/// Whether `grants_pkey` is reported on [`GRANTS`] after `edits`, each
+/// replacing the first occurrence of its text.
+fn reports_grants_key(edits: &[(&str, &str)]) -> bool {
+    let mut sql = GRANTS.to_owned();
+    for (from, to) in edits {
+        assert!(sql.contains(from), "{from}");
+        sql = sql.replacen(from, to, 1);
+    }
+    objects(&sql).contains(&"grants.grants_pkey".to_owned())
+}
 
 #[test]
 fn a_restrictive_read_on_a_column_a_foreign_key_pins_to_the_confined_key_is_clean() {
-    assert_eq!(
-        objects(&pinned_grants(UNIQUE_ID, "NOT NULL", RESOURCE, UNBLOCKED)),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn a_restrictive_read_the_referenced_row_does_not_settle_is_reported() {
-    for (resources_key, organization, from, filter) in [
-        (UNIQUE_ID, "", RESOURCE, UNBLOCKED),
-        (UNIQUE_ID, "NOT NULL", RESOURCE, "true"),
-        (
-            "id INT, PRIMARY KEY (organization_id, id)",
-            "NOT NULL",
-            RESOURCE,
-            UNBLOCKED,
-        ),
-        (
-            UNIQUE_ID,
-            "NOT NULL",
-            "resources resource(id, owner_id, organization_id)",
-            UNBLOCKED,
-        ),
+    for edits in [
+        &[][..],
+        &[
+            (
+                "CREATE FUNCTION sharable_grants()",
+                "CREATE FUNCTION roles() RETURNS SETOF TEXT LANGUAGE sql STABLE AS $$ SELECT 'reader' $$;
+                 CREATE FUNCTION sharable_grants()",
+            ),
+            (
+                "FROM resources_with('admin') resource(id)
+         CROSS JOIN unnest(ARRAY['reader', 'writer']) allowed(role)",
+                "FROM resources resource CROSS JOIN roles() allowed(role)
+         WHERE NOT (resource.organization_id = ANY (ARRAY(SELECT blocking())))",
+            ),
+        ],
     ] {
-        assert_eq!(
-            objects(&pinned_grants(resources_key, organization, from, filter)),
-            vec!["grants.grants_pkey"],
-            "{resources_key} / {organization} / {from} / {filter}"
-        );
+        assert!(!reports_grants_key(edits), "{edits:?}");
     }
 }
 
 #[test]
-fn a_helper_reaching_itself_is_read_as_opaque() {
-    assert_eq!(
-        objects(&pinned_grants(
-            UNIQUE_ID,
-            "NOT NULL",
-            "resources_with(min_role) resource(id)",
-            "true"
-        )),
-        vec!["grants.grants_pkey"]
-    );
+fn a_restrictive_read_the_referenced_row_does_not_settle_is_reported() {
+    for edits in [
+        &[(
+            "organization_id INT NOT NULL,\n       grantee_id",
+            "organization_id INT,\n       grantee_id",
+        )][..],
+        &[(
+            "AND NOT (resource.organization_id",
+            "OR NOT (resource.organization_id",
+        )],
+        &[(
+            "id INT PRIMARY KEY,",
+            "id INT, PRIMARY KEY (organization_id, id),",
+        )],
+        &[(
+            "FROM resources resource\n",
+            "FROM resources resource(id, owner_id, organization_id)\n",
+        )],
+        &[
+            (
+                "FROM resources resource\n",
+                "FROM resources resource CROSS JOIN resources other\n",
+            ),
+            (
+                "NOT (resource.organization_id = ANY",
+                "NOT (other.organization_id = ANY",
+            ),
+        ],
+        &[
+            (
+                "CREATE TABLE resources (organization_id INT",
+                "CREATE TABLE resources (organization_id NUMERIC",
+            ),
+            (
+                "organization_id INT NOT NULL,\n       grantee_id",
+                "organization_id NUMERIC NOT NULL,\n       grantee_id",
+            ),
+        ],
+        &[(
+            "USING (NOT (organization_id = ANY",
+            "USING (NOT (grantee_id = ANY",
+        )],
+        &[(
+            "FROM resources resource\n",
+            "FROM resources_with(min_role) resource(id)\n",
+        )],
+    ] {
+        assert!(reports_grants_key(edits), "{edits:?}");
+    }
 }
