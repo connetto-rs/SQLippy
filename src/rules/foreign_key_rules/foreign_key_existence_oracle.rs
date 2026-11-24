@@ -73,23 +73,27 @@ use crate::{
 /// label of an enum parameter returns only rows it returns for a lower one,
 /// as the rule `exposed_definer_over_protected_table` reads it.
 /// A check may draw the key from the rows of a set-returning `LANGUAGE sql`
-/// helper with `IN (SELECT ... FROM
-/// helper())`. Every arm of the helper's body must then draw the key column
-/// from a set the referenced policies admit, or draw the key from one row of
-/// the referenced table its filters make readable, or draw the key column
-/// from a row of a table a referenced policy reads the key from, which the
-/// role reads and which meets that read's filters. Inside a helper that runs
-/// as its owner, a filter counts only when it reads no table and calls only
-/// definers and built-ins that read neither the acting role nor its
-/// privileges, and a helper setting a parameter other than its search path
-/// counts for nothing. An arm of the check that leaves a key column `NULL`
-/// needs neither, since PostgreSQL checks no key holding a `NULL`. A write is
-/// also excused when the referencing table's `BEFORE` row triggers, on every
-/// path that keeps the row, insert the referenced row from `NEW` with
-/// `ON CONFLICT DO NOTHING` and leave the key unchanged afterwards, while
-/// every unique index of the referenced table takes that conflict and spans
-/// the referenced columns. The key then finds its row whether or not it
-/// existed.
+/// helper, as `IN (SELECT helper())`, `= ANY (ARRAY(SELECT helper()))` or
+/// `IN (SELECT ... FROM helper())`. Every arm of the helper's body must then
+/// draw the key column from a set the referenced policies admit, or draw the
+/// key from one row of the referenced table its filters make readable, or
+/// draw the key column from a row of a table a referenced policy reads the
+/// key from, which the role reads and which meets that read's filters. A
+/// foreign key of the referenced table carries the filters of the row an arm
+/// draws the key from onto the matched row when it binds every stored row,
+/// compares its columns by identity, and the drawn columns cover a unique
+/// key of its referenced table. A helper called in the body is read as its
+/// own arms. Inside a helper that runs as its owner, a filter counts only
+/// when it reads no table and calls only definers and built-ins that read
+/// neither the acting role nor its privileges, and a helper setting a
+/// parameter other than its search path counts for nothing. An arm of the
+/// check that leaves a key column `NULL` needs neither, since PostgreSQL
+/// checks no key holding a `NULL`. A write is also excused when the
+/// referencing table's `BEFORE` row triggers, on every path that keeps the
+/// row, insert the referenced row from `NEW` with `ON CONFLICT DO NOTHING`
+/// and leave the key unchanged afterwards, while every unique index of the
+/// referenced table takes that conflict and spans the referenced columns.
+/// The key then finds its row whether or not it existed.
 ///
 /// An insert is also excused when every referenced row the key can match
 /// already holds a referencing row with the same values of a unique key of
