@@ -16,6 +16,7 @@ use sqlparser::ast::{
 
 use crate::rules::{
     closed_set_support::stored_name,
+    literal_support::literal,
     policy_support::{
         conjuncts, disjuncts, is_column_reference, is_tautology, unnested, unwrapped,
     },
@@ -193,13 +194,7 @@ pub(crate) fn clause_implies<C: Columns>(
     if let Some((operands, wider)) = &condition.membership
         && let Some((row, members)) = membership(clause)
         && row.len() == operands.len()
-        && row
-            .iter()
-            .zip(operands)
-            .all(|(value, operand)| match operand {
-                Operand::Tested(tested) => is_column(value) && columns.tests(value, tested),
-                Operand::Value(stated) => value == *stated,
-            })
+        && row_meets(columns, row, operands, context)
         && is_within(columns, &members, wider)?
     {
         return Ok(true);
@@ -452,6 +447,60 @@ pub(crate) fn renamed(expression: &Expr, rename: impl Fn(&Expr) -> Option<Term>)
         },
     );
     Some(renamed)
+}
+
+/// Whether `row`, tested against a set by a clause, holds the values each
+/// of `operands` asks of a condition's row, a column matching a column the
+/// condition tests, a value matching it as written, and a column `context`
+/// fixes to a literal matching that literal either way.
+fn row_meets<C: Columns>(
+    columns: &C,
+    row: &[Expr],
+    operands: &[Operand<'_, C::Tested>],
+    context: &[&Expr],
+) -> bool {
+    row.iter()
+        .zip(operands)
+        .all(|(value, operand)| match operand {
+            Operand::Tested(tested) => {
+                if is_column(value) {
+                    columns.tests(value, tested)
+                } else {
+                    literal(value).is_some_and(|fixed| {
+                        pinned(context, |column| columns.tests(column, tested), fixed)
+                    })
+                }
+            }
+            Operand::Value(stated) => {
+                value == *stated
+                    || is_column(value)
+                        && columns.tested(value).is_some_and(|tested| {
+                            literal(stated).is_some_and(|fixed| {
+                                pinned(context, |column| columns.tests(column, &tested), fixed)
+                            })
+                        })
+            }
+        })
+}
+
+/// Whether a conjunct of `context` fixes a column `tested` accepts to the
+/// literal `fixed` with `=`, written on either side.
+fn pinned(context: &[&Expr], tested: impl Fn(&Expr) -> bool, fixed: &Value) -> bool {
+    context.iter().any(|conjunct| {
+        let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } = unnested(conjunct)
+        else {
+            return false;
+        };
+        [(left, right), (right, left)]
+            .into_iter()
+            .any(|(column, value)| {
+                is_column(column) && tested(column) && literal(value) == Some(fixed)
+            })
+    })
 }
 
 /// Whether every value `narrower` yields is one `wider` yields, whatever
