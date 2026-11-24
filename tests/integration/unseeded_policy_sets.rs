@@ -51,6 +51,11 @@ fn seed_constraints_and_tableless_seeds_pass() {
             "actor TEXT",
             "current_setting('app.user_id', true)",
         ),
+        (
+            "SELECT memberships.id FROM memberships JOIN resources ON resources.id = memberships.id WHERE memberships.actor_id = actor",
+            "actor TEXT",
+            "current_setting('app.user_id', true)",
+        ),
         ("SELECT 1", "", ""),
     ] {
         assert_eq!(reported(&schema(seed, parameters, call)), 0, "{seed}");
