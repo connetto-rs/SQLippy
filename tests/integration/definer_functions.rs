@@ -1925,6 +1925,142 @@ fn a_parameter_confines_nothing_unless_it_is_an_enum_no_column_shadows() {
     );
 }
 
+const OWNED: &str = "
+    CREATE ROLE app NOLOGIN;
+    CREATE SCHEMA authz;
+    CREATE TYPE authz.role AS ENUM ('reader', 'writer', 'admin');
+    CREATE TABLE public.resources (
+      id INT PRIMARY KEY, parent_id INT, organization_id INT NOT NULL, owner_id INT NOT NULL,
+      granted_role authz.role NOT NULL
+    );
+    ALTER TABLE public.resources ENABLE ROW LEVEL SECURITY;
+    GRANT SELECT ON public.resources TO app;
+    ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+    ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+    CREATE FUNCTION authz.caller_id() RETURNS INT
+      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT 1 $$;";
+
+#[test]
+fn a_helper_drawing_the_tested_row_by_its_key_carries_every_condition_of_it() {
+    assert_eq!(
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "{OWNED}
+                 CREATE POLICY owned_resources ON public.resources FOR SELECT TO app
+                   USING (owner_id = authz.caller_id());
+                 CREATE FUNCTION authz.owned_ids() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource
+                     WHERE resource.owner_id = authz.caller_id() $$;
+                 CREATE FUNCTION authz.owned_parent_ids() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.parent_id FROM public.resources resource
+                     WHERE resource.owner_id = authz.caller_id() $$;
+                 CREATE FUNCTION authz.through_owned() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource
+                     WHERE resource.id IN (SELECT authz.owned_ids()) $$;
+                 CREATE FUNCTION authz.parents_through_owned() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource
+                     WHERE resource.parent_id IN (SELECT authz.owned_ids()) $$;
+                 CREATE FUNCTION authz.through_owned_parents() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource
+                     WHERE resource.parent_id IN (SELECT authz.owned_parent_ids()) $$;"
+            ),
+        ),
+        ["parents_through_owned()", "through_owned_parents()"]
+    );
+}
+
+#[test]
+fn a_policy_helper_parameter_takes_the_literal_the_policy_passes() {
+    let reported = |policy_role: &str, filter: &str| {
+        exposed(
+            nested(
+                Deployment::default(),
+                &[
+                    "authz.granted_ids('admin')",
+                    "authz.granted_ids('writer')",
+                    "authz.granted_ids('reader')",
+                ],
+            )
+            .with_app_role("app"),
+            &format!(
+                "{OWNED}
+                 CREATE FUNCTION authz.granted_ids(min_role authz.role) RETURNS SETOF INT
+                   LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource
+                     WHERE resource.owner_id = authz.caller_id() AND resource.granted_role >= min_role $$;
+                 CREATE POLICY granted_resources ON public.resources FOR SELECT TO app
+                   USING (id IN (SELECT authz.granted_ids({policy_role})));
+                 CREATE FUNCTION authz.readable_ids() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource
+                     WHERE {filter} $$;"
+            ),
+        )
+    };
+    let granted = "resource.owner_id = authz.caller_id() AND resource.granted_role >= 'reader'";
+    assert_eq!(reported("'reader'", granted), Vec::<String>::new());
+    assert_eq!(
+        reported("'reader'", "resource.owner_id = authz.caller_id()"),
+        ["readable_ids()"]
+    );
+    assert_eq!(
+        reported("'admin'", granted),
+        ["granted_ids(authz.role)", "readable_ids()"]
+    );
+}
+
+#[test]
+fn a_helper_parameter_takes_the_argument_its_caller_passes() {
+    let organization_ladder = nested(
+        Deployment::default(),
+        &[
+            "authz.organizations_with('admin')",
+            "authz.organizations_with('writer')",
+            "authz.organizations_with('reader')",
+        ],
+    );
+    let schema = format!(
+        "{OWNED}
+         CREATE TABLE public.memberships (user_id INT NOT NULL, organization_id INT NOT NULL, role authz.role NOT NULL);
+         CREATE FUNCTION authz.organizations_with(min_role authz.role) RETURNS SETOF INT
+           LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             SELECT membership.organization_id FROM public.memberships membership
+             WHERE membership.user_id = authz.caller_id() AND membership.role >= min_role $$;
+         CREATE FUNCTION authz.resources_with(min_role authz.role) RETURNS SETOF INT
+           LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             SELECT resource.id FROM public.resources resource
+             WHERE resource.organization_id IN (SELECT authz.organizations_with(min_role)) $$;
+         CREATE POLICY member_resources ON public.resources FOR SELECT TO app
+           USING (organization_id IN (SELECT authz.organizations_with('reader')));
+         CREATE FUNCTION authz.organizations_reaching(min_role authz.role) RETURNS SETOF INT
+           LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             SELECT resource.organization_id FROM public.resources resource
+             WHERE resource.id IN (SELECT authz.resources_with(min_role)) $$;
+         CREATE FUNCTION authz.writable_ids() RETURNS SETOF INT
+           LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             SELECT resource.id FROM public.resources resource
+             WHERE resource.id IN (SELECT authz.resources_with('writer')) $$;"
+    );
+    assert_eq!(
+        exposed(organization_ladder.with_app_role("app"), &schema),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        exposed(Deployment::default().with_app_role("app"), &schema),
+        [
+            "organizations_reaching(authz.role)",
+            "resources_with(authz.role)",
+            "writable_ids()"
+        ]
+    );
+}
+
 const CAPPED_KINDS: &str = "
     CREATE ROLE app NOLOGIN;
     CREATE SCHEMA authz;
