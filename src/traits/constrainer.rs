@@ -276,12 +276,13 @@ pub trait Constrainer: Default {
         self.constrainer().rules()
     }
 
-    /// Passes every violation, lookup failure and unused allowance to `sink`
-    /// until it breaks.
+    /// Passes every unresolved external foreign key, violation, lookup
+    /// failure and unused allowance to `sink` until it breaks.
     ///
-    /// A lookup failure ends the rule that hit it on that object, and the
-    /// traversal continues with the next rule and object. Unused allowances
-    /// are reported only after a complete traversal.
+    /// Unresolved external foreign keys come first. A lookup failure ends
+    /// the rule that hit it on that object, and the traversal continues with
+    /// the next rule and object. Unused allowances are reported only after a
+    /// complete traversal.
     fn visit_schema(
         &self,
         database: &Self::Database,
@@ -291,8 +292,9 @@ pub trait Constrainer: Default {
     }
 
     /// Returns every rule inactive on the engine `database` runs on, then
-    /// every violation raised at `warn` or `deny`, every lookup failure and
-    /// every unused allowance, in traversal order.
+    /// every unresolved external foreign key, every violation raised at
+    /// `warn` or `deny`, every lookup failure and every unused allowance, in
+    /// traversal order.
     ///
     /// # Example
     ///
@@ -320,13 +322,15 @@ pub trait Constrainer: Default {
         diagnostics
     }
 
-    /// Validates the schema, stopping at the first violation raised at `warn`
-    /// or `deny`, the first lookup failure or the first unused allowance.
+    /// Validates the schema, stopping at the first unresolved external
+    /// foreign key, the first violation raised at `warn` or `deny`, the first
+    /// lookup failure or the first unused allowance.
     ///
     /// # Errors
     ///
-    /// Returns the first [`Error::Violation`], [`Error::Lookup`] or
-    /// [`Error::UnusedAllowance`] in traversal order.
+    /// Returns the first [`Error::UnresolvedForeignKey`],
+    /// [`Error::Violation`], [`Error::Lookup`] or [`Error::UnusedAllowance`]
+    /// in traversal order.
     fn validate_schema(&self, database: &Self::Database) -> Result<(), Error<Self::Database>> {
         let mut first = None;
         let _ = self.visit_schema(database, &mut |error| {

@@ -89,9 +89,10 @@ fn record(report: &mut Report, error: Error<ParserDB>) {
             });
         }
         Error::Lookup(error) => report.lookups.push(error.to_string()),
-        // The page registers no allowances and declares every deployment
-        // fact the rules read, so neither of these can arise.
-        Error::UnusedAllowance(_) | Error::Inactive(_) => {}
+        // The page registers no allowances, declares no external foreign key
+        // and declares every deployment fact the rules read, so none of these
+        // can arise.
+        Error::UnusedAllowance(_) | Error::Inactive(_) | Error::UnresolvedForeignKey(_) => {}
     }
 }
 

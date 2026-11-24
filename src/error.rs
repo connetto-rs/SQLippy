@@ -10,7 +10,7 @@ use sql_traits::{
 use sqlparser::ast::Statement;
 
 use crate::{
-    deployment::Declaration,
+    deployment::{Declaration, ExternalForeignKey},
     lint::{Level, RuleMetadata},
 };
 
@@ -454,6 +454,35 @@ pub enum Error<DB: DatabaseLike> {
     /// declaration it reads.
     #[error("Inactive rule: {0}")]
     Inactive(InactiveRule),
+    /// A declared external foreign key names a table or column the schema
+    /// lacks, so it is stale or misspelled.
+    #[error("Unresolved declaration: {0}")]
+    UnresolvedForeignKey(Box<UnresolvedForeignKey>),
+}
+
+/// A declared [`ExternalForeignKey`] that does not resolve in the schema.
+#[derive(Debug, Clone)]
+pub struct UnresolvedForeignKey {
+    pub(crate) key: ExternalForeignKey,
+    pub(crate) problem: String,
+}
+
+impl UnresolvedForeignKey {
+    /// Returns the declared key.
+    #[must_use]
+    pub fn key(&self) -> &ExternalForeignKey {
+        &self.key
+    }
+}
+
+impl Display for UnresolvedForeignKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the external foreign key {} {}",
+            self.key, self.problem
+        )
+    }
 }
 
 /// Why a rule stopped before checking everything it covers.

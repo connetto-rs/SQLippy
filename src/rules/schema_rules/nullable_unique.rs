@@ -9,18 +9,29 @@ use crate::{
     engine::Engine,
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::key_support::nullable_host_columns,
+    rules::{external_key_support::external_host_columns, key_support::nullable_host_columns},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
 
 /// Whether `column` is the one nullable column of a foreign key of its
-/// table, so a `NULL` there means the row references nothing.
+/// table, local or among the host columns of its `external` keys, so a
+/// `NULL` there means the row references nothing.
 fn is_optional_reference<DB: DatabaseLike>(
     database: &DB,
+    external: &[Vec<&DB::Column>],
     column: &DB::Column,
 ) -> Result<bool, LookupError> {
     for foreign_key in column.foreign_keys(database)? {
         if nullable_host_columns(database, foreign_key)?.len() == 1 {
+            return Ok(true);
+        }
+    }
+    for columns in external.iter().filter(|columns| columns.contains(&column)) {
+        let mut nullable = 0;
+        for host in columns {
+            nullable += usize::from(host.is_nullable(database)?);
+        }
+        if nullable == 1 {
             return Ok(true);
         }
     }
@@ -31,6 +42,7 @@ fn is_optional_reference<DB: DatabaseLike>(
 /// other than optional references.
 fn nullable_columns<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     database: &DB,
+    external: &[Vec<&DB::Column>],
     index: &I,
 ) -> Result<Vec<String>, LookupError> {
     if !index.nulls_distinct() {
@@ -38,7 +50,7 @@ fn nullable_columns<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     }
     let mut nullable = Vec::new();
     for column in index.columns(database)? {
-        if column.is_nullable(database)? && !is_optional_reference(database, column)? {
+        if column.is_nullable(database)? && !is_optional_reference(database, external, column)? {
             nullable.push(format!("'{}'", column.column_name()));
         }
     }
@@ -52,7 +64,9 @@ schema_rule!(
     /// An optional reference, the one nullable column of a foreign key such
     /// as `invitation_id` under `FOREIGN KEY (tenant_id, invitation_id)` with
     /// `tenant_id` `NOT NULL`, is exempt, since distinct `NULL`s there let
-    /// many rows reference nothing.
+    /// many rows reference nothing. A foreign key the deployment declares
+    /// with [`Deployment::with_external_foreign_key`](crate::deployment::Deployment::with_external_foreign_key)
+    /// exempts its column the same way.
     ///
     /// # Example
     ///
@@ -87,13 +101,15 @@ impl<DB: DatabaseLike> SchemaRule for NullableUniqueColumn<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
+        let deployment = reporter.deployment();
         for table in database.tables() {
+            let external = external_host_columns(database, deployment, table)?;
             let mut found: Vec<(Option<&str>, Vec<String>)> = Vec::new();
             for index in table.unique_indices(database)? {
-                found.push((index.name(), nullable_columns(database, index)?));
+                found.push((index.name(), nullable_columns(database, &external, index)?));
             }
             for index in table.indices(database)?.filter(|index| index.is_unique()) {
-                found.push((index.name(), nullable_columns(database, index)?));
+                found.push((index.name(), nullable_columns(database, &external, index)?));
             }
             let name = table.table_name();
             for (index, columns) in found.into_iter().filter(|(_, columns)| !columns.is_empty()) {
