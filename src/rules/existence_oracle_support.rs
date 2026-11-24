@@ -16,7 +16,7 @@ use sqlparser::{
     ast::{
         AccessExpr, BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr,
         FunctionArguments, FunctionSecurity, Ident, InTarget, JoinOperator, ObjectName, Query,
-        Select, SelectItem, SetExpr, SetOperator, TableAlias, TableFactor, Value, VisitMut,
+        Select, SelectItem, SetExpr, SetOperator, TableAlias, TableFactor, Value, Visit, VisitMut,
         VisitorMut, visit_expressions,
     },
     dialect::PostgreSqlDialect,
@@ -1176,7 +1176,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             return Ok(None);
         };
         if let Some(path) = function.search_path(self.database)?
-            && !resolves_alike(self.database, &body, &path)?
+            && !resolves_alike(self.database, body.as_ref(), &path)?
         {
             return Ok(None);
         }
@@ -1627,7 +1627,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             return Ok(None);
         }
         if let Some(path) = function.search_path(self.database)?
-            && !resolves_alike(self.database, &body, &path)?
+            && !resolves_alike(self.database, body.as_ref(), &path)?
         {
             return Ok(None);
         }
@@ -1838,9 +1838,9 @@ enum Reader {
 /// `path` what it reaches on the schema's own search path. A function name
 /// declared in more than one schema counts as reaching another, since
 /// overloads resolve by argument types the paths may order differently.
-fn resolves_alike<DB: DatabaseLike>(
+pub(crate) fn resolves_alike<DB: DatabaseLike, V: Visit>(
     database: &DB,
-    body: &Query,
+    body: &V,
     path: &[(Cow<'_, str>, bool)],
 ) -> Result<bool, LookupError> {
     let mut names: Vec<ObjectName> = Vec::new();
