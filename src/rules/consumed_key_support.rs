@@ -786,15 +786,20 @@ fn stays_written<DB: DatabaseLike>(
     if deletes {
         return Ok(!inserts);
     }
-    if !(inserts && removes) {
+    if !inserts {
         return Ok(true);
     }
-    // A removed row then comes back only once its referencing rows are gone.
+    // A client inserting a second row with the naming value names the key
+    // again, and a removed row comes back only once its referencing rows are
+    // gone.
     let unique = equality_keys(database, named)?
         .iter()
         .any(|columns| columns.as_slice() == [referenced]);
     if !unique {
         return Ok(false);
+    }
+    if !removes {
+        return Ok(true);
     }
     for foreign_key in consumption.written.foreign_keys(database)? {
         if foreign_key.referenced_table(database)? == named

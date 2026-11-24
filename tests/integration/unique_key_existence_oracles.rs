@@ -503,6 +503,14 @@ fn a_key_the_trigger_leaves_in_the_checked_set_is_reported() {
                 "GRANT TRUNCATE, INSERT ON invitations TO app; GRANT SELECT, INSERT ON memberships",
             ),
         ],
+        &[
+            ("id INT PRIMARY KEY, email", "id INT NOT NULL, email"),
+            ("REFERENCES invitations (id)", ""),
+            (
+                "GRANT SELECT, INSERT ON memberships",
+                "GRANT INSERT ON invitations TO app; GRANT SELECT, INSERT ON memberships",
+            ),
+        ],
     ] {
         assert!(reports_invitation_key(edits), "{edits:?}");
     }
