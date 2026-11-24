@@ -296,6 +296,22 @@ fn a_key_a_trigger_takes_out_of_the_checked_set_is_clean() {
             "GRANT SELECT, INSERT ON memberships",
             "GRANT INSERT ON invitations TO app; GRANT SELECT, INSERT ON memberships",
         )],
+        &[(
+            "RETURN NULL;",
+            "UPDATE memberships SET nickname = 1 WHERE user_id = NEW.user_id; RETURN NULL;",
+        )],
+        &[("SET accepted = true", "SET accepted = true, email = email")],
+        &[(
+            "AND NOT accepted",
+            "AND accepted IN (SELECT false UNION SELECT true) AND NOT accepted",
+        )],
+        &[(
+            "BEGIN",
+            "BEGIN IF NEW.user_id > 0 THEN
+               UPDATE invitations SET accepted = true WHERE id = NEW.invitation_id; RETURN NULL;
+             END IF;",
+        )],
+        &[("UPDATE invitations SET", "UPDATE ONLY invitations SET")],
     ] {
         assert!(!reports_invitation_key(edits), "{edits:?}");
     }
@@ -420,6 +436,53 @@ fn a_key_the_trigger_leaves_in_the_checked_set_is_reported() {
                 "GRANT TRUNCATE, INSERT ON invitations TO app; GRANT SELECT, INSERT ON memberships",
             ),
         ],
+    ] {
+        assert!(reports_invitation_key(edits), "{edits:?}");
+    }
+}
+
+#[test]
+fn a_trigger_or_helper_the_rule_cannot_read_leaves_the_key_reported() {
+    for edits in [
+        &[(
+            "CREATE TRIGGER memberships_accept AFTER INSERT ON memberships
+      FOR EACH ROW EXECUTE FUNCTION accept_invitation()",
+            "CREATE FUNCTION accept_native() RETURNS TRIGGER LANGUAGE c AS 'accept', 'accept';
+             CREATE TRIGGER memberships_accept AFTER INSERT ON memberships
+               FOR EACH ROW EXECUTE FUNCTION accept_native()",
+        )][..],
+        &[(
+            "WHERE id = NEW.invitation_id",
+            "WHERE id <> NEW.invitation_id",
+        )],
+        &[("SET accepted = true", "SET (accepted) = (false)")],
+        &[(
+            "WHERE id = NEW.invitation_id",
+            "WHERE id = NEW.invitation_id + 1",
+        )],
+        &[("SET accepted = true", "SET accepted = (SELECT false)")],
+        &[(
+            "WHERE id = NEW.invitation_id",
+            "WHERE invite_id = NEW.invitation_id",
+        )],
+        &[("SET accepted = true", "SET accepted = true, acceptd = true")],
+        &[
+            ("accepted_by INT);", "accepted_by INT, code INT);"),
+            ("SELECT id FROM invitations", "SELECT code FROM invitations"),
+            (
+                "WHERE id = NEW.invitation_id",
+                "WHERE code = NEW.invitation_id",
+            ),
+            RE_CREATING,
+        ],
+        &[
+            (
+                "LANGUAGE sql STABLE SECURITY DEFINER AS $$",
+                "LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$ BEGIN RETURN QUERY",
+            ),
+            ("AND NOT accepted", "AND NOT accepted; END"),
+        ],
+        &[("AND NOT accepted", "AND NOT accepted UNION SELECT 0")],
     ] {
         assert!(reports_invitation_key(edits), "{edits:?}");
     }
