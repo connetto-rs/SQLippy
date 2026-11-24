@@ -2750,37 +2750,44 @@ fn an_inferred_ladder_composes_with_declared_sets() {
     );
 }
 
-/// Functions reported when `authz.readable()` returns the resources
-/// `filter` admits among those a private recursive helper, declared
-/// `volatility`, reaches over `edges`, and `policy` is the read policy of
-/// `resources`.
+/// A schema where `authz.readable()` returns the resources `filter` admits
+/// among those a private recursive helper, declared `volatility`, reaches
+/// over `edges`, `helpers` declares further functions, and `policy` is the
+/// read policy of `resources`.
+fn private_helper_schema(volatility: &str, filter: &str, policy: &str, helpers: &str) -> String {
+    format!(
+        "CREATE ROLE app NOLOGIN;
+         CREATE SCHEMA authz;
+         CREATE TABLE resources (id INT PRIMARY KEY, hidden BOOLEAN NOT NULL);
+         CREATE TABLE edges (id INT, parent_id INT);
+         ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE edges ENABLE ROW LEVEL SECURITY;
+         GRANT SELECT ON resources, edges TO app;
+         ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+         ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+         CREATE FUNCTION authz.reached() RETURNS SETOF INT
+           LANGUAGE sql {volatility} SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             WITH RECURSIVE reached (id) AS (
+               SELECT 1 UNION SELECT edge.id FROM reached JOIN public.edges edge ON edge.parent_id = reached.id)
+             SELECT id FROM reached $$;
+         REVOKE EXECUTE ON FUNCTION authz.reached() FROM app;
+         {helpers}
+         CREATE FUNCTION authz.readable() RETURNS SETOF INT
+           LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             SELECT resource.id FROM public.resources resource
+             WHERE {filter} resource.id IN (SELECT authz.reached()) $$;
+         CREATE POLICY readable_resources ON resources FOR SELECT TO app USING ({policy});
+         CREATE POLICY readable_edges ON edges FOR SELECT TO app
+           USING (id IN (SELECT authz.readable()));"
+    )
+}
+
+/// Functions reported over [`private_helper_schema`] with no further
+/// helpers.
 fn exposed_behind_private_helper(volatility: &str, filter: &str, policy: &str) -> Vec<String> {
     exposed(
         Deployment::default().with_app_role("app"),
-        &format!(
-            "CREATE ROLE app NOLOGIN;
-             CREATE SCHEMA authz;
-             CREATE TABLE resources (id INT PRIMARY KEY, hidden BOOLEAN NOT NULL);
-             CREATE TABLE edges (id INT, parent_id INT);
-             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
-             ALTER TABLE edges ENABLE ROW LEVEL SECURITY;
-             GRANT SELECT ON resources, edges TO app;
-             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
-             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
-             CREATE FUNCTION authz.reached() RETURNS SETOF INT
-               LANGUAGE sql {volatility} SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                 WITH RECURSIVE reached (id) AS (
-                   SELECT 1 UNION SELECT edge.id FROM reached JOIN public.edges edge ON edge.parent_id = reached.id)
-                 SELECT id FROM reached $$;
-             REVOKE EXECUTE ON FUNCTION authz.reached() FROM app;
-             CREATE FUNCTION authz.readable() RETURNS SETOF INT
-               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                 SELECT resource.id FROM public.resources resource
-                 WHERE {filter} resource.id IN (SELECT authz.reached()) $$;
-             CREATE POLICY readable_resources ON resources FOR SELECT TO app USING ({policy});
-             CREATE POLICY readable_edges ON edges FOR SELECT TO app
-               USING (id IN (SELECT authz.readable()));"
-        ),
+        &private_helper_schema(volatility, filter, policy, ""),
     )
 }
 
@@ -2802,8 +2809,70 @@ fn a_private_helper_counts_when_the_policy_tests_every_value_its_caller_returns(
 }
 
 #[test]
+fn a_private_helper_counts_only_while_every_function_it_reaches_only_reads() {
+    let tested = "id IN (SELECT authz.readable())";
+    let reported = |helper: &str, helpers: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &private_helper_schema(
+                "STABLE",
+                &format!("resource.id IN (SELECT authz.{helper}()) AND"),
+                tested,
+                &format!(
+                    "{helpers}
+                     CREATE FUNCTION authz.{helper}() RETURNS SETOF INT
+                       LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                         SELECT edge.id FROM public.edges edge
+                         WHERE edge.parent_id IN (SELECT authz.{helper}_source()) $$;
+                     REVOKE EXECUTE ON FUNCTION authz.{helper}() FROM app;"
+                ),
+            ),
+        )
+    };
+    assert_eq!(
+        reported(
+            "looped",
+            "CREATE FUNCTION authz.looped_source() RETURNS SETOF INT
+               LANGUAGE sql STABLE AS $$ SELECT authz.looped() $$;"
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        reported(
+            "stamped",
+            "CREATE FUNCTION authz.stamped_source() RETURNS SETOF INT
+               LANGUAGE sql VOLATILE AS $$ SELECT 1 $$;"
+        ),
+        ["readable()"]
+    );
+    assert_eq!(
+        reported(
+            "native",
+            "CREATE FUNCTION authz.native_source() RETURNS SETOF INT
+               LANGUAGE plpython3u STABLE AS $$ return [1] $$;"
+        ),
+        ["readable()"]
+    );
+}
+
+#[test]
+fn a_private_helper_counts_only_for_a_caller_a_policy_can_call_alike() {
+    let schema = private_helper_schema("STABLE", "", "id IN (SELECT authz.readable())", "");
+    assert_eq!(
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &schema.replace(
+                "authz.readable() RETURNS SETOF INT",
+                "authz.readable(OUT id INT) RETURNS SETOF INT"
+            )
+        ),
+        ["readable()"]
+    );
+}
+
+#[test]
 fn a_row_drawn_through_a_helper_call_lies_in_the_set_of_that_helper() {
-    let reported = |policy_role: &str, passed: &str| {
+    let reported = |policy_role: &str, drawn_from: &str| {
         exposed(
             Deployment::default().with_app_role("app"),
             &format!(
@@ -2825,7 +2894,7 @@ fn a_row_drawn_through_a_helper_call_lies_in_the_set_of_that_helper() {
                    USING (id IN (SELECT authz.residual({policy_role})));
                  CREATE FUNCTION authz.resources_with(min_role authz.role) RETURNS SETOF INT
                    LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                     SELECT residual.id FROM authz.residual({passed}) residual (id) $$;
+                     SELECT residual.id FROM {drawn_from} $$;
                  CREATE FUNCTION authz.organizations_reaching(min_role authz.role) RETURNS SETOF INT
                    LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
                      SELECT resource.organization_id FROM public.resources resource
@@ -2833,15 +2902,63 @@ fn a_row_drawn_through_a_helper_call_lies_in_the_set_of_that_helper() {
             ),
         )
     };
-    assert_eq!(reported("'reader'", "min_role"), Vec::<String>::new());
-    assert_eq!(reported("'reader'", "'writer'"), Vec::<String>::new());
+    let through = |passed: &str| format!("authz.residual({passed}) residual (id)");
     assert_eq!(
-        reported("'admin'", "min_role"),
-        ["organizations_reaching(authz.role)", "residual(authz.role)"]
+        reported("'reader'", &through("min_role")),
+        Vec::<String>::new()
     );
     assert_eq!(
-        reported("'reader'", "min_role::text::authz.role"),
-        ["organizations_reaching(authz.role)"]
+        reported("'reader'", &through("'writer'")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        reported("'admin'", &through("min_role")),
+        ["organizations_reaching(authz.role)", "residual(authz.role)"]
+    );
+    for unknown in [
+        through("min_role::text::authz.role"),
+        "public.grants permission, authz.residual(permission.role) residual (id)".to_owned(),
+    ] {
+        assert_eq!(
+            reported("'reader'", &unknown),
+            ["organizations_reaching(authz.role)"],
+            "{unknown}"
+        );
+    }
+}
+
+#[test]
+fn a_row_drawn_through_helpers_returning_an_out_column_keeps_its_conditions() {
+    let reported = |condition: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "CREATE ROLE app NOLOGIN;
+                 CREATE SCHEMA authz;
+                 CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL,
+                   hidden BOOLEAN NOT NULL);
+                 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+                 GRANT SELECT ON resources TO app;
+                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+                 CREATE POLICY readable_resources ON resources FOR SELECT TO app USING (NOT hidden);
+                 CREATE FUNCTION authz.listed(OUT id INT) RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource WHERE {condition} $$;
+                 CREATE FUNCTION authz.visible_ids(OUT id INT) RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT listed.id FROM authz.listed() listed $$;
+                 CREATE FUNCTION authz.organizations_reaching() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.organization_id FROM public.resources resource
+                     WHERE resource.id IN (SELECT authz.visible_ids()) $$;"
+            ),
+        )
+    };
+    assert_eq!(reported("NOT resource.hidden"), Vec::<String>::new());
+    assert_eq!(
+        reported("resource.organization_id > 0"),
+        ["listed()", "organizations_reaching()"]
     );
 }
 
