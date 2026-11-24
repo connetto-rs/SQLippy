@@ -69,6 +69,7 @@ rule_icons! {
     "dynamic_sql_injection" => FaSyringe,
     "unsatisfiable_check" => FaCircleXmark,
     "null_only_check" => FaCircleXmark,
+    "contradictory_checks" => FaCircleXmark,
     "surrogate_primary_key_in_extension" => FaPuzzlePiece,
     "tautological_check" => FaEquals,
     "outer_column_capture" => FaMagnet,

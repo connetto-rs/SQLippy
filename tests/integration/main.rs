@@ -21,6 +21,7 @@ mod cluster_roles;
 mod column_types;
 mod constant_checks;
 mod constant_policy_clauses;
+mod contradictory_checks;
 mod copied_columns_through_superkeys;
 mod correlated_policy_subqueries;
 mod credential_free_writes;
