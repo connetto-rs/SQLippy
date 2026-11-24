@@ -112,6 +112,7 @@ pub use script_rules::*;
 mod authority_support;
 mod clock_support;
 mod closed_set_support;
+mod consumed_key_support;
 mod credential_support;
 mod cte_support;
 mod existence_oracle_support;

@@ -46,6 +46,24 @@ pub(crate) fn names_record(expression: &Expr, record: &str) -> bool {
     }
 }
 
+/// The stored name of the field of `NEW` the expression, under parentheses,
+/// names.
+pub(crate) fn new_field(expression: &Expr) -> Option<Cow<'_, str>> {
+    match expression {
+        Expr::Nested(inner) => new_field(inner),
+        Expr::CompoundIdentifier(parts) => match parts.as_slice() {
+            [record, field] if stored(record) == "new" => Some(stored(field)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `expression`, under parentheses, is `NEW.column`.
+pub(crate) fn names_new_field(expression: &Expr, column: &str) -> bool {
+    new_field(expression).is_some_and(|field| field == column)
+}
+
 /// What a write to a PL/pgSQL target does to `NEW.column`.
 pub(crate) enum Written {
     /// It leaves the column alone.
