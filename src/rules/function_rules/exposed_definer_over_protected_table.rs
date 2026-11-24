@@ -110,7 +110,9 @@ use crate::{
 /// outer filters, since a row passing it exists, and `x IN (SELECT y …)`
 /// holds `x` equal to `y`. A query nested in a condition of a `WHERE` is
 /// filtered by the other conditions of that `WHERE` too, since its outcome
-/// reaches the result only for outer rows passing them.
+/// reaches the result only for outer rows passing them. A column the
+/// filters fix with `=` to a literal stands for that literal in a row
+/// tested with `IN` against a set, and the literal for the column.
 ///
 /// A read whose column reaches, unchanged, the result of a function that is
 /// not `VOLATILE` and returns a set, through `UNION` arms and `WITH` items

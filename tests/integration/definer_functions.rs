@@ -2623,3 +2623,78 @@ fn the_default_constrainer_runs_the_function_rules_at_their_group_levels() {
         ]
     );
 }
+
+/// Functions reported when `authz.kinded()` returns the resources `filter`
+/// admits and `policy` is the read policy of `resources`, both free to test
+/// pairs against `authz.capped()`.
+fn exposed_through_pairs(filter: &str, policy: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE SCHEMA authz;
+             CREATE TABLE caps (resource_id INT, kind TEXT);
+             CREATE TABLE resources (id INT PRIMARY KEY, kind TEXT NOT NULL);
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON resources TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE FUNCTION authz.capped() RETURNS TABLE (resource_id INT, kind TEXT)
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT cap.resource_id, cap.kind FROM public.caps cap $$;
+             CREATE POLICY readable_resources ON resources FOR SELECT TO app USING ({policy});
+             CREATE FUNCTION authz.kinded() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource WHERE {filter} $$;"
+        ),
+    )
+}
+
+#[test]
+fn a_column_fixed_to_a_literal_stands_for_it_in_a_tested_pair() {
+    let by_kind = "(id, kind) IN (SELECT * FROM authz.capped())";
+    let by_literal = "(id, 'organization') IN (SELECT * FROM authz.capped())";
+    let literal_pair = "(resource.id, 'organization') IN (SELECT * FROM authz.capped())";
+    let column_pair = "(resource.id, resource.kind) IN (SELECT * FROM authz.capped())";
+    for (filter, policy) in [
+        (
+            format!("resource.kind = 'organization' AND {literal_pair}"),
+            by_kind,
+        ),
+        (
+            format!("'organization' = resource.kind AND {literal_pair}"),
+            by_kind,
+        ),
+        (
+            format!("resource.kind = 'organization' AND {column_pair}"),
+            by_literal,
+        ),
+    ] {
+        assert_eq!(
+            exposed_through_pairs(&filter, policy),
+            Vec::<String>::new(),
+            "{filter}"
+        );
+    }
+    for (filter, policy) in [
+        (literal_pair.to_owned(), by_kind),
+        (
+            format!("resource.kind = 'project' AND {literal_pair}"),
+            by_kind,
+        ),
+        (
+            format!("resource.kind <> 'organization' AND {literal_pair}"),
+            by_kind,
+        ),
+        (
+            format!("resource.kind = 'project' AND {column_pair}"),
+            by_literal,
+        ),
+    ] {
+        assert_eq!(
+            exposed_through_pairs(&filter, policy),
+            ["kinded()"],
+            "{filter}"
+        );
+    }
+}
