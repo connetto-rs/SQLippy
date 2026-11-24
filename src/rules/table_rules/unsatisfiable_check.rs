@@ -2,7 +2,10 @@
 //! enforces that tables do not have negation (always false) check
 //! constraints.
 
-use sql_traits::traits::{CheckConstraintLike, DatabaseLike, TableLike};
+use sql_traits::{
+    structs::Raising,
+    traits::{CheckConstraintLike, DatabaseLike, TableLike},
+};
 
 use crate::{
     error::Interruption,
@@ -96,9 +99,9 @@ impl<DB: DatabaseLike> TableRule for UnsatisfiableCheck<DB> {
         table: &<Self::Database as DatabaseLike>::Table,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        // Check if any check constraint is a negation
         for check_constraint in table.check_constraints(database)? {
-            if check_constraint.is_negation(database)? {
+            let truth = check_constraint.truth_under(database, &[])?;
+            if truth.raising != Raising::Always && !truth.outcomes.truth && !truth.outcomes.null {
                 let table_name = table.table_name();
                 let expression = check_constraint.expression(database).to_string();
                 reporter.table(

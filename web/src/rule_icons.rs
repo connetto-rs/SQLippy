@@ -48,6 +48,7 @@ macro_rules! rule_icons {
 }
 
 rule_icons! {
+    "always_raising_expression" => FaTriangleExclamation,
     "client_role_bypasses_row_level_security" => FaDoorOpen,
     "credential_setting_write" => FaUserPen,
     "dead_permissive_policy" => FaSkull,

@@ -1,5 +1,7 @@
 //! Submodule providing constraint structs that can be applied to tables.
 
+mod always_raising_expression;
+pub use always_raising_expression::AlwaysRaisingExpression;
 mod mixed_case_table_name;
 pub use mixed_case_table_name::MixedCaseTableName;
 mod non_snake_case_table_name;
