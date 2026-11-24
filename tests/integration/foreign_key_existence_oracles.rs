@@ -1030,6 +1030,39 @@ fn a_definer_helper_without_a_declared_relation_between_sets_is_reported() {
 }
 
 #[test]
+fn a_key_confined_to_a_helper_called_with_a_higher_role_is_clean() {
+    let schema = |comparison: &str| {
+        format!(
+            "CREATE ROLE app;
+             CREATE TYPE level AS ENUM ('reader', 'writer', 'admin');
+             CREATE TABLE grants (resource_id INT, level level);
+             CREATE FUNCTION readable(minimum level) RETURNS SETOF INT LANGUAGE sql STABLE AS $$
+               SELECT permission.resource_id FROM grants permission WHERE {comparison} $$;
+             CREATE TABLE resources (id INT PRIMARY KEY);
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY resources_read ON resources FOR SELECT TO app
+               USING (id IN (SELECT readable('reader')));
+             CREATE TABLE notes (id INT PRIMARY KEY,
+               resource_id INT NOT NULL CONSTRAINT notes_resource REFERENCES resources (id));
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY notes_insert ON notes FOR INSERT TO app
+               WITH CHECK (resource_id IN (SELECT readable('writer')));
+             GRANT SELECT ON resources TO app;
+             GRANT INSERT ON notes TO app;"
+        )
+    };
+    let deployment = || Deployment::default().with_app_role("app");
+    assert_eq!(
+        objects_under(deployment(), &schema("permission.level >= minimum")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        objects_under(deployment(), &schema("permission.level <= minimum")),
+        ["notes.notes_resource"]
+    );
+}
+
+#[test]
 fn a_definer_helper_calling_a_name_another_schema_declares_is_reported() {
     let schema = sharable_schema(
         "SECURITY DEFINER",

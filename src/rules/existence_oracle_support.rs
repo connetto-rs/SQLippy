@@ -35,6 +35,7 @@ use crate::{
             query_members, reads_column_or_parameter,
         },
         key_support::{binds, equality_keys, instances, key_pairs, named, no_inheritors},
+        ladder_support::Ladders,
         policy_read_support::{reads_every_row, sublink_reads},
         policy_support::{
             acting, conjuncts, disjuncts, is_column_reference, is_contradiction, is_tautology,
@@ -188,6 +189,7 @@ pub(crate) struct Confinement<'a, DB: DatabaseLike> {
     /// The helpers whose bodies are being read, outermost first, so that a
     /// helper reaching itself is read as opaque.
     reading: RefCell<Vec<&'a DB::Function>>,
+    ladders: Ladders<'a, DB>,
 }
 
 impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
@@ -226,6 +228,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             unfoldings: RefCell::new(HashMap::new()),
             consumptions: Vec::new(),
             reading: RefCell::new(Vec::new()),
+            ladders: Ladders::new(database),
         })
     }
 
@@ -1130,8 +1133,12 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// `wider` yields, through the declared sets once each set is spelled
     /// as the helpers it calls unfold it.
     fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> Result<bool, LookupError> {
-        self.deployment
-            .is_set_within_unfolding(narrower, wider, |set| self.unfolded(set))
+        self.deployment.is_set_within_unfolding(
+            narrower,
+            wider,
+            |set| self.unfolded(set),
+            |narrower, wider| self.ladders.within(narrower, wider),
+        )
     }
 
     /// Another spelling of the set `set` yields, read from the helper it
