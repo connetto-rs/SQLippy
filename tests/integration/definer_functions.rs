@@ -460,6 +460,57 @@ fn a_set_declared_within_the_policys_set_confines_a_read() {
 }
 
 #[test]
+fn a_row_an_exists_or_in_finds_lies_in_the_policy_helpers_set() {
+    const OWN: &str = "membership.user_id = current_setting('app.user_id', true)";
+    let reported = |filter: &str| {
+        exposed_to_app(&format!(
+            "CREATE FUNCTION member_resource_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource WHERE {filter} $$;"
+        ))
+    };
+    for (filter, expected) in [
+        (
+            format!(
+                "resource.organization_id IN (SELECT membership.organization_id
+                   FROM public.memberships membership WHERE {OWN})"
+            ),
+            &[][..],
+        ),
+        (
+            format!(
+                "EXISTS (SELECT 1 FROM public.memberships membership
+                   WHERE membership.organization_id = resource.organization_id AND {OWN})"
+            ),
+            &[],
+        ),
+        (
+            format!(
+                "resource.organization_id NOT IN (SELECT membership.organization_id
+                   FROM public.memberships membership WHERE {OWN})"
+            ),
+            &["member_resource_ids()"],
+        ),
+        (
+            format!(
+                "EXISTS (SELECT 1 FROM public.memberships membership
+                   WHERE membership.organization_id > resource.organization_id AND {OWN})"
+            ),
+            &["member_resource_ids()"],
+        ),
+        (
+            "EXISTS (SELECT 1 FROM public.memberships membership
+               WHERE membership.organization_id = resource.organization_id
+               AND membership.user_id = current_setting('app.user_id', true) || 'x')"
+                .to_owned(),
+            &["member_resource_ids()"],
+        ),
+    ] {
+        assert_eq!(reported(&filter), expected, "{filter}");
+    }
+}
+
+#[test]
 fn a_definer_returning_rows_a_restrictive_policy_hides_is_reported_until_it_repeats_it() {
     assert_eq!(
         exposed_to_app(

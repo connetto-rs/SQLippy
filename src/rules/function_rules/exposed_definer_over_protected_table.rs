@@ -194,10 +194,11 @@ use crate::{
 /// other than `NULL` for every parameter. An arm of it has to read one table alone,
 /// every row and with no sample, and return the column of every row of it
 /// meeting its filter, where a condition reading a parameter states it of
-/// the literal the policy passes, and of no other argument. A row the body
-/// reads of that table, not filled with `NULL`s by an outer join, has to
-/// meet every condition of the filter, and the body's filters hold the
-/// column the arm returns of that row equal to the column.
+/// the literal the policy passes, and of no other argument. A row of that
+/// table the `SELECT` reads, or a query an `EXISTS` or `IN` of its `WHERE`
+/// finds, not filled with `NULL`s by an outer join, has to meet every
+/// condition of the filter, and the body's filters hold the column the arm
+/// returns of that row equal to the column.
 ///
 /// The rule does not run on SQLite, which has no stored functions.
 ///
@@ -1267,8 +1268,8 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 }
                 conditions.extend(drawn);
                 let witnessed = self.witnessed_sets(
-                    select,
                     &filters,
+                    owners,
                     table,
                     relation,
                     &equalities,
@@ -1560,14 +1561,17 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
 
     /// `column IN (SELECT helper())` for `relation`, a read of `table` its
     /// filters state `conditions` of, for each helper a policy of the table
-    /// tests a column against, when a row of a table `select` reads meets
-    /// every condition of an exhaustive arm of the helper over that table,
-    /// those reading a parameter stated of the literal the policy passes,
-    /// and the filters hold the column the arm returns equal to `column`.
+    /// tests a column against, when a row of a table the `SELECT` `filters`
+    /// filters reads, or a query an `EXISTS` or `IN` of its `WHERE` finds,
+    /// meets every condition of an exhaustive arm of the helper over that
+    /// table, those reading a parameter stated of the literal the policy
+    /// passes, and the filters hold the column the arm returns equal to
+    /// `column`. `owners` are the queries around whose `WITH` holds items
+    /// in reach.
     fn witnessed_sets(
         &self,
-        select: &Select,
         filters: &Filters<'_>,
+        owners: &[&Query],
         table: &'a DB::Table,
         relation: &TableFactor,
         equalities: &Equalities<'_>,
@@ -1582,60 +1586,68 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             .iter()
             .map(|set| set.literals.then(|| listed_arguments(&set.call)).flatten())
             .collect();
-        for from in &select.from {
-            for (position, joined) in relations(from).enumerate() {
-                let same = ptr::eq(joined, relation);
-                let Some(joined_table) = self.stored(joined)? else {
-                    continue;
-                };
-                if !same && !present(from, position) {
-                    continue;
-                }
-                let arms: Vec<_> = sets
-                    .iter()
-                    .zip(&arguments)
-                    .flat_map(|(set, arguments)| {
-                        set.arms
-                            .arms
-                            .iter()
-                            .filter(|arm| arm.exhaustive && arm.drawn.table == joined_table)
-                            .filter_map(move |arm| {
-                                let met = arm.drawn.under(arguments.as_deref())?;
-                                Some((&set.call, arm.drawn.as_ref(), met))
-                            })
-                    })
-                    .collect();
-                if arms.is_empty() {
-                    continue;
-                }
-                let stated;
-                let row = if same {
-                    conditions
-                } else {
-                    stated = self.stated(filters, from, position)?;
-                    stated.conditions.as_slice()
-                };
-                let clause = conjunction(row.to_vec());
-                for (members, drawn, met) in arms {
-                    if !self.implies_every(&clause, &met)? {
+        let mut found = Vec::new();
+        for condition in &filters.filter {
+            if let Some(select) = semi_join(condition) {
+                found.push(self.filters(select, &[], owners)?);
+            }
+        }
+        for scope in iter::once(filters).chain(&found) {
+            for from in scope.from {
+                for (position, joined) in relations(from).enumerate() {
+                    let same = ptr::eq(joined, relation);
+                    let Some(joined_table) = self.stored(joined)? else {
+                        continue;
+                    };
+                    if !same && !present(from, position) {
                         continue;
                     }
-                    let column = if same {
-                        Some(drawn.column.column_name())
+                    let arms: Vec<_> = sets
+                        .iter()
+                        .zip(&arguments)
+                        .flat_map(|(set, arguments)| {
+                            set.arms
+                                .arms
+                                .iter()
+                                .filter(|arm| arm.exhaustive && arm.drawn.table == joined_table)
+                                .filter_map(move |arm| {
+                                    let met = arm.drawn.under(arguments.as_deref())?;
+                                    Some((&set.call, arm.drawn.as_ref(), met))
+                                })
+                        })
+                        .collect();
+                    if arms.is_empty() {
+                        continue;
+                    }
+                    let stated;
+                    let row = if same {
+                        conditions
                     } else {
-                        equalities.of_relation(
-                            &Node::Column {
-                                factor: joined,
-                                name: Cow::Borrowed(drawn.column.column_name()),
-                            },
-                            relation,
-                        )
+                        stated = self.stated(scope, from, position)?;
+                        stated.conditions.as_slice()
                     };
-                    if let Some(column) = column
-                        && let Some(membership) = set_membership(column, members)
-                        && !witnessed.contains(&membership)
-                    {
-                        witnessed.push(membership);
+                    let clause = conjunction(row.to_vec());
+                    for (members, drawn, met) in arms {
+                        if !self.implies_every(&clause, &met)? {
+                            continue;
+                        }
+                        let column = if same {
+                            Some(drawn.column.column_name())
+                        } else {
+                            equalities.of_relation(
+                                &Node::Column {
+                                    factor: joined,
+                                    name: Cow::Borrowed(drawn.column.column_name()),
+                                },
+                                relation,
+                            )
+                        };
+                        if let Some(column) = column
+                            && let Some(membership) = set_membership(column, members)
+                            && !witnessed.contains(&membership)
+                        {
+                            witnessed.push(membership);
+                        }
                     }
                 }
             }
