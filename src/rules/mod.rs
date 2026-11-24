@@ -117,6 +117,8 @@ mod credential_support;
 mod cte_support;
 mod existence_oracle_support;
 mod expression_site_support;
+mod external_key_support;
+pub(crate) use external_key_support::unresolved_external_foreign_keys;
 mod function_body_support;
 mod function_reach_support;
 mod grant_support;

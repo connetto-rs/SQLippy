@@ -63,6 +63,61 @@ pub struct Deployment {
     clock_tolerance: Option<Duration>,
     vocabularies: Vec<Vocabulary>,
     cluster_bootstrap: Option<ClusterBootstrap>,
+    external_foreign_keys: Vec<ExternalForeignKey>,
+}
+
+/// A foreign key another party checks, such as the server a client replica
+/// syncs with, by the stored names of its tables and columns. No rule takes
+/// it for a key the database enforces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalForeignKey {
+    schema: String,
+    table: String,
+    columns: Vec<String>,
+    referenced_schema: String,
+    referenced_table: String,
+    referenced_columns: Vec<String>,
+}
+
+impl ExternalForeignKey {
+    /// Returns the stored schema and table names of the referencing table.
+    #[must_use]
+    pub fn host(&self) -> (&str, &str) {
+        (&self.schema, &self.table)
+    }
+
+    /// Returns the stored names of the referencing columns.
+    #[must_use]
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+
+    /// Returns the stored schema and table names of the referenced table.
+    #[must_use]
+    pub fn referenced(&self) -> (&str, &str) {
+        (&self.referenced_schema, &self.referenced_table)
+    }
+
+    /// Returns the stored names of the referenced columns.
+    #[must_use]
+    pub fn referenced_columns(&self) -> &[String] {
+        &self.referenced_columns
+    }
+}
+
+impl Display for ExternalForeignKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}.{} ({}) REFERENCES {}.{} ({})",
+            self.schema,
+            self.table,
+            self.columns.join(", "),
+            self.referenced_schema,
+            self.referenced_table,
+            self.referenced_columns.join(", ")
+        )
+    }
 }
 
 /// The entries of a list-valued fact, undeclared until an entry or the
@@ -568,6 +623,66 @@ impl Deployment {
             .iter()
             .find(|key| key.schema == schema && key.table == table)
             .map(|key| key.column.as_str())
+    }
+
+    /// Declares a foreign key another party checks, by the stored names of
+    /// the referencing schema, table and columns and of the referenced
+    /// schema, table and columns, such as a key a client replica's schema
+    /// omits because the server it syncs with checks it. A SQLite table
+    /// created without a database name sits in `main`.
+    ///
+    /// The key gives its columns their meaning as a reference, and never
+    /// counts as enforced, so rules reading the rows a local key keeps
+    /// consistent do not see it. Every table and column it names must be in
+    /// the schema the rules read.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlippy::prelude::*;
+    /// use sqlparser::dialect::SQLiteDialect;
+    ///
+    /// let replica = ParserDB::parse::<SQLiteDialect>(
+    ///     "CREATE TABLE invitations (id BLOB NOT NULL PRIMARY KEY);
+    ///      CREATE TABLE members (id BLOB NOT NULL PRIMARY KEY, invitation_id BLOB UNIQUE);",
+    /// )
+    /// .unwrap();
+    /// let mut constrainer: GenericConstrainer<ParserDB> = NullableUniqueColumn::default().into();
+    /// assert!(constrainer.validate_schema(&replica).is_err());
+    /// constrainer.set_deployment(Deployment::default().with_external_foreign_key(
+    ///     "main",
+    ///     "members",
+    ///     ["invitation_id"],
+    ///     "main",
+    ///     "invitations",
+    ///     ["id"],
+    /// ));
+    /// assert!(constrainer.validate_schema(&replica).is_ok());
+    /// ```
+    #[must_use]
+    pub fn with_external_foreign_key(
+        mut self,
+        schema: impl Into<String>,
+        table: impl Into<String>,
+        columns: impl IntoIterator<Item = impl Into<String>>,
+        referenced_schema: impl Into<String>,
+        referenced_table: impl Into<String>,
+        referenced_columns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.external_foreign_keys.push(ExternalForeignKey {
+            schema: schema.into(),
+            table: table.into(),
+            columns: columns.into_iter().map(Into::into).collect(),
+            referenced_schema: referenced_schema.into(),
+            referenced_table: referenced_table.into(),
+            referenced_columns: referenced_columns.into_iter().map(Into::into).collect(),
+        });
+        self
+    }
+
+    /// Returns the declared external foreign keys.
+    pub fn external_foreign_keys(&self) -> impl Iterator<Item = &ExternalForeignKey> {
+        self.external_foreign_keys.iter()
     }
 
     /// Declares a column whose value, once set, is never cleared back to

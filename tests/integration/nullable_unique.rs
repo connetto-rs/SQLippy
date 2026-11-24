@@ -3,7 +3,7 @@
 //! holding `NULL` and `UNIQUE NULLS NOT DISTINCT` refused the second.
 
 use sqlippy::prelude::*;
-use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::dialect::{PostgreSqlDialect, SQLiteDialect};
 
 /// Level and message of every finding of the rule.
 fn findings<C: Constrainer<Database = ParserDB>>(
@@ -82,4 +82,119 @@ fn the_rule_is_pedantic() {
     assert_eq!(findings(&constrainer, sql), Vec::<(Level, String)>::new());
     constrainer.set_group_level(LintGroup::Pedantic, Level::Warn);
     assert_eq!(findings(&constrainer, sql).len(), 1);
+}
+
+const REPLICA: &str = "CREATE TABLE invitations (organization_id BLOB NOT NULL, id BLOB NOT NULL,
+    PRIMARY KEY (organization_id, id));
+  CREATE TABLE memberships (organization_id BLOB NOT NULL, user_id BLOB NOT NULL,
+    invitation_id BLOB UNIQUE, PRIMARY KEY (organization_id, user_id));
+  CREATE TABLE loose (organization_id BLOB, invitation_id BLOB UNIQUE);";
+
+/// The deployment declaring that another party checks
+/// `table (organization_id, invitation_id)` against
+/// `invitations (organization_id, id)`.
+fn checked_elsewhere(table: &str) -> Deployment {
+    Deployment::default().with_external_foreign_key(
+        "main",
+        table,
+        ["organization_id", "invitation_id"],
+        "main",
+        "invitations",
+        ["organization_id", "id"],
+    )
+}
+
+/// Every diagnostic of the rule on the SQLite `schema` under `deployment`.
+fn replica_diagnostics(deployment: Deployment, schema: &str) -> Vec<Error<ParserDB>> {
+    let database = ParserDB::parse::<SQLiteDialect>(schema).expect("schema parses");
+    let mut constrainer = GenericConstrainer::from(NullableUniqueColumn::default());
+    constrainer.set_deployment(deployment);
+    constrainer.diagnostics(&database)
+}
+
+/// The tables the rule reports on the SQLite `REPLICA` under `deployment`,
+/// sorted.
+fn reported_tables(deployment: Deployment) -> Vec<String> {
+    let mut tables: Vec<String> = replica_diagnostics(deployment, REPLICA)
+        .into_iter()
+        .map(|error| match error {
+            Error::Violation(violation) => match violation.location() {
+                Location::Table(table) => table.table_name().to_owned(),
+                other => panic!("unexpected location: {other:?}"),
+            },
+            other => panic!("unexpected failure: {other}"),
+        })
+        .collect();
+    tables.sort_unstable();
+    tables
+}
+
+#[test]
+fn an_external_optional_reference_is_not_reported() {
+    assert_eq!(
+        reported_tables(Deployment::default()),
+        ["loose", "memberships"]
+    );
+    assert_eq!(reported_tables(checked_elsewhere("memberships")), ["loose"]);
+}
+
+#[test]
+fn an_external_key_with_two_nullable_columns_excuses_neither() {
+    assert_eq!(
+        reported_tables(checked_elsewhere("loose")),
+        ["loose", "memberships"]
+    );
+}
+
+#[test]
+fn an_external_key_naming_what_the_schema_lacks_is_an_error() {
+    let cases = [
+        (
+            checked_elsewhere("members"),
+            "names table 'main.members', which the schema lacks",
+        ),
+        (
+            Deployment::default().with_external_foreign_key(
+                "main",
+                "memberships",
+                ["organization_id", "invite_id"],
+                "main",
+                "invitations",
+                ["organization_id", "id"],
+            ),
+            "names column 'invite_id', which 'main.memberships' lacks",
+        ),
+        (
+            Deployment::default().with_external_foreign_key(
+                "main",
+                "memberships",
+                ["organization_id", "invitation_id"],
+                "main",
+                "invitations",
+                ["organization_id", "invitation_id"],
+            ),
+            "names column 'invitation_id', which 'main.invitations' lacks",
+        ),
+        (
+            Deployment::default().with_external_foreign_key(
+                "main",
+                "memberships",
+                ["organization_id", "invitation_id"],
+                "main",
+                "invitations",
+                ["id"],
+            ),
+            "has 2 columns referencing 1",
+        ),
+    ];
+    for (deployment, problem) in cases {
+        let diagnostics = replica_diagnostics(deployment, REPLICA);
+        let [Error::UnresolvedForeignKey(unresolved), ..] = diagnostics.as_slice() else {
+            panic!("expected an unresolved foreign key first, got {diagnostics:#?}");
+        };
+        assert!(
+            unresolved.to_string().ends_with(problem),
+            "{unresolved} does not end with {problem}"
+        );
+    }
 }

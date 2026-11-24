@@ -16,6 +16,7 @@ use crate::{
         SchemaAllowance, StatementAllowance,
     },
     lint::{Level, LintGroup, RegisteredRule, Rule, RuleKind, RuleMetadata},
+    rules::unresolved_external_foreign_keys,
     traits::{
         ColumnRule, Constrainer, ForeignKeyRule, FunctionRule, QueryRule, Reporter, SchemaRule,
         ScriptRule, TableRule,
@@ -420,6 +421,14 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             functions: &self.function_allowances,
             functions_used: vec![false; self.function_allowances.len()],
         };
+        match unresolved_external_foreign_keys(database, deployment) {
+            Ok(unresolved) => {
+                for key in unresolved {
+                    sink(Error::UnresolvedForeignKey(Box::new(key)))?;
+                }
+            }
+            Err(error) => sink(Error::Lookup(error))?,
+        }
         for table in database.tables() {
             for entry in enabled(&self.tables, deployment, engine) {
                 run.check(entry.rule.metadata(), entry.level, sink, |reporter| {

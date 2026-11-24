@@ -298,7 +298,10 @@ fn a_lookup_failure_is_reported_and_independent_checks_continue() {
         .iter()
         .filter_map(|error| match error {
             Error::Violation(violation) => Some(violation.object()),
-            Error::Lookup(_) | Error::UnusedAllowance(_) | Error::Inactive(_) => None,
+            Error::Lookup(_)
+            | Error::UnusedAllowance(_)
+            | Error::Inactive(_)
+            | Error::UnresolvedForeignKey(_) => None,
         })
         .collect();
     flagged.sort_unstable();

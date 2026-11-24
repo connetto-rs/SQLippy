@@ -13,12 +13,12 @@ pub mod prelude {
     pub use sql_traits::prelude::*;
 
     pub use crate::{
-        deployment::{Declaration, Deployment, WriteEvent},
+        deployment::{Declaration, Deployment, ExternalForeignKey, WriteEvent},
         engine::Engine,
         error::{
             Allowance, AllowedObject, Error, FunctionAllowance, InactiveRule, Interruption,
             Location, PolicyClause, PolicySite, SchemaAllowance, StatementAllowance, StatementSite,
-            Violation,
+            UnresolvedForeignKey, Violation,
         },
         lint::{
             Basis, Level, LintGroup, RegisteredRule, Rule, RuleExample, RuleKind, RuleMetadata,
