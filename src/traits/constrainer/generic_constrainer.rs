@@ -421,13 +421,10 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             functions: &self.function_allowances,
             functions_used: vec![false; self.function_allowances.len()],
         };
-        match unresolved_external_foreign_keys(database, deployment) {
-            Ok(unresolved) => {
-                for key in unresolved {
-                    sink(Error::UnresolvedForeignKey(Box::new(key)))?;
-                }
-            }
-            Err(error) => sink(Error::Lookup(error))?,
+        for unresolved in unresolved_external_foreign_keys(database, deployment) {
+            sink(unresolved.map_or_else(Error::Lookup, |key| {
+                Error::UnresolvedForeignKey(Box::new(key))
+            }))?;
         }
         for table in database.tables() {
             for entry in enabled(&self.tables, deployment, engine) {

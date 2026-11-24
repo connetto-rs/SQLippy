@@ -75,21 +75,20 @@ fn problem<DB: DatabaseLike>(
 }
 
 /// The declared external foreign keys naming a table or column `database`
-/// lacks, in declaration order.
-pub(crate) fn unresolved_external_foreign_keys<DB: DatabaseLike>(
-    database: &DB,
-    deployment: &Deployment,
-) -> Result<Vec<UnresolvedForeignKey>, LookupError> {
-    let mut unresolved = Vec::new();
-    for key in deployment.external_foreign_keys() {
-        if let Some(problem) = problem(database, key)? {
-            unresolved.push(UnresolvedForeignKey {
+/// lacks, in declaration order, with the lookup failure of any key whose
+/// resolution failed in its place.
+pub(crate) fn unresolved_external_foreign_keys<'run, DB: DatabaseLike>(
+    database: &'run DB,
+    deployment: &'run Deployment,
+) -> impl Iterator<Item = Result<UnresolvedForeignKey, LookupError>> + 'run {
+    deployment.external_foreign_keys().filter_map(|key| {
+        problem(database, key).transpose().map(|problem| {
+            problem.map(|problem| UnresolvedForeignKey {
                 key: key.clone(),
                 problem,
-            });
-        }
-    }
-    Ok(unresolved)
+            })
+        })
+    })
 }
 
 /// The host columns of every declared external foreign key of `table` that
