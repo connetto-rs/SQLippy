@@ -13,12 +13,12 @@ fn messages(sql: &str) -> Vec<String> {
 }
 
 #[test]
-fn nullable_opposing_checks_name_both_expressions() {
+fn nullable_opposing_checks_name_both_expressions_and_the_forced_column() {
     let messages = messages("CREATE TABLE measurements (y INT CHECK (y > 0) CHECK (y < 0));");
     assert_eq!(messages.len(), 1);
     assert!(messages[0].contains("y > 0"));
     assert!(messages[0].contains("y < 0"));
-    assert!(messages[0].contains("NULL"));
+    assert!(messages[0].contains("'y'"));
 }
 
 #[test]
@@ -41,8 +41,59 @@ fn shrinking_names_only_the_contradictory_subset() {
 }
 
 #[test]
-fn nullable_guards_on_different_columns_are_reported() {
-    assert_eq!(messages("CREATE TABLE measurements (a INT, b INT, c INT, CHECK (a IS NULL OR c > 0), CHECK (b IS NULL OR c < 0));").len(), 1);
+fn checks_keeping_optional_columns_apart_are_clean() {
+    for sql in [
+        "CREATE TABLE parameters (value_kind TEXT NOT NULL CHECK (value_kind IN ('text', 'boolean')), default_text TEXT, default_boolean BOOLEAN, CHECK (default_text IS NULL OR value_kind = 'text'), CHECK (default_boolean IS NULL OR value_kind = 'boolean'));",
+        "CREATE TABLE measurements (a INT, b INT, c INT, CHECK (a IS NULL OR c > 0), CHECK (b IS NULL OR c < 0));",
+    ] {
+        assert!(messages(sql).is_empty(), "{sql}");
+    }
+}
+
+#[test]
+fn guarded_checks_forcing_a_column_null_name_it() {
+    let messages = messages(
+        "CREATE TABLE measurements (y INT, CHECK (y IS NULL OR y > 0), CHECK (y IS NULL OR y < 0));",
+    );
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].contains("'y'"));
+}
+
+#[test]
+fn columns_forced_by_the_same_checks_share_one_finding() {
+    let messages = messages(
+        "CREATE TABLE measurements (y INT, z INT, CHECK (y > 0 AND z > 0), CHECK (y < 0 AND z < 0));",
+    );
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("'y'"));
+    assert!(messages[0].contains("'z'"));
+}
+
+#[test]
+fn opposing_comparisons_between_columns_are_reported() {
+    let messages =
+        messages("CREATE TABLE measurements (y INT, z INT, CHECK (y > z), CHECK (y < z));");
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].contains("y > z"));
+    assert!(messages[0].contains("y < z"));
+}
+
+#[test]
+fn a_forced_column_and_an_independent_contradiction_are_both_reported() {
+    let messages = messages(
+        "CREATE TABLE measurements (y INT, p INT, q INT, CHECK (y > 0), CHECK (y < 0), CHECK (p > q), CHECK (p < q));",
+    );
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("'y'") && !message.contains("p > q"))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("p > q") && !message.contains("y > 0"))
+    );
 }
 
 #[test]
