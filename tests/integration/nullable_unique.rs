@@ -196,5 +196,6 @@ fn an_external_key_naming_what_the_schema_lacks_is_an_error() {
             unresolved.to_string().ends_with(problem),
             "{unresolved} does not end with {problem}"
         );
+        assert_eq!(unresolved.key().referenced(), ("main", "invitations"));
     }
 }
