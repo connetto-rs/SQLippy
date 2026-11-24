@@ -6,11 +6,11 @@ use sql_traits::traits::DatabaseLike;
 use crate::{
     lint::Level,
     rules::{
-        AddressStoredAsText, AliasShadowedByColumn, ArrayMembershipPolicy, AssignmentConjunction,
-        AuthorityAttributeWritableBelowThreshold, AuthorizationInTrigger, AutovacuumDisabledTable,
-        BeforeTriggerWritesOtherTable, BinarySendFailure, BlankPaddedCharacter,
-        BooleanStateWithoutTime, CascadeIntoRowLevelSecurityTable, CaseSensitiveEmail,
-        CatalogNameAsText, ChildWithoutRowLevelSecurity, ClientChosenTimestamp,
+        AddressStoredAsText, AliasShadowedByColumn, AlwaysRaisingExpression, ArrayMembershipPolicy,
+        AssignmentConjunction, AuthorityAttributeWritableBelowThreshold, AuthorizationInTrigger,
+        AutovacuumDisabledTable, BeforeTriggerWritesOtherTable, BinarySendFailure,
+        BlankPaddedCharacter, BooleanStateWithoutTime, CascadeIntoRowLevelSecurityTable,
+        CaseSensitiveEmail, CatalogNameAsText, ChildWithoutRowLevelSecurity, ClientChosenTimestamp,
         ClientRoleBypassesRowLevelSecurity, ClientWrittenCounterKey, ClientWrittenScaledNumeric,
         ClosedSetAsText, ConditionalCreationWithoutTrustedSchema, ConstantColumnNotGenerated,
         ContradictoryChecks, CopiedColumnThroughSuperkey, CorrelatedPolicySubquery,
@@ -193,7 +193,8 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 62] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 63] = [
+        Box::new(AlwaysRaisingExpression::default()),
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
         Box::new(DuplicateIndex::default()),

@@ -8,6 +8,7 @@ mod live_catalog;
 mod rule_examples;
 mod rule_findings;
 
+mod always_raising_expressions;
 mod assignment_conjunctions;
 mod authority_attribute_write_thresholds;
 mod authorization_in_triggers;
