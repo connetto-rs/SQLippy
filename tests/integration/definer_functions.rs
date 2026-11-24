@@ -570,6 +570,26 @@ fn a_filter_term_reading_the_role_or_path_as_the_owner_confines_nothing() {
 }
 
 #[test]
+fn a_filter_term_calling_a_volatile_builtin_confines_nothing() {
+    assert_eq!(
+        exposed_to_app(
+            "CREATE TABLE notes (id INT, author TEXT, weight DOUBLE PRECISION, seen TIMESTAMPTZ);
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON notes TO app;
+             CREATE POLICY sampled_notes ON notes FOR SELECT TO app USING (weight > random());
+             CREATE POLICY current_notes ON notes FOR SELECT TO app USING (seen > now());
+             CREATE FUNCTION sampled_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note WHERE note.weight > random() $$;
+             CREATE FUNCTION current_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note WHERE note.seen > now() $$;",
+        ),
+        ["sampled_note_ids()"]
+    );
+}
+
+#[test]
 fn a_table_alias_renaming_its_columns_confines_nothing() {
     assert_eq!(
         exposed_to_app(

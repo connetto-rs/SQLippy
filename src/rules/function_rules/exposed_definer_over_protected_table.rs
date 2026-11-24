@@ -102,13 +102,14 @@ use crate::{
 /// `NULL` for a `NULL` argument, since no declaration states it. A column of
 /// the same name hides the parameter, as in PostgreSQL. Only filter terms
 /// that read alike for the caller and the owner count. Such a term reads no
-/// role, no privilege and no search path, reads only stored tables without
-/// row-level security of which every caller may select every column, and
-/// calls a function running as its caller only when that function is one
-/// `LANGUAGE sql` query, not `VOLATILE`, setting its own `search_path` and
-/// no other parameter, that every caller may execute and whose body reads
-/// alike in turn. A table read under an alias renaming its columns confines
-/// nothing.
+/// role, no privilege and no search path, calls no `VOLATILE` built-in such
+/// as `random()`, which the policy evaluates anew, reads only stored tables
+/// without row-level security of which every caller may select every
+/// column, and calls a function running as its caller only when that
+/// function is one `LANGUAGE sql` query, not `VOLATILE`, setting its own
+/// `search_path` and no other parameter, that every caller may execute and
+/// whose body reads alike in turn. A table read under an alias renaming its
+/// columns confines nothing.
 /// Every function of the schema the body calls is held to the same test,
 /// except a `SECURITY DEFINER` function every caller may execute directly,
 /// which this rule judges on its own. Functions in `pg_catalog` are trusted.
@@ -934,17 +935,22 @@ impl<'r, 'a, DB: DatabaseLike> CallerBound<'r, 'a, DB> {
     }
 
     /// Whether `call` may reach a function of the schema that runs as its
-    /// caller and may return otherwise for the caller than for the owner.
-    fn runs_as_caller<'c>(
+    /// caller and may return otherwise for the caller than for the owner, or
+    /// a `VOLATILE` built-in such as `random()`, which a policy repeating the
+    /// term evaluates anew.
+    fn evaluates_otherwise<'c>(
         &mut self,
         call: impl Into<WrittenCall<'c>>,
     ) -> Result<bool, LookupError> {
         let database = self.confinement.database;
         for function in database.functions_reached_by(call, IdentifierCase::Folded)? {
-            if function.target_name().schema() != Some("pg_catalog")
-                && function.security_mode() != FunctionSecurity::Definer
-                && !self.invoked_alike(function)?
-            {
+            let otherwise = if function.target_name().schema() == Some("pg_catalog") {
+                function.volatility() == FunctionBehavior::Volatile
+            } else {
+                function.security_mode() != FunctionSecurity::Definer
+                    && !self.invoked_alike(function)?
+            };
+            if otherwise {
                 return Ok(true);
             }
         }
@@ -1036,7 +1042,7 @@ impl<DB: DatabaseLike> Visitor for CallerBound<'_, '_, DB> {
         if is_role_read(expression) || reads_session_state(call) {
             return ControlFlow::Break(None);
         }
-        Self::verdict(self.runs_as_caller(call))
+        Self::verdict(self.evaluates_otherwise(call))
     }
 
     fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
@@ -1047,7 +1053,7 @@ impl<DB: DatabaseLike> Visitor for CallerBound<'_, '_, DB> {
             return Self::verdict(self.reads_otherwise(name));
         }
         WrittenCall::relation(factor).map_or(ControlFlow::Continue(()), |call| {
-            Self::verdict(self.runs_as_caller(call))
+            Self::verdict(self.evaluates_otherwise(call))
         })
     }
 }
