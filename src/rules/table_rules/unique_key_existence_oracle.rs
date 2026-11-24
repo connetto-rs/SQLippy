@@ -65,14 +65,15 @@ rule_definition!(
     /// no `BEFORE UPDATE` row trigger of the other table may change the
     /// write, nor a `BEFORE DELETE` one the deletion. After a deletion, no
     /// client role may insert into the other table. Where client roles can
-    /// both insert into the other table and delete or truncate its rows, one
-    /// statement could remove a named row and insert it again in its
-    /// original state, so the excuse then also needs the naming column to be
-    /// unique and a foreign key from the key column onto it with `ON DELETE
-    /// RESTRICT`, `CASCADE` or `SET NULL`, since `NO ACTION` accepts the
-    /// re-created row at the end of the statement. A function a client calls
-    /// that writes the other table is not followed. A unique key over an
-    /// expression is not checked. The rule does not run on SQLite.
+    /// insert into the other table, the naming column must be unique, since
+    /// a second row could name the key again. Where they can also delete or
+    /// truncate its rows, one statement could remove a named row and insert
+    /// it again in its original state, so the excuse then also needs a
+    /// foreign key from the key column onto the naming column with `ON
+    /// DELETE RESTRICT`, `CASCADE` or `SET NULL`, since `NO ACTION` accepts
+    /// the re-created row at the end of the statement. A function a client
+    /// calls that writes the other table is not followed. A unique key over
+    /// an expression is not checked. The rule does not run on SQLite.
     ///
     /// # Example
     ///
