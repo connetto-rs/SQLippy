@@ -1139,10 +1139,11 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     resolver,
                     equalities,
                     mut conditions,
+                    caller_bound,
                     ..
                 } = self.stated(&filters, from, position)?;
                 let mut drawn = Vec::new();
-                for condition in &conditions {
+                for condition in conditions.iter().chain(&caller_bound) {
                     drawn.extend(self.drawn_condition(table, condition, &conditions)?);
                 }
                 conditions.extend(drawn);
@@ -1230,21 +1231,28 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         let dropping = filters.dropping(&resolver, position);
         let equalities = Equalities::of(&resolver, &dropping, position)?;
         let mut conditions = Vec::new();
+        let mut caller_bound = Vec::new();
         let mut whole = true;
         for &(clause, conjunct) in &dropping {
-            match renamed(conjunct, |reference| {
+            let stated = renamed(conjunct, |reference| {
                 term(&resolver, reference, relation, &equalities)
-            }) {
+            });
+            match stated {
                 Some(stated) if self.body.confinement.reads_alike(conjunct)? => {
                     conditions.push(stated);
                 }
-                _ => whole &= !matches!(clause, Clause::Where),
+                Some(stated) => {
+                    caller_bound.push(stated);
+                    whole &= !matches!(clause, Clause::Where);
+                }
+                None => whole &= !matches!(clause, Clause::Where),
             }
         }
         Ok(Stated {
             resolver,
             equalities,
             conditions,
+            caller_bound,
             whole,
         })
     }
@@ -1568,6 +1576,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     equalities,
                     conditions,
                     whole: stated,
+                    ..
                 } = self.stated(&filters, from, position)?;
                 if let Some(Term::Column(name)) = term(&resolver, projected, relation, &equalities)
                     && let Some(column) =
@@ -2214,6 +2223,11 @@ struct Stated<'r, 'q, 'a, DB: DatabaseLike> {
     /// The filters, over the stored names of the relation's columns, that
     /// evaluate alike for every role.
     conditions: Vec<Expr>,
+    /// The other filters over those names, which may evaluate otherwise for
+    /// a caller than for the owner. A row such a filter tests against the
+    /// set of a function still meets the conditions the function draws the
+    /// set under.
+    caller_bound: Vec<Expr>,
     /// Whether `conditions` states every conjunct of the `WHERE`.
     whole: bool,
 }

@@ -2963,6 +2963,48 @@ fn a_row_drawn_through_helpers_returning_an_out_column_keeps_its_conditions() {
 }
 
 #[test]
+fn a_row_drawn_through_invoker_helpers_keeps_their_conditions() {
+    let reported = |condition: &str, tested: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "CREATE ROLE app NOLOGIN;
+                 CREATE SCHEMA authz;
+                 CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL,
+                   hidden BOOLEAN NOT NULL);
+                 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+                 GRANT SELECT ON resources TO app;
+                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+                 CREATE POLICY readable_resources ON resources FOR SELECT TO app USING (NOT hidden);
+                 CREATE FUNCTION authz.listed() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource WHERE {condition} $$;
+                 CREATE FUNCTION authz.visible_ids() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT listed.id FROM authz.listed() listed (id) $$;
+                 CREATE FUNCTION authz.organizations_reaching() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.organization_id FROM public.resources resource
+                     WHERE resource.id IN (SELECT authz.{tested}()) $$;"
+            ),
+        )
+    };
+    for tested in ["listed", "visible_ids"] {
+        assert_eq!(
+            reported("NOT resource.hidden", tested),
+            Vec::<String>::new(),
+            "{tested}"
+        );
+        assert_eq!(
+            reported("resource.organization_id > 0", tested),
+            ["organizations_reaching()"],
+            "{tested}"
+        );
+    }
+}
+
+#[test]
 fn a_helper_passed_one_label_spelled_two_ways_yields_one_set() {
     assert_eq!(
         exposed_through_ladder(
