@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.104"
+version = "1.0.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+checksum = "2cb931c189b85683d69a5cfad41d4d418671e1ac413dd209f3f2fc31e3cfd902"
 
 [[package]]
 name = "ar_archive_writer"
@@ -471,7 +471,7 @@ checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
 [[package]]
 name = "diesel"
 version = "2.4.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#f1f894d90c78b3fd216e70079e5597c6185c99cc"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#f354e06688811191f73342f452639380c9ae59a8"
 dependencies = [
  "bigdecimal",
  "bitflags",
@@ -481,7 +481,7 @@ dependencies = [
  "downcast-rs",
  "ipnetwork",
  "itoa",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "libc",
  "num-bigint",
  "num-integer",
@@ -497,7 +497,7 @@ dependencies = [
 [[package]]
 name = "diesel_attribute_parser"
 version = "0.1.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#f1f894d90c78b3fd216e70079e5597c6185c99cc"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#f354e06688811191f73342f452639380c9ae59a8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -507,7 +507,7 @@ dependencies = [
 [[package]]
 name = "diesel_derives"
 version = "2.4.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#f1f894d90c78b3fd216e70079e5597c6185c99cc"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#f354e06688811191f73342f452639380c9ae59a8"
 dependencies = [
  "diesel_attribute_parser",
  "diesel_table_macro_syntax",
@@ -520,7 +520,7 @@ dependencies = [
 [[package]]
 name = "diesel_table_macro_syntax"
 version = "0.4.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#f1f894d90c78b3fd216e70079e5597c6185c99cc"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#f354e06688811191f73342f452639380c9ae59a8"
 dependencies = [
  "syn 3.0.10",
 ]
@@ -566,7 +566,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 [[package]]
 name = "dsl_auto_type"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#f1f894d90c78b3fd216e70079e5597c6185c99cc"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#f354e06688811191f73342f452639380c9ae59a8"
 dependencies = [
  "darling",
  "either",
@@ -601,7 +601,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -899,9 +899,9 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hyper"
-version = "1.12.0"
+version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c"
+checksum = "229c6ff5584df4c6becbfe00567128bac768c8cd32ebc8a8366bd81ed072e8f3"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -1216,12 +1216,12 @@ dependencies = [
 
 [[package]]
 name = "jiff"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5e77cbfb9fff4798e283c2d69dff39fc2c45e7da017e5ce95b654e46ea41236"
+checksum = "107f2e89536b6818514025f6787b0d94d819e54fe3b40365275fc753de485b3f"
 dependencies = [
- "jiff-core 1.0.1",
- "jiff-static 1.0.2",
+ "jiff-core 1.0.2",
+ "jiff-static 1.0.3",
  "jiff-tzdb-platform 1.0.0",
  "log",
  "portable-atomic",
@@ -1241,9 +1241,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6b46a105a9874634dd96231021526bf24ca04955a5998c59a9c7666e634b7b8"
+checksum = "d44c923edf2bf456a982253f1a9ee1f6e89e421dffd0065d9b9a581da0def58f"
 dependencies = [
  "log",
 ]
@@ -1262,11 +1262,11 @@ dependencies = [
 
 [[package]]
 name = "jiff-static"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9067a0b23e5be3147d56b2dcf652b18e6b1364caca93fb157653b6fbcab23a9"
+checksum = "4996f71e569e3a3e32b925c28ef8f0027dc30bb1d594b33eeda409eea185f5c8"
 dependencies = [
- "jiff-core 1.0.1",
+ "jiff-core 1.0.2",
  "proc-macro2",
  "quote",
  "syn 3.0.10",
@@ -1747,9 +1747,9 @@ checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
 name = "pq-sys"
-version = "0.7.8"
+version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "297a95d6f2378891f949d9556723e15140e50d29eac07458dabcee8688995b1d"
+checksum = "b3bc77e8957fcd07d9768dc26486b07e39339693e21d3c5564be908ef6911540"
 dependencies = [
  "libc",
  "pkg-config",
@@ -2003,7 +2003,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2220,7 +2220,7 @@ dependencies = [
  "indexmap 1.9.3",
  "indexmap 2.14.2",
  "jiff 0.2.46",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "schemars 0.9.0",
  "schemars 1.2.3",
  "serde_core",
@@ -2293,7 +2293,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#4c054147b99cb6e48acff2ba5b18bd5ba4df55ec"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#9cbf89091fb26ee76f2cf382d6090937bf4a13b6"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -2361,7 +2361,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-expr-eval"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#1ec72234469ef6b0ab3ca24c871574409f6fd054"
+source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#3ab3cb68cdcd94ea8356c8d90da97bfb54a52d5b"
 dependencies = [
  "rpds",
  "sql-values",
@@ -2397,7 +2397,7 @@ checksum = "858cea190fe7555971c35a5eb336858f1bf962a2bd7ceb8704fb1759b36af2cd"
 [[package]]
 name = "sqlstate"
 version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#f1f894d90c78b3fd216e70079e5597c6185c99cc"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#f354e06688811191f73342f452639380c9ae59a8"
 
 [[package]]
 name = "stable_deref_trait"
