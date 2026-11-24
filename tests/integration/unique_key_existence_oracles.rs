@@ -334,7 +334,7 @@ fn a_key_an_update_guarded_by_its_own_filter_consumes_is_clean() {
         vec![keyed("id = NEW.invitation_id AND NOT accepted")],
         vec![keyed("NOT accepted AND invitations.id = NEW.invitation_id")],
         vec![
-            pending_by,
+            pending_by.clone(),
             stamping,
             keyed("id = NEW.invitation_id AND accepted_by IS NULL"),
         ],
@@ -350,6 +350,21 @@ fn a_key_an_update_guarded_by_its_own_filter_consumes_is_clean() {
             update,
             format!("IF NEW.invitation_id IS NULL THEN RETURN NULL; END IF; {update}"),
         )],
+        vec![
+            (
+                "accepted_by INT);",
+                "accepted_by INT, accepted_at TIMESTAMPTZ);".to_owned(),
+            ),
+            ("AND NOT accepted", "AND accepted_at IS NULL".to_owned()),
+            ("SET accepted = true", "SET accepted_at = now()".to_owned()),
+        ],
+        vec![
+            pending_by,
+            (
+                "SET accepted = true",
+                "SET accepted_by = current_setting('app.user_id')::int".to_owned(),
+            ),
+        ],
     ] {
         assert!(!reports_invitation_key(&edits), "{edits:?}");
     }
@@ -379,6 +394,14 @@ fn a_key_an_update_skips_while_the_check_admits_it_is_reported() {
             update,
             format!("IF NEW.nickname IS NOT NULL THEN {update} END IF;"),
         )],
+        vec![
+            ("AND NOT accepted", "AND accepted_by IS NULL".to_owned()),
+            (
+                "SET accepted = true",
+                "SET accepted_by = NULLIF(current_setting('app.user_id')::int, NEW.user_id)"
+                    .to_owned(),
+            ),
+        ],
     ] {
         assert!(reports_invitation_key(&edits), "{edits:?}");
     }
