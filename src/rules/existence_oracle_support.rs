@@ -423,26 +423,6 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// rows a consumption leaves rejected by the arm's filters once a row
     /// holds their key.
     fn excludes_held(&self, conjunct: &Expr) -> Result<bool, LookupError> {
-        if let Some(([item], set)) = membership(conjunct)
-            && let Some(position) = self.key_position(item)
-            && let Expr::Function(call) = set.as_ref()
-        {
-            let called: Vec<&DB::Function> = self
-                .database
-                .functions_reached_by(call, IdentifierCase::Folded)?
-                .collect();
-            return Ok(match called.as_slice() {
-                [function] if function.returns_set() => {
-                    match self.helper_body_arms(function, Reader::Writer)? {
-                        Some(arms) if arms.iter().all(|arm| arm.outputs.len() == 1) => {
-                            self.arms_exclude_held(position, 0, &arms)?
-                        }
-                        _ => false,
-                    }
-                }
-                _ => false,
-            });
-        }
         let Some(helper) = self.helper_arms(conjunct)? else {
             return Ok(false);
         };
@@ -1222,9 +1202,11 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         })
     }
 
-    /// The arms of the helper `clause` reads the written key from, as
-    /// `(items) IN (SELECT ... FROM helper() alias)` over one call to a
-    /// set-returning `LANGUAGE sql` function, cached by the clause.
+    /// The arms of the helper `clause` reads the written key from, cached by
+    /// the clause. The clause draws one column from a call to a
+    /// set-returning `LANGUAGE sql` function, as `column IN (SELECT
+    /// helper())` or `column = ANY (ARRAY(SELECT helper()))`, or draws
+    /// `(items) IN (SELECT ... FROM helper() alias)` over one such call.
     fn helper_arms(&self, clause: &Expr) -> Result<Option<Rc<HelperArms<'a, DB>>>, LookupError> {
         let address: *const Expr = clause;
         if let Some(cached) = self.helpers.borrow().get(&address) {
@@ -1237,6 +1219,27 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
 
     /// [`Self::helper_arms`] uncached.
     fn read_helper_arms(&self, clause: &Expr) -> Result<Option<HelperArms<'a, DB>>, LookupError> {
+        if let Some(([item], set)) = membership(clause)
+            && let Expr::Function(call) = set.as_ref()
+        {
+            let Some(function) = self
+                .sole_function(call)?
+                .filter(|function| function.returns_set())
+            else {
+                return Ok(None);
+            };
+            return Ok(self
+                .helper_body_arms(function, Reader::Writer)?
+                .filter(|arms| arms.iter().all(|arm| arm.outputs.len() == 1))
+                .map(|arms| HelperArms {
+                    positions: self
+                        .key_columns
+                        .iter()
+                        .map(|column| names_cast_column(item, column).then_some(0))
+                        .collect(),
+                    arms,
+                }));
+        }
         let Expr::In {
             expr,
             target: InTarget::Subquery(query),

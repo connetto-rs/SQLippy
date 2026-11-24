@@ -1360,3 +1360,132 @@ fn a_key_whose_matchable_rows_no_reverse_key_covers_is_reported() {
         ["ownables.ownables_resource"]
     );
 }
+
+const RUNS: &str = "CREATE ROLE app;
+    CREATE ROLE authz_owner;
+    CREATE SCHEMA authz;
+    CREATE TABLE organization_blocks (organization_id UUID NOT NULL, principal_id UUID NOT NULL,
+      PRIMARY KEY (organization_id, principal_id));
+    ALTER TABLE organization_blocks ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE organization_blocks FORCE ROW LEVEL SECURITY;
+    CREATE TABLE resources (id UUID PRIMARY KEY, organization_id UUID NOT NULL,
+      UNIQUE (organization_id, id));
+    ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE resources FORCE ROW LEVEL SECURITY;
+    CREATE TABLE grants (resource_id UUID NOT NULL REFERENCES resources (id), grantee_id UUID NOT NULL,
+      role TEXT NOT NULL, PRIMARY KEY (resource_id, grantee_id));
+    ALTER TABLE grants ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE grants FORCE ROW LEVEL SECURITY;
+    CREATE FUNCTION authz.caller_id() RETURNS UUID LANGUAGE sql STABLE
+      SET search_path = pg_catalog, pg_temp AS $$ SELECT current_setting('app.user_id')::uuid $$;
+    CREATE FUNCTION authz.blocking_organizations() RETURNS SETOF UUID
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+      SELECT block.organization_id FROM public.organization_blocks block
+      WHERE block.principal_id = authz.caller_id() $$;
+    CREATE FUNCTION authz.readable_resources() RETURNS SETOF UUID
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+      SELECT resource.id FROM public.resources resource
+      WHERE resource.id IN (SELECT grant_row.resource_id FROM public.grants grant_row
+          WHERE grant_row.grantee_id = authz.caller_id())
+        AND NOT (resource.organization_id = ANY (ARRAY(SELECT authz.blocking_organizations()))) $$;
+    ALTER FUNCTION authz.blocking_organizations() OWNER TO authz_owner;
+    ALTER FUNCTION authz.readable_resources() OWNER TO authz_owner;
+    REVOKE EXECUTE ON FUNCTION authz.blocking_organizations(), authz.readable_resources() FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION authz.blocking_organizations(), authz.readable_resources() TO app;
+    GRANT SELECT ON organization_blocks, resources, grants TO authz_owner;
+    CREATE POLICY resources_select ON resources FOR SELECT TO app
+      USING (id = ANY (ARRAY(SELECT authz.readable_resources())));
+    CREATE POLICY resources_blocked ON resources AS RESTRICTIVE FOR ALL TO app
+      USING (NOT (organization_id = ANY (ARRAY(SELECT authz.blocking_organizations()))));
+    CREATE TABLE templates (id UUID PRIMARY KEY, organization_id UUID NOT NULL,
+      FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id));
+    ALTER TABLE templates ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE templates FORCE ROW LEVEL SECURITY;
+    CREATE POLICY templates_select ON templates FOR SELECT TO app
+      USING (id = ANY (ARRAY(SELECT authz.readable_resources())));
+    CREATE POLICY templates_blocked ON templates AS RESTRICTIVE FOR ALL TO app
+      USING (NOT (organization_id = ANY (ARRAY(SELECT authz.blocking_organizations()))))
+      WITH CHECK (NOT (organization_id = ANY (ARRAY(SELECT authz.blocking_organizations()))));
+    CREATE TABLE runs (id UUID PRIMARY KEY, organization_id UUID NOT NULL,
+      template_id UUID NOT NULL,
+      CONSTRAINT runs_template_id_fkey FOREIGN KEY (template_id) REFERENCES templates (id),
+      CONSTRAINT runs_resource FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id));
+    CREATE INDEX ON runs (template_id);
+    ALTER TABLE runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE runs FORCE ROW LEVEL SECURITY;
+    CREATE POLICY runs_select ON runs FOR SELECT TO app
+      USING (id = ANY (ARRAY(SELECT authz.readable_resources())));
+    CREATE POLICY runs_insert ON runs FOR INSERT TO app
+      WITH CHECK (id = ANY (ARRAY(SELECT authz.readable_resources()))
+        AND template_id = ANY (ARRAY(SELECT authz.readable_resources())));
+    CREATE POLICY runs_blocked ON runs AS RESTRICTIVE FOR ALL TO app
+      USING (NOT (organization_id = ANY (ARRAY(SELECT authz.blocking_organizations()))))
+      WITH CHECK (NOT (organization_id = ANY (ARRAY(SELECT authz.blocking_organizations()))));
+    GRANT SELECT ON templates, runs TO app;
+    GRANT INSERT ON runs TO app;";
+
+const RESOURCES_WITH: [(&str, &str); 4] = [
+    (
+        "authz.readable_resources() RETURNS",
+        "authz.resources_with(min_role TEXT) RETURNS",
+    ),
+    (
+        "WHERE grant_row.grantee_id = authz.caller_id())",
+        "WHERE grant_row.grantee_id = authz.caller_id() AND grant_row.role = min_role)",
+    ),
+    ("authz.readable_resources()", "authz.resources_with(TEXT)"),
+    (
+        "SELECT authz.resources_with(TEXT)",
+        "SELECT authz.resources_with('reader')",
+    ),
+];
+
+const IN_SUBQUERY: [(&str, &str); 1] = [(
+    "template_id = ANY (ARRAY(SELECT authz.readable_resources()))",
+    "template_id IN (SELECT authz.readable_resources())",
+)];
+
+/// Objects of every finding on [`RUNS`] after the edits of `spelling`, then
+/// of `helper`, then `extra`, each replacing every occurrence of its text.
+fn runs_findings(
+    spelling: &[(&str, &str)],
+    helper: &[(&str, &str)],
+    extra: &[(&str, &str)],
+) -> Vec<String> {
+    let mut sql = RUNS.to_owned();
+    for (from, to) in spelling.iter().chain(helper).chain(extra) {
+        assert!(sql.contains(from), "{from}");
+        sql = sql.replace(from, to);
+    }
+    objects_under(Deployment::default().with_app_role("app"), &sql)
+}
+
+#[test]
+fn a_key_a_helper_confines_to_rows_whose_restrictive_read_it_implies_is_clean() {
+    for spelling in [&[][..], &IN_SUBQUERY] {
+        for helper in [&[][..], &RESOURCES_WITH] {
+            assert_eq!(
+                runs_findings(spelling, helper, &[]),
+                Vec::<String>::new(),
+                "{spelling:?} {helper:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_key_a_helper_confines_to_rows_a_restrictive_read_may_hide_is_reported() {
+    let unblocked = (
+        "\n        AND NOT (resource.organization_id = ANY (ARRAY(SELECT authz.blocking_organizations())))",
+        "",
+    );
+    for spelling in [&[][..], &IN_SUBQUERY] {
+        for helper in [&[][..], &RESOURCES_WITH] {
+            assert_eq!(
+                runs_findings(spelling, helper, &[unblocked]),
+                ["runs.runs_template_id_fkey"],
+                "{spelling:?} {helper:?}"
+            );
+        }
+    }
+}

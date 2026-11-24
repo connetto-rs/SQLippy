@@ -1052,6 +1052,10 @@ fn a_restrictive_read_on_a_column_a_foreign_key_pins_to_the_confined_key_is_clea
          WHERE NOT (resource.organization_id = ANY (ARRAY(SELECT blocking())))",
             ),
         ],
+        &[(
+            "(resource_id, role) IN (SELECT share.resource_id, share.role FROM sharable_grants() share)",
+            "resource_id = ANY (ARRAY(SELECT sharable_resources()))",
+        )],
     ] {
         assert!(!reports_grants_key(edits), "{edits:?}");
     }
@@ -1104,6 +1108,16 @@ fn a_restrictive_read_the_referenced_row_does_not_settle_is_reported() {
             "FROM resources resource\n",
             "FROM resources_with(min_role) resource(id)\n",
         )],
+        &[
+            (
+                "(resource_id, role) IN (SELECT share.resource_id, share.role FROM sharable_grants() share)",
+                "resource_id = ANY (ARRAY(SELECT sharable_resources()))",
+            ),
+            (
+                "AND NOT (resource.organization_id",
+                "OR NOT (resource.organization_id",
+            ),
+        ],
     ] {
         assert!(reports_grants_key(edits), "{edits:?}");
     }
