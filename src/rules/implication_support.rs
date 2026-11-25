@@ -456,13 +456,16 @@ fn every<T, E>(items: &[T], mut holds: impl FnMut(&T) -> Result<bool, E>) -> Res
 /// # Errors
 ///
 /// Returns the lookup error reading a policy or `implied` raised.
-pub(crate) fn admits<DB: DatabaseLike, C: Columns>(
+pub(crate) fn admits<'g, 'p: 'g, DB: DatabaseLike, C: Columns>(
     database: &DB,
     table: &DB::Table,
-    gates: &[RowGate<'_, DB::Policy>],
+    gates: impl IntoIterator<Item = &'g RowGate<'p, DB::Policy>>,
     columns: &C,
     implied: impl Fn(&Condition<'_, C::Tested>) -> Result<bool, LookupError>,
-) -> Result<bool, LookupError> {
+) -> Result<bool, LookupError>
+where
+    DB::Policy: 'p,
+{
     let holds = |condition: &Expr| -> Result<bool, LookupError> {
         Ok(is_tautology(database, table, condition)?
             || implied(&Condition::new(columns, condition))?)
