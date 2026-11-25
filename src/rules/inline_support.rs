@@ -38,7 +38,7 @@ fn plain_sql<F: FunctionLike>(function: &F) -> bool {
 
 /// The one expression a query computes, when it is a `SELECT` of one
 /// expression with no other clause.
-fn selected_expression(query: &Query) -> Option<&Expr> {
+pub(crate) fn selected_expression(query: &Query) -> Option<&Expr> {
     if query.with.is_some()
         || query.order_by.is_some()
         || query.limit_clause.is_some()

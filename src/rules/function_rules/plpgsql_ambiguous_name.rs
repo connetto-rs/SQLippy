@@ -75,7 +75,7 @@ CREATE FUNCTION find_note(requested_id integer) RETURNS integer LANGUAGE plpgsql
 );
 
 /// A name a column and a variable both answer to.
-struct Collision {
+pub(crate) struct Collision {
     name: String,
     variable: String,
     kind: &'static str,
@@ -258,7 +258,7 @@ impl<DB: DatabaseLike> Visitor for Collisions<'_, '_, '_, DB> {
 }
 
 /// The first name of `function`'s body a column and a variable share.
-fn collision<DB: DatabaseLike>(
+pub(crate) fn collision<DB: DatabaseLike>(
     database: &DB,
     function: &DB::Function,
 ) -> Result<Option<Collision>, LookupError> {
