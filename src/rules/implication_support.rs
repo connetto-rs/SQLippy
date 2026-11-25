@@ -286,8 +286,9 @@ fn every<T, E>(items: &[T], mut holds: impl FnMut(&T) -> Result<bool, E>) -> Res
 }
 
 /// Whether `gates` admit every row of `table` that meets each condition
-/// `implied` accepts, which holds when every restrictive term and one
-/// permissive term of each gate is a tautology or accepted.
+/// `implied` accepts, which holds when every restrictive term of each gate
+/// is a tautology or accepted, and one permissive term is or `implied`
+/// accepts the `OR` of them all, the rows PostgreSQL admits.
 ///
 /// # Errors
 ///
@@ -315,6 +316,21 @@ pub(crate) fn admits<DB: DatabaseLike, C: Columns>(
                 admitted = true;
                 break;
             }
+        }
+        if !admitted
+            && let [first, rest @ ..] = gate.permissive()
+            && !rest.is_empty()
+        {
+            let union = rest
+                .iter()
+                .fold(first.expression().expression().clone(), |left, term| {
+                    Expr::BinaryOp {
+                        left: Box::new(left),
+                        op: BinaryOperator::Or,
+                        right: Box::new(term.expression().expression().clone()),
+                    }
+                });
+            admitted = implied(&Condition::new(columns, &union))?;
         }
         if !admitted {
             return Ok(false);
