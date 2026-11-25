@@ -264,6 +264,7 @@ rule_icons! {
     "snapshot_before_lock" => FaLockOpen,
     "plpgsql_ambiguous_name" => FaCircleQuestion,
     "decided_branch" => FaCodeMerge,
+    "case_without_match" => FaCircleXmark,
 }
 #[cfg(test)]
 mod tests {

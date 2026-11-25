@@ -13,6 +13,7 @@ mod assignment_conjunctions;
 mod authority_attribute_write_thresholds;
 mod authorization_in_triggers;
 mod before_trigger_writes;
+mod cases_without_match;
 mod catalog_checks;
 mod catalogue_objects;
 mod client_chosen_timestamps;

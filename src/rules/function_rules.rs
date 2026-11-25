@@ -26,6 +26,8 @@ mod plpgsql_ambiguous_name;
 pub use plpgsql_ambiguous_name::PlpgsqlAmbiguousName;
 mod decided_branch;
 pub use decided_branch::DecidedBranch;
+mod case_without_match;
+pub use case_without_match::CaseWithoutMatch;
 mod function_without_safe_search_path;
 pub use function_without_safe_search_path::FunctionWithoutSafeSearchPath;
 
