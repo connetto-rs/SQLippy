@@ -2295,6 +2295,86 @@ fn a_sql_definer_running_a_statement_the_caller_may_not_run_alike_is_reported() 
     );
 }
 
+/// A `LANGUAGE sql` definer `name` returning `returns`, its body `body`
+/// bound when the function is created.
+fn bound_definer(name: &str, returns: &str, body: &str) -> String {
+    format!(
+        "CREATE FUNCTION {name} RETURNS {returns} LANGUAGE sql VOLATILE SECURITY DEFINER
+           SET search_path = pg_catalog, pg_temp {body};"
+    )
+}
+
+#[test]
+fn a_bound_sql_definer_running_statements_the_caller_may_run_alike_is_not_reported() {
+    let definers = [
+        bound_definer(
+            "atomic_hide_and_purge(p_id INT)",
+            "VOID",
+            &format!("BEGIN ATOMIC {HIDE_OWN_BY_ID}; {DELETE_OWN}; END"),
+        ),
+        bound_definer(
+            "atomic_hide_and_count(p_id INT)",
+            "BIGINT",
+            &format!(
+                "BEGIN ATOMIC {HIDE_OWN_BY_ID};
+                   SELECT count(*) FROM public.resources resource
+                     WHERE resource.owner = current_setting('app.user_id', true);
+                 END"
+            ),
+        ),
+        bound_definer(
+            "atomic_unqualified_purge()",
+            "VOID",
+            "BEGIN ATOMIC DELETE FROM resources resource
+               WHERE resource.hidden AND resource.owner = current_setting('app.user_id', true);
+             END",
+        ),
+        bound_definer(
+            "returned_count()",
+            "BIGINT",
+            "RETURN (SELECT count(*) FROM public.resources resource
+               WHERE resource.owner = current_setting('app.user_id', true))",
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, UPDATE, DELETE", OWN_ROWS, &definers),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_bound_sql_definer_running_a_statement_the_caller_may_not_run_alike_is_reported() {
+    let definers = [
+        bound_definer(
+            "atomic_purge_any()",
+            "VOID",
+            "BEGIN ATOMIC DELETE FROM public.resources resource WHERE resource.hidden; END",
+        ),
+        bound_definer(
+            "atomic_hide_and_count_all(p_id INT)",
+            "BIGINT",
+            &format!(
+                "BEGIN ATOMIC {HIDE_OWN_BY_ID}; SELECT count(*) FROM public.resources resource; END"
+            ),
+        ),
+        bound_definer(
+            "returned_count_all()",
+            "BIGINT",
+            "RETURN (SELECT count(*) FROM public.resources resource)",
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, UPDATE, DELETE", OWN_ROWS, &definers),
+        [
+            "atomic_hide_and_count_all(INT)",
+            "atomic_purge_any()",
+            "returned_count_all()"
+        ]
+    );
+}
+
 /// An `UPDATE` hiding the caller's own rows, returning their ids.
 const HIDE_OWN_RETURNING: &str = "UPDATE public.resources resource SET hidden = true
     WHERE resource.owner = current_setting('app.user_id', true)

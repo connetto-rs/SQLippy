@@ -98,7 +98,9 @@ use super::plpgsql_ambiguous_name::collision;
 /// stays away from protected tables.
 ///
 /// A function is not reported when every caller already reads what it
-/// returns. Its body is then one `LANGUAGE sql` query, or a PL/pgSQL block
+/// returns. Its body is then one `LANGUAGE sql` query, written as a string,
+/// in a `BEGIN ATOMIC` block or as a `RETURN` expression read as its
+/// `SELECT`, whose names resolve as PostgreSQL bound them, or a PL/pgSQL block
 /// that only returns queries, through `RETURN QUERY`, a `FOR` loop over a
 /// query whose one statement `RETURN NEXT`s a value of its record, read as
 /// the `RETURN QUERY` of that value over the query's rows, a `RETURN` of a
@@ -634,17 +636,23 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 
     /// What `walk` finds reading each statement of the body of `function`,
-    /// in order, the `LANGUAGE sql` statements or those
-    /// [`Self::block_statements`] reads, each read as [`Self::read_statement`]
-    /// does with the lineage `lineage` gives it. `None` when the body is no
-    /// such statements or a statement reads as `None`.
+    /// in order, the `LANGUAGE sql` statements, the `SELECT` of a `RETURN`
+    /// expression or those [`Self::block_statements`] reads, each read as
+    /// [`Self::read_statement`] does with the lineage `lineage` gives it. A
+    /// body PostgreSQL bound when the function was created resolves its
+    /// names on the database's own path, as they were bound, and any other
+    /// on the function's. `None` when the body is no such statements or a
+    /// statement reads as `None`.
     fn read_body<T>(
         &self,
         function: &'a DB::Function,
         lineage: impl Fn(&Query) -> Lineage,
         mut walk: impl FnMut(&mut Reads<'_, '_, 'a, DB>, &Query) -> Result<T, LookupError>,
     ) -> Result<Option<Vec<T>>, LookupError> {
-        let path = function.search_path(self.database)?;
+        let path = match function.written_body() {
+            Some(body) if body.is_bound() => None,
+            _ => function.search_path(self.database)?,
+        };
         let statements = match plpgsql_block(function) {
             Some(block) => match self.block_statements(function, block, path.as_deref())? {
                 Some(statements) => statements,
@@ -652,7 +660,16 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             },
             None => match sql_statements_body(self.database, function)? {
                 Some(statements) if !statements.is_empty() => statements.into_owned(),
-                _ => return Ok(None),
+                _ => match function.body_expression(self.database)?.map(|expression| {
+                    rows_query(
+                        vec![SelectItem::UnnamedExpr(expression.into_owned())],
+                        Vec::new(),
+                        None,
+                    )
+                }) {
+                    Some(query) => vec![Statement::Query(Box::new(query))],
+                    None => return Ok(None),
+                },
             },
         };
         let mut found = Vec::with_capacity(statements.len());
