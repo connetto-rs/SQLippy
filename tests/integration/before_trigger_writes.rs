@@ -192,6 +192,8 @@ fn a_parent_write_no_check_refuses_when_stray_is_reported() {
         &[(CHECKED, "WHEN 'user' THEN EXISTS (SELECT 1 FROM teams principal WHERE principal.id = NEW.id)")],
         &[(CHECKED, "WHEN 'user' THEN EXISTS (SELECT count(*) FROM users principal WHERE principal.id = NEW.id)")],
         &[(CHECKED, "WHEN 'user' THEN EXISTS (SELECT 1 FROM users principal WHERE principal.id = NEW.id LIMIT 0)")],
+        &[(CHECKED, "WHEN 'user' THEN EXISTS (SELECT 1 FROM (SELECT * FROM users) principal WHERE principal.id = NEW.id)")],
+        &[(CHECKED, "WHEN 'user' THEN EXISTS (SELECT 1 FROM users principal (other_id, kind) WHERE principal.other_id = NEW.id)")],
         &[(CHECKED, "WHEN 'user' THEN TRUE")],
         &[(RAISED, "BEGIN RAISE EXCEPTION 'missing'; EXCEPTION WHEN OTHERS THEN NULL; END;")],
         &[(RAISED, "RAISE NOTICE 'missing';")],

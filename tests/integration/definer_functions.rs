@@ -469,6 +469,10 @@ fn a_plpgsql_definer_whose_variable_or_guard_may_read_otherwise_is_reported() {
         exposed_to_app(
             &[
                 definer(
+                    "cursor_declared()",
+                    format!("DECLARE resources CURSOR FOR SELECT * FROM public.resources; BEGIN RETURN QUERY {MEMBER_RESOURCES}; END"),
+                ),
+                definer(
                     "reassigned()",
                     format!("DECLARE floor INT := 0; BEGIN floor := 1; RETURN QUERY {MEMBER_RESOURCES}; END"),
                 ),
@@ -529,6 +533,7 @@ fn a_plpgsql_definer_whose_variable_or_guard_may_read_otherwise_is_reported() {
         ),
         [
             "branched()",
+            "cursor_declared()",
             "elsif_guarded()",
             "noticed()",
             "probed()",
