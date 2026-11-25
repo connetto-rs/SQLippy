@@ -1724,10 +1724,12 @@ fn a_plpgsql_definer_running_a_statement_the_caller_may_not_run_alike_is_reporte
             ),
         ),
         block_definer(
-            "hide_or_tell()",
+            "hide_or_tell_role()",
             "VOID",
             "",
-            &format!("{HIDE_MINE}; IF NOT FOUND THEN RAISE EXCEPTION 'missing %', uid; END IF;"),
+            &format!(
+                "{HIDE_MINE}; IF NOT FOUND THEN RAISE EXCEPTION 'missing as %', current_user; END IF;"
+            ),
         ),
         block_definer(
             "purge_reassigned()",
@@ -1772,12 +1774,140 @@ fn a_plpgsql_definer_running_a_statement_the_caller_may_not_run_alike_is_reporte
         [
             "hide_multiple_targets()",
             "hide_or_count()",
-            "hide_or_tell()",
+            "hide_or_tell_role()",
             "hide_qualified_target()",
             "hide_returning_hidden()",
             "hide_then_purge_any()",
             "purge_hidden()",
             "purge_reassigned()"
+        ]
+    );
+}
+
+/// The caller's own `memberships` rows, readable by the caller.
+const OWN_MEMBERSHIPS: &str = "CREATE TABLE memberships (user_id TEXT, organization_id INT);
+    ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+    GRANT SELECT ON memberships TO app;
+    CREATE POLICY own_memberships ON memberships FOR SELECT TO app
+      USING (user_id = current_setting('app.user_id', true));";
+
+/// A guard raising unless the caller holds a membership of `p_org`.
+const MEMBER_GUARD: &str = "IF NOT EXISTS (SELECT 1 FROM public.memberships m
+      WHERE m.organization_id = p_org AND m.user_id = uid)
+    THEN RAISE EXCEPTION 'forbidden'; END IF;";
+
+#[test]
+fn a_plpgsql_definer_guarded_by_what_the_caller_reads_is_not_reported() {
+    let definers = [
+        block_definer(
+            "member_hide(p_org INT)",
+            "VOID",
+            "",
+            &format!("{MEMBER_GUARD} {HIDE_MINE};"),
+        ),
+        block_definer(
+            "member_list(p_org INT)",
+            "SETOF INT",
+            "",
+            &format!(
+                "{MEMBER_GUARD} RETURN QUERY SELECT resource.id FROM public.resources resource
+                   WHERE resource.owner = uid;"
+            ),
+        ),
+        block_definer(
+            "capped_hide()",
+            "VOID",
+            "",
+            &format!(
+                "IF (SELECT count(*) FROM public.resources resource WHERE resource.owner = uid) > 100
+                   THEN RAISE EXCEPTION 'too many'; END IF;
+                 {HIDE_MINE};"
+            ),
+        ),
+        block_definer(
+            "hide_by_id(p_id INT)",
+            "VOID",
+            "",
+            "IF p_id IS NULL THEN
+               RAISE EXCEPTION 'missing id %', p_id USING HINT = 'pass an id', ERRCODE = '22004';
+             END IF;
+             UPDATE public.resources resource SET hidden = true
+               WHERE resource.id = p_id AND resource.owner = uid;",
+        ),
+        block_definer(
+            "hide_or_tell()",
+            "VOID",
+            "",
+            &format!("{HIDE_MINE}; IF NOT FOUND THEN RAISE EXCEPTION 'missing %', uid; END IF;"),
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed(
+            "SELECT, UPDATE",
+            &format!("{OWN_ROWS} {OWN_MEMBERSHIPS}"),
+            &definers
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_plpgsql_definer_guarded_by_what_the_caller_may_not_read_is_reported() {
+    let definers = [
+        block_definer(
+            "any_member_hide(p_org INT)",
+            "VOID",
+            "",
+            &format!(
+                "IF NOT EXISTS (SELECT 1 FROM public.memberships m WHERE m.organization_id = p_org)
+                   THEN RAISE EXCEPTION 'empty'; END IF;
+                 {HIDE_MINE};"
+            ),
+        ),
+        block_definer(
+            "crowded_hide()",
+            "VOID",
+            "",
+            &format!(
+                "IF (SELECT count(*) FROM public.resources resource) > 100
+                   THEN RAISE EXCEPTION 'crowded'; END IF;
+                 {HIDE_MINE};"
+            ),
+        ),
+        block_definer(
+            "hide_as(p_id INT)",
+            "VOID",
+            "",
+            &format!(
+                "IF p_id IS NULL THEN RAISE EXCEPTION 'missing' USING DETAIL = current_user; END IF;
+                 {HIDE_MINE};"
+            ),
+        ),
+        block_definer(
+            "hide_counted(p_id INT)",
+            "VOID",
+            "",
+            &format!(
+                "IF p_id IS NULL THEN RAISE EXCEPTION 'missing among %',
+                   (SELECT count(*) FROM public.resources resource WHERE resource.owner = uid);
+                 END IF;
+                 {HIDE_MINE};"
+            ),
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed(
+            "SELECT, UPDATE",
+            &format!("{OWN_ROWS} {OWN_MEMBERSHIPS}"),
+            &definers
+        ),
+        [
+            "any_member_hide(INT)",
+            "crowded_hide()",
+            "hide_as(INT)",
+            "hide_counted(INT)"
         ]
     );
 }

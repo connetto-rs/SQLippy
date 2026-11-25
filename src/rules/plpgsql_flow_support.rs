@@ -37,14 +37,16 @@ pub(crate) struct Ran {
     /// The condition of each guard, under which the body raises an exception
     /// or returns before the statements run.
     pub(crate) guards: Vec<Expr>,
+    /// Each argument and `USING` option value of the exceptions the guards
+    /// of the block raise, among them those after its statements.
+    pub(crate) raised: Vec<Expr>,
 }
 
 /// What `block` runs when it does nothing else. Its statements are guards
 /// `IF condition THEN RAISE EXCEPTION ...; END IF;` or `IF condition THEN
-/// RETURN; END IF;`, the exception carrying no argument, then the statements
-/// [`ran_by`] reads. Every variable but the one declared without a default
-/// is declared with a default and, as no statement assigns it, reads as that
-/// default.
+/// RETURN; END IF;`, then the statements [`ran_by`] reads. Every variable
+/// but the one declared without a default is declared with a default and,
+/// as no statement assigns it, reads as that default.
 pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
     let Block {
         declarations,
@@ -73,28 +75,39 @@ pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
     }
     let mut statements = statements.into_iter().peekable();
     let mut guards = Vec::new();
-    while let Some(condition) = statements.peek().and_then(guard) {
+    let mut raised = Vec::new();
+    while let Some((condition, values)) = statements.peek().and_then(guard) {
         guards.push(condition);
+        raised.extend(values);
         statements.next();
     }
-    let mut statements = ran_by(statements, target.as_deref())?;
+    let mut statements = ran_by(statements, target.as_deref(), &mut raised)?;
     for statement in &mut statements {
         substitute(statement, &defaults);
     }
-    for guard in &mut guards {
-        substitute(guard, &defaults);
+    for expression in guards.iter_mut().chain(&mut raised) {
+        substitute(expression, &defaults);
     }
-    Some(Ran { statements, guards })
+    Some(Ran {
+        statements,
+        guards,
+        raised,
+    })
 }
 
 /// The statements `nodes` run in order. Each node is a `DELETE`, `UPDATE` or
 /// `INSERT`, bare or as a `RETURN QUERY`, maybe followed by a guard `IF NOT
 /// FOUND THEN ...`, which raises or returns where a caller running the same
-/// write would too, or a `RETURN QUERY` of a query, consecutive ones read as
-/// the `UNION ALL` of them. One `SELECT ... INTO` or write `RETURNING ...
-/// INTO` assigns `target`, which the last node returns. A last bare `RETURN`
-/// ends them, and a `RETURN` of one scalar subquery may stand alone.
-fn ran_by(nodes: impl Iterator<Item = Node>, target: Option<&str>) -> Option<Vec<Statement>> {
+/// write would too, the values its exception carries pushed onto `raised`,
+/// or a `RETURN QUERY` of a query, consecutive ones read as the `UNION ALL`
+/// of them. One `SELECT ... INTO` or write `RETURNING ... INTO` assigns
+/// `target`, which the last node returns. A last bare `RETURN` ends them,
+/// and a `RETURN` of one scalar subquery may stand alone.
+fn ran_by(
+    nodes: impl Iterator<Item = Node>,
+    target: Option<&str>,
+    raised: &mut Vec<Expr>,
+) -> Option<Vec<Statement>> {
     let mut ran: Vec<Statement> = Vec::new();
     let mut returning = None;
     let mut assigned = false;
@@ -159,11 +172,10 @@ fn ran_by(nodes: impl Iterator<Item = Node>, target: Option<&str>) -> Option<Vec
             _ => return None,
         };
         if written
-            && nodes
-                .peek()
-                .and_then(guard)
-                .is_some_and(|condition| not_found(&condition))
+            && let Some((condition, values)) = nodes.peek().and_then(guard)
+            && not_found(&condition)
         {
+            raised.extend(values);
             nodes.next();
         }
     }
@@ -213,8 +225,9 @@ fn not_found(condition: &Expr) -> bool {
 }
 
 /// The condition of `node`, when it is an `IF` whose one branch raises an
-/// exception carrying no argument or returns, without `ELSE`.
-fn guard(node: &Node) -> Option<Expr> {
+/// exception or returns, without `ELSE`, with each argument and `USING`
+/// option value the exception carries.
+fn guard(node: &Node) -> Option<(Expr, Vec<Expr>)> {
     let NodeKind::If(If {
         branches,
         otherwise,
@@ -231,13 +244,16 @@ fn guard(node: &Node) -> Option<Expr> {
     else {
         return None;
     };
-    let leaves = match statements.as_slice() {
+    if !otherwise.is_empty() {
+        return None;
+    }
+    let raised = match statements.as_slice() {
         [
             Node {
                 kind: NodeKind::Return { value: None },
                 ..
             },
-        ] => true,
+        ] => Vec::new(),
         [
             Node {
                 kind:
@@ -249,17 +265,14 @@ fn guard(node: &Node) -> Option<Expr> {
                     }),
                 ..
             },
-        ] => {
-            arguments.is_empty()
-                && options.iter().all(|option| {
-                    matches!(selected_expression(&option.value), Some(Expr::Value(_)))
-                })
-        }
-        _ => false,
+        ] => arguments
+            .iter()
+            .chain(options.iter().map(|option| &option.value))
+            .map(|value| selected_expression(value).cloned())
+            .collect::<Option<_>>()?,
+        _ => return None,
     };
-    (leaves && otherwise.is_empty())
-        .then(|| selected_expression(condition).cloned())
-        .flatten()
+    Some((selected_expression(condition)?.clone(), raised))
 }
 
 /// The query returning the rows of `left` and then those of `right`.
