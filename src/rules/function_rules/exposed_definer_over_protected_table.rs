@@ -3,6 +3,7 @@
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
+    convert::Infallible,
     iter, mem,
     ops::ControlFlow,
     ptr,
@@ -38,6 +39,7 @@ use sqlparser::{
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
+use sqlparser_plpgsql::embedded::Block;
 
 use crate::{
     deployment::Deployment,
@@ -101,19 +103,21 @@ use super::plpgsql_ambiguous_name::collision;
 /// guards `IF condition THEN RAISE EXCEPTION ...` or `IF condition THEN
 /// RETURN`, and names no column a variable also answers to. Every other
 /// variable it declares holds the default it is declared with. A guard's
-/// condition reads no subquery and evaluates alike for a caller and the
-/// owner, and its exception carries no argument, so whether it raises tells
-/// nothing of what the owner reads. That query writes nothing, the function
-/// sets no parameter besides `search_path` and neither it nor a function it
-/// calls runs `set_config`, and every read of a
-/// table with row-level security in it is filtered, by its `WHERE` and the
-/// `ON` of the joins that drop its rows, to rows each caller's own `SELECT`
-/// policies on that table admit, while each caller may select every column
-/// of the table. A read locking its rows with `FOR UPDATE`, `FOR SHARE` or
-/// their key forms locks stored tables only, and the rows it locks of a
-/// table with row-level security are those each caller's `UPDATE` policies
-/// admit too, each caller holding `UPDATE` on a column of the table, as
-/// PostgreSQL requires of a caller locking them directly.
+/// condition evaluates alike for a caller and the owner, each query it holds
+/// confining its reads by the test below, so the owner finds there the rows
+/// a caller finds, and each argument and `USING` option of its exception
+/// evaluates alike and reads no subquery, so whether it raises and what it
+/// says tell nothing of what the owner reads. That query writes nothing, the
+/// function sets no parameter besides `search_path` and neither it nor a
+/// function it calls runs `set_config`, and every read
+/// of a table with row-level security in it is filtered, by its `WHERE` and
+/// the `ON` of the joins that drop its rows, to rows each caller's own
+/// `SELECT` policies on that table admit, while each caller may select every
+/// column of the table. A read locking its rows with `FOR UPDATE`, `FOR
+/// SHARE` or their key forms locks stored tables only, and the rows it locks
+/// of a table with row-level security are those each caller's `UPDATE`
+/// policies admit too, each caller holding `UPDATE` on a column of the
+/// table, as PostgreSQL requires of a caller locking them directly.
 /// The filter has to imply every restrictive policy and one permissive one,
 /// stating each condition as written, where a scalar subquery reading no
 /// relation such as `(SELECT auth.uid())` stands for its value, or testing
@@ -618,13 +622,10 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 
     /// What `walk` finds reading each statement of the body of `function`,
-    /// in order, one `LANGUAGE sql` statement or those a `plpgsql` block
-    /// [`ran_statements`] reads, each read as [`Self::read_statement`] does
-    /// with the lineage `lineage` gives it. `None` when the body is no such
-    /// statement, a statement reads as `None`, a name of the block may read a
-    /// variable where a statement reads a column, or a guard of the block
-    /// reads a subquery or may evaluate otherwise for a caller than for the
-    /// owner, so that whether it raises tells what the owner reads.
+    /// in order, one `LANGUAGE sql` statement or those [`Self::block_statements`]
+    /// reads, each read as [`Self::read_statement`] does with the lineage
+    /// `lineage` gives it. `None` when the body is no such statement or a
+    /// statement reads as `None`.
     fn read_body<T>(
         &self,
         function: &'a DB::Function,
@@ -633,22 +634,10 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     ) -> Result<Option<Vec<T>>, LookupError> {
         let path = function.search_path(self.database)?;
         let statements = match plpgsql_block(function) {
-            Some(block) => {
-                let Some(Ran { statements, guards }) = ran_statements(block) else {
-                    return Ok(None);
-                };
-                if collision(self.database, function)?.is_some() {
-                    return Ok(None);
-                }
-                for guard in &guards {
-                    if holds_subquery(guard)
-                        || !CallerBound::new(self, path.as_deref(), None).reads_alike(guard)?
-                    {
-                        return Ok(None);
-                    }
-                }
-                statements
-            }
+            Some(block) => match self.block_statements(function, block, path.as_deref())? {
+                Some(statements) => statements,
+                None => return Ok(None),
+            },
             None => match sql_statement_body(self.database, function)? {
                 Some(statement) => vec![statement.into_owned()],
                 None => return Ok(None),
@@ -664,6 +653,76 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             found.push(read);
         }
         Ok(Some(found))
+    }
+
+    /// The statements the `plpgsql` block `block` of `function` runs, as
+    /// [`ran_statements`] reads them, its names resolving on `path`. `None`
+    /// when it runs others, a name of the block may read a variable where a
+    /// statement reads a column, a guard of the block may evaluate otherwise
+    /// for a caller than for the owner, as [`Self::guard_reads_alike`] tells,
+    /// so that whether it raises tells what the owner reads, or a value an
+    /// exception carries reads a subquery or may evaluate otherwise.
+    fn block_statements(
+        &self,
+        function: &'a DB::Function,
+        block: Block,
+        path: Option<&[(Cow<'_, str>, bool)]>,
+    ) -> Result<Option<Vec<Statement>>, LookupError> {
+        let Some(Ran {
+            statements,
+            guards,
+            raised,
+        }) = ran_statements(block)
+        else {
+            return Ok(None);
+        };
+        if collision(self.database, function)?.is_some() {
+            return Ok(None);
+        }
+        for guard in &guards {
+            if !self.guard_reads_alike(function, guard, path)? {
+                return Ok(None);
+            }
+        }
+        for value in &raised {
+            if holds_subquery(value) || !CallerBound::new(self, path, None).reads_alike(value)? {
+                return Ok(None);
+            }
+        }
+        Ok(Some(statements))
+    }
+
+    /// Whether the guard condition `guard` of `function` evaluates alike for
+    /// a caller and for the owner, its names resolving on `path`. Each query
+    /// it holds has to confine its reads, as [`Reads::confines_query`] reads
+    /// them, so the owner finds the very rows a caller finds there, and its
+    /// terms have to read alike otherwise.
+    fn guard_reads_alike(
+        &self,
+        function: &'a DB::Function,
+        guard: &Expr,
+        path: Option<&[(Cow<'_, str>, bool)]>,
+    ) -> Result<bool, LookupError> {
+        let mut bound = CallerBound::new(self, path, None);
+        if holds_subquery(guard) {
+            let query = rows_query(
+                vec![SelectItem::UnnamedExpr(guard.clone())],
+                Vec::new(),
+                None,
+            );
+            let confined = self.read_statement(
+                function,
+                Statement::Query(Box::new(query)),
+                path,
+                &|_| Lineage::default(),
+                &mut |reads, query| reads.confines_query(query, &[], &[]),
+            )?;
+            if confined != Some(true) {
+                return Ok(false);
+            }
+            relations_within(guard, &mut bound.positive);
+        }
+        bound.reads_alike(guard)
     }
 
     /// What `walk` finds reading `statement` of the body of `function`, its
@@ -1365,8 +1424,9 @@ struct CallerBound<'r, 'a, DB: DatabaseLike> {
     /// The functions whose bodies the walk stands in.
     reading: Vec<*const DB::Function>,
     /// The relations of subqueries the walked term holds true only for
-    /// finding a row in, whose reads of tables with row-level security every
-    /// caller's policies admit, so a caller finds every row the owner does.
+    /// finding a row in, or of a guard's queries, whose reads of tables with
+    /// row-level security every caller's policies admit, so a caller finds
+    /// every row the owner does.
     positive: Vec<*const TableFactor>,
 }
 
@@ -1610,6 +1670,20 @@ fn positive_relations(condition: &Expr, found: &mut Vec<*const TableFactor>) {
     if let Some(selection) = &select.selection {
         positive_relations(selection, found);
     }
+}
+
+/// Pushes onto `found` every relation of the queries `expression` holds.
+fn relations_within(expression: &Expr, found: &mut Vec<*const TableFactor>) {
+    struct Relations<'f>(&'f mut Vec<*const TableFactor>);
+    impl Visitor for Relations<'_> {
+        type Break = Infallible;
+
+        fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Infallible> {
+            self.0.push(ptr::from_ref(factor));
+            ControlFlow::Continue(())
+        }
+    }
+    let ControlFlow::Continue(()) = walk(expression, &mut Relations(found));
 }
 
 /// What a relation of a `FROM` item holds under a column name.
