@@ -1782,6 +1782,115 @@ fn a_plpgsql_definer_running_a_statement_the_caller_may_not_run_alike_is_reporte
     );
 }
 
+/// The caller's own `resources` rows, locked with `lock`.
+fn locking_own(lock: &str) -> String {
+    format!(
+        "SELECT resource.id FROM public.resources resource
+         WHERE resource.owner = current_setting('app.user_id', true) {lock}"
+    )
+}
+
+#[test]
+fn a_definer_locking_rows_the_caller_may_lock_is_not_reported() {
+    let definers = [
+        returning_definer("lock_own()", "SETOF INT", &locking_own("FOR UPDATE")),
+        returning_definer(
+            "lock_own_shared()",
+            "SETOF INT",
+            &locking_own("FOR SHARE NOWAIT"),
+        ),
+        returning_definer(
+            "lock_own_keys()",
+            "SETOF INT",
+            &locking_own("FOR NO KEY UPDATE SKIP LOCKED"),
+        ),
+        returning_definer(
+            "lock_own_key_share()",
+            "SETOF INT",
+            &locking_own("FOR KEY SHARE"),
+        ),
+        returning_definer("lock_own_of()", "SETOF INT", &locking_of("resource")),
+        block_definer(
+            "lock_listed()",
+            "SETOF INT",
+            "",
+            "RETURN QUERY SELECT resource.id FROM public.resources resource
+               WHERE resource.owner = uid FOR UPDATE;",
+        ),
+    ]
+    .concat();
+    for grants in ["SELECT, UPDATE", "SELECT, UPDATE (hidden)"] {
+        assert_eq!(
+            written_exposed(grants, &format!("{OWN_ROWS} {KINDS}"), &definers),
+            Vec::<String>::new(),
+            "{grants}"
+        );
+    }
+    assert_eq!(
+        written_exposed(
+            "SELECT",
+            &format!("{OWN_ROWS} {KINDS}"),
+            &returning_definer("lock_kind()", "SETOF INT", &locking_of("kind")),
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// A table without row-level security the caller may select from.
+const KINDS: &str = "CREATE TABLE kinds (id INT); GRANT SELECT ON kinds TO app;";
+
+/// The caller's own `resources` rows joined to `kinds`, locking `locked`.
+fn locking_of(locked: &str) -> String {
+    format!(
+        "SELECT resource.id FROM public.resources resource
+         JOIN public.kinds kind ON kind.id = resource.id
+         WHERE resource.owner = current_setting('app.user_id', true)
+         FOR UPDATE OF {locked}"
+    )
+}
+
+#[test]
+fn a_definer_locking_rows_the_caller_may_not_lock_is_reported() {
+    let lock_own = returning_definer("lock_own()", "SETOF INT", &locking_own("FOR UPDATE"));
+    let lock_own_shared =
+        returning_definer("lock_own_shared()", "SETOF INT", &locking_own("FOR SHARE"));
+    let both = [lock_own.as_str(), &lock_own_shared].concat();
+    assert_eq!(
+        written_exposed("SELECT", OWN_ROWS, &both),
+        ["lock_own()", "lock_own_shared()"]
+    );
+    for policies in [
+        "CREATE POLICY own ON resources FOR SELECT TO app
+           USING (owner = current_setting('app.user_id', true));",
+        "CREATE POLICY own ON resources FOR SELECT TO app
+           USING (owner = current_setting('app.user_id', true));
+         CREATE POLICY shown ON resources FOR UPDATE TO app
+           USING (owner = current_setting('app.user_id', true) AND NOT hidden);",
+    ] {
+        assert_eq!(
+            written_exposed("SELECT, UPDATE", policies, &both),
+            ["lock_own()", "lock_own_shared()"],
+            "{policies}"
+        );
+    }
+    assert_eq!(
+        written_exposed(
+            "SELECT",
+            &format!("{OWN_ROWS} {KINDS}"),
+            &[
+                returning_definer(
+                    "lock_derived()",
+                    "SETOF INT",
+                    &format!("SELECT mine.id FROM ({}) mine FOR UPDATE", locking_own("")),
+                ),
+                returning_definer("lock_of_resource()", "SETOF INT", &locking_of("resource")),
+            ]
+            .concat(),
+        ),
+        ["lock_derived()", "lock_of_resource()"]
+    );
+}
+
 #[test]
 fn a_definer_with_an_unresolved_or_unsupported_write_is_reported() {
     for body in [
