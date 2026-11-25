@@ -198,6 +198,7 @@ rule_icons! {
     "redundant_check" => FaCopy,
     "redundant_term" => FaScissors,
     "overly_complex_boolean_expression" => FaScissors,
+    "nonminimal_boolean_expression" => FaScissors,
     "duplicate_foreign_key" => FaPaperclip,
     "duplicate_unique_index" => FaClone,
     "duplicate_policy" => FaCopy,

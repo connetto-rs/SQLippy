@@ -16,6 +16,8 @@ pub(crate) mod redundant_term;
 pub use redundant_term::RedundantTerm;
 mod overly_complex_boolean_expression;
 pub use overly_complex_boolean_expression::OverlyComplexBooleanExpression;
+mod nonminimal_boolean_expression;
+pub use nonminimal_boolean_expression::NonminimalBooleanExpression;
 mod duplicate_unique_index;
 pub use duplicate_unique_index::DuplicateUniqueIndex;
 mod duplicate_foreign_key;
