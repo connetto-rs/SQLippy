@@ -511,6 +511,144 @@ fn a_policys_scalar_subquery_reads_as_the_value_it_projects() {
     );
 }
 
+/// The functions reported where resources admit the rows `policy` does and
+/// `body` filters them by.
+fn setting_exposed(policy: &str, body: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE SCHEMA authz;
+             CREATE TABLE memberships (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+             CREATE TABLE open_members (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+             CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL,
+               owner TEXT, owner_id UUID);
+             ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON memberships, open_members, resources TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE FUNCTION authz.current_setting(name TEXT) RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$ SELECT 'anonymous'::text $$;
+             CREATE FUNCTION authz.current_setting(name TEXT, missing_ok BOOLEAN) RETURNS TEXT
+               LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT pg_catalog.current_setting(name, missing_ok) $$;
+             CREATE POLICY own_memberships ON memberships FOR SELECT TO app
+               USING (user_id = current_setting('app.user_id', true));
+             CREATE POLICY readable ON resources FOR SELECT TO app USING ({policy});
+             CREATE FUNCTION probe() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource WHERE {body} $$;"
+        ),
+    )
+}
+
+/// `EXISTS` over the memberships of `user` in the organization of `row`.
+fn member_of(user: &str, row: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM public.memberships m
+           WHERE m.organization_id = {row}.organization_id AND m.user_id = {user})"
+    )
+}
+
+#[test]
+fn a_setting_read_with_or_without_missing_ok_admits_alike_where_null_rejects_the_row() {
+    let erroring = "current_setting('app.user_id')";
+    let missing = "current_setting('app.user_id', true)";
+    for (policy, body) in [
+        (
+            format!("owner = {erroring}"),
+            format!("resource.owner = {missing}"),
+        ),
+        (
+            "owner = current_setting('app.user_id', false)".to_owned(),
+            format!("resource.owner = {missing}"),
+        ),
+        (
+            format!("owner = {missing}"),
+            format!("resource.owner = {erroring}"),
+        ),
+        (
+            format!("owner_id = {erroring}::uuid"),
+            format!("resource.owner_id = {missing}::uuid"),
+        ),
+        (
+            format!("owner = pg_catalog.{erroring}"),
+            format!("resource.owner = pg_catalog.{missing}"),
+        ),
+        (
+            member_of(erroring, "resources"),
+            member_of(missing, "resource"),
+        ),
+        (
+            format!(
+                "organization_id IN (SELECT m.organization_id FROM public.memberships m
+                   WHERE m.user_id = {erroring})"
+            ),
+            format!(
+                "resource.organization_id IN (SELECT m.organization_id FROM public.memberships m
+                   WHERE m.user_id = {missing})"
+            ),
+        ),
+        (
+            "current_setting('app.role') IN ('auditor')".to_owned(),
+            "current_setting('app.role', true) IN ('auditor')".to_owned(),
+        ),
+    ] {
+        assert_eq!(
+            setting_exposed(&policy, &body),
+            Vec::<String>::new(),
+            "{policy}"
+        );
+    }
+}
+
+#[test]
+fn a_policy_that_may_admit_a_row_while_its_setting_is_unset_is_not_read_with_missing_ok() {
+    let erroring = "current_setting('app.user_id')";
+    let missing = "current_setting('app.user_id', true)";
+    let found = |projection: &str, user: &str, row: &str, tail: &str| {
+        format!(
+            "EXISTS (SELECT {projection} FROM public.open_members m
+               WHERE m.organization_id = {row}.organization_id AND m.user_id = {user} {tail})"
+        )
+    };
+    for (policy, body) in [
+        (
+            format!("COALESCE({erroring}, 'anonymous') = owner"),
+            format!("COALESCE({missing}, 'anonymous') = resource.owner"),
+        ),
+        (
+            "owner = authz.current_setting('app.user_id')".to_owned(),
+            "resource.owner = authz.current_setting('app.user_id', true)".to_owned(),
+        ),
+        (
+            format!("NOT {}", found("1", erroring, "resources", "")),
+            format!("NOT {}", found("1", missing, "resource", "")),
+        ),
+        (
+            format!(
+                "organization_id NOT IN (SELECT m.organization_id FROM public.open_members m
+                   WHERE m.user_id = {erroring})"
+            ),
+            format!(
+                "resource.organization_id NOT IN (SELECT m.organization_id
+                   FROM public.open_members m WHERE m.user_id = {missing})"
+            ),
+        ),
+        (
+            found("count(*)", erroring, "resources", ""),
+            found("count(*)", missing, "resource", ""),
+        ),
+        (
+            found("1", erroring, "resources", "HAVING true"),
+            found("1", missing, "resource", "HAVING true"),
+        ),
+    ] {
+        assert_eq!(setting_exposed(&policy, &body), ["probe()"], "{policy}");
+    }
+}
+
 /// Notes a policy shows to members found in `open_members`, a table without
 /// row-level security, through a subquery reading its columns.
 const MEMBER_NOTES: &str = "

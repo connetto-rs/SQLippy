@@ -10,9 +10,9 @@ use sql_traits::{
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, Distinct, Expr, Function, FunctionArg, FunctionArgExpr,
     FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, InTarget, JoinConstraint,
-    JoinOperator, LimitClause, ObjectName, Query, Select, SelectItem, SetExpr, TableAlias,
-    TableFactor, Value, Visit, VisitMut, Visitor, VisitorMut, WildcardAdditionalOptions,
-    visit_expressions, visit_expressions_mut,
+    JoinOperator, LimitClause, ObjectName, ObjectNamePart, Query, Select, SelectItem, SetExpr,
+    TableAlias, TableFactor, Value, Visit, VisitMut, Visitor, VisitorMut,
+    WildcardAdditionalOptions, visit_expressions, visit_expressions_mut,
 };
 
 use crate::rules::{
@@ -120,6 +120,12 @@ pub(crate) struct Condition<'e, T> {
     /// The condition with each column it tests named as the filter names it,
     /// when the filter names every one.
     renamed: Option<Expr>,
+    /// `renamed` with every setting read without `missing_ok` read with it,
+    /// when it reads one and the condition is never true while that setting
+    /// is unset and so `NULL` with `missing_ok`. Where the setting is unset
+    /// the condition read without `missing_ok` raises an error, and a filter
+    /// implying this form admits no row.
+    relaxed: Option<Expr>,
     /// The row the condition tests against a set, value by value, and the
     /// expression yielding the members of the set.
     pub(crate) membership: Option<(Vec<Operand<'e, T>>, Cow<'e, Expr>)>,
@@ -144,17 +150,22 @@ impl<'e, T> Condition<'e, T> {
                 Vec::new()
             }
         };
+        let renamed = renamed(
+            condition,
+            |column| {
+                stored_name(column)
+                    .and_then(|name| columns.rename(name))
+                    .map(Term::Column)
+            },
+            |name| columns.relation(name),
+        );
         Self {
             original: condition,
-            renamed: renamed(
-                condition,
-                |column| {
-                    stored_name(column)
-                        .and_then(|name| columns.rename(name))
-                        .map(Term::Column)
-                },
-                |name| columns.relation(name),
-            ),
+            relaxed: renamed
+                .as_ref()
+                .and_then(missing_ok)
+                .filter(|_| rejects_unset(condition)),
+            renamed,
             membership: membership(condition).and_then(|(row, members)| {
                 let operands = row
                     .iter()
@@ -203,7 +214,10 @@ pub(crate) fn clause_implies<C: Columns>(
             |column| stored_name(column).map(|name| Term::Column(name.into_owned())),
             |name| columns.relation(name),
         )
-        && (written == *stated || finds_within(&set_within, &written, stated)?)
+        && (written == *stated
+            || missing_ok(&written).as_ref().unwrap_or(&written)
+                == condition.relaxed.as_ref().unwrap_or(stated)
+            || finds_within(&set_within, &written, stated)?)
     {
         return Ok(true);
     }
@@ -276,6 +290,153 @@ pub(crate) fn clause_implies<C: Columns>(
         }
     }
     Ok(false)
+}
+
+/// The name and the `missing_ok` argument, when passed, of a call of
+/// `current_setting`.
+fn setting_read(expression: &Expr) -> Option<(&Expr, Option<&Expr>)> {
+    let Expr::Function(Function {
+        name,
+        args: FunctionArguments::List(list),
+        ..
+    }) = expression
+    else {
+        return None;
+    };
+    let names = |part: &ObjectNamePart, expected: &str| {
+        part.as_ident().is_some_and(|ident| {
+            normalize_identifier(&ident.value, ident.quote_style.is_some()) == expected
+        })
+    };
+    let current_setting = match name.0.as_slice() {
+        [function] => names(function, "current_setting"),
+        [schema, function] => names(schema, "pg_catalog") && names(function, "current_setting"),
+        _ => false,
+    };
+    if !current_setting {
+        return None;
+    }
+    match list.args.as_slice() {
+        [FunctionArg::Unnamed(FunctionArgExpr::Expr(setting))] => Some((setting, None)),
+        [
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(setting)),
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(missing_ok)),
+        ] => Some((setting, Some(missing_ok))),
+        _ => None,
+    }
+}
+
+/// The name of the setting `expression` reads through `current_setting`
+/// without `missing_ok`, raising an error where the setting is unset.
+fn erroring_setting(expression: &Expr) -> Option<&Expr> {
+    match setting_read(expression)? {
+        (setting, None) => Some(setting),
+        (setting, Some(Expr::Value(value))) if value.value == Value::Boolean(false) => {
+            Some(setting)
+        }
+        _ => None,
+    }
+}
+
+/// `expression` with every setting [`erroring_setting`] reads passed
+/// `missing_ok` as `true`, when it reads one.
+fn missing_ok(expression: &Expr) -> Option<Expr> {
+    visit_expressions(expression, |expression| {
+        if erroring_setting(expression).is_some() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+    .then(|| {
+        let mut written = expression.clone();
+        let _ = visit_expressions_mut(&mut written, |expression| {
+            if erroring_setting(expression).is_some()
+                && let Expr::Function(Function {
+                    args: FunctionArguments::List(list),
+                    ..
+                }) = expression
+            {
+                list.args.truncate(1);
+                list.args
+                    .push(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                        Value::Boolean(true).into(),
+                    ))));
+            }
+            ControlFlow::<()>::Continue(())
+        });
+        written
+    })
+}
+
+/// Whether `condition` is never true while a setting [`erroring_setting`]
+/// finds in it is `NULL`, since for each such setting [`rejected`] holds.
+fn rejects_unset(condition: &Expr) -> bool {
+    visit_expressions(condition, |expression| match erroring_setting(expression) {
+        Some(setting) if !rejected(condition, setting) => ControlFlow::Break(()),
+        _ => ControlFlow::Continue(()),
+    })
+    .is_continue()
+}
+
+/// Whether a conjunct of `condition` compares the setting `setting` reads
+/// with a strict comparison, tests it with `IN`, or finds a row of a
+/// subquery only through a `WHERE` this holds for, so that the conjunct is
+/// not true while the setting is `NULL`.
+fn rejected(condition: &Expr, setting: &Expr) -> bool {
+    let reads =
+        |operand: &Expr| setting_read(unwrapped(operand)).is_some_and(|(read, _)| read == setting);
+    conjuncts(condition)
+        .into_iter()
+        .any(|conjunct| match unnested(conjunct) {
+            Expr::BinaryOp {
+                left,
+                op:
+                    BinaryOperator::Eq
+                    | BinaryOperator::NotEq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq,
+                right,
+            } => reads(left) || reads(right),
+            Expr::In {
+                expr,
+                target,
+                negated: false,
+                ..
+            } => {
+                reads(expr)
+                    || matches!(target, InTarget::Subquery(query) if found_only_where(query, setting))
+            }
+            Expr::Exists {
+                subquery,
+                negated: false,
+            } => found_only_where(subquery, setting),
+            _ => false,
+        })
+}
+
+/// Whether `query` yields a row only for a row passing a `WHERE` of which
+/// [`rejected`] holds, projecting constants and columns without `HAVING`.
+fn found_only_where(query: &Query, setting: &Expr) -> bool {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return false;
+    };
+    select.having.is_none()
+        && select.projection.iter().all(|item| match item {
+            SelectItem::UnnamedExpr(projected)
+            | SelectItem::ExprWithAlias {
+                expr: projected, ..
+            } => matches!(projected, Expr::Value(_)) || is_column_reference(projected),
+            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..) => true,
+            SelectItem::ExprWithAliases { .. } => false,
+        })
+        && select
+            .selection
+            .as_ref()
+            .is_some_and(|filter| rejected(filter, setting))
 }
 
 /// Whether `holds` accepts every one of `items`, stopping at the first it
