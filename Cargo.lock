@@ -1808,6 +1808,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "quine-mc_cluskey"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07589615d719a60c8dd8a4622e7946465dfef20d1a428f969e3443e7386d5f45"
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2331,6 +2337,7 @@ dependencies = [
  "pg_diesel",
  "sql-traits",
  "sqlparser",
+ "sqlparser-expr-eval",
  "sqlparser-plpgsql",
  "sqlstate 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "testcontainers",
@@ -2362,8 +2369,9 @@ dependencies = [
 [[package]]
 name = "sqlparser-expr-eval"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#1e87038c58ca7ed3bc931a5f2efa08dc3ff54388"
+source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#1eaf42b7f6a460b5e6d949b28dc34a4844a8be21"
 dependencies = [
+ "quine-mc_cluskey",
  "rpds",
  "sql-values",
  "sqlparser",
