@@ -1299,10 +1299,12 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 if let Some(members) = select_members(select) {
                     return Ok(Some(members));
                 }
-                Ok(match renamed_column_call(select) {
-                    Some(call) if self.yields_one_column(&call)? => Some(Cow::Owned(call)),
-                    _ => None,
-                })
+                let Some(call) = renamed_column_call(select) else {
+                    return Ok(None);
+                };
+                Ok(self
+                    .yields_one_column(&call)?
+                    .then_some(Cow::Owned(Expr::Function(call))))
             }
             SetExpr::Query(query) => self.body_members(query),
             _ => Ok(None),
@@ -1312,10 +1314,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// Whether `call` reaches one set-returning function whose rows have
     /// one column, a built-in scalar it returns a set of or the one column
     /// it declares.
-    fn yields_one_column(&self, call: &Expr) -> Result<bool, LookupError> {
-        let Expr::Function(call) = call else {
-            return Ok(false);
-        };
+    fn yields_one_column(&self, call: &Function) -> Result<bool, LookupError> {
         let Some(function) = self
             .sole_function(call)?
             .filter(|function| function.returns_set())
@@ -2397,15 +2396,15 @@ fn plain_select(query: &Query) -> Option<&Select> {
 /// only add rows.
 fn recursive_seeds(query: &Query) -> Option<Vec<&SetExpr>> {
     let with = query.with.as_ref().filter(|with| with.recursive)?;
-    let [walk] = with.cte_tables.as_slice() else {
-        return None;
-    };
     let SetExpr::Select(outer) = query.body.as_ref() else {
         return None;
     };
+    let walk = with
+        .cte_tables
+        .iter()
+        .find(|walk| reselects(outer, &walk.alias))?;
     if !limits_nothing(query)
         || !filters_nothing(outer)
-        || !reselects(outer, &walk.alias)
         || walk.from.is_some()
         || walk.query.with.is_some()
         || !limits_nothing(&walk.query)
@@ -2451,7 +2450,8 @@ fn positional(quantifier: SetQuantifier) -> bool {
 }
 
 /// Whether `select` reads the walk `walk` names alone and projects each of
-/// its columns once, in order, as `*` or by the names `walk` lists.
+/// its columns once, in order, as `*` or by the names `walk` lists or the
+/// alias it reads the walk under renames them to.
 fn reselects(select: &Select, walk: &TableAlias) -> bool {
     let [from] = select.from.as_slice() else {
         return false;
@@ -2469,11 +2469,12 @@ fn reselects(select: &Select, walk: &TableAlias) -> bool {
         return false;
     };
     let walked = identifier(&walk.name);
+    let renamed = alias
+        .as_ref()
+        .map_or(&[][..], |alias| alias.columns.as_slice());
     if !from.joins.is_empty()
         || !matches!(name.0.as_slice(), [part] if part.as_ident().map(identifier).as_ref() == Some(&walked))
-        || alias
-            .as_ref()
-            .is_some_and(|alias| !alias.columns.is_empty())
+        || renamed.len() > walk.columns.len()
     {
         return false;
     }
@@ -2482,25 +2483,29 @@ fn reselects(select: &Select, walk: &TableAlias) -> bool {
     match select.projection.as_slice() {
         [SelectItem::Wildcard(options)] => *options == WildcardAdditionalOptions::default(),
         items => {
+            let columns = renamed.iter().chain(&walk.columns[renamed.len()..]);
             !walk.columns.is_empty()
                 && items.len() == walk.columns.len()
-                && items.iter().zip(&walk.columns).all(|(item, column)| {
-                    let (SelectItem::UnnamedExpr(expression)
-                    | SelectItem::ExprWithAlias {
-                        expr: expression, ..
-                    }) = item
-                    else {
-                        return false;
+                && items.iter().zip(columns).all(|(item, column)| {
+                    let named = match item {
+                        SelectItem::UnnamedExpr(Expr::Identifier(named))
+                        | SelectItem::ExprWithAlias {
+                            expr: Expr::Identifier(named),
+                            ..
+                        } => Some(named),
+                        SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts))
+                        | SelectItem::ExprWithAlias {
+                            expr: Expr::CompoundIdentifier(parts),
+                            ..
+                        } => parts
+                            .split_last()
+                            .filter(|(_, qualifier)| {
+                                matches!(qualifier, [relation] if identifier(relation) == *exposed)
+                            })
+                            .map(|(named, _)| named),
+                        _ => None,
                     };
-                    let named = match expression {
-                        Expr::Identifier(named) => named,
-                        Expr::CompoundIdentifier(parts) => match parts.as_slice() {
-                            [relation, named] if identifier(relation) == *exposed => named,
-                            _ => return false,
-                        },
-                        _ => return false,
-                    };
-                    identifier(named) == identifier(&column.name)
+                    named.is_some_and(|named| identifier(named) == identifier(&column.name))
                 })
         }
     }

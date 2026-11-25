@@ -683,8 +683,10 @@ fn a_referenced_policy_implied_through_the_key_part_by_part_is_clean() {
 
 /// The typed templates [`slot_schema`] reports under `readable` and `check`,
 /// beside `walk()`, a helper selecting `body` over `steps`, which links each
-/// template to the templates below it.
+/// template to the templates below it, and `seeded()`, a walk from
+/// `readable('reader')`.
 fn walked_slots(readable: &str, body: &str, check: &str) -> Vec<String> {
+    let seeded = walk_from("SELECT readable('reader')", "SELECT walked.id FROM walked");
     let sql = slot_schema(
         readable,
         check,
@@ -692,6 +694,11 @@ fn walked_slots(readable: &str, body: &str, check: &str) -> Vec<String> {
         "id, template_id, organization_id",
         &format!(
             "CREATE TABLE steps (parent_id INT NOT NULL, child_id INT NOT NULL);
+             CREATE FUNCTION readable_rows(level TEXT) RETURNS TABLE (template INT)
+               LANGUAGE sql STABLE AS $$ SELECT 1 $$;
+             CREATE FUNCTION readable_pairs(level TEXT) RETURNS TABLE (template INT, organization INT)
+               LANGUAGE sql STABLE AS $$ SELECT 1, 1 $$;
+             CREATE FUNCTION seeded() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ {seeded} $$;
              CREATE FUNCTION walk() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ {body} $$;"
         ),
     );
@@ -721,17 +728,39 @@ fn a_key_confined_to_the_seed_of_a_recursive_helper_the_referenced_rows_are_read
 {
     let aliased = "SELECT granted.id FROM readable('reader') granted (id)";
     let outer = "SELECT walked.id FROM walked";
-    for body in [
-        aliased.to_owned(),
-        walk_from("SELECT readable('reader')", outer),
-        walk_from(aliased, outer),
-        walk_from(&format!("SELECT readable('writer') UNION {aliased}"), outer),
-        walk_from(aliased, "SELECT id FROM walked"),
+    for (body, check) in [
+        (aliased.to_owned(), READER),
+        (walk_from("SELECT readable('reader')", outer), READER),
+        (walk_from(aliased, outer), READER),
+        (
+            walk_from(&format!("SELECT readable('writer') UNION {aliased}"), outer),
+            READER,
+        ),
+        (walk_from("(SELECT readable('reader'))", outer), READER),
+        (walk_from(aliased, "SELECT id FROM walked"), READER),
+        (walk_from(aliased, "SELECT * FROM walked"), READER),
+        (
+            walk_from(aliased, "SELECT renamed.other FROM walked renamed (other)"),
+            READER,
+        ),
+        (
+            format!(
+                "WITH RECURSIVE unread (id) AS (SELECT 1),
+                 walked (id) AS ({aliased} UNION SELECT step.child_id FROM steps step
+                 JOIN walked ON walked.id = step.parent_id) {outer}"
+            ),
+            READER,
+        ),
+        (walk_from("SELECT seeded()", outer), READER),
+        (
+            "SELECT granted.id FROM readable_rows('reader') granted (id)".to_owned(),
+            "id IN (SELECT readable_rows('reader'))",
+        ),
     ] {
         assert_eq!(
-            walked_slots(WALKED, &body, READER),
+            walked_slots(WALKED, &body, check),
             Vec::<String>::new(),
-            "{body}"
+            "{body} under {check}"
         );
     }
 }
@@ -739,6 +768,7 @@ fn a_key_confined_to_the_seed_of_a_recursive_helper_the_referenced_rows_are_read
 #[test]
 fn a_key_a_recursive_helper_may_not_reach_is_reported() {
     let seed = "SELECT readable('reader')";
+    let pairs = "id IN (SELECT readable_pairs('reader'))";
     for (readable, body, check) in [
         (
             WALKED,
@@ -760,6 +790,32 @@ fn a_key_a_recursive_helper_may_not_reach_is_reported() {
             walk_from(seed, "SELECT step.child_id FROM steps step"),
             READER,
         ),
+        (WALKED, walk_from(seed, "VALUES (1)"), READER),
+        (
+            WALKED,
+            walk_from(seed, "SELECT walked.id FROM walked, steps"),
+            READER,
+        ),
+        (
+            WALKED,
+            walk_from(
+                seed,
+                "SELECT walked.id FROM walked TABLESAMPLE BERNOULLI (50)",
+            ),
+            READER,
+        ),
+        (
+            WALKED,
+            walk_from(seed, "SELECT walked.id + 1 FROM walked"),
+            READER,
+        ),
+        (
+            WALKED,
+            "WITH RECURSIVE walked (id) AS (SELECT readable('reader') INTERSECT
+             SELECT step.child_id FROM steps step) SELECT walked.id FROM walked"
+                .to_owned(),
+            READER,
+        ),
         (
             WALKED,
             "WITH RECURSIVE walked (id) AS (SELECT step.child_id FROM steps step UNION
@@ -772,6 +828,21 @@ fn a_key_a_recursive_helper_may_not_reach_is_reported() {
             WALKED,
             "SELECT granted.id FROM readable('reader') granted (id) WHERE granted.id > 0".to_owned(),
             READER,
+        ),
+        (
+            WALKED,
+            "SELECT granted.id FROM reader_ids() granted (id)".to_owned(),
+            "id = ANY (reader_ids())",
+        ),
+        (
+            WALKED,
+            "SELECT granted.id FROM readable_pairs('reader') granted (id)".to_owned(),
+            pairs,
+        ),
+        (
+            WALKED,
+            "SELECT granted.id FROM readable_pairs('reader') granted (id, organization)".to_owned(),
+            pairs,
         ),
         (
             SLOTS_READ,
