@@ -370,8 +370,7 @@ fn rejects_unset(condition: &Expr) -> bool {
 }
 
 /// Whether a conjunct of `condition` compares the setting `setting` reads
-/// with a strict comparison, tests it with `IN`, or finds a row of a
-/// subquery only through a `WHERE` this holds for, so that the conjunct is
+/// with a strict comparison or tests it with `IN`, so that the conjunct is
 /// not true while the setting is `NULL`.
 fn rejected(condition: &Expr, setting: &Expr) -> bool {
     let reads =
@@ -392,41 +391,11 @@ fn rejected(condition: &Expr, setting: &Expr) -> bool {
             } => reads(left) || reads(right),
             Expr::In {
                 expr,
-                target,
                 negated: false,
                 ..
-            } => {
-                reads(expr)
-                    || matches!(target, InTarget::Subquery(query) if found_only_where(query, setting))
-            }
-            Expr::Exists {
-                subquery,
-                negated: false,
-            } => found_only_where(subquery, setting),
+            } => reads(expr),
             _ => false,
         })
-}
-
-/// Whether `query` yields a row only for a row passing a `WHERE` of which
-/// [`rejected`] holds, projecting constants and columns without `HAVING`.
-fn found_only_where(query: &Query, setting: &Expr) -> bool {
-    query.body.as_select().is_some_and(|select| {
-        select.having.is_none()
-            && select.projection.iter().all(|item| match item {
-                SelectItem::UnnamedExpr(projected)
-                | SelectItem::ExprWithAlias {
-                    expr: projected, ..
-                } => matches!(projected, Expr::Value(_)) || is_column_reference(projected),
-                item => matches!(
-                    item,
-                    SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)
-                ),
-            })
-            && select
-                .selection
-                .as_ref()
-                .is_some_and(|filter| rejected(filter, setting))
-    })
 }
 
 /// Whether `holds` accepts every one of `items`, stopping at the first it
