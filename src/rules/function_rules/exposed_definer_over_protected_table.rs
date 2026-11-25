@@ -92,10 +92,15 @@ use super::plpgsql_ambiguous_name::collision;
 /// A function is not reported when every caller already reads what it
 /// returns. Its body is then one `LANGUAGE sql` query, or a PL/pgSQL block
 /// that only returns queries, through `RETURN QUERY`, a `RETURN` of a scalar
-/// subquery or a `SELECT ... INTO` of the variable it returns, and names no
-/// column a variable also answers to. That query writes nothing, the
-/// function sets no parameter besides `search_path` and neither it nor a
-/// function it calls runs `set_config`, and every read of a
+/// subquery or a `SELECT ... INTO` of the variable it returns, maybe past
+/// guards `IF condition THEN RAISE EXCEPTION ...` or `IF condition THEN
+/// RETURN`, and names no column a variable also answers to. Every other
+/// variable it declares holds the default it is declared with. A guard's
+/// condition reads no subquery and evaluates alike for a caller and the
+/// owner, and its exception carries no argument, so whether it raises tells
+/// nothing of what the owner reads. That query writes nothing, the function
+/// sets no parameter besides `search_path` and neither it nor a function it
+/// calls runs `set_config`, and every read of a
 /// table with row-level security in it is filtered, by its `WHERE` and the
 /// `ON` of the joins that drop its rows, to rows each caller's own `SELECT`
 /// policies on that table admit, while each caller may select every column
