@@ -4572,64 +4572,91 @@ fn a_column_fixed_to_a_literal_stands_for_it_in_a_tested_pair() {
     }
 }
 
+/// The definers the rule reports where `authz.profile_organization()` is
+/// declared by `helper` over `body`, a policy and a definer both keep the
+/// `resources` rows whose organization is `tested`, and `granted` runs last.
+fn profile_helper_exposed(helper: &str, body: &str, tested: &str, granted: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE SCHEMA authz;
+             CREATE TABLE profiles (user_id TEXT PRIMARY KEY, organization_id INT NOT NULL);
+             CREATE TABLE guarded_profiles (user_id TEXT PRIMARY KEY, organization_id INT NOT NULL);
+             CREATE TABLE private_profiles (user_id TEXT PRIMARY KEY, organization_id INT NOT NULL);
+             CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL);
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE guarded_profiles ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE guarded_profiles FORCE ROW LEVEL SECURITY;
+             GRANT SELECT ON resources, profiles, guarded_profiles TO app;
+             CREATE POLICY own_profiles ON guarded_profiles FOR SELECT TO app
+               USING (user_id = current_setting('app.user_id', true));
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE FUNCTION public.profile_of(user_id TEXT) RETURNS INT
+               LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT profile.organization_id FROM public.profiles profile
+                 WHERE profile.user_id = profile_of.user_id $$;
+             CREATE FUNCTION authz.profile_organization() RETURNS INT
+               {helper} AS $$ {body} $$;
+             CREATE FUNCTION authz.organization() RETURNS INT
+               LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT authz.profile_organization() $$;
+             CREATE POLICY organization_resources ON resources FOR SELECT TO app
+               USING (organization_id = {tested});
+             CREATE FUNCTION authz.resource_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE resource.organization_id = {tested} $$;
+             {granted}"
+        ),
+    )
+}
+
 #[test]
 fn an_invoker_helper_reading_alike_for_every_caller_confines_a_filter() {
     const READS_PROFILE: &str = "SELECT profile.organization_id FROM public.profiles profile
         WHERE profile.user_id = current_setting('app.user_id', true)";
-    let reported = |helper: &str, body: &str, tested: &str, granted: &str| {
-        exposed(
-            Deployment::default().with_app_role("app"),
-            &format!(
-                "CREATE ROLE app NOLOGIN;
-                 CREATE SCHEMA authz;
-                 CREATE TABLE profiles (user_id TEXT PRIMARY KEY, organization_id INT NOT NULL);
-                 CREATE TABLE guarded_profiles (user_id TEXT PRIMARY KEY, organization_id INT NOT NULL);
-                 CREATE TABLE private_profiles (user_id TEXT PRIMARY KEY, organization_id INT NOT NULL);
-                 CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL);
-                 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
-                 ALTER TABLE guarded_profiles ENABLE ROW LEVEL SECURITY;
-                 ALTER TABLE guarded_profiles FORCE ROW LEVEL SECURITY;
-                 GRANT SELECT ON resources, profiles, guarded_profiles TO app;
-                 CREATE POLICY own_profiles ON guarded_profiles FOR SELECT TO app
-                   USING (user_id = current_setting('app.user_id', true));
-                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
-                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
-                 CREATE FUNCTION authz.profile_organization() RETURNS INT
-                   {helper} AS $$ {body} $$;
-                 CREATE FUNCTION authz.organization() RETURNS INT
-                   LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
-                     SELECT authz.profile_organization() $$;
-                 CREATE POLICY organization_resources ON resources FOR SELECT TO app
-                   USING (organization_id = {tested});
-                 CREATE FUNCTION authz.resource_ids() RETURNS SETOF INT
-                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                     SELECT resource.id FROM public.resources resource
-                     WHERE resource.organization_id = {tested} $$;
-                 {granted}"
-            ),
-        )
-    };
     let alike = "LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp";
+    let unpinned = "LANGUAGE sql STABLE";
     let revoked = "REVOKE EXECUTE ON FUNCTION authz.profile_organization() FROM app;";
     for tested in [
         "authz.profile_organization()",
         "(SELECT authz.profile_organization())",
         "authz.organization()",
     ] {
-        for body in [
-            READS_PROFILE,
-            "WITH own AS (SELECT profile.organization_id FROM public.profiles profile
-               WHERE profile.user_id = current_setting('app.user_id', true))
-             SELECT own.organization_id FROM own",
+        for (helper, body) in [
+            (alike, READS_PROFILE),
+            (
+                alike,
+                "WITH own AS (SELECT profile.organization_id FROM public.profiles profile
+                   WHERE profile.user_id = current_setting('app.user_id', true))
+                 SELECT own.organization_id FROM own",
+            ),
+            (unpinned, READS_PROFILE),
+            (
+                unpinned,
+                "SELECT public.profile_of(pg_catalog.current_setting('app.user_id', true))",
+            ),
         ] {
             assert_eq!(
-                reported(alike, body, tested, ""),
+                profile_helper_exposed(helper, body, tested, ""),
                 Vec::<String>::new(),
-                "{tested} {body}"
+                "{tested} {helper} {body}"
             );
         }
         for (helper, body, granted) in [
-            ("LANGUAGE sql STABLE", READS_PROFILE, ""),
+            (
+                unpinned,
+                "SELECT profile.organization_id FROM profiles profile
+                 WHERE profile.user_id = current_setting('app.user_id', true)",
+                "",
+            ),
+            (
+                unpinned,
+                "SELECT profile_of(current_setting('app.user_id', true))",
+                "",
+            ),
             (
                 "LANGUAGE sql VOLATILE SET search_path = pg_catalog, pg_temp",
                 READS_PROFILE,
@@ -4656,7 +4683,7 @@ fn an_invoker_helper_reading_alike_for_every_caller_confines_a_filter() {
             (alike, READS_PROFILE, revoked),
         ] {
             assert_eq!(
-                reported(helper, body, tested, granted),
+                profile_helper_exposed(helper, body, tested, granted),
                 ["resource_ids()"],
                 "{tested} {helper} {body} {granted}"
             );
@@ -4734,4 +4761,43 @@ fn a_boolean_compared_with_a_literal_reads_as_itself_or_its_negation() {
         ),
         ["probe_2()"]
     );
+}
+
+#[test]
+fn an_auth_helper_without_its_own_search_path_confines_a_filter() {
+    let reported = |tested: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "CREATE ROLE app NOLOGIN;
+                 CREATE SCHEMA auth;
+                 CREATE TABLE resources (id INT PRIMARY KEY, owner_id UUID, organization_id INT);
+                 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+                 GRANT SELECT ON resources TO app;
+                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+                 CREATE FUNCTION auth.uid() RETURNS UUID LANGUAGE sql STABLE AS $$
+                   SELECT coalesce(
+                     nullif(current_setting('request.jwt.claim.sub', true), ''),
+                     (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+                   )::uuid $$;
+                 CREATE FUNCTION auth.jwt() RETURNS JSONB LANGUAGE sql STABLE AS $$
+                   SELECT coalesce(
+                     nullif(current_setting('request.jwt.claim', true), ''),
+                     nullif(current_setting('request.jwt.claims', true), '')
+                   )::jsonb $$;
+                 CREATE POLICY readable ON resources FOR SELECT TO app USING ({tested});
+                 CREATE FUNCTION public.resource_ids() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource WHERE {tested} $$;"
+            ),
+        )
+    };
+    for tested in [
+        "owner_id = auth.uid()",
+        "owner_id = (SELECT auth.uid())",
+        "organization_id = (auth.jwt() ->> 'organization_id')::int",
+    ] {
+        assert_eq!(reported(tested), Vec::<String>::new(), "{tested}");
+    }
 }
