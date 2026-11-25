@@ -20,6 +20,7 @@ use crate::{
     rules::{
         closed_set_support::{CheckedRows, names_cast_column},
         function_rules::readable,
+        grant_support::is_subscribed,
         literal_support::literal,
         policy_support::conjuncts,
         trigger_support::{fires_on_insert, fires_on_update, row, row_trigger, stored},
@@ -45,7 +46,10 @@ rule_definition!(
     /// column. Nor is a column that a row-level `BEFORE INSERT` or `BEFORE
     /// UPDATE` trigger of its table reads as `NEW.column`, in its `WHEN`
     /// condition or its PL/pgSQL function, since a stored generated column
-    /// holds no value there until those triggers have run.
+    /// holds no value there until those triggers have run. Nor is a column of
+    /// a table the deployment declares subscribed with
+    /// [`Deployment::with_subscribed_table`](crate::deployment::Deployment::with_subscribed_table),
+    /// whose columns take the shape of the publisher's.
     ///
     /// # Example
     ///
@@ -177,7 +181,10 @@ impl<DB: DatabaseLike> ColumnRule for ConstantColumnNotGenerated<DB> {
         let Some(fixed) = literal(default).filter(|value| !matches!(value, Value::Null)) else {
             return Ok(());
         };
-        if column.is_generated(database) || column.is_nullable(database)? {
+        if column.is_generated(database)
+            || column.is_nullable(database)?
+            || is_subscribed(database, reporter.deployment(), column.table(database))
+        {
             return Ok(());
         }
         for foreign_key in column

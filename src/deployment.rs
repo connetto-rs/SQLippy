@@ -51,6 +51,7 @@ pub struct Deployment {
     request_settings: Vec<Expr>,
     sets_within: Vec<(Expr, Expr)>,
     client_written_tables: Vec<(String, String)>,
+    subscribed_tables: Vec<(String, String)>,
     binary_replication_tables: Fact<(String, String)>,
     binary_replication_all_tables: bool,
     self_asserted_claims: Fact<Expr>,
@@ -435,6 +436,33 @@ impl Deployment {
             .iter()
             .any(|(written_schema, written_table)| {
                 written_schema == schema && written_table == table
+            })
+    }
+
+    /// Declares a table whose rows a change feed applies, such as a logical
+    /// replication subscription or the changesets of SQLite's session
+    /// extension, by the stored names of its schema and table. Its columns
+    /// take the shape of the publisher's, which a feed refuses to apply over
+    /// a column set of its own. A SQLite table created without a database
+    /// name sits in `main`.
+    #[must_use]
+    pub fn with_subscribed_table(
+        mut self,
+        schema: impl Into<String>,
+        table: impl Into<String>,
+    ) -> Self {
+        self.subscribed_tables.push((schema.into(), table.into()));
+        self
+    }
+
+    /// Returns whether a change feed applies the rows of the table with these
+    /// stored schema and table names.
+    #[must_use]
+    pub fn is_subscribed(&self, schema: &str, table: &str) -> bool {
+        self.subscribed_tables
+            .iter()
+            .any(|(subscribed_schema, subscribed_table)| {
+                subscribed_schema == schema && subscribed_table == table
             })
     }
 
