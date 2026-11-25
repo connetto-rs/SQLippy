@@ -157,7 +157,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
         register_schema_rules(&mut constrainer);
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 17] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 18] = [
             Box::new(ImpureImmutableFunction::default()),
             Box::new(WritingNonVolatileFunction::default()),
             Box::new(DefinerWithoutSearchPath::default()),
@@ -175,6 +175,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(DecidedBranch::default()),
             Box::new(CaseWithoutMatch::default()),
             Box::new(FailingAssert::default()),
+            Box::new(AlwaysRaisingExpression::default()),
         ];
         for rule in function_rules {
             constrainer.register_function_rule_with_floor(rule, Level::Allow);

@@ -133,3 +133,59 @@ fn live_raising_schema_expressions_are_reported() {
         ]
     );
 }
+
+/// Messages of every finding for the PL/pgSQL `body` of a function taking
+/// `x INT` and returning `INT`.
+fn body_messages(body: &str) -> Vec<String> {
+    let constrainer: GenericConstrainer<ParserDB> = AlwaysRaisingExpression::default().into();
+    findings(
+        &constrainer,
+        "always_raising_expression",
+        &format!("CREATE FUNCTION pick(x INT) RETURNS INT LANGUAGE plpgsql AS $$ {body} $$;"),
+    )
+    .into_iter()
+    .map(|(_, object, message)| {
+        assert_eq!(object, "pick(INT)");
+        message
+    })
+    .collect()
+}
+
+#[test]
+fn plpgsql_conditions_and_values_raising_on_every_path_are_reported() {
+    for (body, found) in [
+        (
+            "DECLARE d INT := 0; BEGIN IF 1 / d > 3 THEN RETURN 1; END IF; RETURN 0; END",
+            "the IF condition `1 / d > 3` raises an error on every path reaching it",
+        ),
+        (
+            "DECLARE d INT := 0; BEGIN ASSERT 5 / d = 1; RETURN 0; END",
+            "the ASSERT condition `5 / d = 1` raises an error on every path reaching it",
+        ),
+        (
+            "DECLARE d INT := 0; q INT; BEGIN q := 10 / d; RETURN q; END",
+            "the assigned value `10 / d` raises an error on every path reaching it",
+        ),
+        (
+            "DECLARE big INT := 2147483647; q INT := big + 1; BEGIN RETURN q; END",
+            "the declared default `big + 1` raises an error on every path reaching it",
+        ),
+    ] {
+        assert_eq!(
+            body_messages(body),
+            [format!("In function 'pick(INT)', {found}.")],
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn plpgsql_expressions_some_path_evaluates_are_clean() {
+    for body in [
+        "BEGIN IF 10 / x > 3 THEN RETURN 1; END IF; RETURN 0; END",
+        "DECLARE d INT := 0; q INT; BEGIN IF x > 0 THEN d := x; END IF; q := 10 / d; RETURN q; END",
+        "DECLARE d INT := 0; q INT; BEGIN RETURN 0; q := 10 / d; END",
+    ] {
+        assert_eq!(body_messages(body), Vec::<String>::new(), "{body}");
+    }
+}

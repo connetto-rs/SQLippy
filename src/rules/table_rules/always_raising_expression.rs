@@ -9,7 +9,10 @@ use sqlparser::ast::Expr;
 use crate::{
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
+    rules::plpgsql_site_support::evaluated_sites,
+    traits::{
+        Constrainer, FunctionRule, GenericConstrainer, Reporter, TableRule, reporter::signature,
+    },
 };
 
 /// Struct defining a rule that reports a schema expression raising an error
@@ -21,6 +24,11 @@ use crate::{
 /// `CREATE` and then fails every write that evaluates it. A `CHECK` that
 /// always raises admits no row, and `unsatisfiable_check` leaves it to this
 /// rule.
+///
+/// In a PL/pgSQL body it reads every condition, assigned value and declared
+/// default on the paths reaching it, under what each variable may hold
+/// there, and reports one that raises on all of them. One no path reaches
+/// is not reported.
 ///
 /// # Example
 ///
@@ -50,6 +58,7 @@ impl<DB: DatabaseLike + 'static> From<AlwaysRaisingExpression<DB>> for GenericCo
     fn from(rule: AlwaysRaisingExpression<DB>) -> Self {
         let mut constrainer = GenericConstrainer::default();
         constrainer.register_table_rule(Box::new(rule));
+        constrainer.register_function_rule(Box::new(AlwaysRaisingExpression::default()));
         constrainer
     }
 }
@@ -175,5 +184,31 @@ impl<DB: DatabaseLike> TableRule for AlwaysRaisingExpression<DB> {
             }
         }
         Ok(())
+    }
+}
+
+impl<DB: DatabaseLike> FunctionRule for AlwaysRaisingExpression<DB> {
+    type Database = DB;
+
+    fn check_function(
+        &self,
+        database: &Self::Database,
+        function: &<Self::Database as DatabaseLike>::Function,
+        reporter: &mut Reporter<'_, Self::Database>,
+    ) -> Result<(), Interruption> {
+        evaluated_sites(database, function, |site| {
+            if site.truth.raising != Raising::Always {
+                return Ok(());
+            }
+            reporter.function(
+                function,
+                format!(
+                    "In function '{}', {} raises an error on every path reaching it.",
+                    signature(function, database),
+                    site.described
+                ),
+                "Rewrite or remove the expression.".to_owned(),
+            )
+        })
     }
 }
