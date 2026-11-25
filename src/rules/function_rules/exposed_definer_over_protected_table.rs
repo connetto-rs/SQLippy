@@ -107,12 +107,16 @@ use crate::{
 /// that read alike for the caller and the owner count. Such a term reads no
 /// role, no privilege and no search path, calls no `VOLATILE` built-in such
 /// as `random()`, which the policy evaluates anew, reads only stored tables
-/// without row-level security of which every caller may select every
-/// column, and calls a function running as its caller only when that
-/// function is one `LANGUAGE sql` query, not `VOLATILE`, setting its own
-/// `search_path` and no other parameter, that every caller may execute and
-/// whose body reads alike in turn. A table read under an alias renaming its
-/// columns confines nothing.
+/// of which every caller may select every column, and calls a function
+/// running as its caller only when that function is one `LANGUAGE sql`
+/// query, not `VOLATILE`, setting its own `search_path` and no other
+/// parameter, that every caller may execute and whose body reads alike in
+/// turn. A stored table with row-level security reads alike only in a
+/// subquery the term holds true for finding a row in, a non-negated `EXISTS`
+/// or `IN` reached through `AND` and `OR` over an unlimited query
+/// inner-joining its relations, since its own read is confined, so each
+/// caller finds every row the owner finds. A table read under an alias
+/// renaming its columns confines nothing.
 /// Every function of the schema the body calls is held to the same test,
 /// except a `SECURITY DEFINER` function every caller may execute directly,
 /// which this rule judges on its own. Functions in `pg_catalog` are trusted.
@@ -920,6 +924,10 @@ struct CallerBound<'r, 'a, DB: DatabaseLike> {
     items: WithScopes,
     /// The functions whose bodies the walk stands in.
     reading: Vec<*const DB::Function>,
+    /// The relations of subqueries the walked term holds true only for
+    /// finding a row in, whose reads of tables with row-level security every
+    /// caller's policies admit, so a caller finds every row the owner does.
+    positive: Vec<*const TableFactor>,
 }
 
 impl<'r, 'a, DB: DatabaseLike> CallerBound<'r, 'a, DB> {
@@ -936,6 +944,7 @@ impl<'r, 'a, DB: DatabaseLike> CallerBound<'r, 'a, DB> {
             around,
             items: WithScopes::default(),
             reading: Vec::new(),
+            positive: Vec::new(),
         }
     }
 
@@ -1000,12 +1009,16 @@ impl<'r, 'a, DB: DatabaseLike> CallerBound<'r, 'a, DB> {
         alike
     }
 
-    /// Whether the relation `name` may hold other rows for the caller than
-    /// for the owner. A `WITH` item of the walked queries reads what its
-    /// walked body reads, and of the other relations only a stored table
-    /// without row-level security every caller may select every column of
-    /// reads alike.
-    fn reads_otherwise(&self, name: &ObjectName) -> Result<bool, LookupError> {
+    /// Whether the relation `factor` reads under `name` may hold other rows
+    /// for the caller than for the owner. A `WITH` item of the walked queries
+    /// reads what its walked body reads, and of the other relations only a
+    /// stored table every caller may select every column of reads alike,
+    /// one with row-level security only as a relation of `positive`.
+    fn reads_otherwise(
+        &self,
+        factor: &TableFactor,
+        name: &ObjectName,
+    ) -> Result<bool, LookupError> {
         if self.items.binding(name).is_some() {
             return Ok(false);
         }
@@ -1019,6 +1032,7 @@ impl<'r, 'a, DB: DatabaseLike> CallerBound<'r, 'a, DB> {
         Ok(match stored_table(database, name, self.path)? {
             Some(table) => {
                 table.has_row_level_security(database)?
+                    && !self.positive.contains(&ptr::from_ref(factor))
                     || !self.confinement.selectable_by_every_caller(table)?
             }
             None => true,
@@ -1063,7 +1077,7 @@ impl<DB: DatabaseLike> Visitor for CallerBound<'_, '_, DB> {
             name, args: None, ..
         } = factor
         {
-            return Self::verdict(self.reads_otherwise(name));
+            return Self::verdict(self.reads_otherwise(factor, name));
         }
         WrittenCall::relation(factor).map_or(ControlFlow::Continue(()), |call| {
             Self::verdict(self.evaluates_otherwise(call))
@@ -1087,6 +1101,56 @@ fn reads_session_state(call: &Function) -> bool {
                     "pg_has_role" | "row_security_active" | "current_schema" | "current_schemas"
                 )
         })
+}
+
+/// Pushes onto `found` the relations of each subquery `condition` holds true
+/// only for finding a row in, reached through `AND` and `OR`. That is an
+/// `EXISTS` or `IN` over a query unlimited, inner-joining its relations, and
+/// yielding one row of columns or constants for each row passing its
+/// `WHERE`, and in turn each such subquery of that `WHERE`. Finding more
+/// rows in them never turns `condition` false.
+fn positive_relations(condition: &Expr, found: &mut Vec<*const TableFactor>) {
+    let (Expr::Exists {
+        subquery,
+        negated: false,
+    }
+    | Expr::In {
+        target: InTarget::Subquery(subquery),
+        negated: false,
+        ..
+    }) = unnested(condition)
+    else {
+        if let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And | BinaryOperator::Or,
+            right,
+        } = unnested(condition)
+        {
+            positive_relations(left, found);
+            positive_relations(right, found);
+        }
+        return;
+    };
+    let Some(select) = witnessed(subquery) else {
+        return;
+    };
+    let inner = select.from.iter().flat_map(|from| &from.joins).all(|join| {
+        matches!(
+            join.join_operator,
+            JoinOperator::Join(_) | JoinOperator::Inner(_) | JoinOperator::CrossJoin(_)
+        )
+    });
+    if !inner
+        || subquery.limit_clause.is_some()
+        || subquery.fetch.is_some()
+        || !subquery.pipe_operators.is_empty()
+    {
+        return;
+    }
+    found.extend(select.from.iter().flat_map(relations).map(ptr::from_ref));
+    if let Some(selection) = &select.selection {
+        positive_relations(selection, found);
+    }
 }
 
 /// What a relation of a `FROM` item holds under a column name.
@@ -1401,10 +1465,14 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     }
 
     /// Whether `expression`, a term of the walked body, evaluates alike for
-    /// a caller and for the owner.
+    /// a caller and for the owner. Every query nested in the body has its
+    /// reads confined by now, so a subquery the term holds true only for
+    /// finding a row in finds, for the owner, only rows each caller finds.
     fn reads_alike(&self, expression: &Expr) -> Result<bool, LookupError> {
-        CallerBound::new(self.body.confinement, self.path, Some(&self.items))
-            .reads_alike(expression)
+        let mut caller_bound =
+            CallerBound::new(self.body.confinement, self.path, Some(&self.items));
+        positive_relations(expression, &mut caller_bound.positive);
+        caller_bound.reads_alike(expression)
     }
 
     /// `column IN (SELECT schema.f(…))` when `conjunct` holds the `column` of
