@@ -94,6 +94,25 @@ fn every_column_of_a_composite_tenant_key_must_not_hold_null() {
 }
 
 #[test]
+fn every_nullable_column_of_a_tenant_key_is_named() {
+    let [(_, object, message)] = findings(
+        &constrainer(),
+        "nullable_tenant_key",
+        "CREATE TABLE projects (id INT PRIMARY KEY, organization_namespace_id INT,
+           organization_id INT);",
+    )
+    .try_into()
+    .expect("one finding");
+    assert_eq!(object, "projects");
+    assert!(
+        message.starts_with(
+            "Columns 'organization_namespace_id', 'organization_id' of the declared tenant key of 'projects' allow NULL"
+        ),
+        "{message}"
+    );
+}
+
+#[test]
 fn the_rule_is_inactive_without_tenant_keys() {
     let constrainer: GenericConstrainer<ParserDB> = NullableTenantKey::default().into();
     assert_eq!(

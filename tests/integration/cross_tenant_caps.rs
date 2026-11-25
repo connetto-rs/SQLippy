@@ -266,3 +266,27 @@ fn composite_tenant_keys_require_every_column_equal() {
         assert!(!reported(from), "{from}");
     }
 }
+
+#[test]
+fn tenant_keys_of_different_lengths_are_never_equal() {
+    let mut constrainer: GenericConstrainer<ParserDB> = CrossTenantCap::default().into();
+    constrainer.set_deployment(
+        Deployment::default()
+            .with_tenant_key(
+                "public",
+                "resources",
+                ["organization_namespace_id", "organization_id"],
+            )
+            .with_tenant_key("public", "caps", ["organization_id"]),
+    );
+    let schema = ParserDB::parse::<PostgreSqlDialect>(
+        "CREATE TABLE resources (id TEXT PRIMARY KEY, organization_namespace_id TEXT,
+           organization_id TEXT, rank INT);
+         CREATE TABLE caps (id TEXT PRIMARY KEY, organization_id TEXT, rank INT);
+         CREATE FUNCTION capped_rank(cap_id TEXT) RETURNS INT LANGUAGE sql AS $$
+           SELECT LEAST(resources.rank, caps.rank) FROM resources JOIN caps
+             ON caps.id = cap_id AND caps.organization_id = resources.organization_id $$;",
+    )
+    .unwrap();
+    assert!(constrainer.validate_schema(&schema).is_err());
+}
