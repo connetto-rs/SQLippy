@@ -123,6 +123,7 @@ mod uncached_helper_queries;
 mod uncached_policy_calls;
 mod unconditional_writes;
 mod undeletable_references;
+mod unending_loops;
 mod unfiltered_change_triggers;
 mod unindexed_recursive_joins;
 mod unique_key_existence_oracles;

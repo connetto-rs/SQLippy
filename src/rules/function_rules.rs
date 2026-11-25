@@ -30,6 +30,8 @@ mod case_without_match;
 pub use case_without_match::CaseWithoutMatch;
 mod failing_assert;
 pub use failing_assert::FailingAssert;
+mod unending_loop;
+pub use unending_loop::UnendingLoop;
 mod function_without_safe_search_path;
 pub use function_without_safe_search_path::FunctionWithoutSafeSearchPath;
 

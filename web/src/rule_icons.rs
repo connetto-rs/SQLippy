@@ -266,6 +266,7 @@ rule_icons! {
     "decided_branch" => FaCodeMerge,
     "case_without_match" => FaCircleXmark,
     "failing_assert" => FaBan,
+    "unending_loop" => FaArrowsSpin,
 }
 #[cfg(test)]
 mod tests {
