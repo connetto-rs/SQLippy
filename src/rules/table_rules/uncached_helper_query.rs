@@ -69,6 +69,8 @@ fn tainted<DB: DatabaseLike>(
         }
         DefinitionSource::Incoming
         | DefinitionSource::Unknown
+        | DefinitionSource::False
+        | DefinitionSource::Found(_)
         | DefinitionSource::Diagnostics(_)
         | DefinitionSource::CallOutput { .. }
         | DefinitionSource::CursorOutput { .. }
