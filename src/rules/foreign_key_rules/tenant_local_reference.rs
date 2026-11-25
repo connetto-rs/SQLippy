@@ -129,34 +129,40 @@ fn listed<DB: DatabaseLike>(columns: &[&DB::Column]) -> String {
         .join(", ")
 }
 
-/// For each foreign key of the table of `column` that checks every row in
-/// which `column` is set and binds every column of `tenant` and `column`, the
-/// root columns it binds each of them to, in the order of `tenant` followed
-/// by `column`.
+/// The root columns of one foreign key that each column of a tenant key is
+/// bound to, in the order of the tenant key, and the root columns another
+/// column is bound to.
+type RootBinding<'db, DB> = (
+    Vec<Vec<&'db <DB as DatabaseLike>::Column>>,
+    Vec<&'db <DB as DatabaseLike>::Column>,
+);
+
+/// The bindings of `tenant` and `column` by each foreign key of the table of
+/// `column` that checks every row in which `column` is set and binds every
+/// column of `tenant` and `column`.
 fn root_bindings<'db, DB: DatabaseLike>(
     database: &'db DB,
     tenant: &[&'db DB::Column],
     column: &'db DB::Column,
-) -> Result<Vec<Vec<Vec<&'db DB::Column>>>, LookupError> {
+) -> Result<Vec<RootBinding<'db, DB>>, LookupError> {
     let mut bindings = Vec::new();
     for foreign_key in column.foreign_keys(database)? {
         if !checked_whenever_set(database, foreign_key, column)? {
             continue;
         }
         let pairs = key_pairs(database, foreign_key)?;
-        let binding: Vec<Vec<&DB::Column>> = tenant
-            .iter()
-            .chain([&column])
-            .map(|&bound| {
-                pairs
-                    .iter()
-                    .filter(|&&(host, _)| host == bound)
-                    .map(|&(_, root)| root)
-                    .collect()
-            })
-            .collect();
-        if binding.iter().all(|roots| !roots.is_empty()) {
-            bindings.push(binding);
+        let roots_of = |bound: &DB::Column| -> Vec<&'db DB::Column> {
+            pairs
+                .iter()
+                .filter(|&&(host, _)| host == bound)
+                .map(|&(_, root)| root)
+                .collect()
+        };
+        let tenant_roots: Vec<Vec<&DB::Column>> =
+            tenant.iter().map(|&bound| roots_of(bound)).collect();
+        let column_roots = roots_of(column);
+        if tenant_roots.iter().all(|roots| !roots.is_empty()) {
+            bindings.push((tenant_roots, column_roots));
         }
     }
     Ok(bindings)
@@ -176,13 +182,8 @@ fn share_root_row<'db, DB: DatabaseLike>(
         return Ok(false);
     }
     let parent_bindings = root_bindings(database, parent_tenant, parent_column)?;
-    for host_binding in root_bindings(database, host_tenant, host_column)? {
-        for parent_binding in &parent_bindings {
-            let (Some((host_roots, host_tenant_roots)), Some((parent_roots, parent_tenant_roots))) =
-                (host_binding.split_last(), parent_binding.split_last())
-            else {
-                continue;
-            };
+    for (host_tenant_roots, host_roots) in root_bindings(database, host_tenant, host_column)? {
+        for (parent_tenant_roots, parent_roots) in &parent_bindings {
             if !host_tenant_roots
                 .iter()
                 .zip(parent_tenant_roots)
@@ -190,7 +191,7 @@ fn share_root_row<'db, DB: DatabaseLike>(
             {
                 continue;
             }
-            for &root_column in host_roots {
+            for &root_column in &host_roots {
                 if parent_roots.contains(&root_column)
                     && has_key_over(database, root_column.table(database), &[root_column])?
                 {
