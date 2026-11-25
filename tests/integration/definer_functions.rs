@@ -503,6 +503,92 @@ fn a_subquery_naming_its_relation_in_ways_the_renaming_does_not_follow_confines_
     );
 }
 
+/// Notes policies show through subqueries over `memberships`, whose own
+/// policy shows each caller only their memberships, and definer functions
+/// repeating each policy's subquery.
+const MEMBERSHIP_NOTES: &str = "
+    CREATE TABLE notes (id INT, organization_id INT);
+    CREATE TABLE organizations (id INT);
+    ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+    GRANT SELECT ON notes, organizations TO app;
+    CREATE POLICY member_notes ON notes FOR SELECT TO app
+      USING (EXISTS (SELECT 1 FROM memberships m
+        WHERE m.organization_id = notes.organization_id
+          AND m.user_id = current_setting('app.user_id', true)));
+    CREATE POLICY listed_notes ON notes FOR SELECT TO app
+      USING (organization_id IN (SELECT m.organization_id FROM memberships m
+        WHERE m.user_id = current_setting('app.user_id', true)));
+    CREATE POLICY outsider_notes ON notes FOR SELECT TO app
+      USING (NOT EXISTS (SELECT 1 FROM memberships m
+        WHERE m.organization_id = notes.organization_id
+          AND m.user_id = current_setting('app.user_id', true)));
+    CREATE POLICY first_notes ON notes FOR SELECT TO app
+      USING (organization_id IN (SELECT m.organization_id FROM memberships m
+        WHERE m.user_id = current_setting('app.user_id', true) LIMIT 1));
+    CREATE POLICY single_notes ON notes FOR SELECT TO app
+      USING (organization_id = (SELECT m.organization_id FROM memberships m
+        WHERE m.user_id = current_setting('app.user_id', true)));
+    CREATE POLICY unjoined_notes ON notes FOR SELECT TO app
+      USING (EXISTS (SELECT 1 FROM organizations o LEFT JOIN memberships m
+        ON m.organization_id = o.id
+          AND m.user_id = current_setting('app.user_id', true)
+        WHERE o.id = notes.organization_id AND m.user_id IS NULL));
+    CREATE FUNCTION member_note_ids() RETURNS SETOF INT
+      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+        SELECT note.id FROM public.notes note
+        WHERE EXISTS (SELECT 1 FROM public.memberships membership
+          WHERE membership.organization_id = note.organization_id
+            AND membership.user_id = current_setting('app.user_id', true)) $$;
+    CREATE FUNCTION listed_note_ids() RETURNS SETOF INT
+      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+        SELECT note.id FROM public.notes note
+        WHERE note.organization_id IN (SELECT membership.organization_id
+          FROM public.memberships membership
+          WHERE membership.user_id = current_setting('app.user_id', true)) $$;
+    CREATE FUNCTION outsider_note_ids() RETURNS SETOF INT
+      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+        SELECT note.id FROM public.notes note
+        WHERE NOT EXISTS (SELECT 1 FROM public.memberships membership
+          WHERE membership.organization_id = note.organization_id
+            AND membership.user_id = current_setting('app.user_id', true)) $$;
+    CREATE FUNCTION first_note_ids() RETURNS SETOF INT
+      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+        SELECT note.id FROM public.notes note
+        WHERE note.organization_id IN (SELECT membership.organization_id
+          FROM public.memberships membership
+          WHERE membership.user_id = current_setting('app.user_id', true) LIMIT 1) $$;
+    CREATE FUNCTION single_note_ids() RETURNS SETOF INT
+      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+        SELECT note.id FROM public.notes note
+        WHERE note.organization_id = (SELECT membership.organization_id
+          FROM public.memberships membership
+          WHERE membership.user_id = current_setting('app.user_id', true)) $$;
+    CREATE FUNCTION unjoined_note_ids() RETURNS SETOF INT
+      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+        SELECT note.id FROM public.notes note
+        WHERE EXISTS (SELECT 1 FROM public.organizations organization
+          LEFT JOIN public.memberships membership
+          ON membership.organization_id = organization.id
+            AND membership.user_id = current_setting('app.user_id', true)
+          WHERE organization.id = note.organization_id AND membership.user_id IS NULL) $$;";
+
+#[test]
+fn a_subquery_over_a_protected_table_confines_only_where_finding_more_rows_admits_more() {
+    let protected = format!("{MEMBERSHIPS}{MEMBERSHIP_NOTES}");
+    let open = protected.replace("ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;", "");
+    let deployment = || Deployment::default().with_app_role("app");
+    assert_eq!(exposed(deployment(), &open), Vec::<String>::new());
+    assert_eq!(
+        exposed(deployment(), &protected),
+        [
+            "first_note_ids()",
+            "outsider_note_ids()",
+            "single_note_ids()",
+            "unjoined_note_ids()"
+        ]
+    );
+}
+
 #[test]
 fn a_value_list_confines_when_each_value_meets_a_policy_arm() {
     assert_eq!(
