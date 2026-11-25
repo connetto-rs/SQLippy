@@ -38,8 +38,24 @@ type Read<'r> = dyn Fn(&Expr) -> Result<Option<ExpressionTruth>, LookupError> + 
 /// finding of its own here.
 type Judged<'r> = dyn Fn(&Expr) -> Result<bool, LookupError> + 'r;
 
-/// A form of a written expression that agrees with it where it sits and
-/// reads fewer of its terms.
+/// Which simpler forms a rule reports, after clippy's two boolean lints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shape {
+    /// A form that drops a term, clippy's `overly_complex_bool_expr`.
+    DropsTerms,
+    /// A shorter form that reads every term, clippy's `nonminimal_bool`.
+    KeepsTerms,
+}
+
+impl Shape {
+    /// Whether a rule reporting this shape reports `form`.
+    fn wants(self, form: &SimplerForm) -> bool {
+        form.dropped.is_empty() == (self == Self::KeepsTerms)
+    }
+}
+
+/// A form of a written expression that agrees with it where it sits and is
+/// shorter.
 pub(crate) struct SimplerForm {
     /// The expression as written.
     written: String,
@@ -53,15 +69,23 @@ impl SimplerForm {
     /// The message of the finding on `place` of `subject`, such as the CHECK
     /// of table 't'.
     fn message(&self, subject: &str, place: &str) -> String {
-        let dropped = self
-            .dropped
+        let Self {
+            written,
+            form,
+            dropped,
+        } = self;
+        if dropped.is_empty() {
+            return format!(
+                "{subject} has {place} `{written}`, which `{form}` says with fewer operators."
+            );
+        }
+        let dropped = dropped
             .iter()
             .map(|term| format!("`{term}`"))
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "{subject} has {place} `{}`, which means the same as `{}` without reading {dropped}.",
-            self.written, self.form
+            "{subject} has {place} `{written}`, which means the same as `{form}` without reading {dropped}."
         )
     }
 
@@ -120,10 +144,10 @@ fn clauses_may_simplify<N: Visit + ?Sized>(node: &N, filters: bool, value_sites:
     found && visited.is_ok()
 }
 
-/// The minimal form of `expression` at `site` that drops a term it reads,
-/// reading each term through `read`. None for an expression already minimal,
-/// one whose minimal form reads every term or is a constant, which the
-/// tautology and contradiction rules report, and one no path reaches.
+/// The minimal form of `expression` at `site`, reading each term through
+/// `read`. None for an expression already minimal, one whose minimal form
+/// is a constant, which the tautology and contradiction rules report, and
+/// one no path reaches.
 ///
 /// # Errors
 ///
@@ -172,7 +196,7 @@ fn simpler_form<DB: DatabaseLike>(
         .filter(|term| !is_null_literal(term))
         .map(ToString::to_string)
         .collect();
-    if dropped.is_empty() || matches!(form, Expr::Value(_)) {
+    if matches!(form, Expr::Value(_)) {
         return Ok(None);
     }
     Ok(Some(SimplerForm {
@@ -260,6 +284,7 @@ fn report_checks<DB: DatabaseLike>(
     database: &DB,
     table: &DB::Table,
     checks: &[(&DB::CheckConstraint, bool)],
+    shape: Shape,
     reporter: &mut Reporter<'_, DB>,
 ) -> Result<(), Interruption> {
     let subject = format!("Table '{}'", table.table_name());
@@ -272,7 +297,9 @@ fn report_checks<DB: DatabaseLike>(
                 .truth_under(database, expression, case, &base)
                 .map(Some)
         };
-        let Some(form) = simpler_form(database, expression, Site::Check, &read)? else {
+        let Some(form) = simpler_form(database, expression, Site::Check, &read)?
+            .filter(|form| shape.wants(form))
+        else {
             continue;
         };
         let site = TermSite::new(
@@ -303,10 +330,11 @@ fn report_checks<DB: DatabaseLike>(
 pub(crate) fn report_table<DB: DatabaseLike>(
     database: &DB,
     table: &DB::Table,
+    shape: Shape,
     reporter: &mut Reporter<'_, DB>,
 ) -> Result<(), Interruption> {
     let checks = guaranteed_checks(database, table)?;
-    report_checks(database, table, &checks, reporter)?;
+    report_checks(database, table, &checks, shape, reporter)?;
     let table_name = table.table_name();
     let base = assumed(&checks, None);
     let read = |expression: &Expr| {
@@ -331,7 +359,9 @@ pub(crate) fn report_table<DB: DatabaseLike>(
             let Some(expression) = expression else {
                 continue;
             };
-            if let Some(form) = simpler_form(database, expression, Site::Value, &read)? {
+            if let Some(form) = simpler_form(database, expression, Site::Value, &read)?
+                .filter(|form| shape.wants(form))
+            {
                 let subject = format!("Column '{table_name}.{}'", column.column_name());
                 reporter.column(column, form.message(&subject, place), form.resolution())?;
             }
@@ -346,7 +376,9 @@ pub(crate) fn report_table<DB: DatabaseLike>(
             let Some(expression) = expression else {
                 continue;
             };
-            let Some(form) = simpler_form(database, expression, Site::Filter, &read)? else {
+            let Some(form) = simpler_form(database, expression, Site::Filter, &read)?
+                .filter(|form| shape.wants(form))
+            else {
                 continue;
             };
             if judged(expression)? {
@@ -371,7 +403,9 @@ pub(crate) fn report_table<DB: DatabaseLike>(
         let Some(predicate) = index.predicate() else {
             continue;
         };
-        let Some(form) = simpler_form(database, predicate, Site::Filter, &read)? else {
+        let Some(form) = simpler_form(database, predicate, Site::Filter, &read)?
+            .filter(|form| shape.wants(form))
+        else {
             continue;
         };
         if judged(predicate)? {
@@ -400,6 +434,7 @@ pub(crate) fn report_table<DB: DatabaseLike>(
 /// the reporter raises.
 pub(crate) fn report_schema<DB: DatabaseLike>(
     database: &DB,
+    shape: Shape,
     reporter: &mut Reporter<'_, DB>,
 ) -> Result<(), Interruption> {
     let case = database.identifier_case();
@@ -420,7 +455,9 @@ pub(crate) fn report_schema<DB: DatabaseLike>(
                     .truth_under(database, expression, case, &others)
                     .map(Some)
             };
-            let Some(form) = simpler_form(database, expression, Site::Check, &read)? else {
+            let Some(form) = simpler_form(database, expression, Site::Check, &read)?
+                .filter(|form| shape.wants(form))
+            else {
                 continue;
             };
             let site = TermSite::new(
@@ -445,6 +482,9 @@ pub(crate) fn report_schema<DB: DatabaseLike>(
         let context = ExpressionContext::new(view.definition(), database, IdentifierCase::Folded)?;
         let subject = format!("View '{}'", view.view_name());
         for (place, form) in context_forms(database, &context, view.definition(), true)? {
+            if !shape.wants(&form) {
+                continue;
+            }
             reporter.view(view, form.message(&subject, place), form.resolution())?;
         }
     }
@@ -455,6 +495,9 @@ pub(crate) fn report_schema<DB: DatabaseLike>(
         let context = ExpressionContext::new(view.definition(), database, IdentifierCase::Folded)?;
         let subject = format!("Materialized view '{}'", view.view_name());
         for (place, form) in context_forms(database, &context, view.definition(), true)? {
+            if !shape.wants(&form) {
+                continue;
+            }
             reporter.materialized_view(view, form.message(&subject, place), form.resolution())?;
         }
     }
@@ -464,7 +507,7 @@ pub(crate) fn report_schema<DB: DatabaseLike>(
             Some("pg_catalog" | "information_schema")
         )
     }) {
-        report_function(database, function, reporter)?;
+        report_function(database, function, shape, reporter)?;
     }
     Ok(())
 }
@@ -479,6 +522,7 @@ pub(crate) fn report_schema<DB: DatabaseLike>(
 fn report_function<DB: DatabaseLike>(
     database: &DB,
     function: &DB::Function,
+    shape: Shape,
     reporter: &mut Reporter<'_, DB>,
 ) -> Result<(), Interruption> {
     let plpgsql = function.stored_language().as_deref() == Some("plpgsql");
@@ -535,7 +579,7 @@ fn report_function<DB: DatabaseLike>(
         plpgsql_forms(database, function, &mut found)?;
     }
     let subject = format!("Function '{}'", signature(function, database));
-    for (place, form) in found {
+    for (place, form) in found.into_iter().filter(|(_, form)| shape.wants(form)) {
         reporter.function(function, form.message(&subject, &place), form.resolution())?;
     }
     Ok(())
@@ -599,6 +643,7 @@ fn plpgsql_forms<DB: DatabaseLike>(
 pub(crate) fn report_statement<DB: DatabaseLike>(
     database: &DB,
     statement: &Statement,
+    shape: Shape,
     reporter: &mut Reporter<'_, DB>,
 ) -> Result<(), Interruption> {
     if !clauses_may_simplify(statement, true, &[Site::Value]) {
@@ -611,6 +656,9 @@ pub(crate) fn report_statement<DB: DatabaseLike>(
         IdentifierCase::Folded,
     )?;
     for (place, form) in context_forms(database, &context, statement, true)? {
+        if !shape.wants(&form) {
+            continue;
+        }
         let message = form.message("The statement", place);
         let resolution = form.resolution();
         reporter.statement(statement, form.written, message, resolution)?;

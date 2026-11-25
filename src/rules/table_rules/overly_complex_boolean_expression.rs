@@ -6,7 +6,7 @@ use sqlparser::ast::Statement;
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::boolean_form_support::{report_schema, report_statement, report_table},
+    rules::boolean_form_support::{Shape, report_schema, report_statement, report_table},
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule, TableRule},
 };
 
@@ -98,7 +98,7 @@ impl<DB: DatabaseLike> TableRule for OverlyComplexBooleanExpression<DB> {
         table: &<Self::Database as DatabaseLike>::Table,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        report_table(database, table, reporter)
+        report_table(database, table, Shape::DropsTerms, reporter)
     }
 }
 
@@ -110,7 +110,7 @@ impl<DB: DatabaseLike> SchemaRule for OverlyComplexBooleanExpression<DB> {
         database: &Self::Database,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        report_schema(database, reporter)
+        report_schema(database, Shape::DropsTerms, reporter)
     }
 }
 
@@ -123,6 +123,6 @@ impl<DB: DatabaseLike> QueryRule for OverlyComplexBooleanExpression<DB> {
         statement: &Statement,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        report_statement(database, statement, reporter)
+        report_statement(database, statement, Shape::DropsTerms, reporter)
     }
 }
