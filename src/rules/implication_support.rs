@@ -481,10 +481,10 @@ fn references_column<V: Visit>(node: &V) -> bool {
     .is_break()
 }
 
-/// Whether `expression` mentions a column or reads an input parameter as
-/// `$n`, either of which may hold another value where it is read again.
-pub(crate) fn reads_column_or_parameter(expression: &Expr) -> bool {
-    visit_expressions(expression, |expression| {
+/// Whether `node` mentions a column or reads an input parameter as `$n`,
+/// either of which may hold another value where it is read again.
+pub(crate) fn reads_column_or_parameter<V: Visit>(node: &V) -> bool {
+    visit_expressions(node, |expression| {
         if is_column(expression) || parameter_ordinal(expression).is_some() {
             ControlFlow::Break(())
         } else {
@@ -1362,7 +1362,7 @@ fn sole_call(select: &Select) -> Option<Expr> {
     if *options != WildcardAdditionalOptions::default() {
         return None;
     }
-    sole_relation_call(select).map(|(call, _)| call)
+    sole_relation_call(select).map(|(call, _)| Expr::Function(call))
 }
 
 /// The column of one call `select` projects, written `(call).column`, when
@@ -1370,13 +1370,16 @@ fn sole_call(select: &Select) -> Option<Expr> {
 /// column through the alias, so it yields every value of the column.
 fn sole_column(select: &Select) -> Option<Expr> {
     let (call, alias, column) = aliased_column(select)?;
-    alias.columns.is_empty().then(|| column_of(call, &column))
+    alias
+        .columns
+        .is_empty()
+        .then(|| column_of(Expr::Function(call), &column))
 }
 
 /// The call `select` reads alone under an alias naming one column, when it
 /// projects that column through the alias and filters nothing, so it yields
 /// every value of the first column of the call.
-pub(crate) fn renamed_column_call(select: &Select) -> Option<Expr> {
+pub(crate) fn renamed_column_call(select: &Select) -> Option<Function> {
     if !filters_nothing(select) {
         return None;
     }
@@ -1395,7 +1398,7 @@ pub(crate) fn renamed_column_call(select: &Select) -> Option<Expr> {
 /// The call `select` reads alone, with its alias and the stored name of the
 /// column it projects alone through that alias. The call reads no column or
 /// parameter, which could stand for another row's value.
-fn aliased_column(select: &Select) -> Option<(Expr, &TableAlias, String)> {
+fn aliased_column(select: &Select) -> Option<(Function, &TableAlias, String)> {
     let [
         SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts))
         | SelectItem::ExprWithAlias {
@@ -1440,9 +1443,9 @@ pub(crate) fn column_of(call: Expr, column: &str) -> Expr {
     }
 }
 
-/// The call `select` reads alone, without ordinality, written as an
-/// expression, with the alias it reads the call under.
-fn sole_relation_call(select: &Select) -> Option<(Expr, Option<&TableAlias>)> {
+/// The call `select` reads alone, without ordinality, with the alias it
+/// reads the call under.
+fn sole_relation_call(select: &Select) -> Option<(Function, Option<&TableAlias>)> {
     let [from] = select.from.as_slice() else {
         return None;
     };
@@ -1467,7 +1470,7 @@ fn sole_relation_call(select: &Select) -> Option<(Expr, Option<&TableAlias>)> {
         } => (name, args, alias),
         _ => return None,
     };
-    let call = Expr::Function(Function {
+    let call = Function {
         name: name.clone(),
         uses_odbc_syntax: false,
         parameters: FunctionArguments::None,
@@ -1480,7 +1483,7 @@ fn sole_relation_call(select: &Select) -> Option<(Expr, Option<&TableAlias>)> {
         null_treatment: None,
         over: None,
         within_group: Vec::new(),
-    });
+    };
     Some((call, alias.as_ref()))
 }
 
