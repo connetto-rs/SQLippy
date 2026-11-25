@@ -8,7 +8,7 @@ use sql_traits::{
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{
-    AccessExpr, BinaryOperator, Distinct, Expr, Function, FunctionArg, FunctionArgExpr,
+    AccessExpr, BinaryOperator, DataType, Distinct, Expr, Function, FunctionArg, FunctionArgExpr,
     FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, InTarget, JoinConstraint,
     JoinOperator, LimitClause, ObjectName, ObjectNamePart, Query, Select, SelectItem, SetExpr,
     TableAlias, TableFactor, UnaryOperator, Value, Visit, VisitMut, Visitor, VisitorMut,
@@ -18,7 +18,7 @@ use sqlparser::ast::{
 use crate::rules::{
     closed_set_support::stored_name,
     ladder_support::{listed_arguments, plain},
-    literal_support::literal,
+    literal_support::{literal, string_value},
     policy_support::{
         conjuncts, disjuncts, is_column_reference, is_tautology, unnested, unwrapped,
     },
@@ -97,6 +97,12 @@ pub(crate) trait Columns {
         None
     }
 
+    /// Whether `data_type` names an enum type, which PostgreSQL compares
+    /// only with values of that same enum.
+    fn is_enum(&self, _data_type: &DataType) -> bool {
+        false
+    }
+
     /// Whether every function `call` may reach returns `NULL` when its
     /// positional argument at `index`, counted from zero, is `NULL`.
     fn returns_null_on_null_argument(&self, _call: &Function, _index: usize) -> bool {
@@ -165,7 +171,8 @@ impl<'e, T> Condition<'e, T> {
             },
             |name| columns.relation(name),
             |call| columns.inlined(call),
-        );
+        )
+        .map(|renamed| untyped_labels(renamed, columns));
         Self {
             original: condition,
             relaxed: renamed
@@ -223,6 +230,7 @@ pub(crate) fn clause_implies<C: Columns>(
             |name| columns.relation(name),
             |_| None,
         )
+        .map(|written| untyped_labels(written, columns))
         && (written == *stated
             || missing_ok(&written).as_ref().unwrap_or(&written)
                 == condition.relaxed.as_ref().unwrap_or(stated)
@@ -305,6 +313,52 @@ pub(crate) fn alternatives(condition: &Expr) -> Option<Vec<Expr>> {
         return Some(arms.into_iter().cloned().collect());
     }
     listed(condition).map(|(operand, values)| equalities(operand, values))
+}
+
+/// `expression` with each string literal cast to an enum type and compared
+/// with a column or parameter written as the bare literal. The comparison
+/// resolves only where the other operand is of that enum, whose type the
+/// bare literal then takes, so both spellings compare alike.
+fn untyped_labels<C: Columns>(mut expression: Expr, columns: &C) -> Expr {
+    let _ = visit_expressions_mut(&mut expression, |node| {
+        if let Expr::BinaryOp {
+            left,
+            op:
+                BinaryOperator::Eq
+                | BinaryOperator::NotEq
+                | BinaryOperator::Lt
+                | BinaryOperator::LtEq
+                | BinaryOperator::Gt
+                | BinaryOperator::GtEq,
+            right,
+        } = node
+        {
+            for flipped in [false, true] {
+                let (reference, operand) = if flipped {
+                    (&**right, &mut **left)
+                } else {
+                    (&**left, &mut **right)
+                };
+                if !is_column_reference(unnested(reference)) {
+                    continue;
+                }
+                if let Expr::Cast {
+                    expr,
+                    data_type,
+                    format: None,
+                    ..
+                } = unnested(operand)
+                    && let Expr::Value(value) = expr.as_ref()
+                    && string_value(&value.value).is_some()
+                    && columns.is_enum(data_type)
+                {
+                    *operand = Expr::Value(value.clone());
+                }
+            }
+        }
+        ControlFlow::<Infallible>::Continue(())
+    });
+    expression
 }
 
 /// The operand `expression` tests and the values it lists, when it is

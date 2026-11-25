@@ -15,7 +15,8 @@ use sql_traits::{
     errors::{LookupError, RowSecurityError},
     structs::{
         ColumnBinding, ColumnDefinition, ExpressionContext, ExpressionScope, FunctionResultType,
-        IdentifierCase, OperandType, RowStatement, RowVersion, TriggerEnablement, WrittenCall,
+        IdentifierCase, OperandType, RowStatement, RowVersion, TargetName, TriggerEnablement,
+        WrittenCall,
     },
     traits::{
         ColumnLike, DataTypeLike, DatabaseLike, EnumerationKind, ForeignKeyLike, FunctionLike,
@@ -127,7 +128,9 @@ use super::plpgsql_ambiguous_name::collision;
 /// table, as PostgreSQL requires of a caller locking them directly.
 /// The filter has to imply every restrictive policy and one permissive one,
 /// stating each condition as written, where a scalar subquery reading no
-/// relation such as `(SELECT auth.uid())` stands for its value, or testing
+/// relation such as `(SELECT auth.uid())` stands for its value and a label
+/// cast to its schema-qualified enum, such as `'reader'::authz.role`, compared
+/// with a column stands for the bare label, or testing
 /// the same column against a set within the policy's, as written, declared
 /// with [`Deployment::with_set_within`], read off a ladder of the schema, or
 /// selected by an arm of the body of a helper the policy's set calls, one
@@ -1489,6 +1492,26 @@ impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
 
     fn parameter_values(&self, ordinal: usize) -> Option<&ParameterValues> {
         self.parameters.get(ordinal)?.as_ref()
+    }
+
+    /// Only a schema-qualified name is read, since an unqualified one may
+    /// resolve to a built-in type ahead of the schema's on the search path.
+    fn is_enum(&self, data_type: &DataType) -> bool {
+        let DataType::Custom(name, modifiers) = data_type else {
+            return false;
+        };
+        let ([schema, name], true) = (name.0.as_slice(), modifiers.is_empty()) else {
+            return false;
+        };
+        schema
+            .as_ident()
+            .zip(name.as_ident())
+            .is_some_and(|(schema, name)| {
+                let target = TargetName::new(&name.value, name.quote_style.is_some())
+                    .with_schema(&schema.value, schema.quote_style.is_some());
+                user_type_named(self.confinement.database, &target)
+                    .is_some_and(|user_type| user_type.enumeration().is_some())
+            })
     }
 
     fn returns_null_on_null_argument(&self, call: &Function, index: usize) -> bool {
