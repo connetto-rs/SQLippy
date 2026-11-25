@@ -28,6 +28,8 @@ mod decided_branch;
 pub use decided_branch::DecidedBranch;
 mod case_without_match;
 pub use case_without_match::CaseWithoutMatch;
+mod failing_assert;
+pub use failing_assert::FailingAssert;
 mod function_without_safe_search_path;
 pub use function_without_safe_search_path::FunctionWithoutSafeSearchPath;
 

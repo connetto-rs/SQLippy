@@ -24,15 +24,16 @@ use crate::{
         DynamicSqlInjection, EmptyPartialIndex, EmptyTextAllowed, EqualityIndexOnArray,
         ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, ExtensionWithoutVersion,
-        FlagNotBoolean, FloatingPointMoney, ForbiddenColumnInExtension, ForeignKeyExistenceOracle,
-        FractionalCount, FunctionMediatedPolicyCycle, FunctionWithoutSafeSearchPath,
-        GrantOptionToClientRole, ImpureImmutableFunction, IncompatibleForeignKey,
-        InvokerWithoutSearchPath, JsonStoredAsText, JsonType, KeyWithoutExactEquality,
-        LatentPolicyReadCycle, LeakproofUserFunction, MaterializedViewExposed, MisquotedSearchPath,
-        MissingPrimaryKey, MixedCaseColumnName, MixedCaseForeignKeyName, MixedCaseTableName,
-        MomentStoredAsText, MoneyType, MonotonicFlagReset, MultiplePermissivePolicies,
-        NarrowIntegerKey, NarrowerReferencingColumn, NeedlessIndexPredicate, NestedPolicySubquery,
-        NilUuidSentinel, NonFiniteNumberAllowed, NonSnakeCaseColumnName, NonSnakeCaseTableName,
+        FailingAssert, FlagNotBoolean, FloatingPointMoney, ForbiddenColumnInExtension,
+        ForeignKeyExistenceOracle, FractionalCount, FunctionMediatedPolicyCycle,
+        FunctionWithoutSafeSearchPath, GrantOptionToClientRole, ImpureImmutableFunction,
+        IncompatibleForeignKey, InvokerWithoutSearchPath, JsonStoredAsText, JsonType,
+        KeyWithoutExactEquality, LatentPolicyReadCycle, LeakproofUserFunction,
+        MaterializedViewExposed, MisquotedSearchPath, MissingPrimaryKey, MixedCaseColumnName,
+        MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText, MoneyType,
+        MonotonicFlagReset, MultiplePermissivePolicies, NarrowIntegerKey,
+        NarrowerReferencingColumn, NeedlessIndexPredicate, NestedPolicySubquery, NilUuidSentinel,
+        NonFiniteNumberAllowed, NonSnakeCaseColumnName, NonSnakeCaseTableName,
         NonterminatingRecursiveCte, NotInNullList, NotInNullableSubquery, NotInSubquery,
         NullComparison, NullCredentialRead, NullOnlyCheck, NullableCompositeForeignKey,
         NullableConcatenation, NullableTenantKey, NullableUniqueColumn, NumberedColumns,
@@ -156,7 +157,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
         register_schema_rules(&mut constrainer);
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 16] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 17] = [
             Box::new(ImpureImmutableFunction::default()),
             Box::new(WritingNonVolatileFunction::default()),
             Box::new(DefinerWithoutSearchPath::default()),
@@ -173,6 +174,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(PlpgsqlAmbiguousName::default()),
             Box::new(DecidedBranch::default()),
             Box::new(CaseWithoutMatch::default()),
+            Box::new(FailingAssert::default()),
         ];
         for rule in function_rules {
             constrainer.register_function_rule_with_floor(rule, Level::Allow);
