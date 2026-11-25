@@ -127,6 +127,7 @@ mod implication_support;
 mod index_support;
 mod inline_support;
 mod json_support;
+mod key_check_guard_support;
 mod key_support;
 mod ladder_support;
 mod literal_support;

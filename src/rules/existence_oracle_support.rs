@@ -678,12 +678,14 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 
     /// Whether every row of the referenced table the key can match passes
-    /// the `SELECT` policies `read`, for every row `written` admits.
+    /// the `SELECT` policies `read`, for every row `written` admits, or every
+    /// row when no gate applies, meeting each of `guards`.
     fn reads_matched_rows(
         &self,
-        written: &RowGate<'_, DB::Policy>,
+        written: Option<&RowGate<'_, DB::Policy>>,
         read: &RowSecurity<'_, DB::Policy>,
         role: Option<&'a DB::Role>,
+        guards: &[Expr],
     ) -> Result<bool, LookupError> {
         let Some(gates) = read.gates() else {
             return Ok(false);
@@ -691,6 +693,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         let reading = Reading {
             confinement: self,
             role,
+            guards,
         };
         admits(self.database, self.parent, gates, &reading, |condition| {
             reading.gate_implies(written, condition)
@@ -1908,41 +1911,42 @@ struct Reading<'c, 'a, DB: DatabaseLike> {
     confinement: &'c Confinement<'a, DB>,
     /// The role the helpers a check calls run for, or `None` for no role.
     role: Option<&'a DB::Role>,
+    /// Conditions every written row whose key is checked meets besides its
+    /// gate, as restrictive terms do.
+    guards: &'c [Expr],
 }
 
 impl<DB: DatabaseLike> Reading<'_, '_, DB> {
-    /// Whether every row `gate` admits meets `condition`, because a
-    /// restrictive term or every permissive one implies it, or each of its
-    /// conjuncts. A term may assume the restrictive terms beside it.
+    /// Whether every row `gate` admits meets `condition`, because a guard,
+    /// a restrictive term or every permissive one implies it, or each of its
+    /// conjuncts. A term may assume the guards and restrictive terms beside
+    /// it. Without a gate, only the guards hold the row.
     fn gate_implies(
         &self,
-        gate: &RowGate<'_, DB::Policy>,
+        gate: Option<&RowGate<'_, DB::Policy>>,
         condition: &Condition<'_, u64>,
     ) -> Result<bool, LookupError> {
         let restrictive: Vec<&Expr> = gate
-            .restrictive()
-            .iter()
-            .flat_map(|term| conjuncts(term.expression().expression()))
+            .into_iter()
+            .flat_map(RowGate::restrictive)
+            .map(|term| term.expression().expression())
+            .chain(self.guards)
             .collect();
-        for term in gate.restrictive() {
-            if clause_implies(
-                self,
-                term.expression().expression(),
-                condition,
-                &restrictive,
-            )? {
+        let context: Vec<&Expr> = restrictive
+            .iter()
+            .flat_map(|clause| conjuncts(clause))
+            .collect();
+        for clause in &restrictive {
+            if clause_implies(self, clause, condition, &context)? {
                 return Ok(true);
             }
         }
-        if !gate.permissive().is_empty() {
+        if let Some(gate) = gate
+            && !gate.permissive().is_empty()
+        {
             let mut every = true;
             for term in gate.permissive() {
-                if !clause_implies(
-                    self,
-                    term.expression().expression(),
-                    condition,
-                    &restrictive,
-                )? {
+                if !clause_implies(self, term.expression().expression(), condition, &context)? {
                     every = false;
                     break;
                 }
@@ -2354,7 +2358,7 @@ fn scalar(query: &Query) -> Option<&Expr> {
 /// Whether `role` may write a key of its choosing through `statement` on
 /// `child`, past its policies and unconfined by them, while `read` holds
 /// the `SELECT` policies it meets on the referenced table, when it may read
-/// it.
+/// it. Every written row whose key is checked also meets each of `guards`.
 pub(crate) fn writes_free_key<'a, DB: DatabaseLike>(
     confinement: &Confinement<'a, DB>,
     child: &'a DB::Table,
@@ -2362,12 +2366,17 @@ pub(crate) fn writes_free_key<'a, DB: DatabaseLike>(
     written: RowVersion,
     role: Option<&'a DB::Role>,
     read: Option<&RowSecurity<'_, DB::Policy>>,
+    guards: &[Expr],
 ) -> Result<bool, LookupError> {
     let Some(security) = row_security(confinement.database, child, statement, role)? else {
         return Ok(false);
     };
+    let reads_matched_rows = |gate| match read {
+        Some(read) => confinement.reads_matched_rows(gate, read, role, guards),
+        None => Ok(false),
+    };
     let Some(gates) = security.gates() else {
-        return Ok(security.exemption().is_some());
+        return Ok(security.exemption().is_some() && !reads_matched_rows(None)?);
     };
     for gate in gates {
         if admits_nothing(confinement.database, child, gate)? {
@@ -2375,12 +2384,7 @@ pub(crate) fn writes_free_key<'a, DB: DatabaseLike>(
         }
     }
     for gate in gates.iter().filter(|gate| gate.row() == written) {
-        if confinement.confining_gate(gate)? {
-            return Ok(false);
-        }
-        if let Some(read) = read
-            && confinement.reads_matched_rows(gate, read, role)?
-        {
+        if confinement.confining_gate(gate)? || reads_matched_rows(Some(gate))? {
             return Ok(false);
         }
     }

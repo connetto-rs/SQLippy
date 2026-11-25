@@ -1,7 +1,7 @@
 //! Facts about triggers and the functions they run, shared by the trigger
 //! rules.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
@@ -13,14 +13,16 @@ use sqlparser::{
     ast::{
         Delete, Expr, FromTable, Ident, Insert, Merge, ObjectName, ObjectNamePart, Query,
         SelectItem, Statement, TableFactor, TableObject, TableWithJoins, TriggerEvent,
-        TriggerObject, TriggerObjectKind, TriggerPeriod, Update,
+        TriggerObject, TriggerObjectKind, TriggerPeriod, Update, VisitMut, VisitorMut,
     },
     keywords::Keyword,
     tokenizer::Token,
 };
 use sqlparser_plpgsql::embedded::{AliasTarget, Block, DeclarationKind, Target};
 
-use crate::rules::{cte_support::stored_table, function_reach_support::Sought};
+use crate::rules::{
+    cte_support::stored_table, function_reach_support::Sought, policy_support::is_column_reference,
+};
 
 /// The name PostgreSQL stores for `ident`.
 pub(crate) fn stored(ident: &Ident) -> Cow<'_, str> {
@@ -62,6 +64,41 @@ pub(crate) fn new_field(expression: &Expr) -> Option<Cow<'_, str>> {
 /// Whether `expression`, under parentheses, is `NEW.column`.
 pub(crate) fn names_new_field(expression: &Expr, column: &str) -> bool {
     new_field(expression).is_some_and(|field| field == column)
+}
+
+/// `value` with each field of `NEW` that `admits` accepts written as the
+/// column of its stored name, or `None` when it reads another column or
+/// field, a variable or a query.
+pub(crate) fn new_fields_as_columns(value: &Expr, admits: impl Fn(&str) -> bool) -> Option<Expr> {
+    /// Rewrites `NEW`'s admitted fields, breaking on any other column or a
+    /// query.
+    struct Fields<F> {
+        admits: F,
+    }
+
+    impl<F: Fn(&str) -> bool> VisitorMut for Fields<F> {
+        type Break = ();
+
+        fn pre_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
+            ControlFlow::Break(())
+        }
+
+        fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<()> {
+            if !is_column_reference(expression) {
+                return ControlFlow::Continue(());
+            }
+            let Some(field) = new_field(expression).filter(|field| (self.admits)(field)) else {
+                return ControlFlow::Break(());
+            };
+            *expression = Expr::Identifier(Ident::new(field));
+            ControlFlow::Continue(())
+        }
+    }
+
+    let mut rewritten = value.clone();
+    VisitMut::visit(&mut rewritten, &mut Fields { admits })
+        .is_continue()
+        .then_some(rewritten)
 }
 
 /// What a write to a PL/pgSQL target does to `NEW.column`.

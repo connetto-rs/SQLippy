@@ -29,6 +29,7 @@ use crate::{
         },
         expression_site_support::is_null_literal,
         function_reach_support::Reach,
+        key_check_guard_support::{KeyCheck, key_check},
         literal_support::{literal, string_value},
         plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, walk_block},
         policy_support::{acting, client_roles},
@@ -93,7 +94,15 @@ use crate::{
 /// row, insert the referenced row from `NEW` with `ON CONFLICT DO NOTHING`
 /// and leave the key unchanged afterwards, while every unique index of the
 /// referenced table takes that conflict and spans the referenced columns.
-/// The key then finds its row whether or not it existed.
+/// The key then finds its row whether or not it existed. A write is also
+/// excused when the referencing table's `BEFORE` row triggers hold every
+/// row whose key PostgreSQL checks to a condition that makes every row the
+/// key can match readable, as a check would. A trigger holds the row to a
+/// condition when, running with its caller's rights, it raises or returns
+/// `NULL` unless `NEW`'s key columns meet it, and its `WHEN` skips only rows
+/// holding a `NULL` key column or, on `UPDATE`, an unchanged key, neither of
+/// which PostgreSQL checks. An `ASSERT` holds nothing, since a session may
+/// turn assertions off.
 ///
 /// An insert is also excused when every referenced row the key can match
 /// already holds a referencing row with the same values of a unique key of
@@ -553,6 +562,8 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
                 ),
                 None => (false, false),
             };
+        let insert_check = key_check(database, foreign_key, false)?;
+        let update_check = key_check(database, foreign_key, true)?;
         let mut probes = Vec::new();
         for (name, role) in client_roles(database, reporter.deployment()) {
             let Some(read) = row_security(database, parent, RowStatement::Select, role)? else {
@@ -570,6 +581,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
             let mut commands = Vec::new();
             if !insert_settled
                 && !covered
+                && let KeyCheck::Meeting(guards) = &insert_check
                 && writes_whole_key(database, key_columns.iter().copied(), &held.insert, false)?
                 && writes_free_key(
                     &confinement,
@@ -578,11 +590,13 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
                     RowVersion::Inserted,
                     role,
                     Some(&read),
+                    guards,
                 )?
             {
                 commands.push("INSERT");
             }
             if !update_settled
+                && let KeyCheck::Meeting(guards) = &update_check
                 && writes_whole_key(database, key_columns.iter().copied(), &held.update, true)?
                 && writes_free_key(
                     &confinement,
@@ -591,6 +605,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
                     RowVersion::Updated,
                     role,
                     Some(&read),
+                    guards,
                 )?
             {
                 commands.push("UPDATE");

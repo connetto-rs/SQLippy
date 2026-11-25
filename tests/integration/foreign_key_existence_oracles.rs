@@ -880,6 +880,211 @@ fn a_trigger_covers_the_writes_it_fires_on() {
     }
 }
 
+const PERFORMED_RUNS: &str = "CREATE FUNCTION caller_id() RETURNS INT LANGUAGE sql STABLE AS
+        $$ SELECT current_setting('app.user_id')::int $$;
+    CREATE TABLE people (id INT PRIMARY KEY);
+    ALTER TABLE people ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY people_select ON people FOR SELECT TO app USING (id = caller_id());
+    CREATE TABLE runs (
+        id INT PRIMARY KEY,
+        performed_by_id INT CONSTRAINT runs_performer REFERENCES people (id),
+        note TEXT
+    );
+    ALTER TABLE runs ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY runs_select ON runs FOR SELECT TO app USING (true);
+    CREATE POLICY runs_update ON runs FOR UPDATE TO app USING (true) WITH CHECK (true);
+    GRANT SELECT, UPDATE (performed_by_id, note) ON runs TO app;";
+
+const NAMES_OTHER: &str = "IF NEW.performed_by_id IS DISTINCT FROM caller_id() THEN
+        RAISE EXCEPTION 'performer % is not the caller', NEW.performed_by_id;
+    END IF;";
+
+const PERFORMER_SET: &str = "WHEN (NEW.performed_by_id IS DISTINCT FROM OLD.performed_by_id AND NEW.performed_by_id IS NOT NULL)";
+
+/// Objects of every finding on the runs schema, with `extra` after it and a
+/// trigger `runs_performer` firing `BEFORE {events}` for each row under
+/// `when`, running `body` before it returns `NEW` with `header` on its
+/// function.
+fn confined_runs(header: &str, body: &str, events: &str, when: &str, extra: &str) -> Vec<String> {
+    objects(&format!(
+        "{PERFORMED_RUNS} {extra}
+         CREATE FUNCTION require_performer() RETURNS TRIGGER LANGUAGE plpgsql {header} AS $$
+         BEGIN {body} RETURN NEW; END $$;
+         CREATE TRIGGER runs_performer BEFORE {events} ON runs FOR EACH ROW {when}
+           EXECUTE FUNCTION require_performer();"
+    ))
+}
+
+#[test]
+fn a_before_trigger_confining_the_key_to_readable_rows_is_clean() {
+    let unchanged_first = format!(
+        "IF NEW.performed_by_id IS NOT DISTINCT FROM OLD.performed_by_id THEN RETURN NEW; END IF; {NAMES_OTHER}"
+    );
+    for (body, events, when) in [
+        (NAMES_OTHER, "UPDATE OF performed_by_id", PERFORMER_SET),
+        (NAMES_OTHER, "UPDATE OF performed_by_id, note", ""),
+        (NAMES_OTHER, "INSERT OR UPDATE", "WHEN (NEW.performed_by_id IS NOT NULL)"),
+        (
+            "IF NEW.performed_by_id IS NOT NULL AND NEW.performed_by_id IS DISTINCT FROM caller_id() THEN
+               RAISE EXCEPTION 'not the caller';
+             END IF;",
+            "UPDATE",
+            "",
+        ),
+        (
+            "IF NEW.performed_by_id IS NULL OR NEW.performed_by_id = caller_id() THEN RETURN NEW; END IF;
+             RAISE EXCEPTION 'not the caller';",
+            "UPDATE",
+            "",
+        ),
+        (unchanged_first.as_str(), "UPDATE OF performed_by_id", ""),
+        (
+            "IF NEW.performed_by_id IS DISTINCT FROM caller_id() THEN RETURN NULL; END IF;",
+            "UPDATE",
+            "",
+        ),
+        (
+            &format!("NEW.note := trim(NEW.note); {NAMES_OTHER} RAISE NOTICE 'checked';"),
+            "UPDATE",
+            "",
+        ),
+        (
+            "IF NOT (NEW.performed_by_id IS DISTINCT FROM caller_id()) THEN RETURN NEW; END IF;
+             RAISE EXCEPTION 'not the caller';",
+            "UPDATE",
+            "",
+        ),
+        (
+            &format!("FOR i IN 1..2 LOOP NULL; END LOOP; ASSERT NEW.note IS NOT NULL; {NAMES_OTHER}"),
+            "UPDATE",
+            "WHEN (OLD.performed_by_id IS DISTINCT FROM NEW.performed_by_id)",
+        ),
+    ] {
+        assert_eq!(
+            confined_runs("", body, events, when, ""),
+            Vec::<String>::new(),
+            "{events} {when} {body}"
+        );
+    }
+    let inserting = "CREATE POLICY runs_insert ON runs FOR INSERT TO app
+          WITH CHECK (performed_by_id IS NULL OR performed_by_id = caller_id());
+        GRANT INSERT ON runs TO app;";
+    assert_eq!(
+        confined_runs(
+            "",
+            NAMES_OTHER,
+            "UPDATE OF performed_by_id",
+            PERFORMER_SET,
+            inserting
+        ),
+        Vec::<String>::new()
+    );
+    // A trigger confines an insert the same way, the insert check letting any key through.
+    let unchecked_insert = "CREATE POLICY runs_insert ON runs FOR INSERT TO app WITH CHECK (true);
+        GRANT INSERT ON runs TO app;";
+    for (events, expected) in [
+        ("INSERT OR UPDATE", Vec::<String>::new()),
+        ("UPDATE", vec!["runs.runs_performer".to_owned()]),
+    ] {
+        assert_eq!(
+            confined_runs("", NAMES_OTHER, events, "", unchecked_insert),
+            expected,
+            "{events}"
+        );
+    }
+}
+
+#[test]
+fn a_before_trigger_that_lets_another_key_through_is_reported() {
+    let rewriter = "CREATE FUNCTION reassign() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+        BEGIN NEW.performed_by_id := 2; RETURN NEW; END $$;
+        CREATE TRIGGER runs_reassign BEFORE UPDATE ON runs FOR EACH ROW EXECUTE FUNCTION reassign();";
+    for (header, body, events, when, extra) in [
+        (
+            "",
+            "IF NEW.performed_by_id <> caller_id() THEN RAISE EXCEPTION 'not the caller'; END IF;".to_owned(),
+            "UPDATE",
+            "",
+            "",
+        ),
+        (
+            "",
+            "IF NOT (NEW.performed_by_id = caller_id()) THEN RAISE EXCEPTION 'not the caller'; END IF;".to_owned(),
+            "UPDATE",
+            "",
+            "",
+        ),
+        (
+            "",
+            "ASSERT NEW.performed_by_id IS NOT DISTINCT FROM caller_id();".to_owned(),
+            "UPDATE",
+            "",
+            "",
+        ),
+        (
+            "",
+            "IF NEW.performed_by_id IS DISTINCT FROM 1 THEN RAISE EXCEPTION 'not the first'; END IF;".to_owned(),
+            "UPDATE",
+            "",
+            "",
+        ),
+        (
+            "",
+            "IF NEW.performed_by_id IS DISTINCT FROM caller_id() THEN RAISE NOTICE 'not the caller'; END IF;".to_owned(),
+            "UPDATE",
+            "",
+            "",
+        ),
+        (
+            "",
+            format!("BEGIN {NAMES_OTHER} EXCEPTION WHEN raise_exception THEN NULL; END;"),
+            "UPDATE",
+            "",
+            "",
+        ),
+        (
+            "",
+            format!("{NAMES_OTHER} NEW.performed_by_id := NEW.performed_by_id + 1;"),
+            "UPDATE",
+            "",
+            "",
+        ),
+        (
+            "",
+            format!("IF NEW.note IS NULL THEN RETURN NEW; END IF; {NAMES_OTHER}"),
+            "UPDATE",
+            "",
+            "",
+        ),
+        ("", NAMES_OTHER.to_owned(), "UPDATE OF note", "", ""),
+        (
+            "",
+            NAMES_OTHER.to_owned(),
+            "UPDATE",
+            "WHEN (NEW.performed_by_id <> OLD.performed_by_id)",
+            "",
+        ),
+        ("", NAMES_OTHER.to_owned(), "UPDATE", "WHEN (NEW.note IS NOT NULL)", ""),
+        ("", NAMES_OTHER.to_owned(), "INSERT", "", ""),
+        (
+            "",
+            format!("FOR new IN 1..1 LOOP NULL; END LOOP; {NAMES_OTHER}"),
+            "UPDATE",
+            "",
+            "",
+        ),
+        ("SECURITY DEFINER", NAMES_OTHER.to_owned(), "UPDATE", "", ""),
+        ("SET app.user_id = '1'", NAMES_OTHER.to_owned(), "UPDATE", "", ""),
+        ("", NAMES_OTHER.to_owned(), "UPDATE", "", rewriter),
+    ] {
+        assert_eq!(
+            confined_runs(header, &body, events, when, extra),
+            ["runs.runs_performer"],
+            "{header} {events} {when} {body} {extra}"
+        );
+    }
+}
+
 /// Object of every finding of the rule on `sql`, under `deployment`.
 fn objects_under(deployment: Deployment, sql: &str) -> Vec<String> {
     let mut constrainer: GenericConstrainer<ParserDB> = ForeignKeyExistenceOracle::default().into();

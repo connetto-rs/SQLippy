@@ -199,6 +199,7 @@ fn probes<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
                 RowVersion::Inserted,
                 role,
                 read.as_ref(),
+                &[],
             )?
         {
             commands.push("INSERT");
@@ -211,6 +212,7 @@ fn probes<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
                 RowVersion::Updated,
                 role,
                 read.as_ref(),
+                &[],
             )?
         {
             commands.push("UPDATE");
