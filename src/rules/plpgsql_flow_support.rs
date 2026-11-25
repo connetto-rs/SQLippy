@@ -6,8 +6,8 @@ use std::{convert::Infallible, iter, ops::ControlFlow};
 use sql_traits::{traits::FunctionLike, utils::identifier_resolution::normalize_identifier};
 use sqlparser::{
     ast::{
-        Expr, Query, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableFactor,
-        TableWithJoins, UnaryOperator, VisitMut, visit_expressions_mut,
+        Expr, Query, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableAlias,
+        TableFactor, TableWithJoins, UnaryOperator, VisitMut, visit_expressions_mut,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -286,31 +286,55 @@ fn next_rows(looped: Loop, record: &str) -> Option<Box<Query>> {
     {
         return Some(rows);
     }
-    let mut query = Parser::new(&PostgreSqlDialect {})
-        .try_with_sql("SELECT NULL FROM (SELECT NULL) AS record")
-        .and_then(|mut parser| parser.parse_query())
-        .ok()?;
-    let SetExpr::Select(select) = query.body.as_mut() else {
-        return None;
-    };
-    let [
-        TableWithJoins {
-            relation:
-                TableFactor::Derived {
-                    subquery,
-                    alias: Some(alias),
-                    ..
-                },
-            ..
-        },
-    ] = select.from.as_mut_slice()
-    else {
-        return None;
-    };
-    *subquery = rows;
-    alias.name = variable.name.0.first()?.as_ident()?.clone();
-    select.projection = vec![SelectItem::UnnamedExpr(value.clone())];
-    Some(query)
+    let query = rows_query(
+        vec![SelectItem::UnnamedExpr(value.clone())],
+        vec![TableWithJoins {
+            relation: TableFactor::Derived {
+                lateral: false,
+                subquery: rows,
+                alias: Some(TableAlias {
+                    name: variable.name.0.first()?.as_ident()?.clone(),
+                    columns: Vec::new(),
+                    explicit: true,
+                    at: None,
+                }),
+                sample: None,
+            },
+            joins: Vec::new(),
+        }],
+        None,
+    );
+    Some(Box::new(query))
+}
+
+/// `SELECT projection FROM from WHERE selection`, projecting `NULL` when
+/// `projection` is empty.
+pub(crate) fn rows_query(
+    projection: Vec<SelectItem>,
+    from: Vec<TableWithJoins>,
+    selection: Option<Expr>,
+) -> Query {
+    let mut select = Parser::new(&PostgreSqlDialect {})
+        .try_with_sql("SELECT NULL")
+        .and_then(|mut parser| parser.parse_select())
+        .expect("SELECT NULL parses");
+    if !projection.is_empty() {
+        select.projection = projection;
+    }
+    select.from = from;
+    select.selection = selection;
+    Query {
+        with: None,
+        body: Box::new(SetExpr::Select(Box::new(select))),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: Vec::new(),
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: Vec::new(),
+    }
 }
 
 /// Whether `into` assigns only the variable `target`, as a whole.

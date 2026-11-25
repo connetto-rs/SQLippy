@@ -2210,11 +2210,31 @@ fn a_plpgsql_definer_returning_next_rows_the_caller_may_not_read_is_reported() {
                RETURN NEXT found_row.id;
              END LOOP;",
         ),
+        block_definer(
+            "integer_loop()",
+            "SETOF INT",
+            "counter INT;",
+            "FOR counter IN 1..3 LOOP
+               RETURN NEXT (SELECT count(*) FROM public.resources);
+             END LOOP;",
+        ),
+        block_definer(
+            "other_record()",
+            "SETOF INT",
+            "found_row RECORD; other_row RECORD := NULL;",
+            "FOR other_row IN SELECT resource.id FROM public.resources resource
+             LOOP RETURN NEXT found_row.id; END LOOP;",
+        ),
     ]
     .concat();
     assert_eq!(
         written_exposed("SELECT, UPDATE", OWN_ROWS, &definers),
-        ["listed_and_hidden_next()", "listed_any_next()"]
+        [
+            "integer_loop()",
+            "listed_and_hidden_next()",
+            "listed_any_next()",
+            "other_record()"
+        ]
     );
 }
 
