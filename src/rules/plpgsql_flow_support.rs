@@ -41,12 +41,12 @@ pub(crate) struct Ran {
 /// What `block` runs when it does nothing else. Its statements are guards
 /// `IF condition THEN RAISE EXCEPTION ...; END IF;` or `IF condition THEN
 /// RETURN; END IF;`, the exception carrying no argument, then one `DELETE`
-/// or `UPDATE` or `RETURN QUERY` statements, either maybe followed by a bare
-/// `RETURN`, the queries read as the `UNION ALL` of them, a `RETURN` of one
-/// scalar subquery, or a `SELECT ... INTO` the one variable declared without
-/// a default followed by a `RETURN` of a name. Every other variable is
-/// declared with a default and, as no statement but these assigns it, reads
-/// as that default.
+/// or `UPDATE`, bare or as a `RETURN QUERY`, or `RETURN QUERY` statements,
+/// either maybe followed by a bare `RETURN`, the queries read as the `UNION
+/// ALL` of them, a `RETURN` of one scalar subquery, or a `SELECT ... INTO`
+/// the one variable declared without a default followed by a `RETURN` of a
+/// name. Every other variable is declared with a default and, as no
+/// statement but these assigns it, reads as that default.
 pub(crate) fn ran_statement(block: Block) -> Option<Ran> {
     let Block {
         declarations,
@@ -91,8 +91,7 @@ pub(crate) fn ran_statement(block: Block) -> Option<Ran> {
     Some(Ran { statement, guards })
 }
 
-/// The statement `statements` run, one `DELETE` or `UPDATE` maybe followed
-/// by a bare `RETURN`, or the query whose rows they return.
+/// The statement run by a write, possibly returned by `RETURN QUERY`, or a returned query.
 fn ran_by(mut statements: Vec<Node>) -> Option<Statement> {
     if matches!(
         statements.as_slice(),
@@ -110,7 +109,8 @@ fn ran_by(mut statements: Vec<Node>) -> Option<Statement> {
                     NodeKind::Statement {
                         statement,
                         into: None,
-                    },
+                    }
+                    | NodeKind::ReturnQuery(ReturnQuery::Query(statement)),
                 ..
             } if matches!(
                 statement.as_ref(),
