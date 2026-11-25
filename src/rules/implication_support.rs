@@ -9,13 +9,15 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, Distinct, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, InTarget, ObjectName, Query,
-    Select, SelectItem, SetExpr, TableAlias, TableFactor, Value, Visit, VisitMut, Visitor,
-    VisitorMut, WildcardAdditionalOptions, visit_expressions, visit_expressions_mut,
+    FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, InTarget, JoinConstraint,
+    JoinOperator, LimitClause, ObjectName, Query, Select, SelectItem, SetExpr, TableAlias,
+    TableFactor, Value, Visit, VisitMut, Visitor, VisitorMut, WildcardAdditionalOptions,
+    visit_expressions, visit_expressions_mut,
 };
 
 use crate::rules::{
     closed_set_support::stored_name,
+    ladder_support::plain,
     literal_support::literal,
     policy_support::{
         conjuncts, disjuncts, is_column_reference, is_tautology, unnested, unwrapped,
@@ -174,14 +176,16 @@ impl<'e, T> Condition<'e, T> {
 
 /// Whether every row `clause` admits meets `condition`, when the row also
 /// meets every one of `context`. That holds when the clause settles it,
-/// states it, tests the same row against a set within the condition's, or
-/// draws its row from rows meeting it, when it implies the condition in
-/// every arm or for every value of an `IN` list or in one of its conjuncts,
-/// or when it implies each conjunct or one arm of `condition`.
+/// states it, finds rows only where the condition's subquery finds one,
+/// tests the same row against a set within the condition's, or draws its
+/// row from rows meeting it, when it implies the condition in every arm or
+/// for every value of an `IN` list or in one of its conjuncts, or when it
+/// implies each conjunct or one arm of `condition`.
 ///
 /// # Errors
 ///
-/// Returns the lookup error [`Columns::draws_implied`] raised.
+/// Returns the lookup error [`Columns::draws_implied`] or
+/// [`Columns::is_set_within`] raised.
 pub(crate) fn clause_implies<C: Columns>(
     columns: &C,
     clause: &Expr,
@@ -192,14 +196,14 @@ pub(crate) fn clause_implies<C: Columns>(
     if columns.settles(clause) {
         return Ok(true);
     }
+    let set_within = |narrower: &Expr, wider: &Expr| columns.is_set_within(narrower, wider);
     if let Some(stated) = &condition.renamed
-        && renamed(
+        && let Some(written) = renamed(
             clause,
             |column| stored_name(column).map(|name| Term::Column(name.into_owned())),
             |name| columns.relation(name),
         )
-        .as_ref()
-            == Some(stated)
+        && (written == *stated || finds_within(&set_within, &written, stated)?)
     {
         return Ok(true);
     }
@@ -703,6 +707,316 @@ impl<I: Iterator<Item = Expr>, T: Iterator<Item = Option<(ObjectName, Ident)>>> 
             *expression = resolved;
         }
         ControlFlow::Continue(())
+    }
+}
+
+/// The `SELECT` of `query` each row of which comes from a row of its `FROM`
+/// passing its `WHERE`, with no row when none passes, projecting columns,
+/// constants or `*`.
+pub(crate) fn witnessed(query: &Query) -> Option<&Select> {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    let projected = select.projection.iter().all(|item| match item {
+        SelectItem::UnnamedExpr(projected)
+        | SelectItem::ExprWithAlias {
+            expr: projected, ..
+        } => matches!(
+            projected,
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_)
+        ),
+        _ => matches!(
+            item,
+            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)
+        ),
+    });
+    (query.order_by.is_none() && plain(select) && projected).then_some(select)
+}
+
+/// The character joining the alias of a renamed reference to its column in
+/// [`flattened`], one no PostgreSQL identifier holds.
+const SEPARATOR: char = '\0';
+
+/// The most maps of a condition's subquery relations onto a clause's that
+/// [`finds_within`] tries.
+const MAPS: usize = 256;
+
+/// `renamed`, written by [`renamed`], with each reference one quoted
+/// identifier, its alias and column joined by [`SEPARATOR`], a column of
+/// the tested row read outside any subquery under the alias `0` as within
+/// one, and the operands of each `=` and `<>` between two references in
+/// order, so that the conjuncts of two subqueries compare alike and
+/// [`clause_implies`] tells their references apart by name.
+fn flattened(renamed: &Expr) -> Expr {
+    let mut flattened = renamed.clone();
+    let _ = visit_expressions_mut(&mut flattened, |expression| {
+        match expression {
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                *expression = Expr::Identifier(Ident::with_quote(
+                    '"',
+                    format!("{}{SEPARATOR}{}", parts[0].value, parts[1].value),
+                ));
+            }
+            Expr::Identifier(column) if !column.value.contains(SEPARATOR) => {
+                column.value = format!("0{SEPARATOR}{}", column.value);
+            }
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Eq | BinaryOperator::NotEq,
+                right,
+            } if matches!(
+                (left.as_ref(), right.as_ref()),
+                (Expr::Identifier(left), Expr::Identifier(right)) if left.value > right.value
+            ) =>
+            {
+                mem::swap(left, right);
+            }
+            _ => {}
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    flattened
+}
+
+/// The rows a non-negated `EXISTS` or `IN` of a [`flattened`] condition
+/// looks for, one combination of rows of `relations` meeting `conjuncts`.
+struct Sought {
+    /// The stored table each relation reads and the alias [`renamed`]
+    /// gave it.
+    relations: Vec<(ObjectName, String)>,
+    conjuncts: Vec<Expr>,
+}
+
+/// What `condition`, flattened, looks for, when it holds exactly when a
+/// combination of rows of the stored tables its subquery inner-joins meets
+/// the `ON` and `WHERE` of the subquery and, for `IN`, yields the tested
+/// value. That subquery projects columns or constants, and an `EXISTS`
+/// over it may limit it to a positive number of rows, while an `IN` limits
+/// nothing. A `NULL` and a false `IN` both reject a row, so the two agree
+/// on every row admitted.
+fn sought(condition: &Expr) -> Option<Sought> {
+    let (query, tested) = match unnested(condition) {
+        Expr::Exists {
+            subquery,
+            negated: false,
+        } if keeps_existence(subquery) => (subquery, None),
+        Expr::In {
+            expr,
+            target: InTarget::Subquery(subquery),
+            negated: false,
+            ..
+        } if subquery.limit_clause.is_none() => (subquery, Some(expr)),
+        _ => return None,
+    };
+    let select = witnessed(query).filter(|_| {
+        query.with.is_none() && query.fetch.is_none() && query.pipe_operators.is_empty()
+    })?;
+    let mut relations = Vec::new();
+    let mut met: Vec<Expr> = Vec::new();
+    for from in &select.from {
+        for factor in iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation))
+        {
+            let TableFactor::Table {
+                name,
+                alias: Some(alias),
+                args: None,
+                ..
+            } = factor
+            else {
+                return None;
+            };
+            (alias.name.quote_style == Some('"') && is_renamed_alias(&alias.name.value))
+                .then_some(())?;
+            relations.push((name.clone(), alias.name.value.clone()));
+        }
+        for join in &from.joins {
+            match &join.join_operator {
+                JoinOperator::Join(JoinConstraint::On(on))
+                | JoinOperator::Inner(JoinConstraint::On(on))
+                | JoinOperator::CrossJoin(JoinConstraint::On(on)) => {
+                    met.extend(conjuncts(on).into_iter().cloned());
+                }
+                JoinOperator::Join(JoinConstraint::None)
+                | JoinOperator::Inner(JoinConstraint::None)
+                | JoinOperator::CrossJoin(JoinConstraint::None) => {}
+                _ => return None,
+            }
+        }
+    }
+    met.extend(select.selection.iter().flat_map(conjuncts).cloned());
+    if let Some(tested) = tested {
+        let [
+            SelectItem::UnnamedExpr(projected)
+            | SelectItem::ExprWithAlias {
+                expr: projected, ..
+            },
+        ] = select.projection.as_slice()
+        else {
+            return None;
+        };
+        met.push(flattened(&Expr::BinaryOp {
+            left: Box::new(projected.clone()),
+            op: BinaryOperator::Eq,
+            right: tested.clone(),
+        }));
+    }
+    Some(Sought {
+        relations,
+        conjuncts: met,
+    })
+}
+
+/// Whether `alias` is one [`renamed`] gives a stored table it resolved,
+/// its depth and position joined by a dot.
+fn is_renamed_alias(alias: &str) -> bool {
+    alias.split_once('.').is_some_and(|(depth, position)| {
+        [depth, position]
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    })
+}
+
+/// Whether `query` yields a row exactly when it would without its `LIMIT`,
+/// as when it has none or one of a positive integer and no offset.
+pub(crate) fn keeps_existence(query: &Query) -> bool {
+    query.limit_clause.as_ref().is_none_or(|clause| {
+        matches!(clause, LimitClause::LimitOffset { limit: Some(limit), offset: None, limit_by }
+            if limit_by.is_empty()
+                && matches!(unnested(limit), Expr::Value(value)
+                    if matches!(&value.value, Value::Number(number, _)
+                        if number.parse::<u64>().is_ok_and(|number| number > 0))))
+    })
+}
+
+/// Whether every value one expression yields is one another yields, as
+/// [`Columns::is_set_within`] tells.
+type SetWithin<'s> = dyn Fn(&Expr, &Expr) -> Result<bool, LookupError> + 's;
+
+/// Whether the renamed `clause` finds a row only where the renamed
+/// `condition` does, both being a non-negated `EXISTS` or `IN` over stored
+/// tables. That holds when some map sends each relation of the condition's
+/// subquery to one of the clause's on the same stored table, two possibly
+/// to one, so that the clause's conjuncts imply each of the condition's
+/// read through the map, as conjunctive queries contain each other.
+fn finds_within(
+    set_within: &SetWithin<'_>,
+    clause: &Expr,
+    condition: &Expr,
+) -> Result<bool, LookupError> {
+    let (Some(found), Some(wanted)) = (sought(&flattened(clause)), sought(&flattened(condition)))
+    else {
+        return Ok(false);
+    };
+    let candidates: Vec<Vec<&str>> = wanted
+        .relations
+        .iter()
+        .map(|(table, _)| {
+            found
+                .relations
+                .iter()
+                .filter(|(other, _)| other == table)
+                .map(|(_, alias)| alias.as_str())
+                .collect()
+        })
+        .collect();
+    if candidates
+        .iter()
+        .try_fold(1_usize, |maps, images| maps.checked_mul(images.len()))
+        .is_none_or(|maps| maps == 0 || maps > MAPS)
+    {
+        return Ok(false);
+    }
+    let flat = Flattened(set_within);
+    let mut choice = vec![0; candidates.len()];
+    loop {
+        let images: Vec<(&str, &str)> = wanted
+            .relations
+            .iter()
+            .zip(&candidates)
+            .zip(&choice)
+            .map(|(((_, alias), images), &chosen)| (alias.as_str(), images[chosen]))
+            .collect();
+        if every(&wanted.conjuncts, |conjunct| {
+            conjunct_implied(&flat, &found.conjuncts, &relabelled(conjunct, &images))
+        })? {
+            return Ok(true);
+        }
+        let Some(position) =
+            (0..choice.len()).find(|&position| choice[position] + 1 < candidates[position].len())
+        else {
+            return Ok(false);
+        };
+        choice[position] += 1;
+        choice[..position].fill(0);
+    }
+}
+
+/// `conjunct` with each reference through an alias of `images` read
+/// through the alias it maps to.
+fn relabelled(conjunct: &Expr, images: &[(&str, &str)]) -> Expr {
+    let mut relabelled = conjunct.clone();
+    let _ = visit_expressions_mut(&mut relabelled, |expression| {
+        if let Expr::Identifier(reference) = expression
+            && let Some((alias, column)) = reference.value.split_once(SEPARATOR)
+            && let Some((_, image)) = images.iter().find(|(from, _)| *from == alias)
+        {
+            reference.value = format!("{image}{SEPARATOR}{column}");
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    relabelled
+}
+
+/// Whether the flattened conjuncts `found` imply the flattened `conjunct`,
+/// one of them stating it, finding rows only where it does, or implying it
+/// together.
+fn conjunct_implied(
+    flat: &Flattened<'_>,
+    found: &[Expr],
+    conjunct: &Expr,
+) -> Result<bool, LookupError> {
+    if found.contains(conjunct) {
+        return Ok(true);
+    }
+    for clause in found {
+        if finds_within(flat.0, clause, conjunct)? {
+            return Ok(true);
+        }
+    }
+    found
+        .iter()
+        .cloned()
+        .reduce(|left, right| Expr::BinaryOp {
+            left: Box::new(left),
+            op: BinaryOperator::And,
+            right: Box::new(right),
+        })
+        .map_or(Ok(false), |together| {
+            clause_implies(flat, &together, &Condition::new(flat, conjunct), &[])
+        })
+}
+
+/// The columns of [`flattened`] conditions, each named by its one
+/// identifier, testing sets as the [`Columns`] the conditions came from.
+struct Flattened<'s>(&'s SetWithin<'s>);
+
+impl Columns for Flattened<'_> {
+    type Tested = String;
+
+    fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> Result<bool, LookupError> {
+        (self.0)(narrower, wider)
+    }
+
+    fn rename(&self, column: Cow<'_, str>) -> Option<String> {
+        Some(column.into_owned())
+    }
+
+    fn tested(&self, column: &Expr) -> Option<String> {
+        stored_name(column).map(Cow::into_owned)
+    }
+
+    fn tests(&self, column: &Expr, tested: &String) -> bool {
+        stored_name(column).is_some_and(|name| name == *tested)
     }
 }
 

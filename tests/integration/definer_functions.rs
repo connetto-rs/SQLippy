@@ -749,6 +749,202 @@ fn a_row_an_exists_or_in_finds_lies_in_the_policy_helpers_set() {
 }
 
 #[test]
+fn a_subquery_confines_when_every_row_it_finds_is_one_the_policys_finds() {
+    const OWN: &str = "m.user_id = current_setting('app.user_id', true)";
+    let reported = |filter: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "CREATE ROLE app NOLOGIN;
+                 CREATE TABLE memberships (user_id TEXT NOT NULL, organization_id INT NOT NULL,
+                   role TEXT NOT NULL);
+                 CREATE TABLE guests (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+                 CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL);
+                 CREATE TABLE notes (id INT PRIMARY KEY, organization_id INT NOT NULL);
+                 ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+                 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+                 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+                 GRANT SELECT ON memberships, guests, resources, notes TO app;
+                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+                 CREATE POLICY own_memberships ON memberships FOR SELECT TO app
+                   USING (user_id = current_setting('app.user_id', true));
+                 CREATE POLICY member_resources ON resources FOR SELECT TO app
+                   USING (EXISTS (SELECT 1 FROM memberships m
+                     WHERE m.organization_id = resources.organization_id AND {OWN}));
+                 CREATE POLICY member_notes ON notes FOR SELECT TO app
+                   USING (organization_id IN (SELECT m.organization_id FROM memberships m
+                     WHERE {OWN}));
+                 CREATE FUNCTION member_ids() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     {filter} $$;"
+            ),
+        )
+    };
+    let resources = |condition: &str| {
+        format!("SELECT resource.id FROM public.resources resource WHERE {condition}")
+    };
+    let notes =
+        |condition: &str| format!("SELECT note.id FROM public.notes note WHERE {condition}");
+    for filter in [
+        resources(
+            "EXISTS (SELECT 1 FROM public.memberships m
+               WHERE current_setting('app.user_id', true) = m.user_id
+                 AND resource.organization_id = m.organization_id)",
+        ),
+        resources(&format!(
+            "EXISTS (SELECT m.user_id FROM public.memberships m
+               WHERE m.organization_id = resource.organization_id AND {OWN}
+                 AND m.role = 'admin' LIMIT 1)"
+        )),
+        resources(&format!(
+            "resource.organization_id IN (SELECT m.organization_id FROM public.memberships m
+               WHERE {OWN})"
+        )),
+        notes(&format!(
+            "EXISTS (SELECT 1 FROM public.memberships m
+               WHERE m.organization_id = note.organization_id AND {OWN})"
+        )),
+        resources(&format!(
+            "EXISTS (SELECT 1 FROM public.memberships m JOIN public.guests g
+               ON g.organization_id = m.organization_id
+               WHERE m.organization_id = resource.organization_id AND {OWN})"
+        )),
+        resources(&format!(
+            "EXISTS (SELECT 1 FROM public.memberships m CROSS JOIN public.guests g
+               WHERE m.organization_id = resource.organization_id AND {OWN})"
+        )),
+    ] {
+        assert_eq!(reported(&filter), Vec::<String>::new(), "{filter}");
+    }
+    for filter in [
+        resources(&format!(
+            "NOT EXISTS (SELECT 1 FROM public.memberships m
+               WHERE m.organization_id = resource.organization_id AND {OWN})"
+        )),
+        resources(
+            "EXISTS (SELECT 1 FROM public.memberships m
+               WHERE m.organization_id = resource.organization_id)",
+        ),
+        resources(
+            "EXISTS (SELECT 1 FROM public.guests m
+               WHERE m.organization_id = resource.organization_id
+                 AND m.user_id = current_setting('app.user_id', true))",
+        ),
+        resources(&format!(
+            "EXISTS (SELECT count(*) FROM public.memberships m
+               WHERE m.organization_id = resource.organization_id AND {OWN})"
+        )),
+        resources(&format!(
+            "EXISTS (SELECT 1 FROM public.memberships m
+               WHERE m.organization_id = resource.id AND {OWN})"
+        )),
+        notes(&format!(
+            "EXISTS (SELECT 1 FROM public.guests g LEFT JOIN public.memberships m
+               ON m.organization_id = g.organization_id AND {OWN}
+               WHERE g.organization_id = note.organization_id)"
+        )),
+    ] {
+        assert_eq!(reported(&filter), ["member_ids()"], "{filter}");
+    }
+}
+
+#[test]
+fn a_policy_subquery_reading_a_table_twice_is_met_by_one_read_of_it() {
+    let reading = |name: &str, filter: &str| {
+        format!(
+            "CREATE FUNCTION {name}() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource WHERE {filter} $$;"
+        )
+    };
+    let seated = reading(
+        "seated_ids",
+        "EXISTS (SELECT 1 FROM public.seats seat
+           WHERE seat.organization_id = resource.organization_id
+             AND seat.user_id = current_setting('app.user_id', true))",
+    );
+    let paired = reading(
+        "paired_ids",
+        "EXISTS (SELECT 1 FROM public.seats other, public.seats seat
+           WHERE seat.organization_id = resource.organization_id
+             AND seat.user_id = current_setting('app.user_id', true))",
+    );
+    let unseated = reading(
+        "unseated_ids",
+        "EXISTS (SELECT 1 FROM public.seats seat
+           WHERE seat.organization_id = resource.organization_id)",
+    );
+    assert_eq!(
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "CREATE ROLE app NOLOGIN;
+                 CREATE TABLE seats (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+                 CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL);
+                 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+                 GRANT SELECT ON seats, resources TO app;
+                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+                 CREATE POLICY seated_resources ON resources FOR SELECT TO app
+                   USING (EXISTS (SELECT 1 FROM seats held, seats any_seat
+                     WHERE held.organization_id = resources.organization_id
+                       AND held.user_id = current_setting('app.user_id', true)
+                       AND any_seat.user_id = current_setting('app.user_id', true)));
+                 {seated}{paired}{unseated}"
+            ),
+        ),
+        ["unseated_ids()"]
+    );
+}
+
+#[test]
+fn a_subquery_nested_in_a_policy_subquery_is_met_by_one_finding_fewer_rows() {
+    let reported = |nested: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "CREATE ROLE app NOLOGIN;
+                 CREATE TABLE seats (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+                 CREATE TABLE organizations (id INT PRIMARY KEY, active BOOLEAN NOT NULL);
+                 CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL);
+                 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+                 GRANT SELECT ON seats, organizations, resources TO app;
+                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+                 CREATE POLICY active_seated_resources ON resources FOR SELECT TO app
+                   USING (EXISTS (SELECT 1 FROM seats s
+                     WHERE s.organization_id = resources.organization_id
+                       AND s.user_id = current_setting('app.user_id', true)
+                       AND EXISTS (SELECT 1 FROM organizations o
+                         WHERE o.id = s.organization_id AND o.active)));
+                 CREATE FUNCTION active_ids() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource
+                     WHERE EXISTS (SELECT 1 FROM public.seats seat
+                       WHERE seat.user_id = current_setting('app.user_id', true)
+                         AND seat.organization_id = resource.organization_id
+                         AND {nested}) $$;"
+            ),
+        )
+    };
+    assert_eq!(
+        reported(
+            "seat.organization_id IN (SELECT organization.id FROM public.organizations organization
+               WHERE organization.active)"
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        reported(
+            "EXISTS (SELECT 1 FROM public.organizations organization
+               WHERE organization.id = seat.organization_id)"
+        ),
+        ["active_ids()"]
+    );
+}
+
+#[test]
 fn a_definer_returning_rows_a_restrictive_policy_hides_is_reported_until_it_repeats_it() {
     assert_eq!(
         exposed_to_app(
