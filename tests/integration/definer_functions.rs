@@ -752,22 +752,173 @@ fn a_definer_deleting_rows_the_caller_may_not_delete_is_reported() {
                        SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
                        {DELETE_OWN} RETURNING resource.id $$;"
                 ),
+            ]
+            .concat(),
+        ),
+        ["purge_any()", "purge_beside()", "purge_joined()", "purge_returning()", "purge_sequence()"]
+    );
+}
+
+/// An `UPDATE` hiding the caller's own rows.
+const HIDE_OWN: &str = "UPDATE public.resources resource SET hidden = true
+    WHERE resource.owner = current_setting('app.user_id', true)";
+
+#[test]
+fn a_definer_updating_only_rows_the_caller_may_update_alike_is_not_reported() {
+    let definers = [
+        writing_definer("hide()", HIDE_OWN),
+        writing_definer(
+            "toggle()",
+            "UPDATE public.resources resource SET hidden = NOT resource.hidden
+             WHERE resource.owner = current_setting('app.user_id', true)",
+        ),
+        writing_definer(
+            "keep_owner()",
+            "UPDATE public.resources resource SET owner = resource.owner, hidden = true
+             WHERE resource.owner = current_setting('app.user_id', true)",
+        ),
+        writing_definer(
+            "hide_twins()",
+            "UPDATE public.resources resource SET hidden = true FROM public.resources twin
+             WHERE twin.id = resource.id AND twin.owner = current_setting('app.user_id', true)
+               AND resource.owner = current_setting('app.user_id', true)",
+        ),
+        format!(
+            "CREATE FUNCTION guarded_hide() RETURNS VOID LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+               SET search_path = pg_catalog, pg_temp AS $$
+             DECLARE {SIGNED_IN} BEGIN
+               IF uid IS NULL THEN RAISE EXCEPTION 'not signed in'; END IF;
+               UPDATE public.resources resource SET hidden = true WHERE resource.owner = uid;
+             END $$;"
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, UPDATE", OWN_ROWS, &definers),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        written_exposed(
+            "SELECT, UPDATE (owner, hidden)",
+            "CREATE POLICY own_read ON resources FOR SELECT TO app
+               USING (owner = current_setting('app.user_id', true));
+             CREATE POLICY own_update ON resources FOR UPDATE TO app
+               USING (owner = current_setting('app.user_id', true))
+               WITH CHECK (owner = current_setting('app.user_id', true));",
+            &definers,
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_definer_updating_rows_the_caller_may_not_update_alike_is_reported() {
+    let hide = writing_definer("hide()", HIDE_OWN);
+    let own = |command: &str| {
+        format!(
+            "CREATE POLICY own ON resources FOR {command} TO app
+               USING (owner = current_setting('app.user_id', true));"
+        )
+    };
+    for (grants, policies) in [
+        ("SELECT", OWN_ROWS.to_owned()),
+        ("SELECT, UPDATE (owner)", OWN_ROWS.to_owned()),
+        ("SELECT, UPDATE", own("SELECT")),
+        ("SELECT, UPDATE", own("UPDATE")),
+        (
+            "SELECT, UPDATE",
+            format!(
+                "{OWN_ROWS}
+                 CREATE FUNCTION public.audit() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+                   BEGIN RETURN NEW; END $$;
+                 CREATE TRIGGER audited BEFORE UPDATE ON resources
+                   FOR EACH ROW EXECUTE FUNCTION public.audit();"
+            ),
+        ),
+    ] {
+        assert_eq!(
+            written_exposed(grants, &policies, &hide),
+            ["hide()"],
+            "{grants} {policies}"
+        );
+    }
+    assert_eq!(
+        written_exposed(
+            "SELECT, UPDATE",
+            OWN_ROWS,
+            &[
                 writing_definer(
-                    "hide()",
-                    "UPDATE public.resources resource SET hidden = true
+                    "give_away()",
+                    "UPDATE public.resources resource SET owner = 'admin'
                      WHERE resource.owner = current_setting('app.user_id', true)",
+                ),
+                writing_definer(
+                    "stamp()",
+                    "UPDATE public.resources resource SET hidden = (current_user = 'app')
+                     WHERE resource.owner = current_setting('app.user_id', true)",
+                ),
+                writing_definer(
+                    "hide_any()",
+                    "UPDATE public.resources resource SET hidden = true",
+                ),
+                writing_definer(
+                    "hide_beside()",
+                    "UPDATE public.resources resource SET hidden = true FROM public.resources other
+                     WHERE other.id = resource.id
+                       AND resource.owner = current_setting('app.user_id', true)",
+                ),
+                format!(
+                    "CREATE FUNCTION hide_returning() RETURNS SETOF INT LANGUAGE sql VOLATILE
+                       SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                       {HIDE_OWN} RETURNING resource.id $$;"
                 ),
             ]
             .concat(),
         ),
         [
-            "hide()",
-            "purge_any()",
-            "purge_beside()",
-            "purge_joined()",
-            "purge_returning()",
-            "purge_sequence()"
+            "give_away()",
+            "hide_any()",
+            "hide_beside()",
+            "hide_returning()",
+            "stamp()"
         ]
+    );
+}
+
+#[test]
+fn a_definer_update_whose_written_row_is_not_followed_is_reported() {
+    assert_eq!(
+        written_exposed(
+            "SELECT, UPDATE",
+            "CREATE POLICY own ON resources FOR ALL TO app
+               USING (owner = current_setting('app.user_id', true))
+               WITH CHECK (owner = current_setting('app.user_id', true)
+                 AND EXISTS (SELECT 1 WHERE hidden IS NOT NULL));",
+            &writing_definer("hide()", HIDE_OWN),
+        ),
+        ["hide()"]
+    );
+    assert_eq!(
+        written_exposed(
+            "SELECT, UPDATE",
+            OWN_ROWS,
+            &[
+                writing_definer(
+                    "paired()",
+                    "UPDATE public.resources resource SET (hidden, owner) = (true, resource.owner)
+                     WHERE resource.owner = current_setting('app.user_id', true)",
+                ),
+                writing_definer(
+                    "copied()",
+                    "UPDATE public.resources resource SET hidden = twin.hidden
+                     FROM public.resources twin
+                     WHERE twin.id = resource.id AND twin.owner = current_setting('app.user_id', true)
+                       AND resource.owner = current_setting('app.user_id', true)",
+                ),
+            ]
+            .concat(),
+        ),
+        ["copied()", "paired()"]
     );
 }
 
