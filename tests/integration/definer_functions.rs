@@ -899,6 +899,14 @@ fn helper_exposed(policy: &str, body: &str) -> Vec<String> {
                  SELECT current_setting('app.user_id', true) $$;
              CREATE FUNCTION authz.indirect() RETURNS TEXT LANGUAGE sql STABLE
                SET search_path = authz, pg_catalog, pg_temp AS $$ SELECT setting_of() $$;
+             CREATE FUNCTION authz.overloaded() RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT current_setting('app.user_id', true) $$;
+             CREATE FUNCTION authz.overloaded(fallback TEXT DEFAULT NULL) RETURNS TEXT
+               LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$ SELECT 'admin'::text $$;
+             CREATE FUNCTION authz.selected_uid() RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT (SELECT current_setting('app.user_id', true))::text $$;
              CREATE POLICY own_memberships ON memberships FOR SELECT TO app
                USING (user_id = current_setting('app.user_id', true));
              CREATE POLICY readable ON resources FOR SELECT TO app USING ({policy});
@@ -987,6 +995,14 @@ fn a_helper_whose_value_may_differ_where_it_is_inlined_confines_nothing() {
         (
             "owner = setting_of()".to_owned(),
             "resource.owner = authz.indirect()",
+        ),
+        (
+            format!("owner = {setting}"),
+            "resource.owner = authz.overloaded()",
+        ),
+        (
+            format!("owner = (SELECT {setting})::text"),
+            "resource.owner = authz.selected_uid()",
         ),
     ] {
         assert_eq!(helper_exposed(&policy, body), ["probe()"], "{body}");
