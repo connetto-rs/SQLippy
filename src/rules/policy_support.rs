@@ -264,12 +264,12 @@ pub(crate) fn sets_only_search_path<F: FunctionLike>(function: &F) -> bool {
     })
 }
 
-/// The statement a `LANGUAGE sql` function runs, when its body is one
-/// statement written as a string or as a `BEGIN ATOMIC` block.
-pub(crate) fn sql_statement_body<'f, F: FunctionLike>(
+/// The statements a `LANGUAGE sql` function runs in order, written as a
+/// string or as a `BEGIN ATOMIC` block, when its body parses.
+pub(crate) fn sql_statements_body<'f, F: FunctionLike>(
     database: &F::DB,
     function: &'f F,
-) -> Result<Option<Cow<'f, Statement>>, LookupError> {
+) -> Result<Option<Cow<'f, [Statement]>>, LookupError> {
     if function
         .stored_language()
         .is_some_and(|language| language != "sql")
@@ -279,10 +279,18 @@ pub(crate) fn sql_statement_body<'f, F: FunctionLike>(
     if let Some(body) = function.body() {
         return Ok(Parser::parse_sql(&PostgreSqlDialect {}, body)
             .ok()
-            .and_then(single_statement)
             .map(Cow::Owned));
     }
-    Ok(match function.atomic_statements(database)? {
+    function.atomic_statements(database)
+}
+
+/// The statement a `LANGUAGE sql` function runs, when its body is one
+/// statement written as a string or as a `BEGIN ATOMIC` block.
+pub(crate) fn sql_statement_body<'f, F: FunctionLike>(
+    database: &F::DB,
+    function: &'f F,
+) -> Result<Option<Cow<'f, Statement>>, LookupError> {
+    Ok(match sql_statements_body(database, function)? {
         Some(Cow::Borrowed([statement])) => Some(Cow::Borrowed(statement)),
         Some(Cow::Owned(statements)) => single_statement(statements).map(Cow::Owned),
         _ => None,
