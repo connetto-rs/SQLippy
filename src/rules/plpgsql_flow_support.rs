@@ -92,41 +92,30 @@ pub(crate) fn ran_statement(block: Block) -> Option<Ran> {
 
 /// The statement `statements` run, one `DELETE` maybe followed by a bare
 /// `RETURN`, or the query whose rows they return.
-fn ran_by(statements: Vec<Node>) -> Option<Statement> {
-    let deletes = match statements.as_slice() {
-        [
-            Node {
-                kind:
-                    NodeKind::Statement {
-                        statement,
-                        into: None,
-                    },
-                ..
-            },
-        ]
-        | [
-            Node {
-                kind:
-                    NodeKind::Statement {
-                        statement,
-                        into: None,
-                    },
-                ..
-            },
+fn ran_by(mut statements: Vec<Node>) -> Option<Statement> {
+    if matches!(
+        statements.as_slice(),
+        [_] | [
+            _,
             Node {
                 kind: NodeKind::Return { value: None },
                 ..
-            },
-        ] => matches!(statement.as_ref(), Statement::Delete(_)),
-        _ => false,
-    };
-    if !deletes {
-        return returned_by(statements).map(|query| Statement::Query(Box::new(query)));
+            }
+        ]
+    ) {
+        match statements.remove(0) {
+            Node {
+                kind:
+                    NodeKind::Statement {
+                        statement,
+                        into: None,
+                    },
+                ..
+            } if matches!(statement.as_ref(), Statement::Delete(_)) => return Some(*statement),
+            node => statements.insert(0, node),
+        }
     }
-    let NodeKind::Statement { statement, .. } = statements.into_iter().next()?.kind else {
-        return None;
-    };
-    Some(*statement)
+    returned_by(statements).map(|query| Statement::Query(Box::new(query)))
 }
 
 /// The condition of `node`, when it is an `IF` whose one branch raises an
