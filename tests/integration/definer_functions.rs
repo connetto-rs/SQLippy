@@ -1675,6 +1675,19 @@ fn a_plpgsql_definer_running_statements_the_caller_may_run_alike_is_not_reported
                RETURNING id INTO new_id;
              RETURN new_id;",
         ),
+        block_definer(
+            "list_then_hide()",
+            "SETOF INT",
+            "",
+            &format!(
+                "RETURN QUERY SELECT resource.id FROM public.resources resource
+                   WHERE resource.owner = uid;
+                 {HIDE_MINE};
+                 RETURN QUERY SELECT resource.id FROM public.resources resource
+                   WHERE resource.owner = uid;
+                 RETURN;"
+            ),
+        ),
     ]
     .concat();
     assert_eq!(
@@ -1734,13 +1747,33 @@ fn a_plpgsql_definer_running_a_statement_the_caller_may_not_run_alike_is_reporte
                RETURNING resource.id INTO hidden_id;
              RETURN hidden_id;",
         ),
+        block_definer(
+            "hide_multiple_targets()",
+            "INT",
+            "hidden_id INT;",
+            &format!(
+                "{HIDE_MINE} RETURNING resource.id, resource.owner INTO hidden_id, uid;
+                 RETURN hidden_id;"
+            ),
+        ),
+        block_definer(
+            "hide_qualified_target()",
+            "INT",
+            "hidden_id INT;",
+            &format!(
+                "{HIDE_MINE} RETURNING resource.id INTO hide_qualified_target.hidden_id;
+                 RETURN hidden_id;"
+            ),
+        ),
     ]
     .concat();
     assert_eq!(
         written_exposed("SELECT, INSERT, UPDATE, DELETE", OWN_ROWS, &definers),
         [
+            "hide_multiple_targets()",
             "hide_or_count()",
             "hide_or_tell()",
+            "hide_qualified_target()",
             "hide_returning_hidden()",
             "hide_then_purge_any()",
             "purge_hidden()",
@@ -4067,6 +4100,7 @@ fn every_arm_of_a_helper_carries_its_filter_or_none_does() {
     for body in [
         format!("{admin} UNION SELECT member.team_id FROM public.team_members member"),
         format!("{admin} UNION SELECT nobody.team_id FROM public.team_members member"),
+        format!("{admin}; {own}"),
     ] {
         assert_eq!(
             reported(&body),
