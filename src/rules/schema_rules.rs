@@ -119,3 +119,5 @@ mod authorization_in_trigger;
 pub use authorization_in_trigger::AuthorizationInTrigger;
 mod trigger_filter_in_body;
 pub use trigger_filter_in_body::TriggerFilterInBody;
+mod deferred_check_deleted_row;
+pub use deferred_check_deleted_row::DeferredCheckDeletedRow;

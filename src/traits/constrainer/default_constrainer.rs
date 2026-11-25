@@ -16,22 +16,22 @@ use crate::{
         ConstantColumnNotGenerated, ContradictoryChecks, CopiedColumnThroughSuperkey,
         CorrelatedPolicySubquery, CredentialFreeWrite, CredentialPatternPolicy,
         CredentialSettingWrite, CrossTenantCap, CteShadowsRelation, DeadPermissivePolicy,
-        DecidedBranch, DefinerMaintainedColumnClientWritable, DefinerPathCreatableSchema,
-        DefinerSchemaWithoutDefaultRevoke, DefinerTakesActingUser, DefinerTemporarySchemaNotLast,
-        DefinerWithoutSearchPath, DenyListPolicy, DistinctOverReferencedSide, DuplicateCheck,
-        DuplicateColumnAssignment, DuplicateColumnNameInExtensionGraph, DuplicateForeignKey,
-        DuplicateIndex, DuplicatePolicy, DuplicateUniqueIndex, DuplicatingRecursiveCte,
-        DynamicSqlInjection, EmptyPartialIndex, EmptyTextAllowed, EqualityIndexOnArray,
-        ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
-        ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, ExtensionWithoutVersion,
-        FailingAssert, FlagNotBoolean, FloatingPointMoney, ForbiddenColumnInExtension,
-        ForeignKeyExistenceOracle, FractionalCount, FunctionMediatedPolicyCycle,
-        FunctionWithoutSafeSearchPath, GrantOptionToClientRole, ImpureImmutableFunction,
-        IncompatibleForeignKey, InvokerWithoutSearchPath, JsonStoredAsText, JsonType,
-        KeyWithoutExactEquality, LatentPolicyReadCycle, LeakproofUserFunction,
-        MaterializedViewExposed, MisquotedSearchPath, MissingPrimaryKey, MixedCaseColumnName,
-        MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText, MoneyType,
-        MonotonicFlagReset, MultiplePermissivePolicies, NarrowIntegerKey,
+        DecidedBranch, DeferredCheckDeletedRow, DefinerMaintainedColumnClientWritable,
+        DefinerPathCreatableSchema, DefinerSchemaWithoutDefaultRevoke, DefinerTakesActingUser,
+        DefinerTemporarySchemaNotLast, DefinerWithoutSearchPath, DenyListPolicy,
+        DistinctOverReferencedSide, DuplicateCheck, DuplicateColumnAssignment,
+        DuplicateColumnNameInExtensionGraph, DuplicateForeignKey, DuplicateIndex, DuplicatePolicy,
+        DuplicateUniqueIndex, DuplicatingRecursiveCte, DynamicSqlInjection, EmptyPartialIndex,
+        EmptyTextAllowed, EqualityIndexOnArray, ExposedDefinerOverProtectedTable,
+        ExpressionDefeatsIndex, ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema,
+        ExtensionWithoutVersion, FailingAssert, FlagNotBoolean, FloatingPointMoney,
+        ForbiddenColumnInExtension, ForeignKeyExistenceOracle, FractionalCount,
+        FunctionMediatedPolicyCycle, FunctionWithoutSafeSearchPath, GrantOptionToClientRole,
+        ImpureImmutableFunction, IncompatibleForeignKey, InvokerWithoutSearchPath,
+        JsonStoredAsText, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
+        LeakproofUserFunction, MaterializedViewExposed, MisquotedSearchPath, MissingPrimaryKey,
+        MixedCaseColumnName, MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText,
+        MoneyType, MonotonicFlagReset, MultiplePermissivePolicies, NarrowIntegerKey,
         NarrowerReferencingColumn, NeedlessIndexPredicate, NestedPolicySubquery, NilUuidSentinel,
         NonFiniteNumberAllowed, NonSnakeCaseColumnName, NonSnakeCaseTableName,
         NonterminatingRecursiveCte, NotInNullList, NotInNullableSubquery, NotInSubquery,
@@ -316,7 +316,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 77] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 78] = [
         Box::new(DuplicateIndex::default()),
         Box::new(NullableConcatenation::default()),
         Box::new(RedundantTerm::default()),
@@ -394,6 +394,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(UnfilteredChangeTrigger::default()),
         Box::new(AuthorizationInTrigger::default()),
         Box::new(TriggerFilterInBody::default()),
+        Box::new(DeferredCheckDeletedRow::default()),
     ];
     for rule in schema_rules {
         constrainer.register_schema_rule_with_floor(rule, Level::Allow);

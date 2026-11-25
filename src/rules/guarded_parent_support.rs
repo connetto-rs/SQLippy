@@ -301,7 +301,7 @@ impl<'db, DB: DatabaseLike> Parent<'db, DB> {
         let [from] = from.as_slice() else {
             return false;
         };
-        let Some(name) = self.relation(&from.relation, self.referenced) else {
+        let Some(name) = sole_relation(self.database, &from.relation, self.referenced) else {
             return false;
         };
         tables.is_empty()
@@ -591,38 +591,10 @@ impl<'db, DB: DatabaseLike> Parent<'db, DB> {
         if !plain {
             return None;
         }
-        Some((select.as_ref(), self.relation(&from.relation, table)?))
-    }
-
-    /// The name a `FROM` item reading `table` alone goes by, without a child
-    /// table's rows unless `table` has none.
-    fn relation(&self, relation: &TableFactor, table: &DB::Table) -> Option<String> {
-        let TableFactor::Table {
-            name,
-            alias,
-            args: None,
-            sample: None,
-            with_ordinality: false,
-            inheritance,
-            ..
-        } = relation
-        else {
-            return None;
-        };
-        let only = matches!(inheritance, Some(TableInheritance::Only { .. }));
-        let childless = table
-            .inheritors(self.database)
-            .is_ok_and(|mut inheritors| inheritors.next().is_none());
-        if !matches!(stored_table(self.database, name, None), Ok(Some(read)) if read == table)
-            || !(only || childless)
-        {
-            return None;
-        }
-        match alias {
-            Some(alias) if alias.columns.is_empty() => Some(stored(&alias.name).into_owned()),
-            Some(_) => None,
-            None => stored_parts(name).pop().map(Cow::into_owned),
-        }
+        Some((
+            select.as_ref(),
+            sole_relation(self.database, &from.relation, table)?,
+        ))
     }
 
     /// The column of `table` that `expression` names, bare or qualified by
@@ -646,6 +618,41 @@ impl<'db, DB: DatabaseLike> Parent<'db, DB> {
             .columns(self.database)
             .ok()?
             .find(|candidate| names_column(candidate, column))
+    }
+}
+
+/// The name a `FROM` item reading `table` alone goes by, without a child
+/// table's rows unless `table` has none.
+pub(crate) fn sole_relation<DB: DatabaseLike>(
+    database: &DB,
+    relation: &TableFactor,
+    table: &DB::Table,
+) -> Option<String> {
+    let TableFactor::Table {
+        name,
+        alias,
+        args: None,
+        sample: None,
+        with_ordinality: false,
+        inheritance,
+        ..
+    } = relation
+    else {
+        return None;
+    };
+    let only = matches!(inheritance, Some(TableInheritance::Only { .. }));
+    let childless = table
+        .inheritors(database)
+        .is_ok_and(|mut inheritors| inheritors.next().is_none());
+    if !matches!(stored_table(database, name, None), Ok(Some(read)) if read == table)
+        || !(only || childless)
+    {
+        return None;
+    }
+    match alias {
+        Some(alias) if alias.columns.is_empty() => Some(stored(&alias.name).into_owned()),
+        Some(_) => None,
+        None => stored_parts(name).pop().map(Cow::into_owned),
     }
 }
 
