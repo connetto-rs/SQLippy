@@ -2375,6 +2375,33 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         })
     }
 
+    /// Each relation of the `FROM` items of `filters` and of the queries
+    /// its `WHERE` finds a row of that reads every row of a stored table
+    /// under its own column names, with that table.
+    fn stored_relations<'f>(
+        &self,
+        filters: &Filters<'f>,
+    ) -> Result<Vec<(&'f TableFactor, &'a DB::Table)>, LookupError> {
+        let found = filters
+            .filter
+            .iter()
+            .copied()
+            .filter_map(unscoped_semi_join);
+        let mut stored = Vec::new();
+        for from in filters
+            .from
+            .iter()
+            .chain(found.flat_map(|select| &select.from))
+        {
+            for factor in relations(from) {
+                if let Some(table) = self.stored(factor)? {
+                    stored.push((factor, table));
+                }
+            }
+        }
+        Ok(stored)
+    }
+
     /// What the filters of the relation at `position` of `from` state of it.
     fn stated<'r>(
         &'r self,
@@ -2396,7 +2423,11 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             sources: &filters.sources,
         };
         let dropping = filters.dropping(&resolver, position);
-        let equalities = Equalities::of(&resolver, &dropping, position)?;
+        let mut equalities = Equalities::of(&resolver, &dropping, position)?;
+        equalities.follow_keys(
+            self.body.confinement.database,
+            &self.stored_relations(filters)?,
+        )?;
         let mut conditions = Vec::new();
         let mut caller_bound = Vec::new();
         let mut whole = true;
@@ -3470,6 +3501,14 @@ impl<'r> Node<'r> {
             name: Cow::Borrowed(name),
         }
     }
+
+    /// The column named `name` of `factor`.
+    fn of(factor: &TableFactor, name: &'r str) -> Self {
+        Self::Column {
+            factor,
+            name: Cow::Borrowed(name),
+        }
+    }
 }
 
 impl<'r> Equalities<'r> {
@@ -3530,6 +3569,78 @@ impl<'r> Equalities<'r> {
         Ok(equalities)
     }
 
+    /// Joins, for each foreign key of a relation of `relations` onto the
+    /// table another reads, the columns of each pair of the key the
+    /// classes do not hold equal yet, once they hold equal pairs whose
+    /// referenced columns cover a unique key of that table. The other row
+    /// is then the one the key references, which holds the value of each
+    /// column of the key in the column it references. Each relation reads
+    /// every row of its stored table under its own column names.
+    fn follow_keys<DB: DatabaseLike>(
+        &mut self,
+        database: &'r DB,
+        relations: &[(&TableFactor, &'r DB::Table)],
+    ) -> Result<(), LookupError> {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &(host, host_table) in relations {
+                for foreign_key in host_table.foreign_keys(database)? {
+                    let referenced_table = foreign_key.referenced_table(database)?;
+                    if !no_inheritors(database, referenced_table)? {
+                        continue;
+                    }
+                    let pairs = key_pairs(database, foreign_key)?;
+                    let keys = equality_keys(database, referenced_table)?;
+                    for &(referenced, _) in relations
+                        .iter()
+                        .filter(|(_, table)| ptr::eq(*table, referenced_table))
+                    {
+                        let held: Vec<bool> = pairs
+                            .iter()
+                            .map(|(host_column, referenced_column)| {
+                                self.equal(
+                                    &Node::of(host, host_column.column_name()),
+                                    &Node::of(referenced, referenced_column.column_name()),
+                                )
+                            })
+                            .collect();
+                        let Some(bound) = pairs
+                            .iter()
+                            .zip(&held)
+                            .find_map(|(&(host_column, _), &held)| held.then_some(host_column))
+                        else {
+                            continue;
+                        };
+                        let covered = |column: &&DB::Column| {
+                            pairs
+                                .iter()
+                                .zip(&held)
+                                .any(|(&(_, referenced_column), &held)| {
+                                    held && referenced_column == *column
+                                })
+                        };
+                        if !keys.iter().any(|key| key.iter().all(covered))
+                            || !binds(database, foreign_key, bound)?
+                        {
+                            continue;
+                        }
+                        for (&(host_column, referenced_column), held) in pairs.iter().zip(held) {
+                            if !held && same_identity(database, host_column, referenced_column)? {
+                                self.link(
+                                    Node::of(host, host_column.column_name()),
+                                    Node::of(referenced, referenced_column.column_name()),
+                                );
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Joins the classes of `left` and `right`.
     fn link(&mut self, left: Node<'r>, right: Node<'r>) {
         let left = self.joined(left);
@@ -3551,6 +3662,13 @@ impl<'r> Equalities<'r> {
     /// The index of `column`.
     fn position(&self, column: &Node<'_>) -> Option<usize> {
         self.columns.iter().position(|named| named == column)
+    }
+
+    /// Whether the classes hold `left` equal to `right`.
+    fn equal(&self, left: &Node<'_>, right: &Node<'_>) -> bool {
+        self.position(left)
+            .zip(self.position(right))
+            .is_some_and(|(left, right)| self.head(left) == self.head(right))
     }
 
     /// The head of the class of the column at `index`.
