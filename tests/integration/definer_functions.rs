@@ -5744,6 +5744,167 @@ fn a_helper_drawing_the_tested_row_by_its_key_carries_every_condition_of_it() {
     );
 }
 
+/// The functions `exposed` reports when `authz.reached()`, private, runs
+/// `helper` and `authz.owned_reached()`, granted to `app`, runs `body`.
+fn reported_over_keyed_helper(helper: &str, body: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE SCHEMA authz;
+             CREATE TABLE public.kinds (id INT PRIMARY KEY, shown BOOLEAN NOT NULL);
+             CREATE TABLE public.audits (resource_id INT NOT NULL);
+             CREATE TABLE public.resources (
+               id INT PRIMARY KEY, code INT UNIQUE, parent_id INT, kind_id INT NOT NULL,
+               owner_id TEXT NOT NULL, hidden BOOLEAN NOT NULL
+             );
+             CREATE TABLE public.secrets (resource_id INT NOT NULL);
+             ALTER TABLE public.resources ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE public.secrets ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON public.kinds, public.resources, public.secrets TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             CREATE POLICY owned ON public.resources FOR SELECT TO app
+               USING (owner_id = current_setting('app.user_id', true));
+             CREATE FUNCTION authz.reached() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 {helper} $$;
+             CREATE FUNCTION authz.owned_reached() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 {body} $$;
+             GRANT EXECUTE ON FUNCTION authz.owned_reached() TO app;"
+        ),
+    )
+}
+
+/// The caller's own resources whose row passes `test`.
+fn owned_where(test: &str) -> String {
+    format!(
+        "SELECT resource.id FROM public.resources resource
+         WHERE {test} AND resource.owner_id = current_setting('app.user_id', true)"
+    )
+}
+
+const EVERY_RESOURCE: &str = "SELECT resource.id FROM public.resources resource";
+
+#[test]
+fn a_private_helper_keyed_by_the_rows_it_reads_confines_a_test_of_their_key() {
+    let reported = reported_over_keyed_helper;
+    let filtered = owned_where;
+    let every = EVERY_RESOURCE;
+    let shown = "SELECT resource.id FROM public.resources resource WHERE NOT resource.hidden";
+    let tested = filtered("resource.id IN (SELECT authz.reached())");
+    for (helper, body) in [
+        (every, tested.clone()),
+        (shown, tested.clone()),
+        (shown, filtered("resource.id = ANY (ARRAY(SELECT authz.reached()))")),
+        (
+            "SELECT resource.id FROM public.resources resource WHERE NOT resource.hidden
+             UNION SELECT resource.id FROM public.resources resource WHERE resource.parent_id IS NULL",
+            tested.clone(),
+        ),
+        (
+            "SELECT resource.id FROM public.resources resource
+             JOIN public.kinds kind ON kind.id = resource.kind_id WHERE kind.shown",
+            tested.clone(),
+        ),
+        (
+            "SELECT resource.id FROM public.resources resource
+             WHERE resource.kind_id IN (SELECT kind.id FROM public.kinds kind WHERE kind.shown)",
+            tested.clone(),
+        ),
+        (every, filtered("resource.id NOT IN (SELECT authz.reached())")),
+        (every, filtered("resource.id <> ALL (ARRAY(SELECT authz.reached()))")),
+        (
+            every,
+            filtered("resource.id IN (SELECT reached.id FROM authz.reached() reached (id))"),
+        ),
+        (
+            every,
+            filtered("NOT EXISTS (SELECT 1 FROM authz.reached() reached WHERE reached = resource.id)"),
+        ),
+        (
+            every,
+            "SELECT CASE WHEN resource.id IN (SELECT authz.reached()) THEN resource.id END
+             FROM public.resources resource
+             WHERE resource.owner_id = current_setting('app.user_id', true)"
+                .to_owned(),
+        ),
+        (
+            every,
+            "SELECT resource.id FROM public.resources resource
+             JOIN public.kinds kind
+               ON kind.id = resource.kind_id AND resource.id NOT IN (SELECT authz.reached())
+             WHERE resource.owner_id = current_setting('app.user_id', true)"
+                .to_owned(),
+        ),
+    ] {
+        assert_eq!(reported(helper, &body), Vec::<String>::new(), "{helper} {body}");
+    }
+}
+
+#[test]
+fn a_private_helper_reading_more_than_the_keyed_row_or_tested_otherwise_is_reported() {
+    let reported = reported_over_keyed_helper;
+    let filtered = owned_where;
+    let every = EVERY_RESOURCE;
+    let tested = filtered("resource.id IN (SELECT authz.reached())");
+    for (helper, body) in [
+        (
+            every,
+            "SELECT CASE WHEN resource.id NOT IN (SELECT authz.reached()) IS NULL THEN kind.id END
+             FROM public.kinds kind LEFT JOIN public.resources resource
+               ON resource.kind_id = kind.id
+              AND resource.owner_id = current_setting('app.user_id', true)"
+                .to_owned(),
+        ),
+        (
+            "SELECT resource.id FROM public.resources resource
+             WHERE resource.id IN (SELECT secret.resource_id FROM public.secrets secret)",
+            tested.clone(),
+        ),
+        (
+            "SELECT resource.id FROM public.resources resource
+             WHERE EXISTS (SELECT 1 FROM public.resources child WHERE child.parent_id = resource.id)",
+            tested.clone(),
+        ),
+        (
+            "SELECT resource.id FROM public.resources resource
+             JOIN public.audits audit ON audit.resource_id = resource.id",
+            tested.clone(),
+        ),
+        (
+            "SELECT resource.id FROM public.kinds kind
+             LEFT JOIN public.resources resource ON resource.kind_id = kind.id",
+            filtered("resource.id NOT IN (SELECT authz.reached())"),
+        ),
+        (
+            "SELECT resource.id FROM public.resources resource ORDER BY resource.hidden LIMIT 1",
+            tested.clone(),
+        ),
+        ("SELECT secret.resource_id FROM public.secrets secret", tested.clone()),
+        ("SELECT resource.parent_id FROM public.resources resource", tested.clone()),
+        (
+            "SELECT resource.code FROM public.resources resource",
+            filtered("resource.code NOT IN (SELECT authz.reached())"),
+        ),
+        (every, filtered("resource.parent_id IN (SELECT authz.reached())")),
+        (every, filtered("(SELECT count(*) FROM authz.reached()) > 0")),
+        (
+            every,
+            filtered("EXISTS (SELECT 1 FROM authz.reached() reached WHERE reached = resource.parent_id)"),
+        ),
+        (
+            every,
+            filtered(
+                "EXISTS (SELECT 1 FROM public.resources other
+                         WHERE other.parent_id = resource.id AND other.id IN (SELECT authz.reached()))",
+            ),
+        ),
+    ] {
+        assert_eq!(reported(helper, &body), ["owned_reached()"], "{helper} {body}");
+    }
+}
+
 #[test]
 fn a_policy_helper_parameter_takes_the_literal_the_policy_passes() {
     let reported = |policy_role: &str, filter: &str| {

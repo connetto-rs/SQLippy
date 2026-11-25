@@ -59,8 +59,9 @@ use crate::{
         helper_set_support::HelperSets,
         implication_support::{
             Columns, Condition, ParameterValues, StoredRelation, Term, admits, alternatives,
-            clause_implies, keeps_existence, left_to_prove, membership, parameter,
-            parameter_ordinal, renamed, witnessed,
+            clause_implies, filters_nothing, keeps_existence, left_to_prove, limits_nothing,
+            membership, parameter, parameter_ordinal, renamed, renamed_column_call, select_members,
+            witnessed,
         },
         inline_support::selected_expression,
         key_support::{binds, equality_keys, key_pairs, no_inheritors},
@@ -540,10 +541,11 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         confined
     }
 
-    /// Whether the functions `function` calls confine their reads, call no
-    /// `set_config`, whose setting a filter may then read in place of the
-    /// caller's, and its own body reads no table with row-level security or
-    /// confines each read.
+    /// Whether each function `function` calls confines its reads or returns
+    /// keys `function` tests only of rows it reads, none is `set_config`,
+    /// whose setting a filter may then read in place of the caller's, and
+    /// its own body reads no table with row-level security or confines each
+    /// read.
     fn confines_body(&mut self, function: &'a DB::Function) -> Result<bool, LookupError> {
         let (tables, callees) = match function
             .referenced_tables(self.database)
@@ -560,6 +562,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 self.runs_for_every_caller(callee)?
                     || self.confines(callee)?
                     || self.releases_through_policy_sets(callee)?
+                    || self.keys_tested_alone(function, callee)?
             };
             if !confined {
                 return Ok(false);
@@ -601,6 +604,105 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         let released = self.releases_policy_sets()?;
         self.released.set(Some(released));
         Ok(released)
+    }
+
+    /// Whether `callee` returns keys of rows of one table, as
+    /// [`Self::keyed_set`] reads it, and `function` tests no value against
+    /// its set but the key of a row of that table it reads, as
+    /// [`Reads::tests_keys_alone`] reads each statement, calling it nowhere
+    /// else. A row `function` reads is then in the set exactly when the
+    /// conditions `callee` reads its rows under hold of that row, which each
+    /// caller could evaluate itself.
+    fn keys_tested_alone(
+        &mut self,
+        function: &'a DB::Function,
+        callee: &'a DB::Function,
+    ) -> Result<bool, LookupError> {
+        let Some(keyed) = self.keyed_set(callee)? else {
+            return Ok(false);
+        };
+        if let Some(block) = plpgsql_block(function) {
+            let Some(ran) = ran_statements(block, input_count(function)) else {
+                return Ok(false);
+            };
+            for value in ran.guards.iter().chain(&ran.raised) {
+                if !calls_of(value, callee).is_empty() {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(self
+            .read_body(
+                function,
+                |_| Lineage::default(),
+                |reads, query| reads.tests_keys_alone(query, callee, keyed),
+            )?
+            .is_some_and(|tested| tested.iter().all(|tested| *tested)))
+    }
+
+    /// The table and the column of it `function` returns the values of, as
+    /// [`Reads::keyed_rows`] reads each statement, when that column alone is
+    /// a unique key that holds no `NULL`, `function` is not `VOLATILE`, sets
+    /// no parameter but `search_path`, and every function it calls is a
+    /// built-in other than `set_config`, runs for every caller or confines
+    /// its reads. Every value it returns is then the key of one row, which
+    /// it returns under conditions on that row alone.
+    fn keyed_set(
+        &mut self,
+        function: &'a DB::Function,
+    ) -> Result<Option<Keyed<'a, DB>>, LookupError> {
+        let database = self.database;
+        if function.volatility() == FunctionBehavior::Volatile
+            || !function.returns_set()
+            || !sets_only_search_path(function)
+        {
+            return Ok(None);
+        }
+        #[expect(
+            clippy::redundant_closure_for_method_calls,
+            reason = "the method path fixes the lifetimes of `Reads` its impl declares, \
+                      while `read_body` passes the closure borrows of any lifetime"
+        )]
+        let Some(statements) = self.read_body(
+            function,
+            |_| Lineage::default(),
+            |reads, query| reads.keyed_rows(query),
+        )?
+        else {
+            return Ok(None);
+        };
+        let mut statements = statements.into_iter();
+        let Some(Some(keyed)) = statements.next() else {
+            return Ok(None);
+        };
+        for other in statements {
+            if !other
+                .is_some_and(|(table, column)| ptr::eq(table, keyed.0) && ptr::eq(column, keyed.1))
+            {
+                return Ok(None);
+            }
+        }
+        if keyed.1.is_nullable(database)?
+            || !unique_within(database, keyed.0, slice::from_ref(&keyed.1))?
+        {
+            return Ok(None);
+        }
+        let callees = match function.referenced_functions(database) {
+            Ok(callees) => callees,
+            Err(error) if super::unreadable_body(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        for callee in callees {
+            let confined = if callee.target_name().schema() == Some("pg_catalog") {
+                callee.target_name().name() != "set_config"
+            } else {
+                self.runs_for_every_caller(callee)? || self.confines(callee)?
+            };
+            if !confined {
+                return Ok(None);
+            }
+        }
+        Ok(Some(keyed))
     }
 
     /// Whether neither `function` nor a function it reaches is `VOLATILE`,
@@ -729,15 +831,11 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         block: Block,
         path: Option<&[(Cow<'_, str>, bool)]>,
     ) -> Result<Option<Vec<Statement>>, LookupError> {
-        let inputs = function
-            .argument_modes()
-            .filter(|mode| !matches!(mode, ArgMode::Out))
-            .count();
         let Some(Ran {
             statements,
             guards,
             raised,
-        }) = ran_statements(block, inputs)
+        }) = ran_statements(block, input_count(function))
         else {
             return Ok(None);
         };
@@ -967,10 +1065,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             FunctionCalledOnNull::Strict | FunctionCalledOnNull::ReturnsNullOnNullInput
         );
         let scope = ExpressionScope::FunctionBody(function);
-        let inputs = function
-            .argument_modes()
-            .filter(|mode| !matches!(mode, ArgMode::Out))
-            .count();
+        let inputs = input_count(function);
         let mut values = Vec::with_capacity(inputs);
         for ordinal in 0..inputs {
             let placeholder = parameter(ordinal);
@@ -3211,6 +3306,250 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             .collect()
     }
 
+    /// The table and the column of it whose value is every row `query`
+    /// yields, when `query` writes nothing, locks and limits nothing, and
+    /// each `SELECT` whose rows it yields projects that column alone, of a
+    /// relation reading the table, as [`Self::drawn_keys`] reads them. Each
+    /// other relation `query` reads, and every other term, has to read alike
+    /// for every caller, as [`CallerBound`] tells, so the table is read
+    /// nowhere else and every row is drawn under conditions on that row and
+    /// on what each caller may read in full.
+    fn keyed_rows(&mut self, query: &Query) -> Result<Option<Keyed<'a, DB>>, LookupError> {
+        let mut leaves = Vec::new();
+        if self.written.is_some()
+            || self.inserted.is_some()
+            || !query.locks.is_empty()
+            || !limits_nothing(query)
+            || !leaf_selects(&query.body, &mut leaves)
+        {
+            return Ok(None);
+        }
+        let mut bound = CallerBound::new(self.body.confinement, self.path, None);
+        self.items.enter(query);
+        let drawn = self.drawn_keys(&leaves, &mut bound.positive);
+        self.items.leave(query);
+        let Some(keyed) = drawn? else {
+            return Ok(None);
+        };
+        Ok(bound.reads_alike(query)?.then_some(keyed))
+    }
+
+    /// The table and column every one of `leaves` projects alone, pushing
+    /// onto `drawn` the relation of each it projects the column of, when each
+    /// groups nothing and the relation reads the table and no outer join of
+    /// its `FROM` item fills it with `NULL`s.
+    fn drawn_keys(
+        &self,
+        leaves: &[&Select],
+        drawn: &mut Vec<*const TableFactor>,
+    ) -> Result<Option<Keyed<'a, DB>>, LookupError> {
+        let database = self.body.confinement.database;
+        let mut keyed: Option<Keyed<'a, DB>> = None;
+        for select in leaves {
+            let [
+                SelectItem::UnnamedExpr(projected)
+                | SelectItem::ExprWithAlias {
+                    expr: projected, ..
+                },
+            ] = select.projection.as_slice()
+            else {
+                return Ok(None);
+            };
+            let Some((ColumnDefinition::Base { column, .. }, binding)) =
+                self.context.reference(unnested(projected)).ok().flatten()
+            else {
+                return Ok(None);
+            };
+            let Some(relation) = binding.entry().map(|entry| entry.factor()) else {
+                return Ok(None);
+            };
+            let preserved = select.from.iter().any(|from| {
+                relations(from)
+                    .position(|read| ptr::eq(read, relation))
+                    .is_some_and(|position| present(from, position))
+            });
+            if !plain(select) || !preserved {
+                return Ok(None);
+            }
+            let Some(table) = self.stored(relation)? else {
+                return Ok(None);
+            };
+            let Some(column) = column_named(database, table, column.column_name())? else {
+                return Ok(None);
+            };
+            if keyed.is_some_and(|(read, key)| !ptr::eq(read, table) || !ptr::eq(key, column)) {
+                return Ok(None);
+            }
+            keyed = Some((table, column));
+            drawn.push(ptr::from_ref(relation));
+        }
+        Ok(keyed)
+    }
+
+    /// Whether every call in `query` that may reach `callee` is the set of
+    /// a test of the key `keyed` names, as [`Self::key_test`] reads it.
+    fn tests_keys_alone(
+        &self,
+        query: &Query,
+        callee: &'a DB::Function,
+        keyed: Keyed<'a, DB>,
+    ) -> Result<bool, LookupError> {
+        let calls = calls_of(query, callee);
+        if calls.is_empty() {
+            return Ok(true);
+        }
+        let present = present_relations(query);
+        let mut tested = Vec::new();
+        let walked = visit_expressions(query, |expression| {
+            match self.key_test(expression, callee, keyed, &present) {
+                Ok(Some(call)) => tested.push(call),
+                Ok(None) => {}
+                Err(error) => return ControlFlow::Break(error),
+            }
+            ControlFlow::Continue(())
+        });
+        if let ControlFlow::Break(error) = walked {
+            return Err(error);
+        }
+        Ok(calls.iter().all(|call| tested.contains(call)))
+    }
+
+    /// The call of `callee` whose rows `test` compares the key `keyed` names
+    /// of a relation reading its table with, by the address [`calls_of`]
+    /// gives it. That is a comparison [`tested_set`] reads over a query
+    /// yielding every row of the call and nothing else, or `EXISTS` over the
+    /// call alone filtered by the equality of its value with the key. The
+    /// relation has to be one of `present`, never filled with `NULL`s, since
+    /// a `NULL` key tells an empty set from another.
+    fn key_test(
+        &self,
+        test: &Expr,
+        callee: &'a DB::Function,
+        keyed: Keyed<'a, DB>,
+        present: &[*const TableFactor],
+    ) -> Result<Option<*const ()>, LookupError> {
+        if let Some((key, set)) = tested_set(test) {
+            let SetExpr::Select(select) = set.body.as_ref() else {
+                return Ok(None);
+            };
+            if !self.is_key(key, keyed, present)
+                || set.with.is_some()
+                || !limits_nothing(set)
+                || !filters_nothing(select)
+            {
+                return Ok(None);
+            }
+            if let (
+                [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }],
+                [],
+            ) = (select.projection.as_slice(), select.from.as_slice())
+            {
+                let call = unnested(value);
+                let Expr::Function(written) = call else {
+                    return Ok(None);
+                };
+                let passed = match positional_arguments(written, callee) {
+                    Some(arguments) => self.passed_alike(&arguments)?,
+                    None => false,
+                };
+                let reached = called(self.body.confinement.database, written)?
+                    .is_some_and(|function| ptr::eq(function, callee));
+                return Ok((passed && reached).then(|| ptr::from_ref(call).cast()));
+            }
+            let [TableWithJoins { relation, joins }] = select.from.as_slice() else {
+                return Ok(None);
+            };
+            let whole = select_members(select).is_some() || renamed_column_call(select).is_some();
+            return Ok(
+                (whole && joins.is_empty() && self.calls_alike(relation, callee)?)
+                    .then(|| ptr::from_ref(relation).cast()),
+            );
+        }
+        let Expr::Exists { subquery, .. } = test else {
+            return Ok(None);
+        };
+        let SetExpr::Select(select) = subquery.body.as_ref() else {
+            return Ok(None);
+        };
+        let ([TableWithJoins { relation, joins }], Some(selection)) =
+            (select.from.as_slice(), &select.selection)
+        else {
+            return Ok(None);
+        };
+        let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } = unnested(selection)
+        else {
+            return Ok(None);
+        };
+        if subquery.with.is_some()
+            || !limits_nothing(subquery)
+            || !plain(select)
+            || !joins.is_empty()
+            || !self.calls_alike(relation, callee)?
+        {
+            return Ok(None);
+        }
+        let equated = [(left, right), (right, left)].into_iter().any(|(value, key)| {
+            matches!(
+                self.context.reference(unnested(value)).ok().flatten(),
+                Some((ColumnDefinition::FunctionResult { function, .. }, binding))
+                    if ptr::eq(function, callee)
+                        && binding.entry().is_some_and(|entry| ptr::eq(entry.factor(), relation))
+            ) && self.is_key(key, keyed, present)
+        });
+        Ok(equated.then(|| ptr::from_ref(relation).cast()))
+    }
+
+    /// Whether `key` names the column `keyed` names of a relation of
+    /// `present` reading the stored table it names.
+    fn is_key(&self, key: &Expr, keyed: Keyed<'a, DB>, present: &[*const TableFactor]) -> bool {
+        matches!(
+            self.context.reference(unnested(key)).ok().flatten(),
+            Some((ColumnDefinition::Base { table, column, .. }, binding))
+                if ptr::eq(table, keyed.0)
+                    && ptr::eq(column, keyed.1)
+                    && binding.entry().is_some_and(|entry| {
+                        matches!(entry.factor(), TableFactor::Table { args: None, .. })
+                            && present.contains(&ptr::from_ref(entry.factor()))
+                    })
+        )
+    }
+
+    /// Whether `relation` reads every row of a call of `callee` passing
+    /// arguments that read alike, as [`Self::passed_alike`] takes them.
+    fn calls_alike(
+        &self,
+        relation: &TableFactor,
+        callee: &'a DB::Function,
+    ) -> Result<bool, LookupError> {
+        let Some(call) = whole_call(relation) else {
+            return Ok(false);
+        };
+        if !called(self.body.confinement.database, call)?
+            .is_some_and(|function| ptr::eq(function, callee))
+        {
+            return Ok(false);
+        }
+        match relation_arguments(relation, callee) {
+            Some(arguments) => self.passed_alike(&arguments),
+            None => Ok(false),
+        }
+    }
+
+    /// Whether each of `arguments` reads no subquery and evaluates alike for
+    /// every caller.
+    fn passed_alike(&self, arguments: &[&Expr]) -> Result<bool, LookupError> {
+        for argument in arguments {
+            if holds_subquery(argument) || !self.reads_alike(argument)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// The columns the `USING` joins of `select` merge.
     fn merges(&self, select: &Select, sources: &[Source<'_>]) -> Result<Vec<Merge>, LookupError> {
         let mut merges: Vec<Merge> = Vec::new();
@@ -4359,10 +4698,7 @@ fn bound_to(condition: &Expr, arguments: &[&Expr]) -> Option<Expr> {
 /// Whether `call` passes `function` a literal other than `NULL` for each of
 /// its input parameters, leaving none to a default.
 fn arguments_set<F: FunctionLike>(call: &Function, function: &F) -> bool {
-    let inputs = function
-        .argument_modes()
-        .filter(|mode| !matches!(mode, ArgMode::Out))
-        .count();
+    let inputs = input_count(function);
     matches!(&call.args, FunctionArguments::List(list) if list.args.len() == inputs
     && list.args.iter().all(|argument| {
         let (FunctionArg::Unnamed(argument)
@@ -4371,6 +4707,130 @@ fn arguments_set<F: FunctionLike>(call: &Function, function: &F) -> bool {
         matches!(argument, FunctionArgExpr::Expr(value)
             if literal(value).is_some_and(|value| !matches!(value, Value::Null)))
     }))
+}
+
+/// The number of input parameters of `function`, which `$n` counts.
+fn input_count<F: FunctionLike>(function: &F) -> usize {
+    function
+        .argument_modes()
+        .filter(|mode| !matches!(mode, ArgMode::Out))
+        .count()
+}
+
+/// A stored table and the column of it a function returns, alone a unique
+/// key of the table holding no `NULL`.
+type Keyed<'a, DB> = (
+    &'a <DB as DatabaseLike>::Table,
+    &'a <DB as DatabaseLike>::Column,
+);
+
+/// The calls in `node` written with the name of `callee`, whatever schema
+/// or path they resolve on, each by the address of the expression or the
+/// relation written as the call. Every call that may reach `callee` is one.
+fn calls_of<F: FunctionLike, N: Visit + ?Sized>(node: &N, callee: &F) -> Vec<*const ()> {
+    struct Calls<'n> {
+        name: &'n str,
+        found: Vec<*const ()>,
+    }
+    impl Calls<'_> {
+        fn note(&mut self, written: &ObjectName, address: *const ()) {
+            if written
+                .0
+                .last()
+                .and_then(ObjectNamePart::as_ident)
+                .is_some_and(|name| name.value.eq_ignore_ascii_case(self.name))
+            {
+                self.found.push(address);
+            }
+        }
+    }
+    impl Visitor for Calls<'_> {
+        type Break = Infallible;
+
+        fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Infallible> {
+            if let Expr::Function(call) = expression {
+                self.note(&call.name, ptr::from_ref(expression).cast());
+            }
+            ControlFlow::Continue(())
+        }
+
+        fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Infallible> {
+            if let TableFactor::Table {
+                name,
+                args: Some(_),
+                ..
+            }
+            | TableFactor::Function { name, .. } = factor
+            {
+                self.note(name, ptr::from_ref(factor).cast());
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let target = callee.target_name();
+    let mut calls = Calls {
+        name: target.name(),
+        found: Vec::new(),
+    };
+    let ControlFlow::Continue(()) = walk(node, &mut calls);
+    calls.found
+}
+
+/// Pushes onto `leaves` the `SELECT`s whose rows `body` yields, when it
+/// combines them through set operations alone and every query nested on
+/// the way declares no `WITH`, locks nothing and limits nothing.
+fn leaf_selects<'q>(body: &'q SetExpr, leaves: &mut Vec<&'q Select>) -> bool {
+    match body {
+        SetExpr::Select(select) => {
+            leaves.push(select);
+            true
+        }
+        SetExpr::SetOperation { left, right, .. } => {
+            leaf_selects(left, leaves) && leaf_selects(right, leaves)
+        }
+        SetExpr::Query(query) => {
+            query.with.is_none()
+                && query.locks.is_empty()
+                && limits_nothing(query)
+                && leaf_selects(&query.body, leaves)
+        }
+        _ => false,
+    }
+}
+
+/// The query whose rows `test` compares `key` with, for `key IN (query)`,
+/// `key NOT IN (query)`, `key = ANY` and `key <> ALL` over `query` or over
+/// `ARRAY(query)`.
+fn tested_set(test: &Expr) -> Option<(&Expr, &Query)> {
+    let (key, set) = match test {
+        Expr::In {
+            expr,
+            target: InTarget::Subquery(query),
+            ..
+        } => return Some((expr, query)),
+        Expr::AnyOp {
+            left,
+            compare_op: BinaryOperator::Eq,
+            right,
+            ..
+        }
+        | Expr::AllOp {
+            left,
+            compare_op: BinaryOperator::NotEq,
+            right,
+        } => (left, unwrapped(right)),
+        _ => return None,
+    };
+    match set {
+        Expr::Subquery(query) => Some((key, query)),
+        Expr::Function(function) if function.name.to_string().eq_ignore_ascii_case("array") => {
+            match &function.args {
+                FunctionArguments::Subquery(query) => Some((key, query)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// The call `relation` reads every row of, numbering none.
@@ -5228,6 +5688,29 @@ fn present(from: &TableWithJoins, position: usize) -> bool {
             JoinOperator::Right(_) | JoinOperator::RightOuter(_) => position > index,
             _ => false,
         })
+}
+
+/// The relations of every `FROM` item of the `SELECT`s `node` holds that
+/// [`present`] takes, which no outer join fills with `NULL`s.
+fn present_relations<N: Visit + ?Sized>(node: &N) -> Vec<*const TableFactor> {
+    struct Present(Vec<*const TableFactor>);
+    impl Visitor for Present {
+        type Break = Infallible;
+
+        fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Infallible> {
+            for from in &select.from {
+                for (position, relation) in relations(from).enumerate() {
+                    if present(from, position) {
+                        self.0.push(ptr::from_ref(relation));
+                    }
+                }
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut found = Present(Vec::new());
+    let ControlFlow::Continue(()) = walk(node, &mut found);
+    found.0
 }
 
 /// `schema.name($1, …)` calling `function`, its schema `public` when its
