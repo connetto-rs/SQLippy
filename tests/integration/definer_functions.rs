@@ -640,8 +640,13 @@ fn written_exposed(grants: &str, policies: &str, definers: &str) -> Vec<String> 
 
 /// A `LANGUAGE sql` definer `name` running `body` and returning nothing.
 fn writing_definer(name: &str, body: &str) -> String {
+    returning_definer(name, "VOID", body)
+}
+
+/// A `LANGUAGE sql` definer `name` running `body` and returning `returns`.
+fn returning_definer(name: &str, returns: &str, body: &str) -> String {
     format!(
-        "CREATE FUNCTION {name} RETURNS VOID LANGUAGE sql VOLATILE SECURITY DEFINER
+        "CREATE FUNCTION {name} RETURNS {returns} LANGUAGE sql VOLATILE SECURITY DEFINER
            SET search_path = pg_catalog, pg_temp AS $$ {body} $$;"
     )
 }
@@ -747,15 +752,10 @@ fn a_definer_deleting_rows_the_caller_may_not_delete_is_reported() {
                      WHERE other.id = resource.id
                        AND resource.owner = current_setting('app.user_id', true)",
                 ),
-                format!(
-                    "CREATE FUNCTION purge_returning() RETURNS SETOF INT LANGUAGE sql VOLATILE
-                       SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                       {DELETE_OWN} RETURNING resource.id $$;"
-                ),
             ]
             .concat(),
         ),
-        ["purge_any()", "purge_beside()", "purge_joined()", "purge_returning()", "purge_sequence()"]
+        ["purge_any()", "purge_beside()", "purge_joined()", "purge_sequence()"]
     );
 }
 
@@ -887,11 +887,6 @@ fn a_definer_updating_rows_the_caller_may_not_update_alike_is_reported() {
                      WHERE other.id = resource.id
                        AND resource.owner = current_setting('app.user_id', true)",
                 ),
-                format!(
-                    "CREATE FUNCTION hide_returning() RETURNS SETOF INT LANGUAGE sql VOLATILE
-                       SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                       {HIDE_OWN} RETURNING resource.id $$;"
-                ),
             ]
             .concat(),
         ),
@@ -901,7 +896,6 @@ fn a_definer_updating_rows_the_caller_may_not_update_alike_is_reported() {
             "give_away()",
             "hide_any()",
             "hide_beside()",
-            "hide_returning()",
             "joined_target()",
             "qualified_target()",
             "stamp()"
@@ -969,10 +963,144 @@ fn a_definer_update_whose_written_row_is_not_followed_is_reported() {
                      WHERE twin.id = resource.id AND twin.owner = current_setting('app.user_id', true)
                        AND resource.owner = current_setting('app.user_id', true)",
                 ),
+                returning_definer(
+                    "echoed()",
+                    "SETOF BOOLEAN",
+                    &format!("{HIDE_OWN} RETURNING (SELECT resource.hidden)"),
+                ),
             ]
             .concat(),
         ),
-        ["copied()", "paired()"]
+        ["copied()", "echoed()", "paired()"]
+    );
+}
+
+#[test]
+fn a_definer_returning_rows_the_caller_may_write_and_read_back_is_not_reported() {
+    let definers = [
+        returning_definer(
+            "purge_returning()",
+            "SETOF INT",
+            &format!("{DELETE_OWN} RETURNING resource.id"),
+        ),
+        returning_definer(
+            "purge_rows()",
+            "SETOF public.resources",
+            &format!("{DELETE_OWN} RETURNING *"),
+        ),
+        returning_definer(
+            "hide_returning()",
+            "SETOF INT",
+            &format!("{HIDE_OWN} RETURNING resource.id"),
+        ),
+        returning_definer(
+            "toggle_returning()",
+            "SETOF BOOLEAN",
+            "UPDATE public.resources resource SET hidden = NOT resource.hidden
+             WHERE resource.owner = current_setting('app.user_id', true) RETURNING hidden",
+        ),
+        returning_definer(
+            "hide_twins_returning()",
+            "SETOF BOOLEAN",
+            "UPDATE public.resources resource SET hidden = true FROM public.resources twin
+             WHERE twin.id = resource.id AND twin.owner = current_setting('app.user_id', true)
+               AND resource.owner = current_setting('app.user_id', true)
+             RETURNING twin.hidden",
+        ),
+        returning_definer(
+            "hide_rows()",
+            "SETOF public.resources",
+            &format!("{HIDE_OWN} RETURNING *"),
+        ),
+        returning_definer(
+            "hide_unaliased()",
+            "SETOF BOOLEAN",
+            "UPDATE public.resources SET hidden = true
+             WHERE owner = current_setting('app.user_id', true)
+             RETURNING resources.hidden AS hidden_now",
+        ),
+        format!(
+            "CREATE FUNCTION guarded_hide_returning() RETURNS SETOF INT LANGUAGE plpgsql VOLATILE
+               SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             DECLARE {SIGNED_IN} BEGIN
+               IF uid IS NULL THEN RAISE EXCEPTION 'not signed in'; END IF;
+               RETURN QUERY UPDATE public.resources resource SET hidden = true
+                 WHERE resource.owner = uid RETURNING resource.id;
+             END $$;"
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, UPDATE, DELETE", OWN_ROWS, &definers),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        written_exposed(
+            "SELECT, UPDATE (hidden), DELETE",
+            "CREATE POLICY own_read ON resources FOR SELECT TO app
+               USING (owner = current_setting('app.user_id', true));
+             CREATE POLICY own_update ON resources FOR UPDATE TO app
+               USING (owner = current_setting('app.user_id', true))
+               WITH CHECK (owner = current_setting('app.user_id', true));
+             CREATE POLICY own_delete ON resources FOR DELETE TO app
+               USING (owner = current_setting('app.user_id', true));",
+            &definers,
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_definer_returning_rows_the_caller_may_not_read_back_is_reported() {
+    let definers = [
+        returning_definer(
+            "purge_returning()",
+            "SETOF INT",
+            &format!("{DELETE_OWN} RETURNING resource.id"),
+        ),
+        returning_definer(
+            "hide_returning()",
+            "SETOF INT",
+            &format!("{HIDE_OWN} RETURNING resource.id"),
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed(
+            "SELECT, UPDATE, DELETE",
+            "CREATE POLICY shown ON resources FOR SELECT TO app
+               USING (owner = current_setting('app.user_id', true) AND NOT hidden);
+             CREATE POLICY own_update ON resources FOR UPDATE TO app
+               USING (owner = current_setting('app.user_id', true));
+             CREATE POLICY own_delete ON resources FOR DELETE TO app
+               USING (owner = current_setting('app.user_id', true));",
+            &definers,
+        ),
+        ["hide_returning()", "purge_returning()"]
+    );
+    assert_eq!(
+        written_exposed(
+            "SELECT, UPDATE, DELETE",
+            OWN_ROWS,
+            &[
+                returning_definer(
+                    "peek_returning()",
+                    "SETOF INT",
+                    &format!(
+                        "{HIDE_OWN} RETURNING (SELECT max(other.id) FROM public.resources other)"
+                    ),
+                ),
+                returning_definer(
+                    "purge_peeking()",
+                    "SETOF INT",
+                    &format!(
+                        "{DELETE_OWN} RETURNING (SELECT max(other.id) FROM public.resources other)"
+                    ),
+                ),
+            ]
+            .concat(),
+        ),
+        ["peek_returning()", "purge_peeking()"]
     );
 }
 

@@ -152,20 +152,21 @@ use super::plpgsql_ambiguous_name::collision;
 ///
 /// A function is not reported either when each caller could run what it
 /// writes and change the same rows the same way. Its body is then one
-/// `DELETE` or `UPDATE` of one table returning nothing, in `LANGUAGE sql` or
-/// in a PL/pgSQL block past such guards, read as the `SELECT` of the rows it
-/// writes joined to the tables its `USING` or `FROM` names. That `SELECT` is
-/// held to the test above, the written table to each caller's policies for
-/// the command besides the `SELECT` ones, as PostgreSQL holds a write
-/// reading a column of its table. An `UPDATE` sets each column, named alone,
-/// to a value that evaluates alike for a caller and the owner and names no
-/// column of another relation it joins, and the policies judging the updated
-/// row, its `WITH CHECK`
-/// and the `SELECT` ones, have to hold of the row the filter admits with
-/// those values in place. A policy naming a set column inside a subquery
-/// fails that. Every caller holds `DELETE` on the table, or `UPDATE` on each
-/// column set, and no trigger is declared on it, since a trigger runs as the
-/// owner inside the function.
+/// `DELETE` or `UPDATE` of one table, in `LANGUAGE sql` or in a PL/pgSQL
+/// block past such guards, bare or as its `RETURN QUERY`, read as the
+/// `SELECT` of the rows it writes joined to the tables its `USING` or `FROM`
+/// names, projecting what its `RETURNING` returns. That `SELECT` is held to
+/// the test above, the written table to each caller's policies for the
+/// command besides the `SELECT` ones, as PostgreSQL holds a write reading a
+/// column of its table. An `UPDATE` sets each column, named alone, to a value
+/// that evaluates alike for a caller and the owner and names no column of
+/// another relation it joins, and the policies judging the updated row, its
+/// `WITH CHECK` and the `SELECT` ones, have to hold of the row the filter
+/// admits with those values in place. Its `RETURNING` reads each set column
+/// as its value. A policy or a `RETURNING` naming a set column inside a
+/// subquery fails that. Every caller holds `DELETE` on the table, or `UPDATE`
+/// on each column set, and no trigger is declared on it, since a trigger
+/// runs as the owner inside the function.
 ///
 /// A call `f(a)` passing a label of an enum lies within `f(b)` passing a
 /// lower label of the same enum, all other arguments alike, when `f` is a
@@ -3437,9 +3438,9 @@ fn relations(from: &TableWithJoins) -> impl Iterator<Item = &TableFactor> {
     iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation))
 }
 
-/// `SELECT NULL FROM target, using… WHERE selection`, the rows `delete`
-/// deletes joined to the `USING` rows that select them, when it deletes
-/// from one table and returns nothing.
+/// `SELECT returned… FROM target, using… WHERE selection`, the rows `delete`
+/// deletes joined to the `USING` rows that select them, projecting what its
+/// `RETURNING` returns of them, when it deletes from one table.
 fn deleted_rows(delete: Delete) -> Option<Query> {
     let Delete {
         tables,
@@ -3447,7 +3448,7 @@ fn deleted_rows(delete: Delete) -> Option<Query> {
         on_cluster: None,
         using,
         selection,
-        returning: None,
+        returning,
         output: None,
         order_by,
         limit: None,
@@ -3464,14 +3465,16 @@ fn deleted_rows(delete: Delete) -> Option<Query> {
         return None;
     }
     from.extend(using.into_iter().flatten());
-    Some(rows_query(Vec::new(), from, selection))
+    Some(rows_query(returning.unwrap_or_default(), from, selection))
 }
 
-/// `SELECT value… FROM target, from… WHERE selection`, the rows `update`
-/// updates joined to the `FROM` rows that select them, projecting the value
-/// it sets each column to, with the stored names of those columns in order,
-/// when it updates one table, setting each column by its name, and returns
-/// nothing.
+/// `SELECT value…, returned… FROM target, from… WHERE selection`, the rows
+/// `update` updates joined to the `FROM` rows that select them, projecting
+/// the value it sets each column to and then what its `RETURNING` returns,
+/// with the stored names of those columns in order, when it updates one
+/// table, setting each column by its name. A column of the updated row that
+/// `RETURNING` names reads as the value it is set to, and a wildcard stays
+/// as written. `None` when a query nested in `RETURNING` names such a column.
 fn updated_rows(update: Update) -> Option<(Query, Vec<String>)> {
     let Update {
         table,
@@ -3479,7 +3482,7 @@ fn updated_rows(update: Update) -> Option<(Query, Vec<String>)> {
         assignments,
         from: joined,
         selection,
-        returning: None,
+        returning,
         output: None,
         or: None,
         order_by,
@@ -3493,8 +3496,16 @@ fn updated_rows(update: Update) -> Option<(Query, Vec<String>)> {
     if !table.joins.is_empty() || !order_by.is_empty() {
         return None;
     }
-    let mut columns = Vec::with_capacity(assignments.len());
-    let mut values = Vec::with_capacity(assignments.len());
+    let visible = match &table.relation {
+        TableFactor::Table {
+            alias: Some(alias), ..
+        } => alias.name.clone(),
+        TableFactor::Table {
+            name, alias: None, ..
+        } => name.0.last()?.as_ident()?.clone(),
+        _ => return None,
+    };
+    let mut assigned = Vec::with_capacity(assignments.len());
     for Assignment { target, value } in assignments {
         let AssignmentTarget::ColumnName(ObjectName(parts)) = target else {
             return None;
@@ -3502,17 +3513,38 @@ fn updated_rows(update: Update) -> Option<(Query, Vec<String>)> {
         let [ObjectNamePart::Identifier(column)] = parts.as_slice() else {
             return None;
         };
-        columns
-            .push(normalize_identifier(&column.value, column.quote_style.is_some()).into_owned());
-        values.push(SelectItem::UnnamedExpr(value));
+        assigned.push((
+            normalize_identifier(&column.value, column.quote_style.is_some()).into_owned(),
+            value,
+        ));
     }
+    let returned = returning
+        .into_iter()
+        .flatten()
+        .map(|item| match item {
+            SelectItem::UnnamedExpr(expression) => {
+                with_assigned(&expression, &assigned, Some(&visible)).map(SelectItem::UnnamedExpr)
+            }
+            SelectItem::ExprWithAlias { expr, alias } => {
+                with_assigned(&expr, &assigned, Some(&visible))
+                    .map(|expr| SelectItem::ExprWithAlias { expr, alias })
+            }
+            wildcard => Some(wildcard),
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let (columns, values): (Vec<String>, Vec<Expr>) = assigned.into_iter().unzip();
     let mut from = vec![table];
     match joined {
         None => {}
         Some(UpdateTableFromKind::AfterSet(joined)) => from.extend(joined),
         Some(UpdateTableFromKind::BeforeSet(_)) => return None,
     }
-    Some((rows_query(values, from, selection), columns))
+    let projection = values
+        .into_iter()
+        .map(SelectItem::UnnamedExpr)
+        .chain(returned)
+        .collect();
+    Some((rows_query(projection, from, selection), columns))
 }
 
 /// `SELECT projection FROM from WHERE selection`, projecting `NULL` when
@@ -3549,9 +3581,21 @@ fn rows_query(
 /// with each column of `assigned` set to its value, or `None` when a query
 /// nested in it names such a column, which may be a column of its own.
 fn new_row(condition: &Expr, assigned: &[(String, Expr)]) -> Option<Expr> {
+    with_assigned(condition, assigned, None)
+}
+
+/// `expression` with each column of `assigned` it names, bare or qualified
+/// by `qualifier` when one is given, replaced by its value, or `None` when a
+/// query nested in it names such a column.
+fn with_assigned(
+    expression: &Expr,
+    assigned: &[(String, Expr)],
+    qualifier: Option<&Ident>,
+) -> Option<Expr> {
     /// Replaces each column of `assigned` outside nested queries.
     struct Written<'v> {
         assigned: &'v [(String, Expr)],
+        qualifier: Option<&'v Ident>,
         depth: usize,
     }
     impl VisitorMut for Written<'_> {
@@ -3565,18 +3609,22 @@ fn new_row(condition: &Expr, assigned: &[(String, Expr)]) -> Option<Expr> {
             ControlFlow::Continue(())
         }
         fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<()> {
-            if !matches!(
-                expression,
-                Expr::Identifier(_) | Expr::CompoundIdentifier(_)
-            ) {
-                return ControlFlow::Continue(());
-            }
-            let Some(value) = stored_name(expression).and_then(|name| {
-                self.assigned
-                    .iter()
-                    .find(|(column, _)| *column == name)
-                    .map(|(_, value)| value)
-            }) else {
+            let name = match expression {
+                Expr::Identifier(name) => name,
+                Expr::CompoundIdentifier(parts) => match parts.as_slice() {
+                    [.., qualifier, name]
+                        if self
+                            .qualifier
+                            .is_none_or(|visible| same_name(qualifier, visible)) =>
+                    {
+                        name
+                    }
+                    _ => return ControlFlow::Continue(()),
+                },
+                _ => return ControlFlow::Continue(()),
+            };
+            let name = normalize_identifier(&name.value, name.quote_style.is_some());
+            let Some((_, value)) = self.assigned.iter().find(|(column, _)| *column == name) else {
                 return ControlFlow::Continue(());
             };
             if self.depth > 0 {
@@ -3586,8 +3634,12 @@ fn new_row(condition: &Expr, assigned: &[(String, Expr)]) -> Option<Expr> {
             ControlFlow::Continue(())
         }
     }
-    let mut new = condition.clone();
-    let mut written = Written { assigned, depth: 0 };
+    let mut new = expression.clone();
+    let mut written = Written {
+        assigned,
+        qualifier,
+        depth: 0,
+    };
     VisitMut::visit(&mut new, &mut written)
         .is_continue()
         .then_some(new)
