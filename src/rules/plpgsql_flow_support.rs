@@ -1,7 +1,7 @@
 //! Walks a PL/pgSQL body in the order it can run, carrying what a rule tracks
 //! along every path through branches, loops, exits and handlers.
 
-use std::{convert::Infallible, ops::ControlFlow};
+use std::{convert::Infallible, iter, ops::ControlFlow};
 
 use sql_traits::{traits::FunctionLike, utils::identifier_resolution::normalize_identifier};
 use sqlparser::ast::{
@@ -10,9 +10,10 @@ use sqlparser::ast::{
 };
 use sqlparser_plpgsql::{
     embedded::{
-        Block, BoundCursor, Branch, Case, DeclarationKind, Dynamic, Exit, ExitKind, Fetch, If,
-        Indirection, IntoTargets, Loop, LoopControl, Node, NodeKind, Open, Raise, RaiseLevel,
-        ReturnQuery, Target, Variable,
+        Assignment, Block, BoundCursor, Branch, Case, DeclarationKind, Diagnostics,
+        DiagnosticsItem, DiagnosticsKind, Dynamic, Exit, ExitKind, Fetch, If, Indirection,
+        IntoTargets, Loop, LoopControl, Node, NodeKind, Open, Raise, RaiseLevel, ReturnQuery,
+        Target, Variable,
     },
     embedded_sql,
 };
@@ -44,9 +45,10 @@ pub(crate) struct Ran {
 
 /// What `block` runs when it does nothing else. Its statements are guards
 /// `IF condition THEN RAISE EXCEPTION ...; END IF;` or `IF condition THEN
-/// RETURN; END IF;`, then the statements [`ran_by`] reads. Every variable
-/// but the one declared without a default is declared with a default and,
-/// as no statement assigns it, reads as that default.
+/// RETURN; END IF;` and assignments `variable := value;` of variables
+/// declared without a default, then the statements [`ran_by`] reads. Every
+/// variable but one is declared with a default or assigned once among the
+/// guards and, as no later statement assigns it, reads as that value.
 pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
     let Block {
         declarations,
@@ -58,7 +60,7 @@ pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
         return None;
     }
     let mut defaults: Vec<(String, Expr)> = Vec::new();
-    let mut target = None;
+    let mut unset = Vec::new();
     for declaration in declarations {
         let DeclarationKind::Variable(Variable { default, .. }) = declaration.kind else {
             return None;
@@ -69,25 +71,44 @@ pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
                 substitute(&mut value, &defaults);
                 defaults.push((declaration.name, value));
             }
-            None if target.is_none() => target = Some(declaration.name),
-            None => return None,
+            None => unset.push(declaration.name),
         }
     }
     let mut statements = statements.into_iter().peekable();
     let mut guards = Vec::new();
     let mut raised = Vec::new();
-    while let Some((condition, values)) = statements.peek().and_then(guard) {
-        guards.push(condition);
-        raised.extend(values);
+    while let Some(node) = statements.peek() {
+        if let Some((mut condition, mut values)) = guard(node) {
+            for expression in iter::once(&mut condition).chain(&mut values) {
+                substitute(expression, &defaults);
+            }
+            guards.push(condition);
+            raised.extend(values);
+        } else if let NodeKind::Assignment(Assignment { target, value }) = &node.kind
+            && let Some(position) = unset.iter().position(|name| assigns(target, name))
+        {
+            let mut value = selected_expression(value)?.clone();
+            substitute(&mut value, &defaults);
+            defaults.push((unset.remove(position), value));
+        } else {
+            break;
+        }
         statements.next();
     }
-    let mut statements = ran_by(statements, target.as_deref(), &mut raised)?;
+    let target = match unset.as_slice() {
+        [] => None,
+        [target] => Some(target.as_str()),
+        _ => return None,
+    };
+    let mut later = Vec::new();
+    let mut statements = ran_by(statements, target, &mut later)?;
     for statement in &mut statements {
         substitute(statement, &defaults);
     }
-    for expression in guards.iter_mut().chain(&mut raised) {
+    for expression in &mut later {
         substitute(expression, &defaults);
     }
+    raised.extend(later);
     Some(Ran {
         statements,
         guards,
@@ -100,9 +121,11 @@ pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
 /// FOUND THEN ...`, which raises or returns where a caller running the same
 /// write would too, the values its exception carries pushed onto `raised`,
 /// or a `RETURN QUERY` of a query, consecutive ones read as the `UNION ALL`
-/// of them. One `SELECT ... INTO` or write `RETURNING ... INTO` assigns
-/// `target`, which the last node returns. A last bare `RETURN` ends them,
-/// and a `RETURN` of one scalar subquery may stand alone.
+/// of them. One `SELECT ... INTO`, write `RETURNING ... INTO`, or `GET
+/// DIAGNOSTICS ... = ROW_COUNT` after a write and its guard assigns `target`,
+/// which the last node returns, since a caller running the same write
+/// changes as many rows. A last bare `RETURN` ends them, and a `RETURN` of
+/// one scalar subquery may stand alone.
 fn ran_by(
     nodes: impl Iterator<Item = Node>,
     target: Option<&str>,
@@ -111,6 +134,7 @@ fn ran_by(
     let mut ran: Vec<Statement> = Vec::new();
     let mut returning = None;
     let mut assigned = false;
+    let mut wrote = false;
     let mut nodes = nodes.peekable();
     while let Some(node) = nodes.next() {
         let last = nodes.peek().is_none();
@@ -152,6 +176,19 @@ fn ran_by(
                 }
                 written
             }
+            NodeKind::Diagnostics(Diagnostics {
+                stacked: false,
+                items,
+            }) if wrote
+                && !assigned
+                && matches!(items.as_slice(), [DiagnosticsItem {
+                    target: counted,
+                    kind: DiagnosticsKind::RowCount,
+                }] if target.is_some_and(|target| assigns(counted, target))) =>
+            {
+                assigned = true;
+                false
+            }
             NodeKind::Return { value: None } if last => false,
             NodeKind::Return { value: Some(value) } if last => {
                 match selected_expression(&value)? {
@@ -171,6 +208,7 @@ fn ran_by(
             }
             _ => return None,
         };
+        wrote = written;
         if written
             && let Some((condition, values)) = nodes.peek().and_then(guard)
             && not_found(&condition)
@@ -195,19 +233,19 @@ fn writes(statement: &Statement) -> bool {
 
 /// Whether `into` assigns only the variable `target`, as a whole.
 fn names_target(into: &IntoTargets, target: Option<&str>) -> bool {
-    let [Target { name, indirection }] = into.targets.as_slice() else {
-        return false;
-    };
+    matches!(into.targets.as_slice(), [assigned]
+        if target.is_some_and(|target| assigns(assigned, target)))
+}
+
+/// Whether `assigned` names the variable `variable`, as a whole.
+fn assigns(assigned: &Target, variable: &str) -> bool {
+    let Target { name, indirection } = assigned;
     let [part] = name.0.as_slice() else {
         return false;
     };
     indirection.is_empty()
         && part.as_ident().is_some_and(|name| {
-            target
-                == Some(&normalize_identifier(
-                    &name.value,
-                    name.quote_style.is_some(),
-                ))
+            normalize_identifier(&name.value, name.quote_style.is_some()) == variable
         })
 }
 
