@@ -956,8 +956,28 @@ fn a_before_trigger_confining_the_key_to_readable_rows_is_clean() {
         ),
         (
             &format!("FOR i IN 1..2 LOOP NULL; END LOOP; ASSERT NEW.note IS NOT NULL; {NAMES_OTHER}"),
+            "DELETE OR UPDATE",
+            "WHEN ((OLD.performed_by_id) IS DISTINCT FROM NEW.performed_by_id)",
+        ),
+        (
+            "IF NEW.performed_by_id IS DISTINCT FROM caller_id() AND NEW.performed_by_id IS NOT NULL THEN
+               RAISE EXCEPTION 'not the caller';
+             END IF;",
             "UPDATE",
-            "WHEN (OLD.performed_by_id IS DISTINCT FROM NEW.performed_by_id)",
+            "",
+        ),
+        (
+            "IF NEW.performed_by_id = caller_id() THEN RETURN NEW; END IF;
+             IF NEW.performed_by_id IS NULL THEN RETURN NEW; END IF;
+             RAISE EXCEPTION 'not the caller';",
+            "UPDATE",
+            "",
+        ),
+        ("RAISE EXCEPTION 'runs are closed';", "UPDATE", ""),
+        (
+            "IF NEW.performed_by_id IS NULL THEN RETURN NEW; END IF; RAISE EXCEPTION 'performers are fixed';",
+            "UPDATE",
+            "",
         ),
     ] {
         assert_eq!(
@@ -992,6 +1012,26 @@ fn a_before_trigger_confining_the_key_to_readable_rows_is_clean() {
             "{events}"
         );
     }
+}
+
+#[test]
+fn a_before_trigger_pinned_to_its_path_or_repeated_is_clean() {
+    assert_eq!(
+        confined_runs("SET search_path = public", NAMES_OTHER, "UPDATE", "", ""),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        objects(&format!(
+            "{PERFORMED_RUNS}
+             CREATE FUNCTION require_performer() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+             BEGIN {NAMES_OTHER} RETURN NEW; END $$;
+             CREATE TRIGGER runs_performer BEFORE UPDATE ON runs FOR EACH ROW
+               EXECUTE FUNCTION require_performer();
+             CREATE TRIGGER runs_performer_again BEFORE UPDATE ON runs FOR EACH ROW
+               EXECUTE FUNCTION require_performer();"
+        )),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -1082,6 +1122,82 @@ fn a_before_trigger_that_lets_another_key_through_is_reported() {
             ["runs.runs_performer"],
             "{header} {events} {when} {body} {extra}"
         );
+    }
+}
+
+#[test]
+fn a_before_trigger_reading_the_key_only_in_part_is_reported() {
+    for (header, body, when, extra) in [
+        ("", NAMES_OTHER, "WHEN (NEW.performed_by_id = caller_id())", ""),
+        (
+            "",
+            "IF NEW.performed_by_id = caller_id() OR NEW.performed_by_id = 0 THEN RETURN NEW; END IF;
+             RAISE EXCEPTION 'not the caller';",
+            "",
+            "",
+        ),
+        (
+            "",
+            "IF NEW.note IS NULL AND NEW.performed_by_id IS DISTINCT FROM caller_id() THEN
+               RAISE EXCEPTION 'not the caller';
+             END IF;",
+            "",
+            "",
+        ),
+        (
+            "",
+            "IF NEW.performed_by_id IS DISTINCT FROM OLD.id THEN RAISE EXCEPTION 'not the run'; END IF;",
+            "",
+            "",
+        ),
+        (
+            "SET search_path = shadow, public",
+            NAMES_OTHER,
+            "",
+            "CREATE SCHEMA shadow;
+             CREATE FUNCTION shadow.caller_id() RETURNS INT LANGUAGE sql STABLE AS $$ SELECT 1 $$;",
+        ),
+        (
+            "",
+            NAMES_OTHER,
+            "",
+            "CREATE FUNCTION native_stamp() RETURNS TRIGGER LANGUAGE c AS 'stamp', 'native_stamp';
+             CREATE TRIGGER runs_stamp BEFORE UPDATE ON runs FOR EACH ROW EXECUTE FUNCTION native_stamp();",
+        ),
+        (
+            "",
+            NAMES_OTHER,
+            "",
+            "CREATE TRIGGER runs_suppress BEFORE UPDATE ON runs FOR EACH ROW
+               EXECUTE FUNCTION suppress_redundant_updates_trigger();",
+        ),
+    ] {
+        assert_eq!(
+            confined_runs(header, body, "UPDATE", when, extra),
+            ["runs.runs_performer"],
+            "{header} {when} {body} {extra}"
+        );
+    }
+}
+
+#[test]
+fn a_trigger_testing_one_column_of_a_composite_key_leaves_it_checked() {
+    for (when, probe) in [
+        ("", "'app' through INSERT whether"),
+        (
+            "WHEN (NEW.id IS DISTINCT FROM OLD.id)",
+            "'app' through INSERT and UPDATE whether",
+        ),
+    ] {
+        let findings = reported(&format!(
+            "{GRANTEES} {USERS} GRANT UPDATE ON users TO app;
+             CREATE FUNCTION require_grantee() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+             BEGIN RAISE EXCEPTION 'grantees are fixed'; RETURN NEW; END $$;
+             CREATE TRIGGER users_grantee BEFORE UPDATE ON users FOR EACH ROW {when}
+               EXECUTE FUNCTION require_grantee();"
+        ));
+        assert_eq!(findings.len(), 1, "{when}: {findings:?}");
+        assert!(findings[0].1.contains(probe), "{when}: {}", findings[0].1);
     }
 }
 
