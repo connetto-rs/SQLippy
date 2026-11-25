@@ -245,10 +245,10 @@ pub(crate) fn covers<DB: DatabaseLike>(
     }
 }
 
-/// The query of a body of statements, when it is one query.
-fn single_query(mut statements: Vec<Statement>) -> Option<Query> {
+/// The statement of a body of statements, when it is one.
+fn single_statement(mut statements: Vec<Statement>) -> Option<Statement> {
     match (statements.pop(), statements.is_empty()) {
-        (Some(Statement::Query(query)), true) => Some(*query),
+        (Some(statement), true) => Some(statement),
         _ => None,
     }
 }
@@ -264,12 +264,12 @@ pub(crate) fn sets_only_search_path<F: FunctionLike>(function: &F) -> bool {
     })
 }
 
-/// The query a `LANGUAGE sql` function runs, when its body is one query
-/// written as a string or as a `BEGIN ATOMIC` block.
-pub(crate) fn sql_query_body<'f, F: FunctionLike>(
+/// The statement a `LANGUAGE sql` function runs, when its body is one
+/// statement written as a string or as a `BEGIN ATOMIC` block.
+pub(crate) fn sql_statement_body<'f, F: FunctionLike>(
     database: &F::DB,
     function: &'f F,
-) -> Result<Option<Cow<'f, Query>>, LookupError> {
+) -> Result<Option<Cow<'f, Statement>>, LookupError> {
     if function
         .stored_language()
         .is_some_and(|language| language != "sql")
@@ -279,12 +279,25 @@ pub(crate) fn sql_query_body<'f, F: FunctionLike>(
     if let Some(body) = function.body() {
         return Ok(Parser::parse_sql(&PostgreSqlDialect {}, body)
             .ok()
-            .and_then(single_query)
+            .and_then(single_statement)
             .map(Cow::Owned));
     }
     Ok(match function.atomic_statements(database)? {
-        Some(Cow::Borrowed([Statement::Query(query)])) => Some(Cow::Borrowed(query.as_ref())),
-        Some(Cow::Owned(statements)) => single_query(statements).map(Cow::Owned),
+        Some(Cow::Borrowed([statement])) => Some(Cow::Borrowed(statement)),
+        Some(Cow::Owned(statements)) => single_statement(statements).map(Cow::Owned),
+        _ => None,
+    })
+}
+
+/// The query a `LANGUAGE sql` function runs, when its body is one query
+/// written as a string or as a `BEGIN ATOMIC` block.
+pub(crate) fn sql_query_body<'f, F: FunctionLike>(
+    database: &F::DB,
+    function: &'f F,
+) -> Result<Option<Cow<'f, Query>>, LookupError> {
+    Ok(match sql_statement_body(database, function)? {
+        Some(Cow::Borrowed(Statement::Query(query))) => Some(Cow::Borrowed(query.as_ref())),
+        Some(Cow::Owned(Statement::Query(query))) => Some(Cow::Owned(*query)),
         _ => None,
     })
 }
