@@ -8,7 +8,10 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     traits::{ColumnRule, Constrainer, GenericConstrainer, Reporter},
 };
-use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
+use sql_traits::{
+    traits::{ColumnLike, DataTypeLike, DatabaseLike, TableLike},
+    utils::scalar_family::ScalarFamily,
+};
 
 /// Struct defining a constraint that enforces that the last segment of a
 /// column name is singular.
@@ -16,7 +19,9 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 /// For column names with underscores (e.g., `user_account`), only the last
 /// segment after the final underscore is checked for singularity. A last
 /// segment of one or two letters, such as the unit in `duration_s` or
-/// `latency_ms`, is an abbreviation and is never reported.
+/// `latency_ms`, is an abbreviation and is never reported. A boolean
+/// column, also through a domain, holds one truth value and is named as a
+/// predicate, so `produces` and `allows_guests` are never reported.
 ///
 /// # Example
 ///
@@ -25,7 +30,7 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 ///
 /// ```rust
 /// use sqlippy::prelude::*;
-/// use sqlparser::dialect::GenericDialect;
+/// use sqlparser::dialect::{GenericDialect, PostgreSqlDialect};
 ///
 /// let constrainer: GenericConstrainer<ParserDB> = PluralColumnName::default().into();
 ///
@@ -65,6 +70,21 @@ use sql_traits::traits::{ColumnLike, DatabaseLike, TableLike};
 /// ] {
 ///     let schema = ParserDB::parse::<GenericDialect>(&format!("CREATE TABLE mytable ({name} INT);")).unwrap();
 ///     assert_eq!(constrainer.validate_schema(&schema).is_ok(), singular, "{name}");
+/// }
+///
+/// // Boolean predicates, while an array of booleans still holds many values
+/// for (definition, singular) in [
+///     ("produces BOOLEAN", true),
+///     ("allows_guests BOOLEAN", true),
+///     ("consumes flag_t", true),
+///     ("produces BOOLEAN[]", false),
+///     ("tags TEXT[]", false),
+/// ] {
+///     let schema = ParserDB::parse::<PostgreSqlDialect>(&format!(
+///         "CREATE DOMAIN flag_t AS BOOLEAN; CREATE TABLE mytable ({definition});"
+///     ))
+///     .unwrap();
+///     assert_eq!(constrainer.validate_schema(&schema).is_ok(), singular, "{definition}");
 /// }
 /// ```
 pub struct PluralColumnName<DB>(std::marker::PhantomData<DB>);
@@ -112,6 +132,14 @@ impl<DB: DatabaseLike> ColumnRule for PluralColumnName<DB> {
         let column_name = column.column_name();
         let last_segment = column_name.split('_').next_back().unwrap_or(column_name);
         if last_segment.chars().count() <= 2 {
+            return Ok(());
+        }
+
+        let mut data_type = column.data_type(database);
+        while let Some(base) = data_type.base_type(database) {
+            data_type = base;
+        }
+        if data_type.scalar_family(database) == Some(ScalarFamily::Bool) {
             return Ok(());
         }
 
