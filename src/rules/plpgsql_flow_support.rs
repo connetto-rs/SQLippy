@@ -117,15 +117,16 @@ pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
 }
 
 /// The statements `nodes` run in order. Each node is a `DELETE`, `UPDATE` or
-/// `INSERT`, bare or as a `RETURN QUERY`, maybe followed by a guard `IF NOT
-/// FOUND THEN ...`, which raises or returns where a caller running the same
-/// write would too, the values its exception carries pushed onto `raised`,
-/// or a `RETURN QUERY` of a query, consecutive ones read as the `UNION ALL`
-/// of them. One `SELECT ... INTO`, write `RETURNING ... INTO`, or `GET
-/// DIAGNOSTICS ... = ROW_COUNT` after a write and its guard assigns `target`,
-/// which the last node returns, since a caller running the same write
-/// changes as many rows. A last bare `RETURN` ends them, and a `RETURN` of
-/// one scalar subquery may stand alone.
+/// `INSERT`, bare or as a `RETURN QUERY`, a `PERFORM` of a query, read as
+/// that query, or a `SELECT ... INTO`, each maybe followed by a guard `IF
+/// NOT FOUND THEN ...`, which raises or returns where a caller running the
+/// same statement would too, the values its exception carries pushed onto
+/// `raised`. A node may also be a `RETURN QUERY` of a query, consecutive
+/// ones read as the `UNION ALL` of them. One `SELECT ... INTO`, write
+/// `RETURNING ... INTO`, or `GET DIAGNOSTICS ... = ROW_COUNT` after a write
+/// and its guard assigns `target`, which the last node returns, since a
+/// caller running the same write changes as many rows. A last bare `RETURN`
+/// ends them, and a `RETURN` of one scalar subquery may stand alone.
 fn ran_by(
     nodes: impl Iterator<Item = Node>,
     target: Option<&str>,
@@ -146,7 +147,7 @@ fn ran_by(
         {
             ran.push(Statement::Query(query));
         }
-        let written = match node.kind {
+        let (written, found) = match node.kind {
             NodeKind::Statement { statement, into } => {
                 let written = writes(&statement);
                 match into {
@@ -161,7 +162,11 @@ fn ran_by(
                     _ => return None,
                 }
                 ran.push(*statement);
-                written
+                (written, true)
+            }
+            NodeKind::Perform { query } if matches!(*query, Statement::Query(_)) => {
+                ran.push(*query);
+                (false, true)
             }
             NodeKind::ReturnQuery(ReturnQuery::Query(statement)) => {
                 let written = writes(&statement);
@@ -174,7 +179,7 @@ fn ran_by(
                     }
                     statement => ran.push(statement),
                 }
-                written
+                (written, written)
             }
             NodeKind::Diagnostics(Diagnostics {
                 stacked: false,
@@ -187,9 +192,9 @@ fn ran_by(
                 }] if target.is_some_and(|target| assigns(counted, target))) =>
             {
                 assigned = true;
-                false
+                (false, false)
             }
-            NodeKind::Return { value: None } if last => false,
+            NodeKind::Return { value: None } if last => (false, false),
             NodeKind::Return { value: Some(value) } if last => {
                 match selected_expression(&value)? {
                     Expr::Identifier(name)
@@ -204,12 +209,12 @@ fn ran_by(
                     }
                     _ => return None,
                 }
-                false
+                (false, false)
             }
             _ => return None,
         };
         wrote = written;
-        if written
+        if found
             && let Some((condition, values)) = nodes.peek().and_then(guard)
             && not_found(&condition)
         {

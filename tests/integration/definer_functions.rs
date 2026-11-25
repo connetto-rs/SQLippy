@@ -2089,6 +2089,80 @@ fn a_plpgsql_definer_assigning_otherwise_is_reported() {
     );
 }
 
+#[test]
+fn a_plpgsql_definer_checking_found_after_its_reads_alike_is_not_reported() {
+    let definers = [
+        block_definer(
+            "checked_hide(p_id INT)",
+            "VOID",
+            "",
+            "PERFORM 1 FROM public.resources resource
+               WHERE resource.id = p_id AND resource.owner = uid;
+             IF NOT FOUND THEN RAISE EXCEPTION 'missing %', p_id; END IF;
+             UPDATE public.resources resource SET hidden = true
+               WHERE resource.id = p_id AND resource.owner = uid;",
+        ),
+        block_definer(
+            "checked_title(p_id INT)",
+            "TEXT",
+            "found_title TEXT;",
+            "SELECT resource.title INTO found_title FROM public.resources resource
+               WHERE resource.id = p_id AND resource.owner = uid;
+             IF NOT FOUND THEN RAISE EXCEPTION 'missing'; END IF;
+             RETURN found_title;",
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, UPDATE", OWN_ROWS, &definers),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_plpgsql_definer_checking_found_after_reads_the_caller_may_not_run_is_reported() {
+    let definers = [
+        block_definer(
+            "probed_hide(p_id INT)",
+            "VOID",
+            "",
+            &format!(
+                "PERFORM 1 FROM public.resources resource WHERE resource.id = p_id;
+                 IF NOT FOUND THEN RAISE EXCEPTION 'missing'; END IF;
+                 {HIDE_MINE};"
+            ),
+        ),
+        block_definer(
+            "probed_title(p_id INT)",
+            "TEXT",
+            "found_title TEXT;",
+            "SELECT resource.title INTO found_title FROM public.resources resource
+               WHERE resource.id = p_id;
+             IF NOT FOUND THEN RAISE EXCEPTION 'missing'; END IF;
+             RETURN found_title;",
+        ),
+        block_definer(
+            "performed_as_owner()",
+            "VOID",
+            "",
+            &format!(
+                "PERFORM 1 FROM public.resources resource WHERE resource.owner = uid;
+                 IF NOT FOUND THEN RAISE EXCEPTION 'none as %', current_user; END IF;
+                 {HIDE_MINE};"
+            ),
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, UPDATE", OWN_ROWS, &definers),
+        [
+            "performed_as_owner()",
+            "probed_hide(INT)",
+            "probed_title(INT)"
+        ]
+    );
+}
+
 /// The caller's own `resources` rows, locked with `lock`.
 fn locking_own(lock: &str) -> String {
     format!(
