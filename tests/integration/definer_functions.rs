@@ -5098,6 +5098,115 @@ fn a_callee_set_carries_the_policy_sets_its_arm_rows_stand_in() {
     }
 }
 
+/// Functions reported over `tables`, declaring `public.teams` and
+/// `public.team_members`, and `definer`, the body of a function returning
+/// the organizations of teams. A team and a member are visible in the
+/// organizations of the caller's team memberships.
+fn team_organizations(tables: &str, definer: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE SCHEMA authz;
+             {tables}
+             ALTER TABLE public.teams ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE public.team_members ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON public.teams, public.team_members TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE FUNCTION authz.member_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT member.organization_id FROM public.team_members member
+                 WHERE member.user_id = current_setting('app.user_id', true) $$;
+             CREATE POLICY team_members_select ON public.team_members FOR SELECT TO app
+               USING (organization_id = ANY (ARRAY(SELECT authz.member_organizations())));
+             CREATE POLICY teams_select ON public.teams FOR SELECT TO app
+               USING (organization_id = ANY (ARRAY(SELECT authz.member_organizations())));
+             CREATE FUNCTION authz.team_admin_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 {definer} $$;"
+        ),
+    )
+}
+
+#[test]
+fn a_composite_foreign_key_holds_its_other_columns_equal_once_a_key_is() {
+    let tables = |keys: &str, organization: &str, reference: &str, more: &str| {
+        format!(
+            "CREATE TABLE public.teams (id INT NOT NULL, organization_id INT NOT NULL, {keys});
+             CREATE TABLE public.team_members (team_id INT NOT NULL, organization_id INT {organization},
+               user_id TEXT NOT NULL, admin BOOLEAN NOT NULL{reference});
+             {more}"
+        )
+    };
+    let keys = "PRIMARY KEY (id), UNIQUE (organization_id, id)";
+    let reference = ",
+        FOREIGN KEY (organization_id, team_id) REFERENCES public.teams (organization_id, id)";
+    let joined = "SELECT team.organization_id FROM public.teams team
+        JOIN public.team_members member ON member.team_id = team.id
+        WHERE member.user_id = current_setting('app.user_id', true) AND member.admin";
+    let listed = "SELECT team.organization_id FROM public.teams team, public.team_members member
+        WHERE member.team_id = team.id
+          AND member.user_id = current_setting('app.user_id', true) AND member.admin";
+    let found = "SELECT team.organization_id FROM public.teams team
+        WHERE team.id IN (SELECT member.team_id FROM public.team_members member
+          WHERE member.user_id = current_setting('app.user_id', true) AND member.admin)";
+    let full = format!("{reference} MATCH FULL");
+    let deferrable = format!("{reference} DEFERRABLE");
+    let unvalidated = "ALTER TABLE public.team_members ADD FOREIGN KEY (organization_id, team_id)
+        REFERENCES public.teams (organization_id, id) NOT VALID;";
+    let inherited = "CREATE TABLE public.archived_teams () INHERITS (public.teams);";
+    let unbound = [
+        tables(keys, "", reference, ""),
+        tables(keys, "NOT NULL", &deferrable, ""),
+        tables(keys, "NOT NULL", "", ""),
+        tables(keys, "NOT NULL", "", unvalidated),
+        tables(keys, "NOT NULL", reference, inherited),
+        tables(
+            "PRIMARY KEY (organization_id, id)",
+            "NOT NULL",
+            reference,
+            "",
+        ),
+        tables(
+            "PRIMARY KEY (id) DEFERRABLE, UNIQUE (organization_id, id)",
+            "NOT NULL",
+            reference,
+            "",
+        ),
+    ];
+    let written = joined.replace(
+        "ON member.team_id = team.id",
+        "ON member.team_id = team.id AND member.organization_id = team.organization_id",
+    );
+    for schema in &unbound {
+        assert_eq!(
+            team_organizations(schema, &written),
+            Vec::<String>::new(),
+            "{schema}"
+        );
+    }
+    for definer in [joined, listed, found] {
+        for schema in [
+            tables(keys, "NOT NULL", reference, ""),
+            tables(keys, "", &full, ""),
+        ] {
+            assert_eq!(
+                team_organizations(&schema, definer),
+                Vec::<String>::new(),
+                "{schema} {definer}"
+            );
+        }
+        for schema in &unbound {
+            assert_eq!(
+                team_organizations(schema, definer),
+                ["team_admin_organizations()"],
+                "{schema} {definer}"
+            );
+        }
+    }
+}
+
 #[test]
 fn every_arm_of_a_helper_carries_its_filter_or_none_does() {
     let excluded = "member.organization_id IN (SELECT authz.member_organizations())
