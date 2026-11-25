@@ -31,6 +31,7 @@ mod credential_patterns;
 mod cross_tenant_caps;
 mod cte_shadows_relations;
 mod decided_branches;
+mod deferred_checks_deleted_rows;
 mod definer_acting_user;
 mod definer_creatable_schemas;
 mod definer_default_privileges;
