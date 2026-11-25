@@ -623,6 +623,42 @@ fn a_value_list_confines_when_each_value_meets_a_policy_arm() {
 }
 
 #[test]
+fn a_filter_confines_when_each_arm_meets_a_different_permissive_policy() {
+    let reported = |filter: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "CREATE ROLE app NOLOGIN;
+                 CREATE TABLE posts (id INT PRIMARY KEY, author TEXT, published BOOLEAN NOT NULL);
+                 ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
+                 GRANT SELECT ON posts TO app;
+                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+                 CREATE POLICY own_posts ON posts FOR SELECT TO app
+                   USING (author = current_setting('app.user_id', true));
+                 CREATE POLICY published_posts ON posts FOR SELECT TO app USING (published);
+                 CREATE FUNCTION visible_post_ids() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT post.id FROM public.posts post WHERE {filter} $$;"
+            ),
+        )
+    };
+    for filter in [
+        "post.author = current_setting('app.user_id', true) OR post.published",
+        "post.published OR post.author = current_setting('app.user_id', true)",
+        "post.id > 0 AND (post.published OR post.author = current_setting('app.user_id', true))",
+    ] {
+        assert_eq!(reported(filter), Vec::<String>::new(), "{filter}");
+    }
+    for filter in [
+        "post.author = current_setting('app.user_id', true) OR post.id > 0",
+        "post.published OR post.author IS NULL",
+    ] {
+        assert_eq!(reported(filter), ["visible_post_ids()"], "{filter}");
+    }
+}
+
+#[test]
 fn a_set_declared_within_the_policys_set_confines_a_read() {
     let helper = "
         CREATE FUNCTION admin_organizations() RETURNS SETOF INT

@@ -97,7 +97,8 @@ use crate::{
 /// table, compares by the tables and columns its names resolve to, or
 /// testing the same column against a set within the policy's, as written,
 /// declared with [`Deployment::with_set_within`] or read off a ladder of the
-/// schema.
+/// schema. A filter whose `OR` arms each imply another permissive policy
+/// counts too, since PostgreSQL admits a row any permissive policy admits.
 /// A set read through an input parameter of an enum type, such as
 /// `resources_with(min_role)`, has to lie within the policy's for every
 /// label of the enum. It has to for `NULL`
