@@ -736,7 +736,7 @@ impl<F: Fn(&Expr) -> Option<Term>, R: Fn(&ObjectName) -> Option<StoredRelation>>
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
         if let Expr::Subquery(query) = expression
-            && sole_item(query).is_some()
+            && unfiltered(query).and_then(sole_item).is_some()
         {
             self.inlining = Some(ptr::from_ref(query.as_ref()));
         }
@@ -815,7 +815,7 @@ impl<I: Iterator<Item = Expr>, T: Iterator<Item = Option<(ObjectName, Ident)>>> 
 
     fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<Infallible> {
         if let Expr::Subquery(query) = expression
-            && sole_item(query).is_some()
+            && unfiltered(query).and_then(sole_item).is_some()
             && let SetExpr::Select(select) = query.body.as_mut()
             && let [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] =
                 select.projection.as_mut_slice()
@@ -1286,41 +1286,62 @@ fn value_members(value: &Expr) -> Option<Cow<'_, Expr>> {
 /// alone, selects every column of one call or one column of one call, and
 /// filters and limits nothing.
 pub(crate) fn query_members(query: &Query) -> Option<Cow<'_, Expr>> {
-    match sole_item(query) {
+    match query.body.as_ref() {
+        SetExpr::Select(select) if query.with.is_none() && limits_nothing(query) => {
+            select_members(select)
+        }
+        _ => None,
+    }
+}
+
+/// The expression yielding the rows of `select`, when it projects it alone,
+/// selects every column of one call or one column of one call, and filters
+/// nothing.
+pub(crate) fn select_members(select: &Select) -> Option<Cow<'_, Expr>> {
+    if !filters_nothing(select) {
+        return None;
+    }
+    match sole_item(select) {
         Some(value) => value_members(value),
-        None => sole_call(query)
-            .or_else(|| sole_column(query))
+        None => sole_call(select)
+            .or_else(|| sole_column(select))
             .map(Cow::Owned),
     }
 }
 
-/// The `SELECT` of `query`, when it filters, limits and draws on nothing
-/// and keeps every distinct row, so it yields every row its `FROM` list
-/// does.
-fn unfiltered(query: &Query) -> Option<&Select> {
-    if let SetExpr::Select(select) = query.body.as_ref()
-        && query.with.is_none()
-        && query.limit_clause.is_none()
-        && query.fetch.is_none()
-        && query.pipe_operators.is_empty()
-        && !matches!(select.distinct, Some(Distinct::On(_)))
+/// Whether `query` limits none of the rows its body yields.
+pub(crate) fn limits_nothing(query: &Query) -> bool {
+    query.limit_clause.is_none() && query.fetch.is_none() && query.pipe_operators.is_empty()
+}
+
+/// Whether `select` filters and draws on nothing and keeps every distinct
+/// row, so it yields every row its `FROM` list does.
+pub(crate) fn filters_nothing(select: &Select) -> bool {
+    !matches!(select.distinct, Some(Distinct::On(_)))
         && select.top.is_none()
         && select.prewhere.is_none()
         && select.selection.is_none()
         && select.connect_by.is_empty()
         && select.having.is_none()
         && select.qualify.is_none()
-    {
-        Some(select)
-    } else {
-        None
+}
+
+/// The `SELECT` of `query`, when it declares no `WITH`, limits nothing and
+/// filters nothing.
+fn unfiltered(query: &Query) -> Option<&Select> {
+    match query.body.as_ref() {
+        SetExpr::Select(select)
+            if query.with.is_none() && limits_nothing(query) && filters_nothing(select) =>
+        {
+            Some(select)
+        }
+        _ => None,
     }
 }
 
-/// The one expression `query` projects, when it reads, filters and limits
-/// nothing, so it yields that value in one row.
-fn sole_item(query: &Query) -> Option<&Expr> {
-    let select = unfiltered(query)?;
+/// The one expression `select` projects, when it reads nothing, so it
+/// yields that value in one row.
+fn sole_item(select: &Select) -> Option<&Expr> {
     if let [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] =
         select.projection.as_slice()
         && select.from.is_empty()
@@ -1331,11 +1352,10 @@ fn sole_item(query: &Query) -> Option<&Expr> {
     }
 }
 
-/// The call `query` selects every column of, written as an expression, when
-/// the query reads that call alone, without ordinality, and filters and
-/// limits nothing, so it yields every row of the call.
-fn sole_call(query: &Query) -> Option<Expr> {
-    let select = unfiltered(query)?;
+/// The call `select` selects every column of, written as an expression, when
+/// it reads that call alone, without ordinality, so it yields every row of
+/// the call.
+fn sole_call(select: &Select) -> Option<Expr> {
     let [SelectItem::Wildcard(options)] = select.projection.as_slice() else {
         return None;
     };
@@ -1345,13 +1365,37 @@ fn sole_call(query: &Query) -> Option<Expr> {
     sole_relation_call(select).map(|(call, _)| call)
 }
 
-/// The column of one call `query` projects, written `(call).column`, when
-/// the query reads that call alone under an alias renaming no column, names
-/// the column through the alias, and filters and limits nothing, so it
-/// yields every value of the column. The call reads no column or parameter,
-/// which could stand for another row's value.
-fn sole_column(query: &Query) -> Option<Expr> {
-    let select = unfiltered(query)?;
+/// The column of one call `select` projects, written `(call).column`, when
+/// it reads that call alone under an alias renaming no column and names the
+/// column through the alias, so it yields every value of the column.
+fn sole_column(select: &Select) -> Option<Expr> {
+    let (call, alias, column) = aliased_column(select)?;
+    alias.columns.is_empty().then(|| column_of(call, &column))
+}
+
+/// The call `select` reads alone under an alias naming one column, when it
+/// projects that column through the alias and filters nothing, so it yields
+/// every value of the first column of the call.
+pub(crate) fn renamed_column_call(select: &Select) -> Option<Expr> {
+    if !filters_nothing(select) {
+        return None;
+    }
+    let (call, alias, column) = aliased_column(select)?;
+    match alias.columns.as_slice() {
+        [renamed]
+            if normalize_identifier(&renamed.name.value, renamed.name.quote_style.is_some())
+                == column =>
+        {
+            Some(call)
+        }
+        _ => None,
+    }
+}
+
+/// The call `select` reads alone, with its alias and the stored name of the
+/// column it projects alone through that alias. The call reads no column or
+/// parameter, which could stand for another row's value.
+fn aliased_column(select: &Select) -> Option<(Expr, &TableAlias, String)> {
     let [
         SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts))
         | SelectItem::ExprWithAlias {
@@ -1368,16 +1412,16 @@ fn sole_column(query: &Query) -> Option<Expr> {
     let (call, Some(alias)) = sole_relation_call(select)? else {
         return None;
     };
-    if !alias.columns.is_empty()
-        || normalize_identifier(&alias.name.value, alias.name.quote_style.is_some())
-            != normalize_identifier(&relation.value, relation.quote_style.is_some())
+    if normalize_identifier(&alias.name.value, alias.name.quote_style.is_some())
+        != normalize_identifier(&relation.value, relation.quote_style.is_some())
         || reads_column_or_parameter(&call)
     {
         return None;
     }
-    Some(column_of(
+    Some((
         call,
-        &normalize_identifier(&column.value, column.quote_style.is_some()),
+        alias,
+        normalize_identifier(&column.value, column.quote_style.is_some()).into_owned(),
     ))
 }
 
