@@ -1085,6 +1085,35 @@ fn a_before_trigger_pinned_to_its_path_or_repeated_is_clean() {
 }
 
 #[test]
+fn a_trigger_off_the_checked_write_may_rewrite_the_key() {
+    let reassign = "CREATE FUNCTION reassign() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+        BEGIN NEW.performed_by_id := 2; RETURN NEW; END $$;";
+    for trigger in [
+        "AFTER UPDATE ON runs FOR EACH ROW",
+        "BEFORE UPDATE ON runs FOR EACH STATEMENT",
+        "BEFORE INSERT OR DELETE ON runs FOR EACH ROW",
+    ] {
+        let extra = format!(
+            "{reassign} CREATE TRIGGER runs_reassign {trigger} EXECUTE FUNCTION reassign();"
+        );
+        assert_eq!(
+            confined_runs("", NAMES_OTHER, "UPDATE", "", &extra),
+            Vec::<String>::new(),
+            "{trigger}"
+        );
+    }
+    let disabled = format!(
+        "{reassign} CREATE TRIGGER runs_reassign BEFORE UPDATE ON runs FOR EACH ROW
+           EXECUTE FUNCTION reassign();
+         ALTER TABLE runs DISABLE TRIGGER runs_reassign;"
+    );
+    assert_eq!(
+        confined_runs("", NAMES_OTHER, "UPDATE", "", &disabled),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn a_before_trigger_that_lets_another_key_through_is_reported() {
     let rewriter = "CREATE FUNCTION reassign() RETURNS TRIGGER LANGUAGE plpgsql AS $$
         BEGIN NEW.performed_by_id := 2; RETURN NEW; END $$;
