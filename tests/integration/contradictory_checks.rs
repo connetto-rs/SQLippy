@@ -44,6 +44,8 @@ fn shrinking_names_only_the_contradictory_subset() {
 fn checks_keeping_optional_columns_apart_are_clean() {
     for sql in [
         "CREATE TABLE parameters (value_kind TEXT NOT NULL CHECK (value_kind IN ('text', 'boolean')), default_text TEXT, default_boolean BOOLEAN, CHECK (default_text IS NULL OR value_kind = 'text'), CHECK (default_boolean IS NULL OR value_kind = 'boolean'));",
+        "CREATE TABLE parameters (value_kind TEXT NOT NULL CHECK (value_kind IN ('text', 'number')), default_text TEXT CHECK (default_text <> ''), default_number DOUBLE PRECISION CHECK (default_number >= 0), CHECK (default_text IS NULL OR value_kind = 'text'), CHECK (default_number IS NULL OR value_kind = 'number'));",
+        "CREATE TABLE parameters (value_kind TEXT NOT NULL CHECK (value_kind IN ('text', 'number')), default_text TEXT CHECK (default_text IS NULL OR default_text <> ''), default_number DOUBLE PRECISION CHECK (default_number IS NULL OR default_number >= 0), CHECK (default_text IS NULL OR value_kind = 'text'), CHECK (default_number IS NULL OR value_kind = 'number'));",
         "CREATE TABLE measurements (a INT, b INT, c INT, CHECK (a IS NULL OR c > 0), CHECK (b IS NULL OR c < 0));",
     ] {
         assert!(messages(sql).is_empty(), "{sql}");
@@ -70,12 +72,12 @@ fn columns_forced_by_the_same_checks_share_one_finding() {
 }
 
 #[test]
-fn opposing_comparisons_between_columns_are_reported() {
+fn opposing_comparisons_between_columns_name_the_check_never_true() {
     let messages =
         messages("CREATE TABLE measurements (y INT, z INT, CHECK (y > z), CHECK (y < z));");
     assert_eq!(messages.len(), 1);
-    assert!(messages[0].contains("y > z"));
-    assert!(messages[0].contains("y < z"));
+    assert!(messages[0].contains("`CHECK (y > z)`, `CHECK (y < z)`"));
+    assert!(messages[0].contains("under which `CHECK (y > z)` is never true"));
 }
 
 #[test]

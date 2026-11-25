@@ -17,14 +17,15 @@ use crate::{
 ///
 /// A `CHECK` admits a row when it is true or `NULL`. A set is reported when
 /// its checks force a column they read to be `NULL` in every row they admit,
-/// as `CHECK (y > 0)` with `CHECK (y < 0)` force `y`, or when no row makes
-/// all of them true, as with `CHECK (y > z)` and `CHECK (y < z)`. Checks
-/// that only keep two optional columns from both being set, such as
+/// as `CHECK (y > 0)` with `CHECK (y < 0)` force `y`, or when one of them is
+/// true in no row the others admit, as `CHECK (y < z)` leaves `CHECK (y > z)`.
+/// Checks that only keep two optional columns from both being set, such as
 /// `CHECK (a IS NULL OR kind = 'a')` with `CHECK (b IS NULL OR kind = 'b')`,
-/// meet neither. Each finding names a set of checks minimal by inclusion,
-/// found by dropping each check in turn while the rest still contradict. A
-/// single check that contradicts on its own is left to `unsatisfiable_check`
-/// and `null_only_check`.
+/// meet neither, whether or not `a` and `b` carry checks of their own. Each
+/// finding names a set of checks minimal by inclusion, found by dropping each
+/// check in turn while the rest still contradict. A single check that
+/// contradicts on its own is left to `unsatisfiable_check` and
+/// `null_only_check`.
 ///
 /// # Example
 ///
@@ -63,7 +64,7 @@ impl<DB> Rule for ContradictoryChecks<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(ContradictoryChecks),
             group: LintGroup::Correctness,
-            rationale: "Jointly contradictory checks admit rows only through NULL, either forcing a column NULL or never being all true.",
+            rationale: "Jointly contradictory checks admit rows only through NULL, either forcing a column NULL or leaving one of them never true.",
             source: Some(
                 "https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-CHECK-CONSTRAINTS",
             ),
@@ -82,6 +83,8 @@ impl<DB> Rule for ContradictoryChecks<DB> {
 struct Demand<'a> {
     /// Whether the row makes every check true, rather than true or `NULL`.
     every_check_true: bool,
+    /// An expression the row makes true besides the checks.
+    holding: Option<&'a Expr>,
     /// The `IS NOT NULL` tests of the columns the row sets.
     non_null: &'a [Expr],
 }
@@ -111,8 +114,9 @@ fn admits_row<'a, DB: DatabaseLike>(
         })
         .chain(
             demand
-                .non_null
-                .iter()
+                .holding
+                .into_iter()
+                .chain(demand.non_null)
                 .map(|expression| Assumption::Expression {
                     expression,
                     outcomes: Outcomes::TRUE,
@@ -181,6 +185,7 @@ fn report_forced_columns<'a, DB: DatabaseLike>(
         }
         let demand = Demand {
             every_check_true: false,
+            holding: None,
             non_null: std::slice::from_ref(test),
         };
         let Some(set) = contradicting(database, table, checks, demand)? else {
@@ -190,6 +195,7 @@ fn report_forced_columns<'a, DB: DatabaseLike>(
         for (other, test) in non_null.iter().enumerate().skip(index) {
             let demand = Demand {
                 every_check_true: false,
+                holding: None,
                 non_null: std::slice::from_ref(test),
             };
             if !named[other] && !admits_row(database, table, &set, None, demand)? {
@@ -240,6 +246,7 @@ impl<DB: DatabaseLike> TableRule for ContradictoryChecks<DB> {
             // `unsatisfiable_check` and `null_only_check` answer for a check contradicting alone.
             let alone = Demand {
                 every_check_true: true,
+                holding: None,
                 non_null: &tests,
             };
             if !admits_row(database, table, &[check], None, alone)? {
@@ -262,6 +269,7 @@ impl<DB: DatabaseLike> TableRule for ContradictoryChecks<DB> {
                 None,
                 Demand {
                     every_check_true: true,
+                    holding: None,
                     non_null: &non_null,
                 },
             )?
@@ -278,23 +286,48 @@ impl<DB: DatabaseLike> TableRule for ContradictoryChecks<DB> {
         )?;
         eligible.retain(|check| !accounted.iter().any(|held| std::ptr::eq(*held, *check)));
         let table_name = table.table_name();
-        if let Some(set) = contradicting(
-            database,
-            table,
-            &eligible,
-            Demand {
-                every_check_true: true,
-                non_null: &[],
-            },
-        )? {
+        let mut covered: Vec<&DB::CheckConstraint> = Vec::new();
+        for (index, check) in eligible.iter().enumerate() {
+            if covered.iter().any(|held| std::ptr::eq(*held, *check)) {
+                continue;
+            }
+            let others: Vec<_> = eligible
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .map(|(_, other)| *other)
+                .collect();
+            let Some(killing) = contradicting(
+                database,
+                table,
+                &others,
+                Demand {
+                    every_check_true: false,
+                    holding: Some(check.expression(database)),
+                    non_null: &[],
+                },
+            )?
+            else {
+                continue;
+            };
+            let set: Vec<_> = eligible
+                .iter()
+                .copied()
+                .filter(|member| {
+                    std::ptr::eq(*member, *check)
+                        || killing.iter().any(|held| std::ptr::eq(*held, *member))
+                })
+                .collect();
             reporter.table(
                 table,
                 format!(
-                    "Table '{table_name}' has the checks {}, which no row makes all true, so a write passes them only where a NULL leaves one of them unknown.",
+                    "Table '{table_name}' has the checks {}, under which `CHECK ({})` is never true, so it passes a write only where a NULL leaves it unknown.",
                     listed(database, &set),
+                    check.expression(database),
                 ),
                 format!("Fix or drop one of these checks on '{table_name}'."),
             )?;
+            covered.extend(set);
         }
         Ok(())
     }
