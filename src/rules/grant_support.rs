@@ -219,6 +219,18 @@ pub(crate) fn is_client_written<DB: DatabaseLike>(
     )
 }
 
+/// Whether the deployment declares `table` subscribed.
+pub(crate) fn is_subscribed<DB: DatabaseLike>(
+    database: &DB,
+    deployment: &Deployment,
+    table: &DB::Table,
+) -> bool {
+    deployment.is_subscribed(
+        &schema_of(database, table.stored_table_schema()),
+        &table.stored_table_name(),
+    )
+}
+
 /// The column of `table` the deployment declares as its tenant key.
 pub(crate) fn tenant_column<'db, DB: DatabaseLike>(
     database: &'db DB,
