@@ -11,7 +11,7 @@ use sqlparser::ast::{
     AccessExpr, BinaryOperator, Distinct, Expr, Function, FunctionArg, FunctionArgExpr,
     FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, InTarget, JoinConstraint,
     JoinOperator, LimitClause, ObjectName, ObjectNamePart, Query, Select, SelectItem, SetExpr,
-    TableAlias, TableFactor, Value, Visit, VisitMut, Visitor, VisitorMut,
+    TableAlias, TableFactor, UnaryOperator, Value, Visit, VisitMut, Visitor, VisitorMut,
     WildcardAdditionalOptions, visit_expressions, visit_expressions_mut,
 };
 
@@ -523,17 +523,19 @@ pub(crate) struct StoredRelation {
 
 /// `expression` with every column reference of the row it tests named,
 /// quoted, by the column `rename` resolves it to, every parameter reference
-/// written as `$n`, and every scalar subquery that reads no relation, such
-/// as `(SELECT auth.uid())`, replaced by the value it projects. A subquery
-/// reading stored tables, which `relation` resolves, reads each under its
-/// resolved name and the alias `"depth.position"`, names their columns
-/// through that alias and the columns of the tested row through `"0"`, so
-/// that two spellings of one subquery rename alike and renaming the result
-/// again yields it unchanged. `rename` is called on the references resolving
-/// to no relation of a subquery. `None` when `rename` resolves a reference
-/// to nothing, a reference is ambiguous, or a reference other than a
-/// parameter is read inside a subquery that reads anything but stored
-/// tables or may name its output where a column is expected.
+/// written as `$n`, every scalar subquery that reads no relation, such as
+/// `(SELECT auth.uid())`, replaced by the value it projects, and every
+/// comparison with `TRUE` or `FALSE` written as its operand or `NOT` of it,
+/// as [`compared_with_boolean`] gives it. A subquery reading stored tables,
+/// which `relation` resolves, reads each under its resolved name and the
+/// alias `"depth.position"`, names their columns through that alias and the
+/// columns of the tested row through `"0"`, so that two spellings of one
+/// subquery rename alike and renaming the result again yields it unchanged.
+/// `rename` is called on the references resolving to no relation of a
+/// subquery. `None` when `rename` resolves a reference to nothing, a
+/// reference is ambiguous, or a reference other than a parameter is read
+/// inside a subquery that reads anything but stored tables or may name its
+/// output where a column is expected.
 pub(crate) fn renamed(
     expression: &Expr,
     rename: impl Fn(&Expr) -> Option<Term>,
@@ -825,9 +827,47 @@ impl<I: Iterator<Item = Expr>, T: Iterator<Item = Option<(ObjectName, Ident)>>> 
             && let Some(resolved) = self.resolved.next()
         {
             *expression = resolved;
+        } else if let Some(compared) = compared_with_boolean(expression) {
+            *expression = compared;
         }
         ControlFlow::Continue(())
     }
+}
+
+/// The operand `expression` compares with `TRUE` or `FALSE` through `=` or
+/// `<>`, or `NOT` of it, whichever agrees with the comparison on every row,
+/// `NULL` included.
+fn compared_with_boolean(expression: &mut Expr) -> Option<Expr> {
+    let Expr::BinaryOp {
+        left,
+        op: op @ (BinaryOperator::Eq | BinaryOperator::NotEq),
+        right,
+    } = expression
+    else {
+        return None;
+    };
+    let truth = |operand: &Expr| match operand {
+        Expr::Value(value) => match value.value {
+            Value::Boolean(truth) => Some(truth),
+            _ => None,
+        },
+        _ => None,
+    };
+    let (operand, truth) = match (truth(left), truth(right)) {
+        (_, Some(truth)) => (left, truth),
+        (Some(truth), None) => (right, truth),
+        (None, None) => return None,
+    };
+    let kept = (*op == BinaryOperator::Eq) == truth;
+    let operand = mem::replace(operand.as_mut(), Expr::Value(Value::Null.into()));
+    Some(if kept {
+        operand
+    } else {
+        Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr: Box::new(operand),
+        }
+    })
 }
 
 /// The `SELECT` of `query` each row of which comes from a row of its `FROM`

@@ -4500,3 +4500,75 @@ fn an_invoker_helper_reading_alike_for_every_caller_confines_a_filter() {
         }
     }
 }
+
+/// The definers the rule reports where a policy shows the caller's own
+/// `resources` rows that `policy` keeps and definer `probe_<n>()` returns
+/// the caller's own rows that the `n`-th of `filters` keeps.
+fn shown_exposed(policy: &str, filters: &[&str]) -> Vec<String> {
+    let definers = filters
+        .iter()
+        .enumerate()
+        .map(|(index, filter)| {
+            format!(
+                "CREATE FUNCTION probe_{index}() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource
+                     WHERE resource.owner = current_setting('app.user_id', true) AND {filter} $$;"
+            )
+        })
+        .collect::<Vec<_>>()
+        .concat();
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE TABLE resources (id INT, owner TEXT, hidden BOOLEAN);
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON resources TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE POLICY own_shown ON resources FOR SELECT TO app
+               USING (owner = current_setting('app.user_id', true) AND {policy});
+             {definers}"
+        ),
+    )
+}
+
+#[test]
+fn a_boolean_compared_with_a_literal_reads_as_itself_or_its_negation() {
+    assert_eq!(
+        shown_exposed(
+            "hidden = false",
+            &[
+                "NOT resource.hidden",
+                "resource.hidden <> true",
+                "false = resource.hidden",
+                "resource.hidden IS NOT TRUE",
+                "resource.hidden = true",
+            ],
+        ),
+        ["probe_3()", "probe_4()"]
+    );
+    assert_eq!(
+        shown_exposed(
+            "NOT hidden",
+            &[
+                "resource.hidden = false",
+                "true <> resource.hidden",
+                "resource.hidden",
+            ],
+        ),
+        ["probe_2()"]
+    );
+    assert_eq!(
+        shown_exposed(
+            "hidden",
+            &[
+                "resource.hidden = true",
+                "resource.hidden <> false",
+                "resource.hidden = false",
+            ],
+        ),
+        ["probe_2()"]
+    );
+}
