@@ -17,7 +17,7 @@ use sqlparser::ast::{
 
 use crate::rules::{
     closed_set_support::stored_name,
-    ladder_support::plain,
+    ladder_support::{listed_arguments, plain},
     literal_support::literal,
     policy_support::{
         conjuncts, disjuncts, is_column_reference, is_tautology, unnested, unwrapped,
@@ -295,12 +295,7 @@ pub(crate) fn clause_implies<C: Columns>(
 /// The name and the `missing_ok` argument, when passed, of a call of
 /// `current_setting`.
 fn setting_read(expression: &Expr) -> Option<(&Expr, Option<&Expr>)> {
-    let Expr::Function(Function {
-        name,
-        args: FunctionArguments::List(list),
-        ..
-    }) = expression
-    else {
+    let Expr::Function(call) = expression else {
         return None;
     };
     let names = |part: &ObjectNamePart, expected: &str| {
@@ -308,22 +303,16 @@ fn setting_read(expression: &Expr) -> Option<(&Expr, Option<&Expr>)> {
             normalize_identifier(&ident.value, ident.quote_style.is_some()) == expected
         })
     };
-    let current_setting = match name.0.as_slice() {
-        [function] => names(function, "current_setting"),
-        [schema, function] => names(schema, "pg_catalog") && names(function, "current_setting"),
-        _ => false,
-    };
-    if !current_setting {
+    if !call.name.0.split_last().is_some_and(|(function, schema)| {
+        names(function, "current_setting")
+            && schema.len() <= 1
+            && schema.iter().all(|part| names(part, "pg_catalog"))
+    }) {
         return None;
     }
-    match list.args.as_slice() {
-        [FunctionArg::Unnamed(FunctionArgExpr::Expr(setting))] => Some((setting, None)),
-        [
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(setting)),
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(missing_ok)),
-        ] => Some((setting, Some(missing_ok))),
-        _ => None,
-    }
+    let arguments = listed_arguments(call)?;
+    let setting = *arguments.first()?;
+    (arguments.len() <= 2).then(|| (setting, arguments.get(1).copied()))
 }
 
 /// The name of the setting `expression` reads through `current_setting`
@@ -421,22 +410,23 @@ fn rejected(condition: &Expr, setting: &Expr) -> bool {
 /// Whether `query` yields a row only for a row passing a `WHERE` of which
 /// [`rejected`] holds, projecting constants and columns without `HAVING`.
 fn found_only_where(query: &Query, setting: &Expr) -> bool {
-    let SetExpr::Select(select) = query.body.as_ref() else {
-        return false;
-    };
-    select.having.is_none()
-        && select.projection.iter().all(|item| match item {
-            SelectItem::UnnamedExpr(projected)
-            | SelectItem::ExprWithAlias {
-                expr: projected, ..
-            } => matches!(projected, Expr::Value(_)) || is_column_reference(projected),
-            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..) => true,
-            SelectItem::ExprWithAliases { .. } => false,
-        })
-        && select
-            .selection
-            .as_ref()
-            .is_some_and(|filter| rejected(filter, setting))
+    query.body.as_select().is_some_and(|select| {
+        select.having.is_none()
+            && select.projection.iter().all(|item| match item {
+                SelectItem::UnnamedExpr(projected)
+                | SelectItem::ExprWithAlias {
+                    expr: projected, ..
+                } => matches!(projected, Expr::Value(_)) || is_column_reference(projected),
+                item => matches!(
+                    item,
+                    SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)
+                ),
+            })
+            && select
+                .selection
+                .as_ref()
+                .is_some_and(|filter| rejected(filter, setting))
+    })
 }
 
 /// Whether `holds` accepts every one of `items`, stopping at the first it
