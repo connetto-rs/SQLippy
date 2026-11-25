@@ -67,7 +67,7 @@ use crate::{
         },
         literal_support::literal,
         null_support::rejects_null,
-        plpgsql_flow_support::{Ran, plpgsql_block, ran_statements},
+        plpgsql_flow_support::{Ran, plpgsql_block, ran_statements, rows_query},
         policy_support::{
             acting, client_roles, conjuncts, is_column_reference, is_role_read,
             sets_only_search_path, sql_query_body, sql_statements_body, unnested, unwrapped,
@@ -4704,36 +4704,6 @@ fn names_any(condition: &Expr, columns: &[String]) -> bool {
             }
         })
         .is_break()
-}
-
-/// `SELECT projection FROM from WHERE selection`, projecting `NULL` when
-/// `projection` is empty.
-fn rows_query(
-    projection: Vec<SelectItem>,
-    from: Vec<TableWithJoins>,
-    selection: Option<Expr>,
-) -> Query {
-    let mut select = Parser::new(&PostgreSqlDialect {})
-        .try_with_sql("SELECT NULL")
-        .and_then(|mut parser| parser.parse_select())
-        .expect("SELECT NULL parses");
-    if !projection.is_empty() {
-        select.projection = projection;
-    }
-    select.from = from;
-    select.selection = selection;
-    Query {
-        with: None,
-        body: Box::new(SetExpr::Select(Box::new(select))),
-        order_by: None,
-        limit_clause: None,
-        fetch: None,
-        locks: Vec::new(),
-        for_clause: None,
-        settings: None,
-        format_clause: None,
-        pipe_operators: Vec::new(),
-    }
 }
 
 /// `condition`, over the stored names of a row's columns, tested on the row
