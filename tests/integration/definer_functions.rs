@@ -6323,6 +6323,14 @@ fn a_private_helper_counts_only_while_every_function_it_reaches_only_reads() {
         ),
         ["readable()"]
     );
+    assert_eq!(
+        reported(
+            "empty",
+            "CREATE FUNCTION authz.empty_source() RETURNS SETOF INT
+               LANGUAGE sql STABLE AS $$ $$;"
+        ),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
