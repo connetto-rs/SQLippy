@@ -51,7 +51,8 @@ use crate::{
             Identity, fixed_by, held_values, identity, pin, same_identity, stored_name,
         },
         cte_support::{
-            WithScopes, join_constraint, same_name, stored_column, stored_relation, stored_table,
+            WithScopes, join_constraint, modifies_data, same_name, stored_column, stored_relation,
+            stored_table,
         },
         grant_support::{function_callers, granted_callers, schema_of},
         implication_support::{
@@ -177,6 +178,10 @@ use super::plpgsql_ambiguous_name::collision;
 /// and one write may assign its `RETURNING` `INTO`, or its row count through
 /// `GET DIAGNOSTICS ... = ROW_COUNT`, the variable declared without a
 /// default, which the block's last `RETURN` returns and no statement reads.
+/// A write may also stand in a `WITH` item of a query, read as that write
+/// run before the query, the item read as the rows the write writes
+/// projecting what its `RETURNING` returns, since PostgreSQL runs both on
+/// one snapshot, as it runs the caller's own statement.
 /// A `DELETE` or an `UPDATE` is read as the `SELECT` of the
 /// rows it writes joined to the tables its `USING` or `FROM` names,
 /// projecting what its `RETURNING` returns. That `SELECT` is held to the
@@ -650,12 +655,17 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         };
         let mut found = Vec::with_capacity(statements.len());
         for statement in statements {
-            let Some(read) =
-                self.read_statement(function, statement, path.as_deref(), &lineage, &mut walk)?
-            else {
+            let Some(ran) = self.written_in_turn(statement, path.as_deref())? else {
                 return Ok(None);
             };
-            found.push(read);
+            for statement in ran {
+                let Some(read) =
+                    self.read_statement(function, statement, path.as_deref(), &lineage, &mut walk)?
+                else {
+                    return Ok(None);
+                };
+                found.push(read);
+            }
         }
         Ok(Some(found))
     }
@@ -844,6 +854,55 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             }
             _ => return Ok(None),
         }))
+    }
+
+    /// `statement`, or, for a query whose `WITH` items `DELETE`, `UPDATE` or
+    /// `INSERT`, each of those writes in turn and then the query, each such
+    /// item reading as the rows its write writes, projecting what its
+    /// `RETURNING` returns. PostgreSQL runs the writes and the query on one
+    /// snapshot, so the query reads each table as the caller's own statement
+    /// would. `None` when such a query is `WITH RECURSIVE`, an item `MERGE`s
+    /// or returns a wildcard, or its write reads as `None` in
+    /// [`Self::queried`].
+    fn written_in_turn(
+        &self,
+        statement: Statement,
+        path: Option<&[(Cow<'_, str>, bool)]>,
+    ) -> Result<Option<Vec<Statement>>, LookupError> {
+        let Statement::Query(mut query) = statement else {
+            return Ok(Some(vec![statement]));
+        };
+        let mut ran = Vec::new();
+        if let Some(with) = &mut query.with {
+            let recursive = with.recursive;
+            for item in &mut with.cte_tables {
+                if !modifies_data(item) {
+                    continue;
+                }
+                let (
+                    false,
+                    None,
+                    SetExpr::Delete(write) | SetExpr::Update(write) | SetExpr::Insert(write),
+                ) = (recursive, &item.query.with, item.query.body.as_ref())
+                else {
+                    return Ok(None);
+                };
+                let Some(names) = returned_names(write) else {
+                    return Ok(None);
+                };
+                let Some((Statement::Query(mut rows), ..)) = self.queried(write.clone(), path)?
+                else {
+                    return Ok(None);
+                };
+                if returned_only(&mut rows.body, &names).is_none() {
+                    return Ok(None);
+                }
+                ran.push(write.clone());
+                item.query = rows;
+            }
+        }
+        ran.push(Statement::Query(query));
+        Ok(Some(ran))
     }
 
     /// The values each input parameter of `function` may hold, in the order
@@ -3933,6 +3992,63 @@ fn locks_relation(lock: &LockClause, relation: &TableFactor) -> bool {
         normalize_identifier(&locked.value, locked.quote_style.is_some())
             == normalize_identifier(&named.value, named.quote_style.is_some())
     })
+}
+
+/// The name PostgreSQL gives each column the `RETURNING` of `write` returns,
+/// when it is an alias or a column, or `None` when it returns a wildcard or
+/// is no `DELETE`, `UPDATE` or `INSERT`.
+fn returned_names(write: &Statement) -> Option<Vec<Option<Ident>>> {
+    let (Statement::Delete(Delete { returning, .. })
+    | Statement::Update(Update { returning, .. })
+    | Statement::Insert(Insert { returning, .. })) = write
+    else {
+        return None;
+    };
+    returning
+        .iter()
+        .flatten()
+        .map(|item| match item {
+            SelectItem::ExprWithAlias { alias, .. } => Some(Some(alias.clone())),
+            SelectItem::UnnamedExpr(Expr::Identifier(column)) => Some(Some(column.clone())),
+            SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts)) => Some(parts.last().cloned()),
+            SelectItem::UnnamedExpr(_) => Some(None),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Keeps of each `SELECT` of `body`, which projects what a write writes and
+/// then what its `RETURNING` returns, the last of its columns, one for each
+/// of `names`, each named as its `RETURNING` names it. `None` when a
+/// `SELECT` projects fewer or `body` holds another set expression.
+fn returned_only(body: &mut SetExpr, names: &[Option<Ident>]) -> Option<()> {
+    match body {
+        SetExpr::Select(select) => {
+            let written = select.projection.len().checked_sub(names.len())?;
+            let returned = select.projection.split_off(written);
+            select.projection = returned
+                .into_iter()
+                .zip(names)
+                .map(|(item, name)| match (item, name) {
+                    (
+                        SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. },
+                        Some(alias),
+                    ) => SelectItem::ExprWithAlias {
+                        expr,
+                        alias: alias.clone(),
+                    },
+                    (item, _) => item,
+                })
+                .collect();
+            Some(())
+        }
+        SetExpr::SetOperation { left, right, .. } => {
+            returned_only(left, names)?;
+            returned_only(right, names)
+        }
+        SetExpr::Query(query) => returned_only(&mut query.body, names),
+        _ => None,
+    }
 }
 
 /// `SELECT returned… FROM target, using… WHERE selection`, the rows `delete`
