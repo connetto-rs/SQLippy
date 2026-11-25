@@ -1601,6 +1601,154 @@ fn a_definer_inserting_into_a_table_whose_triggers_or_defaults_may_act_otherwise
     }
 }
 
+/// A `plpgsql` definer named `name`, returning `returns`, declaring the
+/// caller's user id `uid` and `declarations` and running `statements`.
+fn block_definer(name: &str, returns: &str, declarations: &str, statements: &str) -> String {
+    format!(
+        "CREATE FUNCTION {name} RETURNS {returns} LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+           SET search_path = pg_catalog, pg_temp AS $$
+         DECLARE {SIGNED_IN} {declarations} BEGIN {statements} END $$;"
+    )
+}
+
+/// An `UPDATE` hiding the caller's own rows, by the variable `uid`.
+const HIDE_MINE: &str =
+    "UPDATE public.resources resource SET hidden = true WHERE resource.owner = uid";
+
+/// A `DELETE` of the caller's own hidden rows, by the variable `uid`.
+const PURGE_MINE: &str =
+    "DELETE FROM public.resources resource WHERE resource.hidden AND resource.owner = uid";
+
+#[test]
+fn a_plpgsql_definer_running_statements_the_caller_may_run_alike_is_not_reported() {
+    let definers = [
+        block_definer(
+            "hide_returning()",
+            "INT",
+            "hidden_id INT;",
+            &format!("{HIDE_MINE} RETURNING resource.id INTO hidden_id; RETURN hidden_id;"),
+        ),
+        block_definer(
+            "hide_strictly()",
+            "INT",
+            "hidden_id INT;",
+            &format!(
+                "{HIDE_MINE} RETURNING resource.id INTO STRICT hidden_id;
+                 IF NOT FOUND THEN RAISE EXCEPTION 'missing'; END IF;
+                 RETURN hidden_id;"
+            ),
+        ),
+        block_definer(
+            "hide_or_raise()",
+            "VOID",
+            "",
+            &format!("{HIDE_MINE}; IF NOT FOUND THEN RAISE EXCEPTION 'missing'; END IF;"),
+        ),
+        block_definer(
+            "hide_or_leave()",
+            "VOID",
+            "",
+            &format!("{HIDE_MINE}; IF NOT FOUND THEN RETURN; END IF; {PURGE_MINE};"),
+        ),
+        block_definer(
+            "hide_then_purge()",
+            "VOID",
+            "",
+            &format!("{HIDE_MINE}; {PURGE_MINE}; RETURN;"),
+        ),
+        block_definer(
+            "hide_then_list()",
+            "SETOF INT",
+            "",
+            &format!(
+                "IF uid IS NULL THEN RAISE EXCEPTION 'not signed in'; END IF;
+                 {HIDE_MINE};
+                 RETURN QUERY SELECT resource.id FROM public.resources resource
+                   WHERE resource.owner = uid;"
+            ),
+        ),
+        block_definer(
+            "insert_returning()",
+            "INT",
+            "new_id INT;",
+            "INSERT INTO public.resources (id, owner) VALUES (1, current_setting('app.user_id'))
+               RETURNING id INTO new_id;
+             RETURN new_id;",
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, INSERT, UPDATE, DELETE", OWN_ROWS, &definers),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_plpgsql_definer_running_a_statement_the_caller_may_not_run_alike_is_reported() {
+    let definers = [
+        block_definer(
+            "hide_then_purge_any()",
+            "VOID",
+            "",
+            &format!("{HIDE_MINE}; DELETE FROM public.resources resource WHERE resource.hidden;"),
+        ),
+        block_definer(
+            "purge_hidden()",
+            "VOID",
+            "hidden_id INT;",
+            &format!(
+                "{HIDE_MINE} RETURNING resource.id INTO hidden_id;
+                 DELETE FROM public.resources resource WHERE resource.id = hidden_id;"
+            ),
+        ),
+        block_definer(
+            "hide_or_count()",
+            "VOID",
+            "",
+            &format!(
+                "{HIDE_MINE};
+                 IF (SELECT count(*) FROM public.resources) > 1 THEN RAISE EXCEPTION 'crowded'; END IF;"
+            ),
+        ),
+        block_definer(
+            "hide_or_tell()",
+            "VOID",
+            "",
+            &format!("{HIDE_MINE}; IF NOT FOUND THEN RAISE EXCEPTION 'missing %', uid; END IF;"),
+        ),
+        block_definer(
+            "purge_reassigned()",
+            "VOID",
+            "owner_name TEXT := current_setting('app.user_id', true);",
+            &format!(
+                "{HIDE_MINE} RETURNING 'admin' INTO owner_name;
+                 DELETE FROM public.resources resource WHERE resource.owner = owner_name;"
+            ),
+        ),
+        block_definer(
+            "hide_returning_hidden()",
+            "INT",
+            "hidden_id INT;",
+            "UPDATE public.resources resource SET hidden = true
+               WHERE resource.owner = uid OR resource.hidden
+               RETURNING resource.id INTO hidden_id;
+             RETURN hidden_id;",
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, INSERT, UPDATE, DELETE", OWN_ROWS, &definers),
+        [
+            "hide_or_count()",
+            "hide_or_tell()",
+            "hide_returning_hidden()",
+            "hide_then_purge_any()",
+            "purge_hidden()",
+            "purge_reassigned()"
+        ]
+    );
+}
+
 #[test]
 fn a_definer_with_an_unresolved_or_unsupported_write_is_reported() {
     for body in [

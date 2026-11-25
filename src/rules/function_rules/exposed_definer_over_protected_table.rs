@@ -64,7 +64,7 @@ use crate::{
         },
         literal_support::literal,
         null_support::rejects_null,
-        plpgsql_flow_support::{Ran, plpgsql_block, ran_statement},
+        plpgsql_flow_support::{Ran, plpgsql_block, ran_statements},
         policy_support::{
             acting, client_roles, conjuncts, is_column_reference, is_role_read,
             sets_only_search_path, sql_query_body, sql_statement_body, unnested, unwrapped,
@@ -157,19 +157,26 @@ use super::plpgsql_ambiguous_name::collision;
 /// A function is not reported either when each caller could run what it
 /// writes and change the same rows the same way. Its body is then one
 /// `DELETE`, `UPDATE` or `INSERT` of one table, in `LANGUAGE sql` or in a
-/// PL/pgSQL block past such guards, bare or as its `RETURN QUERY`. A `DELETE`
-/// or an `UPDATE` is read as the `SELECT` of the rows it writes joined to
-/// the tables its `USING` or `FROM` names, projecting what its `RETURNING`
-/// returns. That `SELECT` is held to the test above, the written table to
-/// each caller's policies for the command besides the `SELECT` ones, as
-/// PostgreSQL holds a write reading a column of its table. An `UPDATE` sets
-/// each column, named alone, to a value that evaluates alike for a caller
-/// and the owner and names no column of another relation it joins, and the
-/// policies judging the updated row, its `WITH CHECK` and the `SELECT` ones,
-/// have to hold of the row the filter admits with those values in place.
-/// Its `RETURNING` reads each set column as its value. A policy or a
-/// `RETURNING` naming a set column inside a subquery fails that. Every
-/// caller holds `DELETE` on the table, or `UPDATE` on each column set.
+/// PL/pgSQL block past such guards, bare or as its `RETURN QUERY`. A block
+/// may run several such writes and returned queries in turn, each held to
+/// its own test, since a caller running them in the same order meets the
+/// same rows at each. A write may be followed by a guard `IF NOT FOUND THEN
+/// ...`, which raises where the caller's own write would find no row too,
+/// and one write may assign its `RETURNING` `INTO` the variable declared
+/// without a default, which the block's last `RETURN` returns and no
+/// statement reads. A `DELETE` or an `UPDATE` is read as the `SELECT` of the
+/// rows it writes joined to the tables its `USING` or `FROM` names,
+/// projecting what its `RETURNING` returns. That `SELECT` is held to the
+/// test above, the written table to each caller's policies for the command
+/// besides the `SELECT` ones, as PostgreSQL holds a write reading a column
+/// of its table. An `UPDATE` sets each column, named alone, to a value that
+/// evaluates alike for a caller and the owner and names no column of another
+/// relation it joins, and the policies judging the updated row, its `WITH
+/// CHECK` and the `SELECT` ones, have to hold of the row the filter admits
+/// with those values in place. Its `RETURNING` reads each set column as its
+/// value. A policy or a `RETURNING` naming a set column inside a subquery
+/// fails that. Every caller holds `DELETE` on the table, or `UPDATE` on each
+/// column set.
 ///
 /// An `INSERT` of one table naming each column it writes, with no `ON
 /// CONFLICT`, is read as the `SELECT` of the values each row of its `VALUES`
@@ -526,7 +533,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             |query| Lineage::of(function, query),
             |reads, query| reads.confines_query(query, &[], &[]),
         )
-        .map(|confined| confined == Some(true))
+        .map(|confined| confined.is_some_and(|confined| confined.iter().all(|read| *read)))
     }
 
     /// Whether `callee`, a `SECURITY DEFINER` function that neither writes
@@ -606,24 +613,24 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         Ok(true)
     }
 
-    /// What `walk` finds reading the body of `function`, one `LANGUAGE sql`
-    /// statement or the one a `plpgsql` block [`ran_statement`] reads, with
-    /// the lineage `lineage` gives it, read as [`Self::queried`] reads it.
-    /// `None` when the body is no such statement, its names do not resolve,
-    /// a name of the block may read a variable where the statement reads a
-    /// column, or a guard of the block reads a subquery or may evaluate
-    /// otherwise for a caller than for the owner, so that whether it raises
-    /// tells what the owner reads.
+    /// What `walk` finds reading each statement of the body of `function`,
+    /// in order, one `LANGUAGE sql` statement or those a `plpgsql` block
+    /// [`ran_statements`] reads, each read as [`Self::read_statement`] does
+    /// with the lineage `lineage` gives it. `None` when the body is no such
+    /// statement, a statement reads as `None`, a name of the block may read a
+    /// variable where a statement reads a column, or a guard of the block
+    /// reads a subquery or may evaluate otherwise for a caller than for the
+    /// owner, so that whether it raises tells what the owner reads.
     fn read_body<T>(
         &self,
         function: &'a DB::Function,
-        lineage: impl FnOnce(&Query) -> Lineage,
-        walk: impl FnOnce(&mut Reads<'_, '_, 'a, DB>, &Query) -> Result<T, LookupError>,
-    ) -> Result<Option<T>, LookupError> {
+        lineage: impl Fn(&Query) -> Lineage,
+        mut walk: impl FnMut(&mut Reads<'_, '_, 'a, DB>, &Query) -> Result<T, LookupError>,
+    ) -> Result<Option<Vec<T>>, LookupError> {
         let path = function.search_path(self.database)?;
-        let statement = match plpgsql_block(function) {
+        let statements = match plpgsql_block(function) {
             Some(block) => {
-                let Some(Ran { statement, guards }) = ran_statement(block) else {
+                let Some(Ran { statements, guards }) = ran_statements(block) else {
                     return Ok(None);
                 };
                 if collision(self.database, function)?.is_some() {
@@ -636,14 +643,37 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                         return Ok(None);
                     }
                 }
-                statement
+                statements
             }
             None => match sql_statement_body(self.database, function)? {
-                Some(statement) => statement.into_owned(),
+                Some(statement) => vec![statement.into_owned()],
                 None => return Ok(None),
             },
         };
-        let Some((statement, write, insertion)) = self.queried(statement, path.as_deref())? else {
+        let mut found = Vec::with_capacity(statements.len());
+        for statement in statements {
+            let Some(read) =
+                self.read_statement(function, statement, path.as_deref(), &lineage, &mut walk)?
+            else {
+                return Ok(None);
+            };
+            found.push(read);
+        }
+        Ok(Some(found))
+    }
+
+    /// What `walk` finds reading `statement` of the body of `function`, its
+    /// names resolving on `path`, with the lineage `lineage` gives it, read as
+    /// [`Self::queried`] reads it. `None` when its names do not resolve.
+    fn read_statement<T>(
+        &self,
+        function: &'a DB::Function,
+        statement: Statement,
+        path: Option<&[(Cow<'_, str>, bool)]>,
+        lineage: &impl Fn(&Query) -> Lineage,
+        walk: &mut impl FnMut(&mut Reads<'_, '_, 'a, DB>, &Query) -> Result<T, LookupError>,
+    ) -> Result<Option<T>, LookupError> {
+        let Some((statement, write, insertion)) = self.queried(statement, path)? else {
             return Ok(None);
         };
         let scope = ExpressionScope::FunctionBody(function);
@@ -678,7 +708,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 function,
             },
             context: &context,
-            path: path.as_deref(),
+            path,
             items: WithScopes::default(),
             lineage: &lineage,
             written,
@@ -980,10 +1010,10 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         Ok(arms)
     }
 
-    /// [`Self::arms`] read from the body of `function`. A `VOLATILE` function
-    /// may read rows of a later snapshot, and a parameter it sets may change
-    /// what its filters compute, so either draws from rows the rule cannot
-    /// tell.
+    /// [`Self::arms`] read from the body of `function`, which runs one
+    /// statement. A `VOLATILE` function may read rows of a later snapshot,
+    /// and a parameter it sets may change what its filters compute, so
+    /// either draws from rows the rule cannot tell.
     fn read_arms(&self, function: &'a DB::Function) -> Result<Arms<'a, DB>, LookupError> {
         if function.volatility() == FunctionBehavior::Volatile
             || !function.returns_set()
@@ -1012,7 +1042,10 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 Ok(drawing.arms)
             },
         )
-        .map(Option::unwrap_or_default)
+        .map(|arms| match arms.map(<[_; 1]>::try_from) {
+            Some(Ok([arms])) => arms,
+            _ => Arms::default(),
+        })
     }
 }
 

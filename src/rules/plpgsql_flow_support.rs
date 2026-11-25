@@ -5,13 +5,14 @@ use std::{convert::Infallible, ops::ControlFlow};
 
 use sql_traits::{traits::FunctionLike, utils::identifier_resolution::normalize_identifier};
 use sqlparser::ast::{
-    Expr, Query, SetExpr, SetOperator, SetQuantifier, Statement, VisitMut, visit_expressions_mut,
+    Expr, Query, SetExpr, SetOperator, SetQuantifier, Statement, UnaryOperator, VisitMut,
+    visit_expressions_mut,
 };
 use sqlparser_plpgsql::{
     embedded::{
         Block, BoundCursor, Branch, Case, DeclarationKind, Dynamic, Exit, ExitKind, Fetch, If,
-        Indirection, Loop, LoopControl, Node, NodeKind, Open, Raise, RaiseLevel, ReturnQuery,
-        Variable,
+        Indirection, IntoTargets, Loop, LoopControl, Node, NodeKind, Open, Raise, RaiseLevel,
+        ReturnQuery, Target, Variable,
     },
     embedded_sql,
 };
@@ -27,27 +28,24 @@ pub(crate) fn plpgsql_block<F: FunctionLike>(function: &F) -> Option<Block> {
     embedded_sql(function.body()?).ok()
 }
 
-/// The one statement a PL/pgSQL body runs, the query whose rows it returns,
-/// a `DELETE`, an `UPDATE` or an `INSERT`, and the conditions of the guards
-/// it passes first.
+/// The statements a PL/pgSQL body runs in order, each a query whose rows it
+/// returns, a `DELETE`, an `UPDATE` or an `INSERT`, and the conditions of the
+/// guards it passes first.
 pub(crate) struct Ran {
-    /// The statement the body runs.
-    pub(crate) statement: Statement,
+    /// The statements the body runs, in order.
+    pub(crate) statements: Vec<Statement>,
     /// The condition of each guard, under which the body raises an exception
-    /// or returns before the statement runs.
+    /// or returns before the statements run.
     pub(crate) guards: Vec<Expr>,
 }
 
 /// What `block` runs when it does nothing else. Its statements are guards
 /// `IF condition THEN RAISE EXCEPTION ...; END IF;` or `IF condition THEN
-/// RETURN; END IF;`, the exception carrying no argument, then one `DELETE`,
-/// `UPDATE` or `INSERT`, bare or as a `RETURN QUERY`, or `RETURN QUERY`
-/// statements, either maybe followed by a bare `RETURN`, the queries read as
-/// the `UNION ALL` of them, a `RETURN` of one scalar subquery, or a `SELECT
-/// ... INTO` the one variable declared without a default followed by a
-/// `RETURN` of a name. Every other variable is declared with a default and,
-/// as no statement but these assigns it, reads as that default.
-pub(crate) fn ran_statement(block: Block) -> Option<Ran> {
+/// RETURN; END IF;`, the exception carrying no argument, then the statements
+/// [`ran_by`] reads. Every variable but the one declared without a default
+/// is declared with a default and, as no statement assigns it, reads as that
+/// default.
+pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
     let Block {
         declarations,
         statements,
@@ -79,50 +77,131 @@ pub(crate) fn ran_statement(block: Block) -> Option<Ran> {
         guards.push(condition);
         statements.next();
     }
-    let statements: Vec<Node> = statements.collect();
-    let mut statement = match target {
-        None => ran_by(statements)?,
-        Some(_) => Statement::Query(Box::new(selected_into(&statements)?)),
-    };
-    substitute(&mut statement, &defaults);
+    let mut statements = ran_by(statements, target.as_deref())?;
+    for statement in &mut statements {
+        substitute(statement, &defaults);
+    }
     for guard in &mut guards {
         substitute(guard, &defaults);
     }
-    Some(Ran { statement, guards })
+    Some(Ran { statements, guards })
 }
 
-/// The statement run by a write, possibly returned by `RETURN QUERY`, or a returned query.
-fn ran_by(mut statements: Vec<Node>) -> Option<Statement> {
-    if matches!(
-        statements.as_slice(),
-        [_] | [
-            _,
-            Node {
-                kind: NodeKind::Return { value: None },
-                ..
-            }
-        ]
-    ) {
-        match statements.remove(0) {
-            Node {
-                kind:
-                    NodeKind::Statement {
-                        statement,
-                        into: None,
+/// The statements `nodes` run in order. Each node is a `DELETE`, `UPDATE` or
+/// `INSERT`, bare or as a `RETURN QUERY`, maybe followed by a guard `IF NOT
+/// FOUND THEN ...`, which raises or returns where a caller running the same
+/// write would too, or a `RETURN QUERY` of a query, consecutive ones read as
+/// the `UNION ALL` of them. One `SELECT ... INTO` or write `RETURNING ...
+/// INTO` assigns `target`, which the last node returns. A last bare `RETURN`
+/// ends them, and a `RETURN` of one scalar subquery may stand alone.
+fn ran_by(nodes: impl Iterator<Item = Node>, target: Option<&str>) -> Option<Vec<Statement>> {
+    let mut ran: Vec<Statement> = Vec::new();
+    let mut returning = false;
+    let mut assigned = false;
+    let mut nodes = nodes.peekable();
+    while let Some(node) = nodes.next() {
+        let last = nodes.peek().is_none();
+        let written = match node.kind {
+            NodeKind::Statement { statement, into } => {
+                let written = writes(&statement);
+                match into {
+                    None if written => {}
+                    Some(into)
+                        if !assigned
+                            && (written || matches!(*statement, Statement::Query(_)))
+                            && names_target(&into, target) =>
+                    {
+                        assigned = true;
                     }
-                    | NodeKind::ReturnQuery(ReturnQuery::Query(statement)),
-                ..
-            } if matches!(
-                statement.as_ref(),
-                Statement::Delete(_) | Statement::Update(_) | Statement::Insert(_)
-            ) =>
-            {
-                return Some(*statement);
+                    _ => return None,
+                }
+                ran.push(*statement);
+                returning = false;
+                written
             }
-            node => statements.insert(0, node),
+            NodeKind::ReturnQuery(ReturnQuery::Query(statement)) => {
+                let written = writes(&statement);
+                let statement = match (*statement, returning) {
+                    (Statement::Query(query), true) => match ran.pop() {
+                        Some(Statement::Query(previous)) => {
+                            Statement::Query(union_all(previous, query))
+                        }
+                        _ => return None,
+                    },
+                    (statement, _) => statement,
+                };
+                ran.push(statement);
+                returning = !written;
+                written
+            }
+            NodeKind::Return { value: None } if last => false,
+            NodeKind::Return { value: Some(value) } if last => {
+                match selected_expression(&value)? {
+                    Expr::Identifier(name)
+                        if assigned
+                            && target
+                                == Some(&normalize_identifier(
+                                    &name.value,
+                                    name.quote_style.is_some(),
+                                )) => {}
+                    Expr::Subquery(query) if ran.is_empty() => {
+                        ran.push(Statement::Query(query.clone()));
+                    }
+                    _ => return None,
+                }
+                false
+            }
+            _ => return None,
+        };
+        if written
+            && nodes
+                .peek()
+                .and_then(guard)
+                .is_some_and(|condition| not_found(&condition))
+        {
+            nodes.next();
         }
     }
-    returned_by(statements).map(|query| Statement::Query(Box::new(query)))
+    (!ran.is_empty()).then_some(ran)
+}
+
+/// Whether `statement` is a `DELETE`, an `UPDATE` or an `INSERT`.
+fn writes(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::Delete(_) | Statement::Update(_) | Statement::Insert(_)
+    )
+}
+
+/// Whether `into` assigns only the variable `target`, as a whole.
+fn names_target(into: &IntoTargets, target: Option<&str>) -> bool {
+    let [Target { name, indirection }] = into.targets.as_slice() else {
+        return false;
+    };
+    let [part] = name.0.as_slice() else {
+        return false;
+    };
+    indirection.is_empty()
+        && part.as_ident().is_some_and(|name| {
+            target
+                == Some(&normalize_identifier(
+                    &name.value,
+                    name.quote_style.is_some(),
+                ))
+        })
+}
+
+/// Whether `condition` is `NOT FOUND`.
+fn not_found(condition: &Expr) -> bool {
+    let Expr::UnaryOp {
+        op: UnaryOperator::Not,
+        expr,
+    } = condition
+    else {
+        return false;
+    };
+    matches!(expr.as_ref(), Expr::Identifier(name)
+        if normalize_identifier(&name.value, name.quote_style.is_some()) == "found")
 }
 
 /// The condition of `node`, when it is an `IF` whose one branch raises an
@@ -175,85 +254,25 @@ fn guard(node: &Node) -> Option<Expr> {
         .flatten()
 }
 
-/// The query whose rows `statements` return, `RETURN QUERY` statements
-/// maybe followed by a bare `RETURN` or a `RETURN` of one scalar subquery.
-fn returned_by(mut statements: Vec<Node>) -> Option<Query> {
-    if let [
-        Node {
-            kind: NodeKind::Return { value: Some(value) },
-            ..
-        },
-    ] = statements.as_slice()
-    {
-        let Expr::Subquery(query) = selected_expression(value)? else {
-            return None;
-        };
-        return Some(query.as_ref().clone());
-    }
-    if let Some(Node {
-        kind: NodeKind::Return { value: None },
-        ..
-    }) = statements.last()
-    {
-        statements.pop();
-    }
-    statements
-        .into_iter()
-        .map(|node| match node.kind {
-            NodeKind::ReturnQuery(ReturnQuery::Query(statement)) => match *statement {
-                Statement::Query(query) => Some(query),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()?
-        .into_iter()
-        .reduce(|left, right| {
-            Box::new(Query {
-                with: None,
-                body: Box::new(SetExpr::SetOperation {
-                    op: SetOperator::Union,
-                    set_quantifier: SetQuantifier::All,
-                    left: Box::new(SetExpr::Query(left)),
-                    right: Box::new(SetExpr::Query(right)),
-                }),
-                order_by: None,
-                limit_clause: None,
-                fetch: None,
-                locks: Vec::new(),
-                for_clause: None,
-                settings: None,
-                format_clause: None,
-                pipe_operators: Vec::new(),
-            })
-        })
-        .map(|query| *query)
-}
-
-/// The query of `statements` when they are a `SELECT ... INTO` followed by
-/// a `RETURN` of a name, which reads nothing.
-fn selected_into(statements: &[Node]) -> Option<Query> {
-    let [
-        Node {
-            kind:
-                NodeKind::Statement {
-                    statement,
-                    into: Some(_),
-                },
-            ..
-        },
-        Node {
-            kind: NodeKind::Return { value: Some(value) },
-            ..
-        },
-    ] = statements
-    else {
-        return None;
-    };
-    match (statement.as_ref(), selected_expression(value)) {
-        (Statement::Query(query), Some(Expr::Identifier(_))) => Some(query.as_ref().clone()),
-        _ => None,
-    }
+/// The query returning the rows of `left` and then those of `right`.
+fn union_all(left: Box<Query>, right: Box<Query>) -> Box<Query> {
+    Box::new(Query {
+        with: None,
+        body: Box::new(SetExpr::SetOperation {
+            op: SetOperator::Union,
+            set_quantifier: SetQuantifier::All,
+            left: Box::new(SetExpr::Query(left)),
+            right: Box::new(SetExpr::Query(right)),
+        }),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: Vec::new(),
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: Vec::new(),
+    })
 }
 
 /// `node` with every name of a variable in `defaults` replaced by that
