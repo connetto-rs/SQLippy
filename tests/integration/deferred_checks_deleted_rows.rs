@@ -302,3 +302,69 @@ fn a_live_catalog_answers_the_deferral_of_its_triggers() {
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].contains("'parent_checked'"), "{found:?}");
 }
+
+#[test]
+fn an_unreadable_helper_body_surfaces_a_lookup_error() {
+    use std::sync::Arc;
+
+    use pg_diesel::{PgDieselDatabase, dialect::PostgresDialect};
+    use sql_traits::{errors::LookupError, structs::generic_db::GenericDBBuilder};
+
+    let (_container, catalog) = crate::live_catalog::catalog(
+        "public",
+        &format!(
+            "CREATE TABLE parents (id INT PRIMARY KEY);
+             CREATE TABLE children (parent_id INT PRIMARY KEY);
+             CREATE FUNCTION has_child(parent INT) RETURNS BOOLEAN LANGUAGE sql STABLE
+               BEGIN ATOMIC SELECT EXISTS (SELECT FROM children WHERE parent_id = parent); END;
+             CREATE FUNCTION check_parent() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN {} RETURN NULL; END $$;
+             {DEFERRED}",
+            raising("NOT has_child(NEW.id)")
+        ),
+    );
+    let mut builder = GenericDBBuilder::new("deferred".into(), PostgresDialect);
+    for (table, metadata) in catalog.tables_metadata() {
+        builder = builder
+            .add_table(Arc::new(table.clone()), metadata.clone())
+            .expect("tables stay distinct");
+        for column in table.columns(&catalog).expect("columns") {
+            let metadata = catalog
+                .column_metadata(column)
+                .expect("column metadata")
+                .clone();
+            builder = builder.add_column(Arc::new(column.clone()), metadata);
+        }
+        for index in table.unique_indices(&catalog).expect("unique indices") {
+            let metadata = catalog
+                .unique_index_metadata(index)
+                .expect("index metadata")
+                .clone();
+            builder = builder.add_unique_index(Arc::new(index.clone()), metadata);
+        }
+    }
+    for function in catalog.functions() {
+        let metadata = catalog
+            .function_metadata(function)
+            .expect("function metadata")
+            .clone();
+        let function = if function.name() == "has_child" {
+            function.clone().with_bound_definition(
+                "CREATE FUNCTION has_child(parent INT) RETURNS BOOLEAN LANGUAGE sql BEGIN ATOMIC SELECT"
+                    .into(),
+            )
+        } else {
+            function.clone()
+        };
+        builder = builder.add_function(Arc::new(function), metadata);
+    }
+    for trigger in catalog.triggers() {
+        builder = builder.add_trigger(Arc::new(trigger.clone()), ());
+    }
+    let database: PgDieselDatabase = builder.into();
+    let constrainer: GenericConstrainer<PgDieselDatabase> =
+        DeferredCheckDeletedRow::default().into();
+    assert!(matches!(
+        constrainer.validate_schema(&database),
+        Err(Error::Lookup(LookupError::FunctionBodyUnparsable { .. }))
+    ));
+}
