@@ -1,7 +1,7 @@
 //! Whether a filter implies the conditions of row-level-security policies,
 //! compared as written once the columns each tests go by one name.
 
-use std::{borrow::Cow, convert::Infallible, mem, ops::ControlFlow, slice};
+use std::{borrow::Cow, convert::Infallible, iter, mem, ops::ControlFlow, ptr, slice};
 
 use sql_traits::{
     errors::LookupError, structs::RowGate, traits::DatabaseLike,
@@ -9,9 +9,9 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, Distinct, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, Ident, InTarget, Query, Select, SelectItem, SetExpr,
-    TableAlias, TableFactor, Value, Visit, VisitMut, Visitor, VisitorMut,
-    WildcardAdditionalOptions, visit_expressions, visit_expressions_mut,
+    FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, InTarget, ObjectName, Query,
+    Select, SelectItem, SetExpr, TableAlias, TableFactor, Value, Visit, VisitMut, Visitor,
+    VisitorMut, WildcardAdditionalOptions, visit_expressions, visit_expressions_mut,
 };
 
 use crate::rules::{
@@ -71,6 +71,12 @@ pub(crate) trait Columns {
 
     /// Whether the filter column `column` is one of `tested`.
     fn tests(&self, column: &Expr, tested: &Self::Tested) -> bool;
+
+    /// The stored table `name` names in a subquery of a condition, `None`
+    /// for any other relation, whose columns are unknown.
+    fn relation(&self, _name: &ObjectName) -> Option<StoredRelation> {
+        None
+    }
 
     /// Whether `clause` alone meets every condition.
     fn settles(&self, _clause: &Expr) -> bool {
@@ -138,11 +144,15 @@ impl<'e, T> Condition<'e, T> {
         };
         Self {
             original: condition,
-            renamed: renamed(condition, |column| {
-                stored_name(column)
-                    .and_then(|name| columns.rename(name))
-                    .map(Term::Column)
-            }),
+            renamed: renamed(
+                condition,
+                |column| {
+                    stored_name(column)
+                        .and_then(|name| columns.rename(name))
+                        .map(Term::Column)
+                },
+                |name| columns.relation(name),
+            ),
             membership: membership(condition).and_then(|(row, members)| {
                 let operands = row
                     .iter()
@@ -183,9 +193,11 @@ pub(crate) fn clause_implies<C: Columns>(
         return Ok(true);
     }
     if let Some(stated) = &condition.renamed
-        && renamed(clause, |column| {
-            stored_name(column).map(|name| Term::Column(name.into_owned()))
-        })
+        && renamed(
+            clause,
+            |column| stored_name(column).map(|name| Term::Column(name.into_owned())),
+            |name| columns.relation(name),
+        )
         .as_ref()
             == Some(stated)
     {
@@ -361,80 +373,39 @@ pub(crate) fn parameter_ordinal(expression: &Expr) -> Option<usize> {
     digits.parse::<usize>().ok()?.checked_sub(1)
 }
 
-/// `expression` with every column reference named, quoted, by the column
-/// `rename` resolves it to and every parameter reference written as `$n`,
-/// and every scalar subquery that reads no relation, such as
-/// `(SELECT auth.uid())`, replaced by the value it projects. `rename` is
-/// called on the references of `expression` itself. `None` when `rename`
-/// resolves a reference to nothing or a subquery reads a column, which may
-/// resolve to another table's.
-pub(crate) fn renamed(expression: &Expr, rename: impl Fn(&Expr) -> Option<Term>) -> Option<Expr> {
-    /// Resolves each reference, in the order [`Renamer`] meets them.
-    struct Resolver<F> {
-        rename: F,
-        depth: usize,
-        resolved: Vec<Expr>,
-    }
+/// A stored table a subquery of a condition reads, as [`renamed`] names it.
+pub(crate) struct StoredRelation {
+    /// The schema-qualified name the table resolves to.
+    pub(crate) name: ObjectName,
+    /// The stored names of the table's columns.
+    pub(crate) columns: Vec<String>,
+}
 
-    impl<F: Fn(&Expr) -> Option<Term>> Visitor for Resolver<F> {
-        type Break = ();
-
-        fn pre_visit_query(&mut self, _query: &Query) -> ControlFlow<()> {
-            self.depth += 1;
-            ControlFlow::Continue(())
-        }
-
-        fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<()> {
-            self.depth -= 1;
-            ControlFlow::Continue(())
-        }
-
-        fn post_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
-            if !is_column_reference(expression) {
-                return ControlFlow::Continue(());
-            }
-            let resolved = match (self.rename)(expression) {
-                Some(Term::Column(name)) if self.depth == 0 => {
-                    Expr::Identifier(Ident::with_quote('"', name))
-                }
-                Some(Term::Parameter(ordinal)) => parameter(ordinal),
-                _ => return ControlFlow::Break(()),
-            };
-            self.resolved.push(resolved);
-            ControlFlow::Continue(())
-        }
-    }
-
-    /// Writes the resolved references and inlines the scalar subqueries.
-    struct Renamer<I> {
-        resolved: I,
-    }
-
-    impl<I: Iterator<Item = Expr>> VisitorMut for Renamer<I> {
-        type Break = Infallible;
-
-        fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<Infallible> {
-            if let Expr::Subquery(query) = expression
-                && sole_item(query).is_some()
-                && let SetExpr::Select(select) = query.body.as_mut()
-                && let [
-                    SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. },
-                ] = select.projection.as_mut_slice()
-            {
-                *expression = mem::replace(value, Expr::Value(Value::Null.into()));
-            } else if is_column_reference(expression)
-                && let Some(resolved) = self.resolved.next()
-            {
-                *expression = resolved;
-            }
-            ControlFlow::Continue(())
-        }
-    }
-
+/// `expression` with every column reference of the row it tests named,
+/// quoted, by the column `rename` resolves it to, every parameter reference
+/// written as `$n`, and every scalar subquery that reads no relation, such
+/// as `(SELECT auth.uid())`, replaced by the value it projects. A subquery
+/// reading stored tables, which `relation` resolves, reads each under its
+/// resolved name and the alias `"depth.position"`, names their columns
+/// through that alias and the columns of the tested row through `"0"`, so
+/// that two spellings of one subquery rename alike and renaming the result
+/// again yields it unchanged. `rename` is called on the references resolving
+/// to no relation of a subquery. `None` when `rename` resolves a reference
+/// to nothing, a reference is ambiguous, or a reference other than a
+/// parameter is read inside a subquery that reads anything but stored
+/// tables or may name its output where a column is expected.
+pub(crate) fn renamed(
+    expression: &Expr,
+    rename: impl Fn(&Expr) -> Option<Term>,
+    relation: impl Fn(&ObjectName) -> Option<StoredRelation>,
+) -> Option<Expr> {
     let mut resolver = Resolver {
         rename,
-        depth: 0,
+        relation,
+        scopes: Vec::new(),
+        inlining: None,
         resolved: Vec::new(),
+        relations: Vec::new(),
     };
     if walk(expression, &mut resolver).is_break() {
         return None;
@@ -444,9 +415,279 @@ pub(crate) fn renamed(expression: &Expr, rename: impl Fn(&Expr) -> Option<Term>)
         &mut renamed,
         &mut Renamer {
             resolved: resolver.resolved.into_iter(),
+            relations: resolver.relations.into_iter(),
         },
     );
     Some(renamed)
+}
+
+/// A query around a node of a renamed condition.
+struct Scope {
+    /// The stored tables the query reads, each under the name its references
+    /// qualify it by, or `None` when a column read inside does not resolve.
+    bound: Option<Vec<Bound>>,
+    /// How many of `bound` the walk has met.
+    met: usize,
+    /// Whether the query is a scalar subquery reading nothing, which renames
+    /// to the value it projects.
+    inlined: bool,
+}
+
+/// A stored table a subquery reads.
+struct Bound {
+    /// The alias, or the table's own name without its schema, normalized.
+    name: String,
+    relation: StoredRelation,
+    /// The alias the renamed subquery reads the table under.
+    alias: Ident,
+}
+
+/// The stored tables `query`, nested `depth` queries deep, reads in its
+/// `FROM` list, when it reads nothing else, has no `WITH`, and names no
+/// output column where PostgreSQL also looks for a column, as `ORDER BY`,
+/// `GROUP BY` and `DISTINCT ON` do.
+fn bound(
+    query: &Query,
+    depth: usize,
+    relation: impl Fn(&ObjectName) -> Option<StoredRelation>,
+) -> Option<Vec<Bound>> {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    if query.with.is_some()
+        || query.order_by.is_some()
+        || !query.pipe_operators.is_empty()
+        || matches!(select.distinct, Some(Distinct::On(_)))
+        || !matches!(&select.group_by, GroupByExpr::Expressions(grouped, _) if grouped.is_empty())
+        || !select.lateral_views.is_empty()
+        || select
+            .projection
+            .iter()
+            .any(|item| matches!(item, SelectItem::QualifiedWildcard(..)))
+    {
+        return None;
+    }
+    let mut bound = Vec::new();
+    for from in &select.from {
+        for factor in iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation))
+        {
+            let TableFactor::Table {
+                name,
+                alias,
+                args: None,
+                with_hints,
+                version: None,
+                with_ordinality: false,
+                partitions,
+                json_path: None,
+                sample: None,
+                index_directives,
+                ..
+            } = factor
+            else {
+                return None;
+            };
+            if !with_hints.is_empty()
+                || !partitions.is_empty()
+                || !index_directives.is_empty()
+                || alias
+                    .as_ref()
+                    .is_some_and(|alias| !alias.columns.is_empty())
+            {
+                return None;
+            }
+            let named = match alias {
+                Some(alias) => &alias.name,
+                None => name.0.last()?.as_ident()?,
+            };
+            bound.push(Bound {
+                name: normalize_identifier(&named.value, named.quote_style.is_some()).into_owned(),
+                relation: relation(name)?,
+                alias: Ident::with_quote('"', format!("{depth}.{}", bound.len())),
+            });
+        }
+    }
+    Some(bound)
+}
+
+/// Resolves each reference and each relation of a subquery, in the order
+/// [`Renamer`] meets them.
+struct Resolver<F, R> {
+    rename: F,
+    relation: R,
+    /// The queries around the walked node, innermost last.
+    scopes: Vec<Scope>,
+    /// The scalar subquery about to be walked, when it reads nothing and
+    /// renames to the value it projects.
+    inlining: Option<*const Query>,
+    resolved: Vec<Expr>,
+    /// The name and alias each table factor renames to, `None` for one left
+    /// as written.
+    relations: Vec<Option<(ObjectName, Ident)>>,
+}
+
+impl<F: Fn(&Expr) -> Option<Term>, R: Fn(&ObjectName) -> Option<StoredRelation>> Resolver<F, R> {
+    /// `reference`, written as `parts`, as the renamed condition writes it,
+    /// resolved first against the tables of the innermost query and last
+    /// against the tested row.
+    fn resolve(&self, reference: &Expr, parts: &[Ident]) -> Option<Expr> {
+        if self.scopes.is_empty() {
+            return self.outer(reference);
+        }
+        let normalized = |name: &Ident| {
+            normalize_identifier(&name.value, name.quote_style.is_some()).into_owned()
+        };
+        let (qualifier, column) = match parts {
+            [column] => (None, normalized(column)),
+            [qualifier, column] => (Some(normalized(qualifier)), normalized(column)),
+            _ => return None,
+        };
+        for scope in self.scopes.iter().rev() {
+            let Some(bound) = &scope.bound else {
+                return match (self.rename)(reference)? {
+                    Term::Parameter(ordinal) => Some(parameter(ordinal)),
+                    Term::Column(_) => None,
+                };
+            };
+            let mut found = bound.iter().filter(|bound| match &qualifier {
+                Some(qualifier) => bound.name == *qualifier,
+                None => bound.relation.columns.contains(&column),
+            });
+            if let Some(bound) = found.next() {
+                return (found.next().is_none() && bound.relation.columns.contains(&column)).then(
+                    || {
+                        Expr::CompoundIdentifier(vec![
+                            bound.alias.clone(),
+                            Ident::with_quote('"', column),
+                        ])
+                    },
+                );
+            }
+        }
+        self.outer(reference)
+    }
+
+    /// How many queries around the walked node remain once the scalar
+    /// subqueries are inlined.
+    fn depth(&self) -> usize {
+        self.scopes.iter().filter(|scope| !scope.inlined).count()
+    }
+
+    /// `reference`, resolving to no relation of a subquery, as `rename`
+    /// resolves it, qualified by `"0"` inside a subquery.
+    fn outer(&self, reference: &Expr) -> Option<Expr> {
+        Some(match (self.rename)(reference)? {
+            Term::Column(name) if self.depth() == 0 => {
+                Expr::Identifier(Ident::with_quote('"', name))
+            }
+            Term::Column(name) => Expr::CompoundIdentifier(vec![
+                Ident::with_quote('"', "0"),
+                Ident::with_quote('"', name),
+            ]),
+            Term::Parameter(ordinal) => parameter(ordinal),
+        })
+    }
+}
+
+impl<F: Fn(&Expr) -> Option<Term>, R: Fn(&ObjectName) -> Option<StoredRelation>> Visitor
+    for Resolver<F, R>
+{
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
+        if let Expr::Subquery(query) = expression
+            && sole_item(query).is_some()
+        {
+            self.inlining = Some(ptr::from_ref(query.as_ref()));
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+        let inlined = self
+            .inlining
+            .is_some_and(|inlining| ptr::eq(inlining, query));
+        let depth = self.depth() + usize::from(!inlined);
+        let bound = bound(query, depth, &self.relation);
+        self.scopes.push(Scope {
+            bound,
+            met: 0,
+            inlined,
+        });
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<()> {
+        self.scopes.pop();
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_table_factor(&mut self, _factor: &TableFactor) -> ControlFlow<()> {
+        let renamed = self.scopes.last_mut().and_then(|scope| {
+            let bound = scope.bound.as_ref()?.get(scope.met)?;
+            scope.met += 1;
+            Some((bound.relation.name.clone(), bound.alias.clone()))
+        });
+        self.relations.push(renamed);
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
+        let parts = match expression {
+            Expr::Identifier(column) => slice::from_ref(column),
+            Expr::CompoundIdentifier(parts) => parts.as_slice(),
+            _ => return ControlFlow::Continue(()),
+        };
+        let Some(resolved) = self.resolve(expression, parts) else {
+            return ControlFlow::Break(());
+        };
+        self.resolved.push(resolved);
+        ControlFlow::Continue(())
+    }
+}
+
+/// Writes the resolved references and relations and inlines the scalar
+/// subqueries.
+struct Renamer<I, T> {
+    resolved: I,
+    relations: T,
+}
+
+impl<I: Iterator<Item = Expr>, T: Iterator<Item = Option<(ObjectName, Ident)>>> VisitorMut
+    for Renamer<I, T>
+{
+    type Break = Infallible;
+
+    fn pre_visit_table_factor(&mut self, factor: &mut TableFactor) -> ControlFlow<Infallible> {
+        if let Some(Some((stored, renamed))) = self.relations.next()
+            && let TableFactor::Table { name, alias, .. } = factor
+        {
+            *name = stored;
+            *alias = Some(TableAlias {
+                explicit: true,
+                name: renamed,
+                columns: Vec::new(),
+                at: None,
+            });
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<Infallible> {
+        if let Expr::Subquery(query) = expression
+            && sole_item(query).is_some()
+            && let SetExpr::Select(select) = query.body.as_mut()
+            && let [SelectItem::UnnamedExpr(value) | SelectItem::ExprWithAlias { expr: value, .. }] =
+                select.projection.as_mut_slice()
+        {
+            *expression = mem::replace(value, Expr::Value(Value::Null.into()));
+        } else if is_column_reference(expression)
+            && let Some(resolved) = self.resolved.next()
+        {
+            *expression = resolved;
+        }
+        ControlFlow::Continue(())
+    }
 }
 
 /// Whether `row`, tested against a set by a clause, holds the values each
