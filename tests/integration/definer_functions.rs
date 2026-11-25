@@ -5594,6 +5594,90 @@ fn a_policy_helper_parameter_takes_the_literal_the_policy_passes() {
 }
 
 #[test]
+fn a_filter_meets_a_policy_arm_for_each_value_its_row_may_hold() {
+    let reported = |kinds: &str, kind_column: &str, filter: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "CREATE ROLE app NOLOGIN;
+                 CREATE SCHEMA authz;
+                 CREATE TYPE authz.kind AS ENUM ({kinds});
+                 CREATE TABLE public.resources (
+                   id INT PRIMARY KEY, organization_id INT NOT NULL, owner_id INT NOT NULL,
+                   {kind_column}
+                 );
+                 ALTER TABLE public.resources ENABLE ROW LEVEL SECURITY;
+                 GRANT SELECT ON public.resources TO app;
+                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+                 CREATE FUNCTION authz.caller_id() RETURNS INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT 1 $$;
+                 CREATE FUNCTION authz.organizations() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.organization_id FROM public.resources resource
+                     WHERE resource.owner_id = authz.caller_id() AND resource.kind = 'organization' $$;
+                 CREATE FUNCTION authz.folders() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource
+                     WHERE resource.owner_id = authz.caller_id() AND resource.kind = 'folder' $$;
+                 CREATE POLICY readable_resources ON public.resources FOR SELECT TO app
+                   USING (organization_id IN (SELECT authz.organizations())
+                     OR id IN (SELECT authz.folders()));
+                 CREATE FUNCTION authz.owned() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource WHERE {filter} $$;"
+            ),
+        )
+    };
+    let two = "'organization', 'folder'";
+    let three = "'organization', 'folder', 'project'";
+    let required = "kind authz.kind NOT NULL";
+    let owned = "resource.owner_id = authz.caller_id()";
+    let listed = format!("{owned} AND resource.kind IN ('organization', 'folder')");
+    let either =
+        format!("{owned} AND (resource.kind = 'organization' OR resource.kind = 'folder')");
+    let arms = format!(
+        "(resource.kind = 'organization' AND {owned}) OR (resource.kind = 'folder' AND {owned})"
+    );
+    for filter in [owned, &listed, &either, &arms] {
+        assert_eq!(
+            reported(two, required, filter),
+            Vec::<String>::new(),
+            "{filter}"
+        );
+    }
+    for filter in [&listed, &either, &arms] {
+        assert_eq!(
+            reported(three, required, filter),
+            Vec::<String>::new(),
+            "{filter}"
+        );
+    }
+    for (kinds, kind_column, filter) in [
+        (three, required, owned),
+        (two, "kind authz.kind", owned),
+        (two, "kind TEXT NOT NULL", owned),
+        (two, required, "resource.organization_id > 0"),
+        (
+            three,
+            required,
+            &format!("{owned} AND resource.kind IN ('organization', 'project')"),
+        ),
+        (
+            two,
+            required,
+            &format!("(resource.kind = 'organization' AND {owned}) OR resource.kind = 'folder'"),
+        ),
+    ] {
+        assert_eq!(
+            reported(kinds, kind_column, filter),
+            ["owned()"],
+            "{kinds} {kind_column} {filter}"
+        );
+    }
+}
+
+#[test]
 fn a_helper_parameter_takes_the_argument_its_caller_passes() {
     let organization_ladder = nested(
         Deployment::default(),

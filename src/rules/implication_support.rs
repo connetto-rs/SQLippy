@@ -295,6 +295,18 @@ pub(crate) fn clause_implies<C: Columns>(
     Ok(false)
 }
 
+/// The arms of which every row `condition` admits meets one, those of an
+/// `OR` or `x = v` for each value of a list `condition` tests `x` against,
+/// when it is either.
+pub(crate) fn alternatives(condition: &Expr) -> Option<Vec<Expr>> {
+    let condition = unnested(condition);
+    let arms = disjuncts(condition);
+    if arms.len() > 1 {
+        return Some(arms.into_iter().cloned().collect());
+    }
+    listed(condition).map(|(operand, values)| equalities(operand, values))
+}
+
 /// The operand `expression` tests and the values it lists, when it is
 /// `x IN (v, ...)` or `x = ANY (ARRAY[v, ...])`, either of which holds,
 /// fails or is `NULL` where the `OR` of `x = v` over the values does.

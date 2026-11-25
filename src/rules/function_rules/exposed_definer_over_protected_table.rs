@@ -18,8 +18,8 @@ use sql_traits::{
         IdentifierCase, OperandType, RowStatement, RowVersion, TriggerEnablement, WrittenCall,
     },
     traits::{
-        ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, PolicyLike, Relation, TableLike,
-        TriggerLike, UserDefinedTypeLike,
+        ColumnLike, DataTypeLike, DatabaseLike, EnumerationKind, ForeignKeyLike, FunctionLike,
+        PolicyLike, Relation, TableLike, TriggerLike, UserDefinedTypeLike,
     },
     utils::{identifier_resolution::normalize_identifier, normalize_postgres_type},
 };
@@ -56,9 +56,9 @@ use crate::{
         },
         grant_support::{function_callers, granted_callers, schema_of},
         implication_support::{
-            Columns, Condition, ParameterValues, StoredRelation, Term, admits, clause_implies,
-            keeps_existence, left_to_prove, membership, parameter, parameter_ordinal, renamed,
-            witnessed,
+            Columns, Condition, ParameterValues, StoredRelation, Term, admits, alternatives,
+            clause_implies, keeps_existence, left_to_prove, membership, parameter,
+            parameter_ordinal, renamed, witnessed,
         },
         inline_support::selected_expression,
         key_support::{binds, equality_keys, key_pairs, no_inheritors},
@@ -137,7 +137,10 @@ use super::plpgsql_ambiguous_name::collision;
 /// value. Its projection and a positive `LIMIT` of an `EXISTS` find nothing
 /// else.
 /// A filter whose `OR` arms each imply another permissive policy counts too,
-/// since PostgreSQL admits a row any permissive policy admits.
+/// since PostgreSQL admits a row any permissive policy admits. So does one
+/// whose rows the policies admit case by case, each arm of an `OR` or list
+/// it states, or each label of a `NOT NULL` enum column a policy helper's
+/// rows are told apart by, meeting a policy alone.
 /// A set read through an input parameter of an enum type, such as
 /// `resources_with(min_role)`, has to lie within the policy's for every
 /// label of the enum. It has to for `NULL`
@@ -2021,39 +2024,151 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     drawn.extend(self.implied(table, condition, &conditions)?);
                 }
                 conditions.extend(drawn);
-                let witnessed = self.witnessed_sets(
-                    &filters,
-                    owners,
-                    table,
-                    relation,
-                    &equalities,
-                    &conditions,
-                )?;
-                conditions.extend(witnessed);
-                if let Some(membership) = self.lineage.membership(select, |column| {
-                    match term(&resolver, column, relation, &equalities)? {
-                        Term::Column(column) => Some(column),
-                        Term::Parameter(_) => None,
-                    }
-                }) {
-                    conditions.push(membership);
-                }
-                let filter = conjunction(conditions);
-                let rename = |reference: &Expr| term(&resolver, reference, relation, &equalities);
-                let admitted = self
-                    .admits_relation(select, table, relation, &filter, locked, rename)?
-                    && match inserted {
-                        Some(insertion) => {
-                            self.admits_inserted(insertion, select, &filter, rename)?
+                let admits =
+                    |mut conditions: Vec<Expr>| -> Result<bool, LookupError> {
+                        let witnessed = self.witnessed_sets(
+                            &filters,
+                            owners,
+                            table,
+                            relation,
+                            &equalities,
+                            &conditions,
+                        )?;
+                        conditions.extend(witnessed);
+                        if let Some(membership) = self.lineage.membership(select, |column| {
+                            match term(&resolver, column, relation, &equalities)? {
+                                Term::Column(column) => Some(column),
+                                Term::Parameter(_) => None,
+                            }
+                        }) {
+                            conditions.push(membership);
                         }
-                        None => true,
+                        let filter = conjunction(conditions);
+                        let rename =
+                            |reference: &Expr| term(&resolver, reference, relation, &equalities);
+                        Ok(self
+                            .admits_relation(select, table, relation, &filter, locked, rename)?
+                            && match inserted {
+                                Some(insertion) => {
+                                    self.admits_inserted(insertion, select, &filter, rename)?
+                                }
+                                None => true,
+                            })
                     };
-                if !admitted {
+                if !admits(conditions.clone())?
+                    && !self.admits_by_cases(table, &conditions, admits)?
+                {
                     return Ok(false);
                 }
             }
         }
         Ok(true)
+    }
+
+    /// Whether `admits` holds of every case of one split of the rows of
+    /// `table` meeting `conditions`, the cases together holding every such
+    /// row. One split takes the arms of an `OR` or list among `conditions`,
+    /// another the labels of a `NOT NULL` enum column an exhaustive arm of a
+    /// policy helper over `table` fixes, so that a row meets the arm for its
+    /// own label.
+    fn admits_by_cases(
+        &self,
+        table: &'a DB::Table,
+        conditions: &[Expr],
+        admits: impl Fn(Vec<Expr>) -> Result<bool, LookupError>,
+    ) -> Result<bool, LookupError> {
+        let mut splits = Vec::new();
+        for (index, condition) in conditions.iter().enumerate() {
+            let Some(arms) = alternatives(condition) else {
+                continue;
+            };
+            splits.push(
+                arms.iter()
+                    .map(|arm| {
+                        let mut case = conditions.to_vec();
+                        case.remove(index);
+                        case.extend(conjuncts(arm).into_iter().cloned());
+                        case
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        for (column, labels) in self.label_columns(table, conditions)? {
+            splits.push(
+                labels
+                    .into_iter()
+                    .map(|label| {
+                        let mut case = conditions.to_vec();
+                        case.push(Expr::BinaryOp {
+                            left: Box::new(Expr::Identifier(Ident::with_quote('"', &column))),
+                            op: BinaryOperator::Eq,
+                            right: Box::new(Expr::Value(Value::SingleQuotedString(label).into())),
+                        });
+                        case
+                    })
+                    .collect(),
+            );
+        }
+        'splits: for cases in splits {
+            for case in cases {
+                if !admits(case)? {
+                    continue 'splits;
+                }
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Each `NOT NULL` column of `table`, of an enum type, that a condition
+    /// of an exhaustive arm of a policy helper over `table` fixes and none of
+    /// `conditions` does, with the labels of its type.
+    fn label_columns(
+        &self,
+        table: &'a DB::Table,
+        conditions: &[Expr],
+    ) -> Result<Vec<(String, Vec<String>)>, LookupError> {
+        let database = self.body.confinement.database;
+        let mut columns: Vec<(String, Vec<String>)> = Vec::new();
+        for set in self.policy_sets(table)? {
+            for arm in &set.arms.arms {
+                if !arm.exhaustive || arm.drawn.table != table {
+                    continue;
+                }
+                for condition in arm.drawn.conditions.iter().chain(&arm.drawn.bound) {
+                    let Some((name, _)) = fixed_by(condition) else {
+                        continue;
+                    };
+                    if columns.iter().any(|(held, _)| *held == name)
+                        || conditions
+                            .iter()
+                            .any(|stated| fixed_by(stated).is_some_and(|(fixed, _)| fixed == name))
+                    {
+                        continue;
+                    }
+                    for column in table.columns(database)? {
+                        if column.stored_column_name() != name || column.is_nullable(database)? {
+                            continue;
+                        }
+                        let declared = column.data_type(database);
+                        let data_type = declared.base_type(database).unwrap_or(declared);
+                        if let Some(enumeration) = data_type
+                            .enumeration(database)
+                            .filter(|enumeration| enumeration.kind() == EnumerationKind::Enum)
+                        {
+                            columns.push((
+                                name.clone().into_owned(),
+                                enumeration
+                                    .into_members()
+                                    .map(|member| member.label().to_owned())
+                                    .collect(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(columns)
     }
 
     /// Whether every caller may read, alike, the rows of `table`, read as
