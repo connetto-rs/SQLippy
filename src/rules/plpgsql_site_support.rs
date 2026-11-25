@@ -110,7 +110,7 @@ pub(crate) fn evaluated_sites<DB: DatabaseLike>(
 
 /// Names the clause a condition site of `role` belongs to, `None` for a site
 /// whose role is no condition.
-const fn condition_keyword(role: PlPgSqlSiteRole) -> Option<&'static str> {
+pub(crate) const fn condition_keyword(role: PlPgSqlSiteRole) -> Option<&'static str> {
     match role {
         PlPgSqlSiteRole::IfCondition { .. } => Some("IF"),
         PlPgSqlSiteRole::ElsifCondition { .. } => Some("ELSIF"),
@@ -130,7 +130,7 @@ const fn condition_keyword(role: PlPgSqlSiteRole) -> Option<&'static str> {
 
 /// The expression `query`, the `SELECT` PL/pgSQL evaluates an expression
 /// as, selects alone.
-fn selected(query: &Query) -> Option<&Expr> {
+pub(crate) fn selected(query: &Query) -> Option<&Expr> {
     let SetExpr::Select(select) = &*query.body else {
         return None;
     };

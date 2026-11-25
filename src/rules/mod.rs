@@ -110,6 +110,8 @@ pub use query_rules::*;
 mod script_rules;
 pub use script_rules::*;
 mod authority_support;
+mod boolean_form_support;
+mod clause_support;
 mod clock_support;
 mod closed_set_support;
 mod consumed_key_support;
