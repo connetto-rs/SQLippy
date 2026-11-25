@@ -968,10 +968,15 @@ fn a_definer_update_whose_written_row_is_not_followed_is_reported() {
                     "SETOF BOOLEAN",
                     &format!("{HIDE_OWN} RETURNING (SELECT resource.hidden)"),
                 ),
+                writing_definer(
+                    "nested_target()",
+                    "UPDATE (SELECT * FROM public.resources) resource SET hidden = true
+                     WHERE owner = current_setting('app.user_id', true)",
+                ),
             ]
             .concat(),
         ),
-        ["copied()", "echoed()", "paired()"]
+        ["copied()", "echoed()", "nested_target()", "paired()"]
     );
 }
 
