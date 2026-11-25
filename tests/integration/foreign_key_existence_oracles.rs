@@ -973,9 +973,12 @@ fn a_before_trigger_confining_the_key_to_readable_rows_is_clean() {
             "UPDATE",
             "",
         ),
-        ("RAISE EXCEPTION 'runs are closed';", "UPDATE", ""),
         (
-            "IF NEW.performed_by_id IS NULL THEN RETURN NEW; END IF; RAISE EXCEPTION 'performers are fixed';",
+            &format!(
+                "DECLARE note_row RECORD;
+                 BEGIN FOR note_row IN SELECT note FROM runs LOOP NULL; END LOOP; END;
+                 {NAMES_OTHER}"
+            ),
             "UPDATE",
             "",
         ),
@@ -1010,6 +1013,53 @@ fn a_before_trigger_confining_the_key_to_readable_rows_is_clean() {
             confined_runs("", NAMES_OTHER, events, "", unchecked_insert),
             expected,
             "{events}"
+        );
+    }
+}
+
+#[test]
+fn a_before_trigger_keeping_unchecked_rows_on_their_own_paths_is_clean() {
+    for (body, events, when) in [
+        ("RAISE EXCEPTION 'runs are closed';", "UPDATE", ""),
+        (
+            "IF NEW.performed_by_id IS NULL THEN RETURN NEW; END IF; RAISE EXCEPTION 'performers are fixed';",
+            "UPDATE",
+            "",
+        ),
+        (
+            "IF NEW.performed_by_id IS NULL THEN
+               IF NEW.note IS NULL THEN RETURN NEW; END IF;
+               RETURN NEW;
+             END IF;
+             RAISE EXCEPTION 'performers are fixed';",
+            "UPDATE",
+            "",
+        ),
+        (
+            "IF (NEW.performed_by_id IS NULL) THEN RETURN NEW; END IF;
+             IF NEW.performed_by_id = caller_id() THEN RETURN NEW; END IF;
+             RAISE EXCEPTION 'not the caller';",
+            "UPDATE",
+            "",
+        ),
+        (
+            "IF NEW.performed_by_id IS NULL AND NEW.note IS NULL THEN RETURN NEW; END IF;
+             IF NEW.performed_by_id = caller_id() THEN RETURN NEW; END IF;
+             RAISE EXCEPTION 'not the caller';",
+            "UPDATE",
+            "",
+        ),
+        (
+            "IF NOT NEW.performed_by_id IS NOT NULL THEN RETURN NEW; END IF;
+             RAISE EXCEPTION 'performers are fixed';",
+            "UPDATE",
+            "",
+        ),
+    ] {
+        assert_eq!(
+            confined_runs("", body, events, when, ""),
+            Vec::<String>::new(),
+            "{body}"
         );
     }
 }
@@ -1146,7 +1196,38 @@ fn a_before_trigger_reading_the_key_only_in_part_is_reported() {
         ),
         (
             "",
+            "IF NEW.performed_by_id = caller_id() AND NEW.performed_by_id > 0 THEN
+               RAISE EXCEPTION 'the caller';
+             END IF;",
+            "",
+            "",
+        ),
+        (
+            "",
+            "IF NEW.performed_by_id IS NULL OR NEW.note IS NULL THEN RETURN NEW; END IF;
+             RAISE EXCEPTION 'performers are fixed';",
+            "",
+            "",
+        ),
+        (
+            "",
+            "DECLARE new runs;
+             BEGIN
+               IF new.performed_by_id IS DISTINCT FROM caller_id() THEN RAISE EXCEPTION 'not the caller'; END IF;
+             END;",
+            "",
+            "",
+        ),
+        (
+            "",
             "IF NEW.performed_by_id IS DISTINCT FROM OLD.id THEN RAISE EXCEPTION 'not the run'; END IF;",
+            "",
+            "",
+        ),
+        (
+            "",
+            "IF NEW.performed_by_id IS NOT DISTINCT FROM NEW.performed_by_id THEN RETURN NEW; END IF;
+             RAISE EXCEPTION 'not the run';",
             "",
             "",
         ),
@@ -1176,6 +1257,23 @@ fn a_before_trigger_reading_the_key_only_in_part_is_reported() {
             confined_runs(header, body, "UPDATE", when, extra),
             ["runs.runs_performer"],
             "{header} {when} {body} {extra}"
+        );
+    }
+}
+
+#[test]
+fn a_before_trigger_writing_the_key_after_testing_it_is_reported() {
+    for write in [
+        "SELECT 2 INTO NEW.performed_by_id;",
+        "EXECUTE 'SELECT 1';",
+        "DECLARE performers CURSOR FOR SELECT 2;
+         BEGIN OPEN performers; FETCH performers INTO NEW.performed_by_id; END;",
+        "GET DIAGNOSTICS NEW.performed_by_id = ROW_COUNT;",
+    ] {
+        assert_eq!(
+            confined_runs("", &format!("{NAMES_OTHER} {write}"), "UPDATE", "", ""),
+            ["runs.runs_performer"],
+            "{write}"
         );
     }
 }
