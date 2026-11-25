@@ -441,6 +441,23 @@ fn a_plpgsql_definer_that_may_return_an_unconfined_row_is_reported() {
                        RETURN (SELECT count(*) FROM public.resources); END",
                 ),
                 plpgsql_definer(
+                    "counted_plus()",
+                    "BIGINT",
+                    "BEGIN RETURN (SELECT count(*) FROM public.resources) + 0; END",
+                ),
+                plpgsql_definer(
+                    "returned_update()",
+                    "SETOF INT",
+                    "BEGIN RETURN QUERY UPDATE public.resources
+                       SET organization_id = organization_id RETURNING id; END",
+                ),
+                plpgsql_definer(
+                    "updated_first()",
+                    "INT",
+                    "DECLARE owned_id INT; BEGIN UPDATE public.resources
+                       SET organization_id = organization_id; RETURN owned_id; END",
+                ),
+                plpgsql_definer(
                     "colliding(organization_id INT)",
                     "SETOF INT",
                     "BEGIN RETURN QUERY SELECT resource.id FROM public.resources resource
@@ -452,9 +469,12 @@ fn a_plpgsql_definer_that_may_return_an_unconfined_row_is_reported() {
         [
             "colliding(INT)",
             "counted_after()",
+            "counted_plus()",
             "defaulted()",
             "handled()",
-            "one_arm_open()"
+            "one_arm_open()",
+            "returned_update()",
+            "updated_first()"
         ]
     );
 }
