@@ -508,15 +508,33 @@ fn a_plpgsql_definer_whose_variable_or_guard_may_read_otherwise_is_reported() {
                        FROM public.resources resource WHERE resource.id > floor; END"
                         .to_owned(),
                 ),
+                definer(
+                    "elsif_guarded()",
+                    format!(
+                        "DECLARE {SIGNED_IN} BEGIN IF uid IS NULL THEN RETURN;
+                           ELSIF uid = '' THEN RETURN; END IF;
+                         RETURN QUERY {MEMBER_RESOURCES}; END"
+                    ),
+                ),
+                plpgsql_definer(
+                    "two_targets()",
+                    "INT",
+                    "DECLARE owned_id INT; other_id INT; BEGIN
+                     SELECT resource.id INTO owned_id FROM public.resources resource
+                     WHERE resource.organization_id IN (SELECT public.member_organizations());
+                     RETURN owned_id; END",
+                ),
             ]
             .concat()
         ),
         [
             "branched()",
+            "elsif_guarded()",
             "noticed()",
             "probed()",
             "reassigned()",
             "told()",
+            "two_targets()",
             "unconfined()"
         ]
     );
