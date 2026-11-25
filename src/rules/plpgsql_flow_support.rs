@@ -96,11 +96,19 @@ pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
 /// ends them, and a `RETURN` of one scalar subquery may stand alone.
 fn ran_by(nodes: impl Iterator<Item = Node>, target: Option<&str>) -> Option<Vec<Statement>> {
     let mut ran: Vec<Statement> = Vec::new();
-    let mut returning = false;
+    let mut returning = None;
     let mut assigned = false;
     let mut nodes = nodes.peekable();
     while let Some(node) = nodes.next() {
         let last = nodes.peek().is_none();
+        if !matches!(
+            &node.kind,
+            NodeKind::ReturnQuery(ReturnQuery::Query(statement))
+                if matches!(statement.as_ref(), Statement::Query(_))
+        ) && let Some(query) = returning.take()
+        {
+            ran.push(Statement::Query(query));
+        }
         let written = match node.kind {
             NodeKind::Statement { statement, into } => {
                 let written = writes(&statement);
@@ -116,22 +124,19 @@ fn ran_by(nodes: impl Iterator<Item = Node>, target: Option<&str>) -> Option<Vec
                     _ => return None,
                 }
                 ran.push(*statement);
-                returning = false;
                 written
             }
             NodeKind::ReturnQuery(ReturnQuery::Query(statement)) => {
                 let written = writes(&statement);
-                let statement = match (*statement, returning) {
-                    (Statement::Query(query), true) => match ran.pop() {
-                        Some(Statement::Query(previous)) => {
-                            Statement::Query(union_all(previous, query))
-                        }
-                        _ => return None,
-                    },
-                    (statement, _) => statement,
-                };
-                ran.push(statement);
-                returning = !written;
+                match *statement {
+                    Statement::Query(query) => {
+                        returning = Some(match returning.take() {
+                            Some(previous) => union_all(previous, query),
+                            None => query,
+                        });
+                    }
+                    statement => ran.push(statement),
+                }
                 written
             }
             NodeKind::Return { value: None } if last => false,
@@ -161,6 +166,9 @@ fn ran_by(nodes: impl Iterator<Item = Node>, target: Option<&str>) -> Option<Vec
         {
             nodes.next();
         }
+    }
+    if let Some(query) = returning {
+        ran.push(Statement::Query(query));
     }
     (!ran.is_empty()).then_some(ran)
 }
