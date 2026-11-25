@@ -3348,15 +3348,24 @@ fn deleted_rows(delete: Delete) -> Option<Query> {
         return None;
     }
     from.extend(using.into_iter().flatten());
-    let mut query = Parser::new(&PostgreSqlDialect {})
+    let mut select = Parser::new(&PostgreSqlDialect {})
         .try_with_sql("SELECT NULL")
-        .and_then(|mut parser| parser.parse_query())
+        .and_then(|mut parser| parser.parse_select())
         .expect("SELECT NULL parses");
-    if let SetExpr::Select(select) = query.body.as_mut() {
-        select.from = from;
-        select.selection = selection;
-    }
-    Some(*query)
+    select.from = from;
+    select.selection = selection;
+    Some(Query {
+        with: None,
+        body: Box::new(SetExpr::Select(Box::new(select))),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: Vec::new(),
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: Vec::new(),
+    })
 }
 
 /// Whether each row `from` yields holds a row of the relation at
