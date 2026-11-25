@@ -59,13 +59,13 @@ use crate::{
         },
         literal_support::literal,
         null_support::rejects_null,
-        plpgsql_flow_support::{plpgsql_block, returned_query},
+        plpgsql_flow_support::{Returned, plpgsql_block, returned_query},
         policy_support::{
             acting, client_roles, conjuncts, is_column_reference, is_role_read,
             sets_only_search_path, sql_query_body, unnested, unwrapped,
         },
         type_support::user_type_named,
-        walk_support::walk,
+        walk_support::{holds_subquery, walk},
     },
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
 };
@@ -554,19 +554,34 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// What `walk` finds reading the body of `function`, one `LANGUAGE sql`
     /// query or a `plpgsql` block [`returned_query`] reads as one, with the
     /// lineage `lineage` gives it, or `None` when the body is no such query,
-    /// its names do not resolve, or a name of the block may read a variable
-    /// where the query reads a column.
+    /// its names do not resolve, a name of the block may read a variable
+    /// where the query reads a column, or a guard of the block reads a
+    /// subquery or may evaluate otherwise for a caller than for the owner,
+    /// so that whether it raises tells what the owner reads.
     fn read_body<T>(
         &self,
         function: &'a DB::Function,
         lineage: impl FnOnce(&Query) -> Lineage,
         walk: impl FnOnce(&mut Reads<'_, '_, 'a, DB>, &Query) -> Result<T, LookupError>,
     ) -> Result<Option<T>, LookupError> {
+        let path = function.search_path(self.database)?;
         let query = match plpgsql_block(function) {
-            Some(block) => match returned_query(block) {
-                Some(query) if collision(self.database, function)?.is_none() => query,
-                _ => return Ok(None),
-            },
+            Some(block) => {
+                let Some(Returned { query, guards }) = returned_query(block) else {
+                    return Ok(None);
+                };
+                if collision(self.database, function)?.is_some() {
+                    return Ok(None);
+                }
+                for guard in &guards {
+                    if holds_subquery(guard)
+                        || !CallerBound::new(self, path.as_deref(), None).reads_alike(guard)?
+                    {
+                        return Ok(None);
+                    }
+                }
+                query
+            }
             None => match sql_query_body(self.database, function)? {
                 Some(query) => query.into_owned(),
                 None => return Ok(None),
@@ -585,7 +600,6 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         ) else {
             return Ok(None);
         };
-        let path = function.search_path(self.database)?;
         let lineage = lineage(query);
         let mut reads = Reads {
             body: Body {
