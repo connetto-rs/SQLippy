@@ -14,23 +14,25 @@ use sql_traits::{
     errors::{LookupError, RowSecurityError},
     structs::{
         ColumnBinding, ColumnDefinition, ExpressionContext, ExpressionScope, FunctionResultType,
-        IdentifierCase, OperandType, RowStatement, RowVersion, WrittenCall,
+        IdentifierCase, OperandType, RowStatement, RowVersion, TriggerEnablement, WrittenCall,
     },
     traits::{
         ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, PolicyLike, Relation, TableLike,
-        UserDefinedTypeLike,
+        TriggerLike, UserDefinedTypeLike,
     },
     utils::{identifier_resolution::normalize_identifier, normalize_postgres_type},
 };
 use sqlparser::{
     ast::{
-        ArgMode, Assignment, AssignmentTarget, BinaryOperator, CastKind, DataType, Delete, Expr,
-        FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArguments, FunctionBehavior,
-        FunctionCalledOnNull, FunctionSecurity, Ident, InTarget, JoinConstraint, JoinOperator,
-        ObjectName, ObjectNamePart, Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier,
-        Statement, TableAliasColumnDef, TableFactor, TableInheritance, TableWithJoins, Update,
-        UpdateTableFromKind, Value, Visit, VisitMut, Visitor, VisitorMut, With, visit_expressions,
-        visit_expressions_mut, visit_relations,
+        ArgMode, Assignment, AssignmentTarget, BinaryOperator, CaseWhen, CastKind, DataType,
+        Delete, Expr, FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
+        FunctionBehavior, FunctionCalledOnNull, FunctionSecurity, Ident, InTarget, JoinConstraint,
+        JoinOperator, ObjectName, ObjectNamePart, Query, Select, SelectItem, SetExpr, SetOperator,
+        SetQuantifier, Statement, TableAliasColumnDef, TableFactor, TableInheritance,
+        TableWithJoins, TriggerEvent, TriggerObject, TriggerObjectKind, TriggerPeriod, Update,
+        UpdateTableFromKind, Value, Visit, VisitMut, Visitor, VisitorMut, With,
+        helpers::attached_token::AttachedToken, visit_expressions, visit_expressions_mut,
+        visit_relations,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -165,8 +167,18 @@ use super::plpgsql_ambiguous_name::collision;
 /// admits with those values in place. Its `RETURNING` reads each set column
 /// as its value. A policy or a `RETURNING` naming a set column inside a
 /// subquery fails that. Every caller holds `DELETE` on the table, or `UPDATE`
-/// on each column set, and no trigger is declared on it, since a trigger
-/// runs as the owner inside the function.
+/// on each column set.
+///
+/// A trigger runs as the owner inside the function, so each one that may
+/// fire on the write, enabled and declared for its command, and for an
+/// `UPDATE OF` naming a column the `SET` names, has to act alike for a
+/// caller. An `AFTER` trigger whose function is `SECURITY DEFINER` runs as
+/// its owner either way. A `BEFORE ROW` trigger of an `UPDATE` whose
+/// PL/pgSQL body only assigns fields of `NEW` and returns it writes those
+/// columns too, in the order of the trigger names, and its values are held
+/// to the `SET` values' test, the row the policies judge holding them. A
+/// column it writes needs no `UPDATE` grant. Any other trigger keeps the
+/// function reported.
 ///
 /// A call `f(a)` passing a label of an enum lies within `f(b)` passing a
 /// lower label of the same enum, all other arguments alike, when `f` is a
@@ -579,7 +591,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// statement or the one a `plpgsql` block [`ran_statement`] reads, with
     /// the lineage `lineage` gives it. A query is read as it stands, a
     /// `DELETE` as [`deleted_rows`] gives it and an `UPDATE` as
-    /// [`updated_rows`] does. `None` when the body is no such
+    /// [`Updated::rows`] does. `None` when the body is no such
     /// statement, its names do not resolve, a name of the block may read a
     /// variable where the statement reads a column, or a guard of the block
     /// reads a subquery or may evaluate otherwise for a caller than for the
@@ -615,17 +627,34 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         };
         let (statement, write) = match statement {
             query @ Statement::Query(_) => (query, None),
-            Statement::Delete(delete) => match deleted_rows(delete) {
-                Some(query) => (Statement::Query(Box::new(query)), Some(Write::Delete)),
-                None => return Ok(None),
-            },
-            Statement::Update(update) => match updated_rows(update) {
-                Some((query, columns)) => (
-                    Statement::Query(Box::new(query)),
-                    Some(Write::Update(columns)),
-                ),
-                None => return Ok(None),
-            },
+            Statement::Delete(delete) => {
+                let Some((query, target)) = deleted_rows(delete) else {
+                    return Ok(None);
+                };
+                if self.triggered(&target, path.as_deref(), None)?.is_none() {
+                    return Ok(None);
+                }
+                (Statement::Query(Box::new(query)), Some(Write::Delete))
+            }
+            Statement::Update(update) => {
+                let Some(mut updated) = Updated::new(update) else {
+                    return Ok(None);
+                };
+                let Some(maintained) =
+                    self.triggered(&updated.target, path.as_deref(), Some(updated.set()))?
+                else {
+                    return Ok(None);
+                };
+                for maintenance in maintained {
+                    if updated.maintain(maintenance).is_none() {
+                        return Ok(None);
+                    }
+                }
+                let Some((query, write)) = updated.rows() else {
+                    return Ok(None);
+                };
+                (Statement::Query(Box::new(query)), Some(write))
+            }
             _ => return Ok(None),
         };
         let scope = ExpressionScope::FunctionBody(function);
@@ -746,17 +775,68 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         Ok(true)
     }
 
-    /// Whether every caller may write rows of `table` as `write` does, which
-    /// fires no trigger, as one would run as the owner rather than the
-    /// caller.
+    /// The `BEFORE ROW` maintenance triggers, as `sql-traits` reads one, a
+    /// write of the table `name` names runs, in the order they fire, when
+    /// every other trigger that may fire on it is an `AFTER` trigger whose
+    /// function runs as its owner, as it does called from the caller too.
+    /// `set` holds what an `UPDATE` sets each column to, `None` for a
+    /// `DELETE`. `None` when `name` names no table or another trigger may
+    /// fire, since a trigger runs as the owner inside the function and one
+    /// running `BEFORE` may change the row past the caller's policies.
+    fn triggered(
+        &self,
+        name: &ObjectName,
+        path: Option<&[(Cow<'_, str>, bool)]>,
+        set: Option<&[(String, Expr)]>,
+    ) -> Result<Option<Vec<Maintenance>>, LookupError> {
+        let database = self.database;
+        let Some(table) = stored_table(database, name, path)? else {
+            return Ok(None);
+        };
+        let mut triggers: Vec<&DB::Trigger> = table.triggers(database)?.collect();
+        triggers.sort_by(|left, right| left.name().cmp(right.name()));
+        let mut maintained = Vec::new();
+        for trigger in triggers {
+            if trigger.enablement(database)? == TriggerEnablement::Disabled
+                || !trigger.events().iter().any(|event| fires_on(event, set))
+            {
+                continue;
+            }
+            let row = matches!(
+                trigger.orientation(),
+                Some(
+                    TriggerObjectKind::For(TriggerObject::Row)
+                        | TriggerObjectKind::ForEach(TriggerObject::Row)
+                )
+            );
+            match trigger.timing() {
+                Some(TriggerPeriod::After)
+                    if trigger.function(database).is_some_and(|function| {
+                        function.security_mode() == FunctionSecurity::Definer
+                    }) => {}
+                Some(TriggerPeriod::Before)
+                    if row && set.is_some() && trigger.is_maintenance_trigger(database)? =>
+                {
+                    maintained.push(Maintenance {
+                        assignments: trigger
+                            .maintenance_assignments(database)?
+                            .map(|(column, value)| (column.column_name().to_owned(), value))
+                            .collect(),
+                        condition: trigger.condition().cloned(),
+                    });
+                }
+                _ => return Ok(None),
+            }
+        }
+        Ok(Some(maintained))
+    }
+
+    /// Whether every caller holds the privilege `write` needs on `table`.
     fn writable_by_every_caller(
         &self,
         table: &DB::Table,
         write: &Write,
     ) -> Result<bool, LookupError> {
-        if table.triggers(self.database)?.next().is_some() {
-            return Ok(false);
-        }
         for caller in &self.callers {
             let held = table.privileges(acting(*caller), self.database)?;
             match write {
@@ -765,8 +845,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                         return Ok(false);
                     }
                 }
-                Write::Update(columns) => {
-                    for name in columns {
+                Write::Update { columns, set } => {
+                    for name in &columns[..*set] {
                         let Some(column) = column_named(self.database, table, name)? else {
                             return Ok(false);
                         };
@@ -1419,9 +1499,19 @@ struct Reads<'c, 'q, 'a, DB: DatabaseLike> {
 enum Write {
     /// A `DELETE`.
     Delete,
-    /// An `UPDATE` setting each column, by its stored name, to the
-    /// expression the `SELECT` projects at the same position.
-    Update(Vec<String>),
+    /// An `UPDATE` writing each column of `columns`, by its stored name, as
+    /// the expression the `SELECT` projects at the same position. The first
+    /// `set` are those its `SET` names, the others those its triggers do.
+    Update { columns: Vec<String>, set: usize },
+}
+
+/// The columns a `BEFORE ROW` maintenance trigger assigns.
+struct Maintenance {
+    /// Each column it assigns, by its stored name, with what it assigns it,
+    /// reading `NEW` as the row before the trigger runs.
+    assignments: Vec<(String, Expr)>,
+    /// The `WHEN` condition it fires under.
+    condition: Option<Expr>,
 }
 
 impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
@@ -1560,7 +1650,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                                     RowStatement::Delete { reads: true },
                                     &[],
                                 )?,
-                                Write::Update(columns) => {
+                                Write::Update { columns, .. } => {
                                     match self.assigned(
                                         select,
                                         columns,
@@ -3440,8 +3530,9 @@ fn relations(from: &TableWithJoins) -> impl Iterator<Item = &TableFactor> {
 
 /// `SELECT returned… FROM target, using… WHERE selection`, the rows `delete`
 /// deletes joined to the `USING` rows that select them, projecting what its
-/// `RETURNING` returns of them, when it deletes from one table.
-fn deleted_rows(delete: Delete) -> Option<Query> {
+/// `RETURNING` returns of them, with the name of the table it deletes from,
+/// when it deletes from one table.
+fn deleted_rows(delete: Delete) -> Option<(Query, ObjectName)> {
     let Delete {
         tables,
         from: FromTable::WithFromKeyword(mut from),
@@ -3458,93 +3549,239 @@ fn deleted_rows(delete: Delete) -> Option<Query> {
     else {
         return None;
     };
-    if !tables.is_empty()
-        || !order_by.is_empty()
-        || !matches!(from.as_slice(), [target] if target.joins.is_empty())
-    {
+    if !tables.is_empty() || !order_by.is_empty() {
         return None;
     }
-    from.extend(using.into_iter().flatten());
-    Some(rows_query(returning.unwrap_or_default(), from, selection))
-}
-
-/// `SELECT value…, returned… FROM target, from… WHERE selection`, the rows
-/// `update` updates joined to the `FROM` rows that select them, projecting
-/// the value it sets each column to and then what its `RETURNING` returns,
-/// with the stored names of those columns in order, when it updates one
-/// table, setting each column by its name. A column of the updated row that
-/// `RETURNING` names reads as the value it is set to, and a wildcard stays
-/// as written. `None` when a query nested in `RETURNING` names such a column.
-fn updated_rows(update: Update) -> Option<(Query, Vec<String>)> {
-    let Update {
-        table,
-        on_cluster: None,
-        assignments,
-        from: joined,
-        selection,
-        returning,
-        output: None,
-        or: None,
-        order_by,
-        limit: None,
-        settings: None,
-        ..
-    } = update
+    let [
+        TableWithJoins {
+            relation: TableFactor::Table { name, .. },
+            joins,
+        },
+    ] = from.as_slice()
     else {
         return None;
     };
-    if !table.joins.is_empty() || !order_by.is_empty() {
+    if !joins.is_empty() {
         return None;
     }
-    let visible = match &table.relation {
-        TableFactor::Table {
-            alias: Some(alias), ..
-        } => alias.name.clone(),
-        TableFactor::Table {
-            name, alias: None, ..
-        } => name.0.last()?.as_ident()?.clone(),
-        _ => return None,
-    };
-    let mut assigned = Vec::with_capacity(assignments.len());
-    for Assignment { target, value } in assignments {
-        let AssignmentTarget::ColumnName(ObjectName(parts)) = target else {
-            return None;
-        };
-        let [ObjectNamePart::Identifier(column)] = parts.as_slice() else {
-            return None;
-        };
-        assigned.push((
-            normalize_identifier(&column.value, column.quote_style.is_some()).into_owned(),
-            value,
-        ));
+    let target = name.clone();
+    from.extend(using.into_iter().flatten());
+    Some((
+        rows_query(returning.unwrap_or_default(), from, selection),
+        target,
+    ))
+}
+
+/// Whether a trigger firing on `event` fires on a write setting the columns
+/// `set` holds, a `DELETE` when `None`.
+fn fires_on(event: &TriggerEvent, set: Option<&[(String, Expr)]>) -> bool {
+    match (event, set) {
+        (TriggerEvent::Delete, None) => true,
+        (TriggerEvent::Update(columns), Some(set)) => {
+            columns.is_empty()
+                || columns.iter().any(|column| {
+                    let name = normalize_identifier(&column.value, column.quote_style.is_some());
+                    set.iter().any(|(set, _)| *set == name)
+                })
+        }
+        _ => false,
     }
-    let returned = returning
-        .into_iter()
-        .flatten()
-        .map(|item| match item {
-            SelectItem::UnnamedExpr(expression) => {
-                with_assigned(&expression, &assigned, Some(&visible)).map(SelectItem::UnnamedExpr)
-            }
-            SelectItem::ExprWithAlias { expr, alias } => {
-                with_assigned(&expr, &assigned, Some(&visible))
-                    .map(|expr| SelectItem::ExprWithAlias { expr, alias })
-            }
-            wildcard => Some(wildcard),
+}
+
+/// An `UPDATE` of one table, setting each column by its name.
+struct Updated {
+    /// The name of the table it updates.
+    target: ObjectName,
+    /// The name the columns of that table are qualified by.
+    visible: Ident,
+    /// Each column it writes, by its stored name, with the value it writes,
+    /// those its `SET` names first.
+    assigned: Vec<(String, Expr)>,
+    /// How many columns of `assigned` its `SET` names.
+    set: usize,
+    /// The updated table, then the `FROM` rows that select its rows.
+    from: Vec<TableWithJoins>,
+    selection: Option<Expr>,
+    returning: Vec<SelectItem>,
+}
+
+impl Updated {
+    /// `update`, when it updates one table, setting each column by its name.
+    fn new(update: Update) -> Option<Self> {
+        let Update {
+            table,
+            on_cluster: None,
+            assignments,
+            from: joined,
+            selection,
+            returning,
+            output: None,
+            or: None,
+            order_by,
+            limit: None,
+            settings: None,
+            ..
+        } = update
+        else {
+            return None;
+        };
+        if !table.joins.is_empty() || !order_by.is_empty() {
+            return None;
+        }
+        let TableFactor::Table { name, alias, .. } = &table.relation else {
+            return None;
+        };
+        let visible = match alias {
+            Some(alias) => alias.name.clone(),
+            None => name.0.last()?.as_ident()?.clone(),
+        };
+        let target = name.clone();
+        let mut assigned = Vec::with_capacity(assignments.len());
+        for Assignment { target, value } in assignments {
+            let AssignmentTarget::ColumnName(ObjectName(parts)) = target else {
+                return None;
+            };
+            let [ObjectNamePart::Identifier(column)] = parts.as_slice() else {
+                return None;
+            };
+            assigned.push((
+                normalize_identifier(&column.value, column.quote_style.is_some()).into_owned(),
+                value,
+            ));
+        }
+        let set = assigned.len();
+        let mut from = vec![table];
+        match joined {
+            None => {}
+            Some(UpdateTableFromKind::AfterSet(joined)) => from.extend(joined),
+            Some(UpdateTableFromKind::BeforeSet(_)) => return None,
+        }
+        Some(Self {
+            target,
+            visible,
+            assigned,
+            set,
+            from,
+            selection,
+            returning: returning.unwrap_or_default(),
         })
-        .collect::<Option<Vec<_>>>()?;
-    let (columns, values): (Vec<String>, Vec<Expr>) = assigned.into_iter().unzip();
-    let mut from = vec![table];
-    match joined {
-        None => {}
-        Some(UpdateTableFromKind::AfterSet(joined)) => from.extend(joined),
-        Some(UpdateTableFromKind::BeforeSet(_)) => return None,
     }
-    let projection = values
-        .into_iter()
-        .map(SelectItem::UnnamedExpr)
-        .chain(returned)
-        .collect();
-    Some((rows_query(projection, from, selection), columns))
+
+    /// What the `SET` sets each column it names to.
+    fn set(&self) -> &[(String, Expr)] {
+        &self.assigned[..self.set]
+    }
+
+    /// Writes what `maintenance` assigns, when it fires, over what the
+    /// update writes before it runs, or `None` when what it assigns or the
+    /// condition it fires under reads the row in a nested query.
+    fn maintain(&mut self, maintenance: Maintenance) -> Option<()> {
+        let condition = match &maintenance.condition {
+            Some(condition) => Some(self.row(condition)?),
+            None => None,
+        };
+        let mut folded = Vec::with_capacity(maintenance.assignments.len());
+        for (column, value) in maintenance.assignments {
+            let mut value = self.row(&value)?;
+            if let Some(condition) = &condition {
+                value = Expr::Case {
+                    case_token: AttachedToken::empty(),
+                    end_token: AttachedToken::empty(),
+                    operand: None,
+                    conditions: vec![CaseWhen {
+                        condition: condition.clone(),
+                        result: value,
+                    }],
+                    else_result: Some(Box::new(self.written(&column))),
+                };
+            }
+            folded.push((column, value));
+        }
+        for (column, value) in folded {
+            match self.assigned.iter_mut().find(|(held, _)| *held == column) {
+                Some((_, held)) => *held = value,
+                None => self.assigned.push((column, value)),
+            }
+        }
+        Some(())
+    }
+
+    /// `expression` of a trigger on the updated table, each field of `OLD`
+    /// read as the column of the row before the update and each of `NEW` as
+    /// what the update writes it, or `None` when a query nested in it reads
+    /// either.
+    fn row(&self, expression: &Expr) -> Option<Expr> {
+        replaced(expression, |reference| {
+            let Expr::CompoundIdentifier(parts) = reference else {
+                return None;
+            };
+            let [record, field] = parts.as_slice() else {
+                return None;
+            };
+            let field = normalize_identifier(&field.value, field.quote_style.is_some());
+            match normalize_identifier(&record.value, record.quote_style.is_some()).as_ref() {
+                "old" => Some(self.column(&field)),
+                "new" => Some(self.written(&field)),
+                _ => None,
+            }
+        })
+    }
+
+    /// What the update writes the column whose stored name is `column`.
+    fn written(&self, column: &str) -> Expr {
+        match self.assigned.iter().find(|(held, _)| held == column) {
+            Some((_, value)) => Expr::Nested(Box::new(value.clone())),
+            None => self.column(column),
+        }
+    }
+
+    /// The column of the updated row whose stored name is `column`.
+    fn column(&self, column: &str) -> Expr {
+        Expr::CompoundIdentifier(vec![self.visible.clone(), Ident::with_quote('"', column)])
+    }
+
+    /// `SELECT value…, returned… FROM target, from… WHERE selection`, the
+    /// rows the update writes joined to the `FROM` rows that select them,
+    /// projecting the value it writes each column and then what `RETURNING`
+    /// returns, with how it writes them. A column `RETURNING` names, bare or
+    /// qualified, reads as the value it is written, and a wildcard stays as
+    /// written. `None` when a query nested in `RETURNING` names such a
+    /// column.
+    fn rows(self) -> Option<(Query, Write)> {
+        let Self {
+            visible,
+            assigned,
+            set,
+            from,
+            selection,
+            returning,
+            ..
+        } = self;
+        let returned = returning
+            .into_iter()
+            .map(|item| match item {
+                SelectItem::UnnamedExpr(expression) => {
+                    with_assigned(&expression, &assigned, Some(&visible))
+                        .map(SelectItem::UnnamedExpr)
+                }
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    with_assigned(&expr, &assigned, Some(&visible))
+                        .map(|expr| SelectItem::ExprWithAlias { expr, alias })
+                }
+                wildcard => Some(wildcard),
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let (columns, values): (Vec<String>, Vec<Expr>) = assigned.into_iter().unzip();
+        let projection = values
+            .into_iter()
+            .map(SelectItem::UnnamedExpr)
+            .chain(returned)
+            .collect();
+        Some((
+            rows_query(projection, from, selection),
+            Write::Update { columns, set },
+        ))
+    }
 }
 
 /// `SELECT projection FROM from WHERE selection`, projecting `NULL` when
@@ -3592,13 +3829,35 @@ fn with_assigned(
     assigned: &[(String, Expr)],
     qualifier: Option<&Ident>,
 ) -> Option<Expr> {
-    /// Replaces each column of `assigned` outside nested queries.
-    struct Written<'v> {
-        assigned: &'v [(String, Expr)],
-        qualifier: Option<&'v Ident>,
+    replaced(expression, |reference| {
+        let name = match reference {
+            Expr::Identifier(name) => name,
+            Expr::CompoundIdentifier(parts) => match parts.as_slice() {
+                [.., named, name] if qualifier.is_none_or(|visible| same_name(named, visible)) => {
+                    name
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let name = normalize_identifier(&name.value, name.quote_style.is_some());
+        assigned
+            .iter()
+            .find(|(column, _)| *column == name)
+            .map(|(_, value)| Expr::Nested(Box::new(value.clone())))
+    })
+}
+
+/// `expression` with each expression `replacement` gives a replacement for
+/// replaced by it, or `None` when one sits in a query nested in
+/// `expression`.
+fn replaced(expression: &Expr, replacement: impl Fn(&Expr) -> Option<Expr>) -> Option<Expr> {
+    /// Replaces what `replacement` replaces outside nested queries.
+    struct Replacing<F> {
+        replacement: F,
         depth: usize,
     }
-    impl VisitorMut for Written<'_> {
+    impl<F: Fn(&Expr) -> Option<Expr>> VisitorMut for Replacing<F> {
         type Break = ();
         fn pre_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
             self.depth += 1;
@@ -3609,40 +3868,24 @@ fn with_assigned(
             ControlFlow::Continue(())
         }
         fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<()> {
-            let name = match expression {
-                Expr::Identifier(name) => name,
-                Expr::CompoundIdentifier(parts) => match parts.as_slice() {
-                    [.., qualifier, name]
-                        if self
-                            .qualifier
-                            .is_none_or(|visible| same_name(qualifier, visible)) =>
-                    {
-                        name
-                    }
-                    _ => return ControlFlow::Continue(()),
-                },
-                _ => return ControlFlow::Continue(()),
-            };
-            let name = normalize_identifier(&name.value, name.quote_style.is_some());
-            let Some((_, value)) = self.assigned.iter().find(|(column, _)| *column == name) else {
+            let Some(replacement) = (self.replacement)(expression) else {
                 return ControlFlow::Continue(());
             };
             if self.depth > 0 {
                 return ControlFlow::Break(());
             }
-            *expression = Expr::Nested(Box::new(value.clone()));
+            *expression = replacement;
             ControlFlow::Continue(())
         }
     }
-    let mut new = expression.clone();
-    let mut written = Written {
-        assigned,
-        qualifier,
+    let mut replaced = expression.clone();
+    let mut replacing = Replacing {
+        replacement,
         depth: 0,
     };
-    VisitMut::visit(&mut new, &mut written)
+    VisitMut::visit(&mut replaced, &mut replacing)
         .is_continue()
-        .then_some(new)
+        .then_some(replaced)
 }
 
 /// Whether each row `from` yields holds a row of the relation at

@@ -830,7 +830,7 @@ fn a_definer_updating_rows_the_caller_may_not_update_alike_is_reported() {
             format!(
                 "{OWN_ROWS}
                  CREATE FUNCTION public.audit() RETURNS TRIGGER LANGUAGE plpgsql AS $$
-                   BEGIN RETURN NEW; END $$;
+                   BEGIN RAISE NOTICE 'updating'; RETURN NEW; END $$;
                  CREATE TRIGGER audited BEFORE UPDATE ON resources
                    FOR EACH ROW EXECUTE FUNCTION public.audit();"
             ),
@@ -1107,6 +1107,186 @@ fn a_definer_returning_rows_the_caller_may_not_read_back_is_reported() {
         ),
         ["peek_returning()", "purge_peeking()"]
     );
+}
+
+/// A trigger `name` on `resources` firing `firing`, running a PL/pgSQL
+/// function of the same name declared `security`, whose body is `body`.
+fn trigger(name: &str, firing: &str, security: &str, body: &str) -> String {
+    format!(
+        "CREATE FUNCTION public.{name}() RETURNS TRIGGER LANGUAGE plpgsql {security}
+           AS $$ BEGIN {body} END $$;
+         CREATE TRIGGER {name} {firing} ON resources
+           FOR EACH ROW EXECUTE FUNCTION public.{name}();"
+    )
+}
+
+/// [`OWN_ROWS`] over `resources` with an `edited_at` column and `triggers`.
+fn own_rows_triggered(triggers: &[String]) -> String {
+    format!(
+        "ALTER TABLE resources ADD COLUMN edited_at TIMESTAMP;
+         {OWN_ROWS}
+         {}",
+        triggers.concat()
+    )
+}
+
+/// A `BEFORE UPDATE` row trigger `name` on `resources` stamping `edited_at`
+/// when `condition` holds.
+fn stamping_when(name: &str, condition: &str) -> String {
+    format!(
+        "CREATE FUNCTION public.{name}() RETURNS TRIGGER LANGUAGE plpgsql
+           AS $$ BEGIN NEW.edited_at = now(); RETURN NEW; END $$;
+         CREATE TRIGGER {name} BEFORE UPDATE ON resources FOR EACH ROW
+           WHEN ({condition}) EXECUTE FUNCTION public.{name}();"
+    )
+}
+
+#[test]
+fn a_definer_writing_a_table_whose_triggers_run_alike_is_not_reported() {
+    let definers = [
+        writing_definer("hide()", HIDE_OWN),
+        writing_definer("purge()", DELETE_OWN),
+        returning_definer(
+            "hide_returning()",
+            "SETOF TIMESTAMP",
+            &format!("{HIDE_OWN} RETURNING resource.edited_at"),
+        ),
+    ]
+    .concat();
+    let policies = own_rows_triggered(&[
+        trigger(
+            "stamp",
+            "BEFORE UPDATE",
+            "",
+            "NEW.edited_at = now(); RETURN NEW;",
+        ),
+        trigger(
+            "stamp_change",
+            "BEFORE UPDATE",
+            "",
+            "IF NEW.hidden IS DISTINCT FROM OLD.hidden THEN NEW.edited_at = now(); END IF;
+             RETURN NEW;",
+        ),
+        trigger(
+            "audit",
+            "AFTER UPDATE OR DELETE",
+            "SECURITY DEFINER",
+            "RAISE NOTICE 'written'; RETURN NULL;",
+        ),
+        trigger(
+            "on_insert",
+            "BEFORE INSERT",
+            "",
+            "RAISE NOTICE 'inserting'; RETURN NEW;",
+        ),
+        trigger(
+            "on_owner",
+            "BEFORE UPDATE OF owner",
+            "",
+            "RAISE NOTICE 'moving'; RETURN NEW;",
+        ),
+        trigger(
+            "switched_off",
+            "BEFORE UPDATE OR DELETE",
+            "",
+            "RAISE NOTICE 'off'; RETURN NEW;",
+        ),
+        stamping_when("stamp_when", "OLD.hidden IS DISTINCT FROM NEW.hidden"),
+        "ALTER TABLE resources DISABLE TRIGGER switched_off;".to_owned(),
+    ]);
+    assert_eq!(
+        written_exposed("SELECT, UPDATE (hidden), DELETE", &policies, &definers),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_definer_writing_a_table_whose_triggers_may_run_otherwise_is_reported() {
+    let definers = [
+        writing_definer("hide()", HIDE_OWN),
+        writing_definer("purge()", DELETE_OWN),
+    ]
+    .concat();
+    for (triggers, reported) in [
+        (
+            trigger(
+                "notify",
+                "BEFORE UPDATE",
+                "",
+                "RAISE NOTICE 'updating'; RETURN NEW;",
+            ),
+            &["hide()"][..],
+        ),
+        (
+            trigger(
+                "give_away",
+                "BEFORE UPDATE",
+                "",
+                "NEW.owner = 'admin'; RETURN NEW;",
+            ),
+            &["hide()"],
+        ),
+        (
+            stamping_when("stamp_for_caller", "current_user = 'app'"),
+            &["hide()"],
+        ),
+        (
+            trigger(
+                "stamp_caller",
+                "BEFORE UPDATE",
+                "",
+                "IF current_user = 'app' THEN NEW.edited_at = now(); END IF; RETURN NEW;",
+            ),
+            &["hide()"],
+        ),
+        (
+            trigger(
+                "stamp_ahead",
+                "BEFORE UPDATE",
+                "",
+                "NEW.edited_at = (SELECT max(other.edited_at) FROM public.resources other
+                   WHERE other.hidden = NEW.hidden); RETURN NEW;",
+            ),
+            &["hide()"],
+        ),
+        (
+            trigger(
+                "audit",
+                "AFTER UPDATE OR DELETE",
+                "",
+                "RAISE NOTICE 'written'; RETURN NULL;",
+            ),
+            &["hide()", "purge()"],
+        ),
+        (
+            trigger(
+                "on_hidden",
+                "AFTER UPDATE OF hidden",
+                "",
+                "RAISE NOTICE 'hiding'; RETURN NULL;",
+            ),
+            &["hide()"],
+        ),
+        (
+            trigger(
+                "guard",
+                "BEFORE DELETE",
+                "SECURITY DEFINER",
+                "RAISE NOTICE 'deleting'; RETURN OLD;",
+            ),
+            &["purge()"],
+        ),
+    ] {
+        assert_eq!(
+            written_exposed(
+                "SELECT, UPDATE, DELETE",
+                &own_rows_triggered(std::slice::from_ref(&triggers)),
+                &definers
+            ),
+            reported,
+            "{triggers}"
+        );
+    }
 }
 
 #[test]
