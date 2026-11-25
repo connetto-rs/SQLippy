@@ -739,10 +739,6 @@ fn a_definer_deleting_rows_the_caller_may_not_delete_is_reported() {
                      WHERE resource.owner = current_setting('app.user_id', true)",
                 ),
                 writing_definer(
-                    "purge_sequence()",
-                    &format!("{DELETE_OWN}; SELECT 1"),
-                ),
-                writing_definer(
                     "purge_any()",
                     "DELETE FROM public.resources resource WHERE resource.hidden",
                 ),
@@ -755,7 +751,7 @@ fn a_definer_deleting_rows_the_caller_may_not_delete_is_reported() {
             ]
             .concat(),
         ),
-        ["purge_any()", "purge_beside()", "purge_joined()", "purge_sequence()"]
+        ["purge_any()", "purge_beside()", "purge_joined()"]
     );
 }
 
@@ -2160,6 +2156,56 @@ fn a_plpgsql_definer_checking_found_after_reads_the_caller_may_not_run_is_report
             "probed_hide(INT)",
             "probed_title(INT)"
         ]
+    );
+}
+
+/// The caller's own `resources` rows hidden, by `id = p_id`.
+const HIDE_OWN_BY_ID: &str = "UPDATE public.resources resource SET hidden = true
+    WHERE resource.id = p_id AND resource.owner = current_setting('app.user_id', true)";
+
+#[test]
+fn a_sql_definer_running_statements_the_caller_may_run_alike_is_not_reported() {
+    let definers = [
+        returning_definer(
+            "hide_and_count(p_id INT)",
+            "BIGINT",
+            &format!(
+                "{HIDE_OWN_BY_ID};
+                 SELECT count(*) FROM public.resources resource
+                   WHERE resource.owner = current_setting('app.user_id', true)"
+            ),
+        ),
+        writing_definer(
+            "hide_and_purge(p_id INT)",
+            &format!("{HIDE_OWN_BY_ID}; {DELETE_OWN}"),
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, UPDATE, DELETE", OWN_ROWS, &definers),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_sql_definer_running_a_statement_the_caller_may_not_run_alike_is_reported() {
+    let definers = [
+        returning_definer(
+            "hide_and_count_all(p_id INT)",
+            "BIGINT",
+            &format!("{HIDE_OWN_BY_ID}; SELECT count(*) FROM public.resources resource"),
+        ),
+        writing_definer(
+            "purge_any_and_hide(p_id INT)",
+            &format!(
+                "DELETE FROM public.resources resource WHERE resource.hidden; {HIDE_OWN_BY_ID}"
+            ),
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, UPDATE, DELETE", OWN_ROWS, &definers),
+        ["hide_and_count_all(INT)", "purge_any_and_hide(INT)"]
     );
 }
 

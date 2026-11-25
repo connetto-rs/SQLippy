@@ -69,7 +69,7 @@ use crate::{
         plpgsql_flow_support::{Ran, plpgsql_block, ran_statements},
         policy_support::{
             acting, client_roles, conjuncts, is_column_reference, is_role_read,
-            sets_only_search_path, sql_query_body, sql_statement_body, unnested, unwrapped,
+            sets_only_search_path, sql_query_body, sql_statements_body, unnested, unwrapped,
         },
         type_support::user_type_named,
         walk_support::{holds_subquery, walk},
@@ -166,13 +166,14 @@ use super::plpgsql_ambiguous_name::collision;
 /// A function is not reported either when each caller could run what it
 /// writes and change the same rows the same way. Its body is then one
 /// `DELETE`, `UPDATE` or `INSERT` of one table, in `LANGUAGE sql` or in a
-/// PL/pgSQL block past such guards, bare or as its `RETURN QUERY`. A block
-/// may run several such writes, returned queries and queries it `PERFORM`s
-/// or selects `INTO` its variable in turn, each held to its own test, since
-/// a caller running them in the same order meets the same rows at each. A
-/// write, a `PERFORM` or a `SELECT ... INTO` may be followed by a guard `IF
-/// NOT FOUND THEN ...`, which raises where the caller's own statement would
-/// find no row too,
+/// PL/pgSQL block past such guards, bare or as its `RETURN QUERY`. A
+/// `LANGUAGE sql` body may run several such writes and queries in turn, and
+/// a block several such writes, returned queries and queries it `PERFORM`s
+/// or selects `INTO` its variable, each held to its own test, since a caller
+/// running them in the same order meets the same rows at each. A write, a
+/// `PERFORM` or a `SELECT ... INTO` may be followed by a guard `IF NOT FOUND
+/// THEN ...`, which raises where the caller's own statement would find no
+/// row too,
 /// and one write may assign its `RETURNING` `INTO`, or its row count through
 /// `GET DIAGNOSTICS ... = ROW_COUNT`, the variable declared without a
 /// default, which the block's last `RETURN` returns and no statement reads.
@@ -626,10 +627,10 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 
     /// What `walk` finds reading each statement of the body of `function`,
-    /// in order, one `LANGUAGE sql` statement or those [`Self::block_statements`]
-    /// reads, each read as [`Self::read_statement`] does with the lineage
-    /// `lineage` gives it. `None` when the body is no such statement or a
-    /// statement reads as `None`.
+    /// in order, the `LANGUAGE sql` statements or those
+    /// [`Self::block_statements`] reads, each read as [`Self::read_statement`]
+    /// does with the lineage `lineage` gives it. `None` when the body is no
+    /// such statements or a statement reads as `None`.
     fn read_body<T>(
         &self,
         function: &'a DB::Function,
@@ -642,9 +643,9 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 Some(statements) => statements,
                 None => return Ok(None),
             },
-            None => match sql_statement_body(self.database, function)? {
-                Some(statement) => vec![statement.into_owned()],
-                None => return Ok(None),
+            None => match sql_statements_body(self.database, function)? {
+                Some(statements) if !statements.is_empty() => statements.into_owned(),
+                _ => return Ok(None),
             },
         };
         let mut found = Vec::with_capacity(statements.len());
