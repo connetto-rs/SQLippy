@@ -355,6 +355,110 @@ fn a_definer_returning_only_rows_the_callers_policies_show_is_not_reported() {
     );
 }
 
+/// A `plpgsql` definer named `name`, returning `returns` through `body`.
+fn plpgsql_definer(name: &str, returns: &str, body: &str) -> String {
+    format!(
+        "CREATE FUNCTION {name} RETURNS {returns} LANGUAGE plpgsql STABLE SECURITY DEFINER
+           SET search_path = pg_catalog, pg_temp AS $$ {body} $$;"
+    )
+}
+
+const MEMBER_RESOURCES: &str = "SELECT resource.id FROM public.resources resource
+    WHERE resource.organization_id IN (SELECT public.member_organizations())";
+
+#[test]
+fn a_plpgsql_definer_returning_only_confined_queries_reads_as_those_queries() {
+    assert_eq!(
+        exposed_to_app(
+            &[
+                plpgsql_definer(
+                    "returned()",
+                    "SETOF INT",
+                    &format!("BEGIN RETURN QUERY {MEMBER_RESOURCES}; END"),
+                ),
+                plpgsql_definer(
+                    "returned_twice()",
+                    "SETOF INT",
+                    &format!(
+                        "BEGIN RETURN QUERY {MEMBER_RESOURCES};
+                         RETURN QUERY {MEMBER_RESOURCES} AND resource.id > 0; RETURN; END"
+                    ),
+                ),
+                plpgsql_definer(
+                    "counted()",
+                    "BIGINT",
+                    "BEGIN RETURN (SELECT count(*) FROM public.resources resource
+                       WHERE resource.organization_id IN (SELECT public.member_organizations())); END",
+                ),
+                plpgsql_definer(
+                    "selected_into()",
+                    "INT",
+                    "DECLARE owned_id INT; BEGIN SELECT resource.id INTO owned_id
+                       FROM public.resources resource
+                       WHERE resource.organization_id IN (SELECT public.member_organizations());
+                       RETURN owned_id; END",
+                ),
+            ]
+            .concat()
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_plpgsql_definer_that_may_return_an_unconfined_row_is_reported() {
+    let all = "SELECT resource.id FROM public.resources resource";
+    assert_eq!(
+        exposed_to_app(
+            &[
+                plpgsql_definer(
+                    "one_arm_open()",
+                    "SETOF INT",
+                    &format!("BEGIN RETURN QUERY {MEMBER_RESOURCES}; RETURN QUERY {all}; END"),
+                ),
+                plpgsql_definer(
+                    "handled()",
+                    "SETOF INT",
+                    &format!(
+                        "BEGIN RETURN QUERY {MEMBER_RESOURCES};
+                         EXCEPTION WHEN others THEN RETURN QUERY {all}; END"
+                    ),
+                ),
+                plpgsql_definer(
+                    "defaulted()",
+                    "INT",
+                    "DECLARE owned_id INT := 0; BEGIN SELECT resource.id INTO owned_id
+                       FROM public.resources resource
+                       WHERE resource.organization_id IN (SELECT public.member_organizations());
+                       RETURN owned_id; END",
+                ),
+                plpgsql_definer(
+                    "counted_after()",
+                    "BIGINT",
+                    "DECLARE owned_id INT; BEGIN SELECT resource.id INTO owned_id
+                       FROM public.resources resource
+                       WHERE resource.organization_id IN (SELECT public.member_organizations());
+                       RETURN (SELECT count(*) FROM public.resources); END",
+                ),
+                plpgsql_definer(
+                    "colliding(organization_id INT)",
+                    "SETOF INT",
+                    "BEGIN RETURN QUERY SELECT resource.id FROM public.resources resource
+                       WHERE organization_id IN (SELECT public.member_organizations()); END",
+                ),
+            ]
+            .concat()
+        ),
+        [
+            "colliding(INT)",
+            "counted_after()",
+            "defaulted()",
+            "handled()",
+            "one_arm_open()"
+        ]
+    );
+}
+
 #[test]
 fn a_policys_scalar_subquery_reads_as_the_value_it_projects() {
     assert_eq!(

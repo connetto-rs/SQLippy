@@ -2,14 +2,16 @@
 //! along every path through branches, loops, exits and handlers.
 
 use sql_traits::traits::FunctionLike;
-use sqlparser::ast::{Query, Statement};
+use sqlparser::ast::{Expr, Query, SetExpr, SetOperator, SetQuantifier, Statement};
 use sqlparser_plpgsql::{
     embedded::{
-        Block, BoundCursor, Case, DeclarationKind, Dynamic, Exit, ExitKind, Fetch, If, Indirection,
-        Loop, LoopControl, Node, NodeKind, Open, RaiseLevel, ReturnQuery,
+        Block, BoundCursor, Case, Declaration, DeclarationKind, Dynamic, Exit, ExitKind, Fetch, If,
+        Indirection, Loop, LoopControl, Node, NodeKind, Open, RaiseLevel, ReturnQuery, Variable,
     },
     embedded_sql,
 };
+
+use crate::rules::inline_support::selected_expression;
 
 /// The body of a PL/pgSQL function, `None` for another language or a body
 /// that does not parse.
@@ -18,6 +20,108 @@ pub(crate) fn plpgsql_block<F: FunctionLike>(function: &F) -> Option<Block> {
         return None;
     }
     embedded_sql(function.body()?).ok()
+}
+
+/// The query whose rows `block` returns when it does nothing else. That is
+/// `RETURN QUERY` statements, maybe followed by a bare `RETURN`, read as the
+/// `UNION ALL` of their queries, a `RETURN` of one scalar subquery, or a
+/// `SELECT ... INTO` in a block declaring one variable, without a default,
+/// followed by a `RETURN` of a name, which reads nothing.
+pub(crate) fn returned_query(block: Block) -> Option<Query> {
+    let Block {
+        declarations,
+        mut statements,
+        handlers,
+        ..
+    } = block;
+    if !handlers.is_empty() {
+        return None;
+    }
+    match declarations.as_slice() {
+        [] => {
+            if let [
+                Node {
+                    kind: NodeKind::Return { value: Some(value) },
+                    ..
+                },
+            ] = statements.as_slice()
+            {
+                let Expr::Subquery(query) = selected_expression(value)? else {
+                    return None;
+                };
+                return Some(query.as_ref().clone());
+            }
+            if let Some(Node {
+                kind: NodeKind::Return { value: None },
+                ..
+            }) = statements.last()
+            {
+                statements.pop();
+            }
+            statements
+                .into_iter()
+                .map(|node| match node.kind {
+                    NodeKind::ReturnQuery(ReturnQuery::Query(statement)) => match *statement {
+                        Statement::Query(query) => Some(query),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .reduce(|left, right| {
+                    Box::new(Query {
+                        with: None,
+                        body: Box::new(SetExpr::SetOperation {
+                            op: SetOperator::Union,
+                            set_quantifier: SetQuantifier::All,
+                            left: Box::new(SetExpr::Query(left)),
+                            right: Box::new(SetExpr::Query(right)),
+                        }),
+                        order_by: None,
+                        limit_clause: None,
+                        fetch: None,
+                        locks: Vec::new(),
+                        for_clause: None,
+                        settings: None,
+                        format_clause: None,
+                        pipe_operators: Vec::new(),
+                    })
+                })
+                .map(|query| *query)
+        }
+        [
+            Declaration {
+                kind: DeclarationKind::Variable(Variable { default: None, .. }),
+                ..
+            },
+        ] => {
+            let [
+                Node {
+                    kind:
+                        NodeKind::Statement {
+                            statement,
+                            into: Some(_),
+                        },
+                    ..
+                },
+                Node {
+                    kind: NodeKind::Return { value: Some(value) },
+                    ..
+                },
+            ] = statements.as_slice()
+            else {
+                return None;
+            };
+            match (statement.as_ref(), selected_expression(value)) {
+                (Statement::Query(query), Some(Expr::Identifier(_))) => {
+                    Some(query.as_ref().clone())
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// What a rule knows at one point of a body, merged where paths meet.

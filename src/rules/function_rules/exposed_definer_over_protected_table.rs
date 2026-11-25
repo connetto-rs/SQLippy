@@ -57,6 +57,7 @@ use crate::{
         },
         literal_support::literal,
         null_support::rejects_null,
+        plpgsql_flow_support::{plpgsql_block, returned_query},
         policy_support::{
             acting, client_roles, conjuncts, is_column_reference, is_role_read,
             sets_only_search_path, sql_query_body, unnested, unwrapped,
@@ -66,6 +67,8 @@ use crate::{
     },
     traits::{Constrainer, FunctionRule, GenericConstrainer, Reporter, reporter::signature},
 };
+
+use super::plpgsql_ambiguous_name::collision;
 
 /// Struct defining a rule that reports a `SECURITY DEFINER` function that
 /// `PUBLIC` or a declared anonymous or app role can execute while its body
@@ -85,11 +88,15 @@ use crate::{
 /// stays away from protected tables.
 ///
 /// A function is not reported when every caller already reads what it
-/// returns. Its body is then one `LANGUAGE sql` query that writes nothing and
-/// sets no parameter besides `search_path`, and every read of a table with
-/// row-level security in it is filtered, by its `WHERE` and the `ON` of the
-/// joins that drop its rows, to rows each caller's own `SELECT` policies on
-/// that table admit, while each caller may select every column of the table.
+/// returns. Its body is then one `LANGUAGE sql` query, or a PL/pgSQL block
+/// that only returns queries, through `RETURN QUERY`, a `RETURN` of a scalar
+/// subquery or a `SELECT ... INTO` of the variable it returns, and names no
+/// column a variable also answers to. That query writes nothing and the
+/// function sets no parameter besides `search_path`, and every read of a
+/// table with row-level security in it is filtered, by its `WHERE` and the
+/// `ON` of the joins that drop its rows, to rows each caller's own `SELECT`
+/// policies on that table admit, while each caller may select every column
+/// of the table.
 /// The filter has to imply every restrictive policy and one permissive one,
 /// stating each condition as written, where a scalar subquery reading no
 /// relation such as `(SELECT auth.uid())` stands for its value, or testing
@@ -536,18 +543,27 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 
     /// What `walk` finds reading the body of `function`, one `LANGUAGE sql`
-    /// query, with the lineage `lineage` gives it, or `None` when the body is
-    /// no such query or its names do not resolve.
+    /// query or a `plpgsql` block [`returned_query`] reads as one, with the
+    /// lineage `lineage` gives it, or `None` when the body is no such query,
+    /// its names do not resolve, or a name of the block may read a variable
+    /// where the query reads a column.
     fn read_body<T>(
         &self,
         function: &'a DB::Function,
         lineage: impl FnOnce(&Query) -> Lineage,
         walk: impl FnOnce(&mut Reads<'_, '_, 'a, DB>, &Query) -> Result<T, LookupError>,
     ) -> Result<Option<T>, LookupError> {
-        let Some(query) = sql_query_body(self.database, function)? else {
-            return Ok(None);
+        let query = match plpgsql_block(function) {
+            Some(block) => match returned_query(block) {
+                Some(query) if collision(self.database, function)?.is_none() => query,
+                _ => return Ok(None),
+            },
+            None => match sql_query_body(self.database, function)? {
+                Some(query) => query.into_owned(),
+                None => return Ok(None),
+            },
         };
-        let statement = Statement::Query(Box::new(query.into_owned()));
+        let statement = Statement::Query(Box::new(query));
         let scope = ExpressionScope::FunctionBody(function);
         let (Statement::Query(query), Ok(context)) = (
             &statement,
