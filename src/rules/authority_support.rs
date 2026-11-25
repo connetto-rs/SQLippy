@@ -6,7 +6,7 @@ use std::{collections::BTreeSet, ops::ControlFlow};
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinition, ColumnDefinitionScope, ColumnScope, IdentifierCase},
-    traits::{ColumnLike, DatabaseLike, FunctionLike, TableLike},
+    traits::{ColumnLike, DatabaseLike, FunctionLike, PolicyLike, TableLike},
 };
 use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArguments, InTarget, JoinConstraint, JoinOperator,
@@ -16,7 +16,10 @@ use sqlparser::ast::{
 use crate::rules::walk_support::walk;
 use crate::{
     deployment::Deployment,
-    rules::policy_support::{conjuncts, is_column_reference, sql_query_body, walked_clauses},
+    error::PolicyClause,
+    rules::policy_support::{
+        Command, conjuncts, is_column_reference, sql_query_body, walked_clauses,
+    },
 };
 
 /// A column, as its table's position and its stored name.
@@ -671,6 +674,28 @@ pub(crate) fn authority_columns<DB: DatabaseLike>(
     database: &DB,
     deployment: &Deployment,
 ) -> Result<AuthorityColumns, LookupError> {
+    clause_columns(database, deployment, |_, _| true)
+}
+
+/// The columns of the authority tables read by the `USING` clauses of the
+/// policies applying to `SELECT`, the clauses that decide which rows a caller
+/// sees.
+pub(crate) fn read_authority_columns<DB: DatabaseLike>(
+    database: &DB,
+    deployment: &Deployment,
+) -> Result<AuthorityColumns, LookupError> {
+    clause_columns(database, deployment, |policy: &DB::Policy, clause| {
+        clause == PolicyClause::Using && Command::Select.covered_by(policy.command())
+    })
+}
+
+/// The columns of the authority tables read by the policy clauses `walked`
+/// keeps.
+fn clause_columns<DB: DatabaseLike>(
+    database: &DB,
+    deployment: &Deployment,
+    walked: impl Fn(&DB::Policy, PolicyClause) -> bool,
+) -> Result<AuthorityColumns, LookupError> {
     let mut authority = Authority {
         database,
         deployment,
@@ -683,8 +708,10 @@ pub(crate) fn authority_columns<DB: DatabaseLike>(
     };
     for table in database.tables() {
         for policy in table.policies(database)? {
-            for (_, expression) in walked_clauses(database, policy)? {
-                if let Some(expression) = expression {
+            for (clause, expression) in walked_clauses(database, policy)? {
+                if let Some(expression) = expression
+                    && walked(policy, clause)
+                {
                     authority.expression(Some(table), expression, Reading::Tested)?;
                 }
             }
