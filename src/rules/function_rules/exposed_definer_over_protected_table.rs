@@ -167,10 +167,12 @@ use super::plpgsql_ambiguous_name::collision;
 /// writes and change the same rows the same way. Its body is then one
 /// `DELETE`, `UPDATE` or `INSERT` of one table, in `LANGUAGE sql` or in a
 /// PL/pgSQL block past such guards, bare or as its `RETURN QUERY`. A block
-/// may run several such writes and returned queries in turn, each held to
-/// its own test, since a caller running them in the same order meets the
-/// same rows at each. A write may be followed by a guard `IF NOT FOUND THEN
-/// ...`, which raises where the caller's own write would find no row too,
+/// may run several such writes, returned queries and queries it `PERFORM`s
+/// or selects `INTO` its variable in turn, each held to its own test, since
+/// a caller running them in the same order meets the same rows at each. A
+/// write, a `PERFORM` or a `SELECT ... INTO` may be followed by a guard `IF
+/// NOT FOUND THEN ...`, which raises where the caller's own statement would
+/// find no row too,
 /// and one write may assign its `RETURNING` `INTO`, or its row count through
 /// `GET DIAGNOSTICS ... = ROW_COUNT`, the variable declared without a
 /// default, which the block's last `RETURN` returns and no statement reads.
