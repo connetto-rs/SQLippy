@@ -1586,6 +1586,12 @@ fn a_definer_inserting_into_a_table_whose_triggers_or_defaults_may_act_otherwise
             "",
             "RAISE NOTICE 'inserting'; RETURN NEW;",
         )]),
+        own_rows_triggered(&[trigger(
+            "stamp_qualified",
+            "BEFORE INSERT",
+            "",
+            "NEW.edited_at = public.resources.edited_at; RETURN NEW;",
+        )]),
     ] {
         assert_eq!(
             inserted_exposed("SELECT, INSERT", &policies, &insert_own),
@@ -1614,6 +1620,69 @@ fn a_definer_with_an_unresolved_or_unsupported_write_is_reported() {
             "{body}"
         );
     }
+}
+
+#[test]
+fn a_definer_with_an_unsupported_insert_shape_is_reported() {
+    for body in [
+        "DELETE FROM (SELECT * FROM public.resources) resource",
+        "TRUNCATE public.resources",
+        "INSERT INTO public.resources VALUES (1, 'admin', false, NULL)",
+        "INSERT INTO public.resources (resources.owner) VALUES ('admin')",
+        "INSERT INTO public.resources (owner) SELECT * FROM public.resources",
+        "INSERT INTO public.resources (owner) SELECT 'admin' UNION ALL SELECT 'admin'",
+        "INSERT INTO public.resources (missing) VALUES ('admin')",
+        "INSERT INTO public.resources (owner, owner) VALUES ('admin', 'admin')",
+        "INSERT INTO public.resources (owner) VALUES ('admin', false)",
+        "INSERT INTO public.resources (owner) VALUES (missing_owner)",
+        "INSERT INTO public.resources (owner) VALUES ('admin') RETURNING other.*",
+    ] {
+        assert_eq!(
+            inserted_exposed(
+                "SELECT, INSERT, DELETE",
+                OWN_ROWS,
+                &writing_definer("write_rows()", body),
+            ),
+            ["write_rows()"],
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn an_insert_must_meet_each_remaining_policy_conjunct() {
+    assert_eq!(
+        inserted_exposed(
+            "SELECT, INSERT",
+            "CREATE POLICY own ON resources FOR ALL TO app
+               USING (owner = current_setting('app.user_id', true))
+               WITH CHECK (owner = current_setting('app.user_id', true)
+                 AND hidden AND note IS NOT NULL);",
+            &writing_definer("insert_own()", INSERT_OWN),
+        ),
+        ["insert_own()"]
+    );
+}
+
+#[test]
+fn an_insert_may_read_an_open_table_in_its_written_value() {
+    assert_eq!(
+        inserted_exposed(
+            "SELECT, INSERT",
+            &format!(
+                "{OWN_ROWS}
+                 CREATE TABLE public.markers (marker INT);
+                 GRANT SELECT ON public.markers TO app;"
+            ),
+            &writing_definer(
+                "insert_marked()",
+                "INSERT INTO public.resources (owner, hidden)
+                 VALUES (current_setting('app.user_id', true),
+                   EXISTS (SELECT 1 FROM public.markers))",
+            ),
+        ),
+        Vec::<String>::new()
+    );
 }
 
 #[test]

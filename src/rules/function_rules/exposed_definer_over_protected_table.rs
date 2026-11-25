@@ -31,8 +31,9 @@ use sqlparser::{
         SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Statement,
         TableAliasColumnDef, TableFactor, TableInheritance, TableObject, TableWithJoins,
         TriggerEvent, TriggerObject, TriggerObjectKind, TriggerPeriod, Update, UpdateTableFromKind,
-        Value, Visit, VisitMut, Visitor, VisitorMut, With, helpers::attached_token::AttachedToken,
-        visit_expressions, visit_expressions_mut, visit_relations,
+        Value, Values, Visit, VisitMut, Visitor, VisitorMut, With,
+        helpers::attached_token::AttachedToken, visit_expressions, visit_expressions_mut,
+        visit_relations,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -666,7 +667,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             None => None,
         };
         let inserted = insertion.map(|mut insertion| {
-            insertion.rows = selects(&query.body);
+            selects(&query.body, &mut insertion.rows);
             insertion
         });
         let lineage = lineage(query);
@@ -925,9 +926,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         for caller in &self.callers {
             let held = table.privileges(acting(*caller), self.database)?;
             for name in named {
-                let Some(column) = column_named(self.database, table, name)? else {
-                    return Ok(false);
-                };
+                let column = column_named(self.database, table, name)?
+                    .expect("inserted columns belong to their table");
                 if !held.insert.on_column(column) {
                     return Ok(false);
                 }
@@ -1200,10 +1200,9 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
         let database = self.confinement.database;
         let mut written = Vec::with_capacity(assigned.len());
         for (column, value) in assigned {
-            let refused = match column_named(database, table, column)? {
-                Some(column) => !column.is_nullable(database)?,
-                None => false,
-            };
+            let refused = !column_named(database, table, column)?
+                .expect("written columns belong to their table")
+                .is_nullable(database)?;
             written.push((value, refused));
         }
         for caller in &self.confinement.callers {
@@ -1869,8 +1868,8 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         match select.from.as_slice() {
             [] => {
                 self.admits_inserted(insertion, select, &conjunction(Vec::new()), |reference| {
-                    match self.context.reference(reference).ok()?? {
-                        (ColumnDefinition::Parameter { ordinal, .. }, _) => {
+                    match self.context.reference(reference) {
+                        Ok(Some((ColumnDefinition::Parameter { ordinal, .. }, _))) => {
                             Some(Term::Parameter(ordinal))
                         }
                         _ => None,
@@ -4071,9 +4070,8 @@ struct Inserted {
     named: Vec<String>,
     /// The values each row it inserts writes the named columns with.
     rows: Vec<Vec<Expr>>,
-    /// The query of the one `SELECT` yielding the rows, whose projection
-    /// `rows` holds, or `None` for the rows of a `VALUES` list.
-    source: Option<Box<Query>>,
+    /// The query envelope and its detached `SELECT`, or `None` for `VALUES`.
+    source: Option<(Box<Query>, Box<Select>)>,
     returning: Vec<SelectItem>,
 }
 
@@ -4138,15 +4136,20 @@ impl Inserted {
             && source.limit_clause.is_none()
             && source.fetch.is_none()
             && source.locks.is_empty();
-        let (rows, source) = match source.body.as_mut() {
+        let body = mem::replace(
+            source.body.as_mut(),
+            SetExpr::Values(Values {
+                explicit_row: false,
+                value_keyword: false,
+                rows: Vec::new(),
+            }),
+        );
+        let (rows, source) = match body {
             SetExpr::Values(values) if plain => (
-                mem::take(&mut values.rows)
-                    .into_iter()
-                    .map(|row| row.content)
-                    .collect(),
+                values.rows.into_iter().map(|row| row.content).collect(),
                 None,
             ),
-            SetExpr::Select(select) => {
+            SetExpr::Select(mut select) => {
                 let values = mem::take(&mut select.projection)
                     .into_iter()
                     .map(|item| match item {
@@ -4155,7 +4158,7 @@ impl Inserted {
                         _ => None,
                     })
                     .collect::<Option<Vec<_>>>()?;
-                (vec![values], Some(source))
+                (vec![values], Some((source, select)))
             }
             _ => return None,
         };
@@ -4337,13 +4340,14 @@ fn returned_items(
 /// The query of the rows an insert writes, its `source` query projecting
 /// the one projection of `selects`, or the `UNION ALL` of a `SELECT` of each
 /// of them for the rows of a `VALUES` list.
-fn inserted_query(source: Option<Box<Query>>, selects: Vec<Vec<SelectItem>>) -> Option<Query> {
-    if let Some(mut source) = source {
+fn inserted_query(
+    source: Option<(Box<Query>, Box<Select>)>,
+    selects: Vec<Vec<SelectItem>>,
+) -> Option<Query> {
+    if let Some((mut source, mut select)) = source {
         let [projection] = <[_; 1]>::try_from(selects).ok()?;
-        let SetExpr::Select(select) = source.body.as_mut() else {
-            return None;
-        };
         select.projection = projection;
+        *source.body = SetExpr::Select(select);
         return Some(*source);
     }
     let mut bodies = selects
@@ -4384,17 +4388,16 @@ struct Insertion<'a, DB: DatabaseLike> {
     returning: bool,
 }
 
-/// The `SELECT`s of `body` outside nested queries, through its set
-/// operations.
-fn selects(body: &SetExpr) -> Vec<*const Select> {
-    match body {
-        SetExpr::Select(select) => vec![ptr::from_ref(select.as_ref())],
-        SetExpr::SetOperation { left, right, .. } => {
-            let mut found = selects(left);
-            found.extend(selects(right));
-            found
-        }
-        _ => Vec::new(),
+/// Collects the `SELECT`s outside nested queries through set operations.
+fn selects(body: &SetExpr, found: &mut Vec<*const Select>) {
+    if let SetExpr::SetOperation { left, right, .. } = body {
+        selects(left, found);
+        selects(right, found);
+    } else {
+        found.push(ptr::from_ref(
+            body.as_select()
+                .expect("inserted queries contain SELECT rows"),
+        ));
     }
 }
 
