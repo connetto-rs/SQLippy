@@ -1895,6 +1895,15 @@ fn a_plpgsql_definer_guarded_by_what_the_caller_may_not_read_is_reported() {
                  {HIDE_MINE};"
             ),
         ),
+        block_definer(
+            "hide_wildcard(p_id INT)",
+            "VOID",
+            "",
+            &format!(
+                "IF p_id IS NULL THEN RAISE EXCEPTION 'missing %', *; END IF;
+                 {HIDE_MINE};"
+            ),
+        ),
     ]
     .concat();
     assert_eq!(
@@ -1907,8 +1916,103 @@ fn a_plpgsql_definer_guarded_by_what_the_caller_may_not_read_is_reported() {
             "any_member_hide(INT)",
             "crowded_hide()",
             "hide_as(INT)",
-            "hide_counted(INT)"
+            "hide_counted(INT)",
+            "hide_wildcard(INT)"
         ]
+    );
+}
+
+#[test]
+fn an_unreadable_guard_helper_surfaces_a_lookup_error() {
+    use std::sync::Arc;
+
+    use pg_diesel::{PgDieselDatabase, dialect::PostgresDialect};
+    use sql_traits::{
+        errors::LookupError,
+        structs::generic_db::GenericDBBuilder,
+        traits::{DatabaseLike, FunctionLike, TableLike},
+    };
+
+    let (_container, catalog) = crate::live_catalog::catalog(
+        "public",
+        "CREATE TABLE docs (id INT PRIMARY KEY);
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         CREATE FUNCTION guard_value() RETURNS SETOF INT LANGUAGE sql STABLE SECURITY DEFINER
+           SET search_path = pg_catalog, pg_temp
+           BEGIN ATOMIC SELECT id FROM public.docs WHERE id > 0; END;
+         GRANT SELECT ON docs TO PUBLIC;
+         CREATE POLICY readable ON docs FOR SELECT TO PUBLIC USING (id > 0);
+         CREATE FUNCTION guarded_docs() RETURNS SETOF INT LANGUAGE plpgsql STABLE SECURITY DEFINER
+           SET search_path = pg_catalog, pg_temp AS $$
+         BEGIN
+           IF EXISTS (SELECT 1 FROM public.docs WHERE id IN (SELECT public.guard_value()))
+             THEN RETURN; END IF;
+           RETURN QUERY SELECT id FROM public.docs;
+         END $$;",
+    );
+    let mut builder = GenericDBBuilder::new("guards".into(), PostgresDialect);
+    for (schema, ()) in catalog.schemas() {
+        builder = builder.add_schema(Arc::new(schema.clone()), ());
+    }
+    for (table, metadata) in catalog.tables_metadata() {
+        builder = builder
+            .add_table(Arc::new(table.clone()), metadata.clone())
+            .expect("tables stay distinct");
+        for column in table.columns(&catalog).expect("columns") {
+            let metadata = catalog
+                .column_metadata(column)
+                .expect("column metadata")
+                .clone();
+            builder = builder.add_column(Arc::new(column.clone()), metadata);
+        }
+        for index in table.unique_indices(&catalog).expect("unique indices") {
+            let metadata = catalog
+                .unique_index_metadata(index)
+                .expect("index metadata")
+                .clone();
+            builder = builder.add_unique_index(Arc::new(index.clone()), metadata);
+        }
+    }
+    for function in catalog.functions() {
+        let metadata = catalog
+            .function_metadata(function)
+            .expect("function metadata")
+            .clone();
+        let function = if function.name() == "guard_value" {
+            function.clone().with_bound_definition(
+                "CREATE FUNCTION guard_value() RETURNS SETOF INT LANGUAGE sql BEGIN ATOMIC SELECT"
+                    .into(),
+            )
+        } else {
+            function.clone()
+        };
+        builder = builder.add_function(Arc::new(function), metadata);
+    }
+    for policy in catalog.policies() {
+        let metadata = catalog
+            .policy_metadata(policy)
+            .expect("policy metadata")
+            .clone();
+        builder = builder.add_policy(Arc::new(policy.clone()), metadata);
+    }
+    for grant in catalog.table_grants() {
+        let metadata = catalog
+            .table_grant_metadata(grant)
+            .expect("grant metadata")
+            .clone();
+        builder = builder.add_table_grant(Arc::new(grant.clone()), metadata);
+    }
+    let database: PgDieselDatabase = builder.into();
+    let mut constrainer: GenericConstrainer<PgDieselDatabase> =
+        ExposedDefinerOverProtectedTable::default().into();
+    constrainer.set_deployment(Deployment::default());
+    let diagnostics = constrainer.diagnostics(&database);
+    assert!(
+        diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            Error::Lookup(LookupError::FunctionBodyUnparsable { .. })
+        )),
+        "{diagnostics:?}"
     );
 }
 
@@ -4367,6 +4471,7 @@ fn every_arm_of_a_helper_carries_its_filter_or_none_does() {
         format!("{admin} UNION SELECT member.team_id FROM public.team_members member"),
         format!("{admin} UNION SELECT nobody.team_id FROM public.team_members member"),
         format!("{admin}; {own}"),
+        "not a SQL statement".to_owned(),
     ] {
         assert_eq!(
             reported(&body),
