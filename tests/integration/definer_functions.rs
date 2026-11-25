@@ -4874,3 +4874,41 @@ fn a_value_within_a_policys_list_confines_a_filter() {
         );
     }
 }
+
+#[test]
+fn a_definer_setting_a_parameter_in_its_query_is_reported() {
+    assert_eq!(
+        shown_exposed(
+            "NOT hidden",
+            &[
+                "NOT resource.hidden AND pg_catalog.set_config('app.user_id', 'admin', true) IS NOT NULL",
+                "NOT resource.hidden AND (SELECT set_config('app.user_id', 'admin', true)) IS NOT NULL",
+                "NOT resource.hidden AND set_config('application_name', 'probe', true) IS NOT NULL",
+                "NOT resource.hidden AND random() < 0.5",
+            ],
+        ),
+        ["probe_0()", "probe_1()", "probe_2()"]
+    );
+    assert_eq!(
+        exposed(
+            Deployment::default().with_app_role("app"),
+            "CREATE ROLE app NOLOGIN;
+             CREATE TABLE resources (id INT, owner TEXT, hidden BOOLEAN);
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON resources TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE POLICY own ON resources FOR SELECT TO app
+               USING (owner = current_setting('app.user_id', true));
+             CREATE FUNCTION public.act_as(name TEXT) RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT set_config('app.user_id', name, true) $$;
+             CREATE FUNCTION public.admin_resources() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE public.act_as('admin') IS NOT NULL
+                   AND resource.owner = current_setting('app.user_id', true) $$;"
+        ),
+        ["admin_resources()"]
+    );
+}
