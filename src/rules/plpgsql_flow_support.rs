@@ -27,25 +27,26 @@ pub(crate) fn plpgsql_block<F: FunctionLike>(function: &F) -> Option<Block> {
     embedded_sql(function.body()?).ok()
 }
 
-/// The query a PL/pgSQL body returns, and the conditions of the guards it
-/// passes first.
-pub(crate) struct Returned {
-    /// The query whose rows the body returns.
-    pub(crate) query: Query,
+/// The one statement a PL/pgSQL body runs, the query whose rows it returns
+/// or a `DELETE`, and the conditions of the guards it passes first.
+pub(crate) struct Ran {
+    /// The statement the body runs.
+    pub(crate) statement: Statement,
     /// The condition of each guard, under which the body raises an exception
-    /// or returns before any query runs.
+    /// or returns before the statement runs.
     pub(crate) guards: Vec<Expr>,
 }
 
-/// What `block` returns when it does nothing else. Its statements are
-/// guards `IF condition THEN RAISE EXCEPTION ...; END IF;` or `IF condition
-/// THEN RETURN; END IF;`, the exception carrying no argument, then
-/// `RETURN QUERY` statements, maybe followed by a bare `RETURN`, read as the
-/// `UNION ALL` of their queries, a `RETURN` of one scalar subquery, or a
-/// `SELECT ... INTO` the one variable declared without a default followed
-/// by a `RETURN` of a name. Every other variable is declared with a default
-/// and, as no statement but these assigns it, reads as that default.
-pub(crate) fn returned_query(block: Block) -> Option<Returned> {
+/// What `block` runs when it does nothing else. Its statements are guards
+/// `IF condition THEN RAISE EXCEPTION ...; END IF;` or `IF condition THEN
+/// RETURN; END IF;`, the exception carrying no argument, then one `DELETE`
+/// or `RETURN QUERY` statements, either maybe followed by a bare `RETURN`,
+/// the queries read as the `UNION ALL` of them, a `RETURN` of one scalar
+/// subquery, or a `SELECT ... INTO` the one variable declared without a
+/// default followed by a `RETURN` of a name. Every other variable is
+/// declared with a default and, as no statement but these assigns it, reads
+/// as that default.
+pub(crate) fn ran_statement(block: Block) -> Option<Ran> {
     let Block {
         declarations,
         statements,
@@ -78,15 +79,54 @@ pub(crate) fn returned_query(block: Block) -> Option<Returned> {
         statements.next();
     }
     let statements: Vec<Node> = statements.collect();
-    let mut query = match target {
-        None => returned_by(statements)?,
-        Some(_) => selected_into(&statements)?,
+    let mut statement = match target {
+        None => ran_by(statements)?,
+        Some(_) => Statement::Query(Box::new(selected_into(&statements)?)),
     };
-    substitute(&mut query, &defaults);
+    substitute(&mut statement, &defaults);
     for guard in &mut guards {
         substitute(guard, &defaults);
     }
-    Some(Returned { query, guards })
+    Some(Ran { statement, guards })
+}
+
+/// The statement `statements` run, one `DELETE` maybe followed by a bare
+/// `RETURN`, or the query whose rows they return.
+fn ran_by(statements: Vec<Node>) -> Option<Statement> {
+    let deletes = match statements.as_slice() {
+        [
+            Node {
+                kind:
+                    NodeKind::Statement {
+                        statement,
+                        into: None,
+                    },
+                ..
+            },
+        ]
+        | [
+            Node {
+                kind:
+                    NodeKind::Statement {
+                        statement,
+                        into: None,
+                    },
+                ..
+            },
+            Node {
+                kind: NodeKind::Return { value: None },
+                ..
+            },
+        ] => matches!(statement.as_ref(), Statement::Delete(_)),
+        _ => false,
+    };
+    if !deletes {
+        return returned_by(statements).map(|query| Statement::Query(Box::new(query)));
+    }
+    let NodeKind::Statement { statement, .. } = statements.into_iter().next()?.kind else {
+        return None;
+    };
+    Some(*statement)
 }
 
 /// The condition of `node`, when it is an `IF` whose one branch raises an

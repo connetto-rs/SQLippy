@@ -619,6 +619,147 @@ fn a_plpgsql_definer_that_may_return_an_unconfined_row_is_reported() {
     );
 }
 
+/// The definers the rule reports among `definers` over a `resources` table
+/// with row-level security, `grants` granted on it to the caller `app`
+/// under `policies`.
+fn written_exposed(grants: &str, policies: &str, definers: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE TABLE resources (id INT, owner TEXT, hidden BOOLEAN);
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             GRANT {grants} ON resources TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             {policies}
+             {definers}"
+        ),
+    )
+}
+
+/// A `LANGUAGE sql` definer `name` running `body` and returning nothing.
+fn writing_definer(name: &str, body: &str) -> String {
+    format!(
+        "CREATE FUNCTION {name} RETURNS VOID LANGUAGE sql VOLATILE SECURITY DEFINER
+           SET search_path = pg_catalog, pg_temp AS $$ {body} $$;"
+    )
+}
+
+/// A policy for every command showing the caller's own `resources` rows.
+const OWN_ROWS: &str = "CREATE POLICY own ON resources FOR ALL TO app
+    USING (owner = current_setting('app.user_id', true));";
+
+/// A `DELETE` of the caller's own hidden rows.
+const DELETE_OWN: &str = "DELETE FROM public.resources resource
+    WHERE resource.hidden AND resource.owner = current_setting('app.user_id', true)";
+
+#[test]
+fn a_definer_deleting_only_rows_the_caller_may_delete_is_not_reported() {
+    let definers = [
+        writing_definer("purge()", DELETE_OWN),
+        writing_definer(
+            "purge_twins()",
+            "DELETE FROM public.resources resource USING public.resources twin
+             WHERE twin.id = resource.id AND twin.owner = current_setting('app.user_id', true)
+               AND resource.owner = current_setting('app.user_id', true)",
+        ),
+        format!(
+            "CREATE FUNCTION guarded_purge() RETURNS VOID LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+               SET search_path = pg_catalog, pg_temp AS $$
+             DECLARE {SIGNED_IN} BEGIN
+               IF uid IS NULL THEN RAISE EXCEPTION 'not signed in'; END IF;
+               DELETE FROM public.resources resource WHERE resource.hidden AND resource.owner = uid;
+             END $$;"
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, DELETE", OWN_ROWS, &definers),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        written_exposed(
+            "SELECT, DELETE",
+            "CREATE POLICY own_read ON resources FOR SELECT TO app
+               USING (owner = current_setting('app.user_id', true));
+             CREATE POLICY own_delete ON resources FOR DELETE TO app
+               USING (owner = current_setting('app.user_id', true));",
+            &definers,
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_definer_deleting_rows_the_caller_may_not_delete_is_reported() {
+    let purge = writing_definer("purge()", DELETE_OWN);
+    assert_eq!(written_exposed("SELECT", OWN_ROWS, &purge), ["purge()"]);
+    let own = |command: &str| {
+        format!(
+            "CREATE POLICY own ON resources FOR {command} TO app
+               USING (owner = current_setting('app.user_id', true));"
+        )
+    };
+    assert_eq!(
+        written_exposed("SELECT, DELETE", &own("SELECT"), &purge),
+        ["purge()"]
+    );
+    assert_eq!(
+        written_exposed("SELECT, DELETE", &own("DELETE"), &purge),
+        ["purge()"]
+    );
+    assert_eq!(
+        written_exposed(
+            "SELECT, DELETE, UPDATE",
+            &format!(
+                "{OWN_ROWS}
+                 CREATE FUNCTION public.audit() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+                   BEGIN RETURN OLD; END $$;
+                 CREATE TRIGGER audited BEFORE DELETE ON resources
+                   FOR EACH ROW EXECUTE FUNCTION public.audit();"
+            ),
+            &purge,
+        ),
+        ["purge()"]
+    );
+    assert_eq!(
+        written_exposed(
+            "SELECT, DELETE, UPDATE",
+            OWN_ROWS,
+            &[
+                writing_definer(
+                    "purge_any()",
+                    "DELETE FROM public.resources resource WHERE resource.hidden",
+                ),
+                writing_definer(
+                    "purge_beside()",
+                    "DELETE FROM public.resources resource USING public.resources other
+                     WHERE other.id = resource.id
+                       AND resource.owner = current_setting('app.user_id', true)",
+                ),
+                format!(
+                    "CREATE FUNCTION purge_returning() RETURNS SETOF INT LANGUAGE sql VOLATILE
+                       SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                       {DELETE_OWN} RETURNING resource.id $$;"
+                ),
+                writing_definer(
+                    "hide()",
+                    "UPDATE public.resources resource SET hidden = true
+                     WHERE resource.owner = current_setting('app.user_id', true)",
+                ),
+            ]
+            .concat(),
+        ),
+        [
+            "hide()",
+            "purge_any()",
+            "purge_beside()",
+            "purge_returning()"
+        ]
+    );
+}
+
 #[test]
 fn a_policys_scalar_subquery_reads_as_the_value_it_projects() {
     assert_eq!(

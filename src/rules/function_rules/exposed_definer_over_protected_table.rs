@@ -24,12 +24,12 @@ use sql_traits::{
 };
 use sqlparser::{
     ast::{
-        ArgMode, BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
-        FunctionArguments, FunctionBehavior, FunctionCalledOnNull, FunctionSecurity, Ident,
-        InTarget, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, Query, Select,
-        SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableAliasColumnDef,
-        TableFactor, TableInheritance, TableWithJoins, Value, Visit, Visitor, With,
-        visit_expressions, visit_expressions_mut, visit_relations,
+        ArgMode, BinaryOperator, CastKind, DataType, Delete, Expr, FromTable, Function,
+        FunctionArg, FunctionArgExpr, FunctionArguments, FunctionBehavior, FunctionCalledOnNull,
+        FunctionSecurity, Ident, InTarget, JoinConstraint, JoinOperator, ObjectName,
+        ObjectNamePart, Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement,
+        TableAliasColumnDef, TableFactor, TableInheritance, TableWithJoins, Value, Visit, Visitor,
+        With, visit_expressions, visit_expressions_mut, visit_relations,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -59,10 +59,10 @@ use crate::{
         },
         literal_support::literal,
         null_support::rejects_null,
-        plpgsql_flow_support::{Returned, plpgsql_block, returned_query},
+        plpgsql_flow_support::{Ran, plpgsql_block, ran_statement},
         policy_support::{
             acting, client_roles, conjuncts, is_column_reference, is_role_read,
-            sets_only_search_path, sql_query_body, unnested, unwrapped,
+            sets_only_search_path, sql_query_body, sql_statement_body, unnested, unwrapped,
         },
         type_support::user_type_named,
         walk_support::{holds_subquery, walk},
@@ -148,6 +148,16 @@ use super::plpgsql_ambiguous_name::collision;
 /// column of a row each caller's `SELECT` policies admit for lying in that
 /// function's own set. The callers then learn of the rows the helper reads
 /// only which of the rows they read the function returns.
+///
+/// A function is not reported either when each caller could run what it
+/// writes and delete the same rows. Its body is then one `DELETE` from one
+/// table returning nothing, in `LANGUAGE sql` or in a PL/pgSQL block past
+/// such guards, read as the `SELECT` of the rows it deletes joined to the
+/// tables its `USING` names. That `SELECT` is held to the test above, the
+/// deleted table to each caller's `DELETE` policies besides the `SELECT`
+/// ones, as PostgreSQL holds a `DELETE` reading a column of its table. Every
+/// caller holds `DELETE` on that table, and no trigger is declared on it,
+/// since a trigger runs as the owner inside the function.
 ///
 /// A call `f(a)` passing a label of an enum lies within `f(b)` passing a
 /// lower label of the same enum, all other arguments alike, when `f` is a
@@ -549,7 +559,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         };
         for arm in &arms.arms {
             let tested = in_set(arm.drawn.column.column_name(), member.clone());
-            if !body.admits_every_caller(arm.drawn.table, &tested)? {
+            if !body.admits_every_caller(arm.drawn.table, &tested, RowStatement::Select)? {
                 return Ok(false);
             }
         }
@@ -557,12 +567,13 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 
     /// What `walk` finds reading the body of `function`, one `LANGUAGE sql`
-    /// query or a `plpgsql` block [`returned_query`] reads as one, with the
-    /// lineage `lineage` gives it, or `None` when the body is no such query,
-    /// its names do not resolve, a name of the block may read a variable
-    /// where the query reads a column, or a guard of the block reads a
-    /// subquery or may evaluate otherwise for a caller than for the owner,
-    /// so that whether it raises tells what the owner reads.
+    /// statement or the one a `plpgsql` block [`ran_statement`] reads, with
+    /// the lineage `lineage` gives it. A query is read as it stands and a
+    /// `DELETE` as [`deleted_rows`] gives it. `None` when the body is no such
+    /// statement, its names do not resolve, a name of the block may read a
+    /// variable where the statement reads a column, or a guard of the block
+    /// reads a subquery or may evaluate otherwise for a caller than for the
+    /// owner, so that whether it raises tells what the owner reads.
     fn read_body<T>(
         &self,
         function: &'a DB::Function,
@@ -570,9 +581,9 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         walk: impl FnOnce(&mut Reads<'_, '_, 'a, DB>, &Query) -> Result<T, LookupError>,
     ) -> Result<Option<T>, LookupError> {
         let path = function.search_path(self.database)?;
-        let query = match plpgsql_block(function) {
+        let statement = match plpgsql_block(function) {
             Some(block) => {
-                let Some(Returned { query, guards }) = returned_query(block) else {
+                let Some(Ran { statement, guards }) = ran_statement(block) else {
                     return Ok(None);
                 };
                 if collision(self.database, function)?.is_some() {
@@ -585,14 +596,21 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                         return Ok(None);
                     }
                 }
-                query
+                statement
             }
-            None => match sql_query_body(self.database, function)? {
-                Some(query) => query.into_owned(),
+            None => match sql_statement_body(self.database, function)? {
+                Some(statement) => statement.into_owned(),
                 None => return Ok(None),
             },
         };
-        let statement = Statement::Query(Box::new(query));
+        let (statement, writes) = match statement {
+            query @ Statement::Query(_) => (query, false),
+            Statement::Delete(delete) => match deleted_rows(delete) {
+                Some(query) => (Statement::Query(Box::new(query)), true),
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
         let scope = ExpressionScope::FunctionBody(function);
         let (Statement::Query(query), Ok(context)) = (
             &statement,
@@ -605,6 +623,13 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         ) else {
             return Ok(None);
         };
+        let deleted = match query.body.as_ref() {
+            SetExpr::Select(select) if writes => select
+                .from
+                .first()
+                .map(|from| ptr::from_ref(&from.relation)),
+            _ => None,
+        };
         let lineage = lineage(query);
         let mut reads = Reads {
             body: Body {
@@ -616,6 +641,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             path: path.as_deref(),
             items: WithScopes::default(),
             lineage: &lineage,
+            deleted,
         };
         walk(&mut reads, query).map(Some)
     }
@@ -697,6 +723,20 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 if !held.select.on_column(column) {
                     return Ok(false);
                 }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether every caller may delete rows of `table`, whose deletes fire
+    /// no trigger, which would run as the owner rather than the caller.
+    fn deletable_by_every_caller(&self, table: &DB::Table) -> Result<bool, LookupError> {
+        if table.triggers(self.database)?.next().is_some() {
+            return Ok(false);
+        }
+        for caller in &self.callers {
+            if !table.privileges(acting(*caller), self.database)?.delete {
+                return Ok(false);
             }
         }
         Ok(true)
@@ -884,13 +924,17 @@ struct Body<'c, 'a, DB: DatabaseLike> {
 
 impl<DB: DatabaseLike> Body<'_, '_, DB> {
     /// Whether `filter`, stating conditions of the columns of `table` by
-    /// their stored names, admits only rows every caller's `SELECT` policies
-    /// admit, of which every caller may select every column.
-    fn admits_every_caller(&self, table: &DB::Table, filter: &Expr) -> Result<bool, LookupError> {
+    /// their stored names, admits only rows every caller's policies for
+    /// `statement` admit, of which every caller may select every column.
+    fn admits_every_caller(
+        &self,
+        table: &DB::Table,
+        filter: &Expr,
+        statement: RowStatement,
+    ) -> Result<bool, LookupError> {
         let database = self.confinement.database;
         for caller in &self.confinement.callers {
-            let security = match table.row_security(RowStatement::Select, acting(*caller), database)
-            {
+            let security = match table.row_security(statement, acting(*caller), database) {
                 Ok(security) => security,
                 Err(RowSecurityError::Lookup(error)) => return Err(error),
                 Err(_) => return Ok(false),
@@ -1313,6 +1357,9 @@ struct Reads<'c, 'q, 'a, DB: DatabaseLike> {
     path: Option<&'c [(Cow<'c, str>, bool)]>,
     items: WithScopes,
     lineage: &'c Lineage,
+    /// The relation of the body's `DELETE`, read as a `SELECT` of the rows
+    /// it deletes, which each caller has to be allowed to delete.
+    deleted: Option<*const TableFactor>,
 }
 
 impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
@@ -1438,9 +1485,20 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 }) {
                     conditions.push(membership);
                 }
+                let statement = if self
+                    .deleted
+                    .is_some_and(|deleted| ptr::eq(deleted, relation))
+                {
+                    if !self.body.confinement.deletable_by_every_caller(table)? {
+                        return Ok(false);
+                    }
+                    RowStatement::Delete { reads: true }
+                } else {
+                    RowStatement::Select
+                };
                 if !self
                     .body
-                    .admits_every_caller(table, &conjunction(conditions))?
+                    .admits_every_caller(table, &conjunction(conditions), statement)?
                 {
                     return Ok(false);
                 }
@@ -3261,6 +3319,45 @@ fn apart<DB: DatabaseLike>(left: &[Pinned<'_, DB>], right: &[Pinned<'_, DB>]) ->
 /// The relations of `from`, in order.
 fn relations(from: &TableWithJoins) -> impl Iterator<Item = &TableFactor> {
     iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation))
+}
+
+/// `SELECT NULL FROM target, using… WHERE selection`, the rows `delete`
+/// deletes joined to the `USING` rows that select them, when it deletes
+/// from one table and returns nothing.
+fn deleted_rows(delete: Delete) -> Option<Query> {
+    let Delete {
+        tables,
+        from: FromTable::WithFromKeyword(mut from),
+        on_cluster: None,
+        using,
+        selection,
+        returning: None,
+        output: None,
+        order_by,
+        limit: None,
+        settings: None,
+        ..
+    } = delete
+    else {
+        return None;
+    };
+    if !tables.is_empty()
+        || !order_by.is_empty()
+        || !matches!(from.as_slice(), [target] if target.joins.is_empty())
+    {
+        return None;
+    }
+    from.extend(using.into_iter().flatten());
+    let mut query = Parser::new(&PostgreSqlDialect {})
+        .try_with_sql("SELECT NULL")
+        .and_then(|mut parser| parser.parse_query())
+        .ok()?;
+    let SetExpr::Select(select) = query.body.as_mut() else {
+        return None;
+    };
+    select.from = from;
+    select.selection = selection;
+    Some(*query)
 }
 
 /// Whether each row `from` yields holds a row of the relation at
