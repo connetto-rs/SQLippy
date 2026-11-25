@@ -2216,6 +2216,99 @@ fn a_sql_definer_running_a_statement_the_caller_may_not_run_alike_is_reported() 
     );
 }
 
+/// An `UPDATE` hiding the caller's own rows, returning their ids.
+const HIDE_OWN_RETURNING: &str = "UPDATE public.resources resource SET hidden = true
+    WHERE resource.owner = current_setting('app.user_id', true)
+    RETURNING resource.id, resource.hidden";
+
+#[test]
+fn a_definer_querying_what_a_write_in_with_returns_alike_is_not_reported() {
+    let definers = [
+        returning_definer(
+            "hide_counted()",
+            "BIGINT",
+            &format!("WITH hid AS ({HIDE_OWN_RETURNING}) SELECT count(*) FROM hid"),
+        ),
+        returning_definer(
+            "hide_flags()",
+            "SETOF BOOLEAN",
+            &format!("WITH hid AS ({HIDE_OWN_RETURNING}) SELECT hid.hidden FROM hid"),
+        ),
+        returning_definer(
+            "purge_listed()",
+            "SETOF INT",
+            &format!(
+                "WITH purged AS ({DELETE_OWN} RETURNING resource.id) SELECT purged.id FROM purged"
+            ),
+        ),
+        returning_definer(
+            "create_listed(p_id INT)",
+            "SETOF INT",
+            "WITH created AS (
+               INSERT INTO public.resources AS resource (id, owner, hidden)
+               VALUES (p_id, current_setting('app.user_id'), false)
+               RETURNING resource.id)
+             SELECT created.id FROM created",
+        ),
+        block_definer(
+            "hide_returned()",
+            "SETOF INT",
+            "",
+            &format!("RETURN QUERY WITH hid AS ({HIDE_OWN_RETURNING}) SELECT hid.id FROM hid;"),
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, INSERT, UPDATE, DELETE", OWN_ROWS, &definers),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_definer_whose_write_in_with_or_query_the_caller_may_not_run_alike_is_reported() {
+    let definers = [
+        returning_definer(
+            "hide_any_counted()",
+            "BIGINT",
+            "WITH hid AS (UPDATE public.resources resource SET hidden = true RETURNING resource.id)
+             SELECT count(*) FROM hid",
+        ),
+        returning_definer(
+            "hide_and_count_all()",
+            "BIGINT",
+            &format!(
+                "WITH hid AS ({HIDE_OWN_RETURNING})
+                 SELECT count(*) FROM public.resources resource"
+            ),
+        ),
+        returning_definer(
+            "hide_all_returned()",
+            "BIGINT",
+            "WITH hid AS (UPDATE public.resources resource SET hidden = true
+               WHERE resource.owner = current_setting('app.user_id', true) RETURNING *)
+             SELECT count(*) FROM hid",
+        ),
+        returning_definer(
+            "create_unsigned_counted()",
+            "BIGINT",
+            "WITH created AS (
+               INSERT INTO public.resources (id, owner)
+               VALUES (1, current_setting('app.user_id', true)) RETURNING id)
+             SELECT count(*) FROM created",
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, INSERT, UPDATE, DELETE", OWN_ROWS, &definers),
+        [
+            "create_unsigned_counted()",
+            "hide_all_returned()",
+            "hide_and_count_all()",
+            "hide_any_counted()"
+        ]
+    );
+}
+
 /// The caller's own `resources` rows, locked with `lock`.
 fn locking_own(lock: &str) -> String {
     format!(
