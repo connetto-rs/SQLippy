@@ -263,6 +263,7 @@ rule_icons! {
     "trigger_filter_in_body" => FaFilter,
     "snapshot_before_lock" => FaLockOpen,
     "plpgsql_ambiguous_name" => FaCircleQuestion,
+    "decided_branch" => FaCodeMerge,
 }
 #[cfg(test)]
 mod tests {

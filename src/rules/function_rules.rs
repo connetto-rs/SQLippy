@@ -24,6 +24,8 @@ mod snapshot_before_lock;
 pub use snapshot_before_lock::SnapshotBeforeLock;
 mod plpgsql_ambiguous_name;
 pub use plpgsql_ambiguous_name::PlpgsqlAmbiguousName;
+mod decided_branch;
+pub use decided_branch::DecidedBranch;
 mod function_without_safe_search_path;
 pub use function_without_safe_search_path::FunctionWithoutSafeSearchPath;
 

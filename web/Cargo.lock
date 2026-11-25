@@ -3037,7 +3037,7 @@ checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#32d00b312f5042234400fb81b781992bb58764bb"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#8085eda5c3471c508eb3a926065db8192904542f"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -3136,11 +3136,12 @@ dependencies = [
 [[package]]
 name = "sqlparser-plpgsql-dataflow"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-plpgsql-dataflow?branch=main#e056da2f014d00313dda104510c9029859fb55f4"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql-dataflow?branch=main#a11eac4e8763ac8ea0b0cc842ae414859d0c789e"
 dependencies = [
  "sqlparser",
  "sqlparser-expr-eval",
  "sqlparser-plpgsql",
+ "sqlstate",
  "thiserror 2.0.21",
 ]
 
