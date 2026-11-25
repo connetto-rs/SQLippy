@@ -80,6 +80,12 @@ pub(crate) trait Columns {
         None
     }
 
+    /// The value a policy's `call` returns, written so that it reads alike
+    /// wherever it stands, `None` for a call kept as written.
+    fn inlined(&self, _call: &Function) -> Option<Expr> {
+        None
+    }
+
     /// Whether `clause` alone meets every condition.
     fn settles(&self, _clause: &Expr) -> bool {
         false
@@ -158,6 +164,7 @@ impl<'e, T> Condition<'e, T> {
                     .map(Term::Column)
             },
             |name| columns.relation(name),
+            |call| columns.inlined(call),
         );
         Self {
             original: condition,
@@ -213,6 +220,7 @@ pub(crate) fn clause_implies<C: Columns>(
             clause,
             |column| stored_name(column).map(|name| Term::Column(name.into_owned())),
             |name| columns.relation(name),
+            |_| None,
         )
         && (written == *stated
             || missing_ok(&written).as_ref().unwrap_or(&written)
@@ -523,7 +531,8 @@ pub(crate) struct StoredRelation {
 
 /// `expression` with every column reference of the row it tests named,
 /// quoted, by the column `rename` resolves it to, every parameter reference
-/// written as `$n`, every scalar subquery that reads no relation, such as
+/// written as `$n`, every call `inline` resolves replaced by the value it
+/// returns, every scalar subquery that reads no relation, such as
 /// `(SELECT auth.uid())`, replaced by the value it projects, and every
 /// comparison with `TRUE` or `FALSE` written as its operand or `NOT` of it,
 /// as [`compared_with_boolean`] gives it. A subquery reading stored tables,
@@ -540,14 +549,17 @@ pub(crate) fn renamed(
     expression: &Expr,
     rename: impl Fn(&Expr) -> Option<Term>,
     relation: impl Fn(&ObjectName) -> Option<StoredRelation>,
+    inline: impl Fn(&Function) -> Option<Expr>,
 ) -> Option<Expr> {
     let mut resolver = Resolver {
         rename,
         relation,
+        inline,
         scopes: Vec::new(),
         inlining: None,
         resolved: Vec::new(),
         relations: Vec::new(),
+        inlined: Vec::new(),
     };
     if walk(expression, &mut resolver).is_break() {
         return None;
@@ -558,6 +570,7 @@ pub(crate) fn renamed(
         &mut Renamer {
             resolved: resolver.resolved.into_iter(),
             relations: resolver.relations.into_iter(),
+            inlined: resolver.inlined.into_iter(),
         },
     );
     Some(renamed)
@@ -652,11 +665,12 @@ fn bound(
     Some(bound)
 }
 
-/// Resolves each reference and each relation of a subquery, in the order
+/// Resolves each reference, relation and call of a subquery, in the order
 /// [`Renamer`] meets them.
-struct Resolver<F, R> {
+struct Resolver<F, R, I> {
     rename: F,
     relation: R,
+    inline: I,
     /// The queries around the walked node, innermost last.
     scopes: Vec<Scope>,
     /// The scalar subquery about to be walked, when it reads nothing and
@@ -666,9 +680,13 @@ struct Resolver<F, R> {
     /// The name and alias each table factor renames to, `None` for one left
     /// as written.
     relations: Vec<Option<(ObjectName, Ident)>>,
+    /// The value each call returns, `None` for one left as written.
+    inlined: Vec<Option<Expr>>,
 }
 
-impl<F: Fn(&Expr) -> Option<Term>, R: Fn(&ObjectName) -> Option<StoredRelation>> Resolver<F, R> {
+impl<F: Fn(&Expr) -> Option<Term>, R: Fn(&ObjectName) -> Option<StoredRelation>, I>
+    Resolver<F, R, I>
+{
     /// `reference`, written as `parts`, as the renamed condition writes it,
     /// resolved first against the tables of the innermost query and last
     /// against the tested row.
@@ -731,8 +749,11 @@ impl<F: Fn(&Expr) -> Option<Term>, R: Fn(&ObjectName) -> Option<StoredRelation>>
     }
 }
 
-impl<F: Fn(&Expr) -> Option<Term>, R: Fn(&ObjectName) -> Option<StoredRelation>> Visitor
-    for Resolver<F, R>
+impl<
+    F: Fn(&Expr) -> Option<Term>,
+    R: Fn(&ObjectName) -> Option<StoredRelation>,
+    I: Fn(&Function) -> Option<Expr>,
+> Visitor for Resolver<F, R, I>
 {
     type Break = ();
 
@@ -778,6 +799,10 @@ impl<F: Fn(&Expr) -> Option<Term>, R: Fn(&ObjectName) -> Option<StoredRelation>>
         let parts = match expression {
             Expr::Identifier(column) => slice::from_ref(column),
             Expr::CompoundIdentifier(parts) => parts.as_slice(),
+            Expr::Function(call) => {
+                self.inlined.push((self.inline)(call));
+                return ControlFlow::Continue(());
+            }
             _ => return ControlFlow::Continue(()),
         };
         let Some(resolved) = self.resolve(expression, parts) else {
@@ -788,15 +813,19 @@ impl<F: Fn(&Expr) -> Option<Term>, R: Fn(&ObjectName) -> Option<StoredRelation>>
     }
 }
 
-/// Writes the resolved references and relations and inlines the scalar
-/// subqueries.
-struct Renamer<I, T> {
-    resolved: I,
+/// Writes the resolved references, relations and calls and inlines the
+/// scalar subqueries.
+struct Renamer<E, T, C> {
+    resolved: E,
     relations: T,
+    inlined: C,
 }
 
-impl<I: Iterator<Item = Expr>, T: Iterator<Item = Option<(ObjectName, Ident)>>> VisitorMut
-    for Renamer<I, T>
+impl<
+    E: Iterator<Item = Expr>,
+    T: Iterator<Item = Option<(ObjectName, Ident)>>,
+    C: Iterator<Item = Option<Expr>>,
+> VisitorMut for Renamer<E, T, C>
 {
     type Break = Infallible;
 
@@ -823,6 +852,10 @@ impl<I: Iterator<Item = Expr>, T: Iterator<Item = Option<(ObjectName, Ident)>>> 
                 select.projection.as_mut_slice()
         {
             *expression = mem::replace(value, Expr::Value(Value::Null.into()));
+        } else if matches!(expression, Expr::Function(_))
+            && let Some(Some(value)) = self.inlined.next()
+        {
+            *expression = value;
         } else if is_column_reference(expression)
             && let Some(resolved) = self.resolved.next()
         {

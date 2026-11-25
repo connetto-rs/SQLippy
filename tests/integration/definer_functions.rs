@@ -846,6 +846,153 @@ fn a_subquery_over_a_protected_table_confines_only_where_finding_more_rows_admit
     );
 }
 
+/// The functions reported where resources admit the rows `policy` does and
+/// `body` reads them, with helpers returning the caller's setting.
+fn helper_exposed(policy: &str, body: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE SCHEMA authz;
+             CREATE TABLE memberships (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+             CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL,
+               owner TEXT, owner_id UUID);
+             ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON memberships, resources TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE FUNCTION authz.uid() RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT current_setting('app.user_id', true) $$;
+             CREATE FUNCTION authz.definer_uid() RETURNS TEXT LANGUAGE sql STABLE
+               SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT current_setting('app.user_id', true) $$;
+             CREATE FUNCTION authz.uuid_uid() RETURNS UUID LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT NULLIF(current_setting('app.user_id', true), '')::uuid $$;
+             CREATE FUNCTION authz.path_setting() RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT current_setting('search_path') $$;
+             CREATE FUNCTION authz.resolved() RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT pg_catalog.to_regclass('resources')::text $$;
+             CREATE FUNCTION authz.visible() RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT pg_catalog.pg_table_is_visible(16384)::text $$;
+             CREATE FUNCTION authz.table_name() RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$ SELECT 'resources'::regclass::text $$;
+             CREATE DOMAIN public.label AS TEXT;
+             CREATE FUNCTION authz.labelled() RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT current_setting('app.user_id', true)::label::text $$;
+             CREATE FUNCTION authz.volatile_uid() RETURNS TEXT LANGUAGE sql VOLATILE
+               SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT current_setting('app.user_id', true) $$;
+             CREATE FUNCTION authz.varchar_uid() RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT current_setting('app.user_id', true)::varchar $$;
+             CREATE FUNCTION public.setting_of() RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$ SELECT 'admin'::text $$;
+             CREATE FUNCTION authz.setting_of() RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT current_setting('app.user_id', true) $$;
+             CREATE FUNCTION authz.indirect() RETURNS TEXT LANGUAGE sql STABLE
+               SET search_path = authz, pg_catalog, pg_temp AS $$ SELECT setting_of() $$;
+             CREATE POLICY own_memberships ON memberships FOR SELECT TO app
+               USING (user_id = current_setting('app.user_id', true));
+             CREATE POLICY readable ON resources FOR SELECT TO app USING ({policy});
+             CREATE FUNCTION authz.probe() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource WHERE {body} $$;"
+        ),
+    )
+}
+
+#[test]
+fn a_helper_reading_alike_stands_for_the_value_it_casts_or_calls_to_its_type() {
+    let setting = "current_setting('app.user_id', true)";
+    let member = |user: &str, organization: &str| {
+        format!(
+            "EXISTS (SELECT 1 FROM public.memberships m
+               WHERE m.organization_id = {organization}.organization_id AND m.user_id = {user})"
+        )
+    };
+    for (policy, body) in [
+        (
+            format!("owner = {setting}"),
+            "resource.owner = authz.uid()".to_owned(),
+        ),
+        (
+            "owner = authz.uid()".to_owned(),
+            format!("resource.owner = {setting}"),
+        ),
+        (
+            format!("owner = {setting}"),
+            "resource.owner = authz.definer_uid()".to_owned(),
+        ),
+        (
+            member("authz.uid()", "resources"),
+            member("authz.uid()", "resource"),
+        ),
+        (
+            member("(SELECT authz.uid())", "resources"),
+            member("(SELECT authz.uid())", "resource"),
+        ),
+        (
+            format!("owner_id = NULLIF({setting}, '')::uuid"),
+            "resource.owner_id = authz.uuid_uid()".to_owned(),
+        ),
+    ] {
+        assert_eq!(
+            helper_exposed(&policy, &body),
+            Vec::<String>::new(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_helper_whose_value_may_differ_where_it_is_inlined_confines_nothing() {
+    let setting = "current_setting('app.user_id', true)";
+    for (policy, body) in [
+        (
+            "owner = current_setting('search_path')".to_owned(),
+            "resource.owner = authz.path_setting()",
+        ),
+        (
+            "owner = pg_catalog.to_regclass('resources')::text".to_owned(),
+            "resource.owner = authz.resolved()",
+        ),
+        (
+            "owner = pg_catalog.pg_table_is_visible(16384)::text".to_owned(),
+            "resource.owner = authz.visible()",
+        ),
+        (
+            "owner = 'resources'::regclass::text".to_owned(),
+            "resource.owner = authz.table_name()",
+        ),
+        (
+            format!("owner = {setting}::label::text"),
+            "resource.owner = authz.labelled()",
+        ),
+        (
+            format!("owner = {setting}"),
+            "resource.owner = authz.volatile_uid()",
+        ),
+        (
+            format!("owner = {setting}::varchar"),
+            "resource.owner = authz.varchar_uid()",
+        ),
+        (
+            "owner = setting_of()".to_owned(),
+            "resource.owner = authz.indirect()",
+        ),
+    ] {
+        assert_eq!(helper_exposed(&policy, body), ["probe()"], "{body}");
+    }
+}
+
 #[test]
 fn a_value_list_confines_when_each_value_meets_a_policy_arm() {
     assert_eq!(

@@ -20,15 +20,16 @@ use sql_traits::{
         ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, PolicyLike, Relation, TableLike,
         UserDefinedTypeLike,
     },
-    utils::identifier_resolution::normalize_identifier,
+    utils::{identifier_resolution::normalize_identifier, normalize_postgres_type},
 };
 use sqlparser::{
     ast::{
-        ArgMode, BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-        FunctionBehavior, FunctionCalledOnNull, FunctionSecurity, Ident, InTarget, JoinConstraint,
-        JoinOperator, ObjectName, ObjectNamePart, Query, Select, SelectItem, SetExpr, SetOperator,
-        SetQuantifier, Statement, TableAliasColumnDef, TableFactor, TableInheritance,
-        TableWithJoins, Value, Visit, Visitor, With, visit_expressions, visit_expressions_mut,
+        ArgMode, BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
+        FunctionArguments, FunctionBehavior, FunctionCalledOnNull, FunctionSecurity, Ident,
+        InTarget, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, Query, Select,
+        SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableAliasColumnDef,
+        TableFactor, TableInheritance, TableWithJoins, Value, Visit, Visitor, With,
+        visit_expressions, visit_expressions_mut,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -51,6 +52,7 @@ use crate::{
             Columns, Condition, ParameterValues, StoredRelation, Term, admits, clause_implies,
             keeps_existence, membership, parameter, parameter_ordinal, renamed, witnessed,
         },
+        inline_support::selected_expression,
         key_support::{binds, equality_keys, key_pairs, no_inheritors},
         ladder_support::{
             Ladders, called, listed_arguments, plain, positional_arguments, relation_arguments,
@@ -913,6 +915,10 @@ impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
         stored_relation_named(self.confinement.database, name, None)
     }
 
+    fn inlined(&self, call: &Function) -> Option<Expr> {
+        helper_value(self.confinement, call)
+    }
+
     fn parameter_values(&self, ordinal: usize) -> Option<&ParameterValues> {
         self.parameters.get(ordinal)?.as_ref()
     }
@@ -1108,8 +1114,9 @@ impl<DB: DatabaseLike> Visitor for CallerBound<'_, '_, DB> {
 }
 
 /// Whether `call` asks what privileges or roles the current role holds, such
-/// as `has_table_privilege` or `pg_has_role`, or which schemas the search
-/// path names, which the function's own `SET search_path` changes.
+/// as `has_table_privilege` or `pg_has_role`, or reads the search path, as
+/// `current_schema`, `to_regclass` or `current_setting('search_path')` do,
+/// which the function's own `SET search_path` changes.
 fn reads_session_state(call: &Function) -> bool {
     call.name
         .0
@@ -1118,11 +1125,29 @@ fn reads_session_state(call: &Function) -> bool {
         .is_some_and(|name| {
             let name = name.value.to_lowercase();
             (name.starts_with("has_") && name.ends_with("_privilege"))
+                || name.starts_with("to_reg")
+                || (name.starts_with("pg_") && name.ends_with("_is_visible"))
                 || matches!(
                     name.as_str(),
                     "pg_has_role" | "row_security_active" | "current_schema" | "current_schemas"
                 )
+                || (matches!(name.as_str(), "current_setting" | "set_config")
+                    && !names_other_setting_than_search_path(call))
         })
+}
+
+/// Whether the first argument of `call` is a literal naming a setting other
+/// than `search_path`.
+fn names_other_setting_than_search_path(call: &Function) -> bool {
+    matches!(
+        &call.args,
+        FunctionArguments::List(list) if matches!(
+            list.args.first(),
+            Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))))
+                if matches!(&value.value, Value::SingleQuotedString(setting)
+                    if !setting.eq_ignore_ascii_case("search_path"))
+        )
+    )
 }
 
 /// Pushes onto `found` the relations of each subquery `condition` holds true
@@ -1476,6 +1501,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 conjunct,
                 |reference| term(&resolver, reference, relation, &equalities),
                 |name| self.subquery_relation(name),
+                |call| helper_value(self.body.confinement, call),
             );
             match stated {
                 Some(stated) if self.reads_alike(conjunct)? => {
@@ -1585,6 +1611,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                         _ => None,
                     },
                     |name| self.subquery_relation(name),
+                    |call| helper_value(self.body.confinement, call),
                 )
             })
     }
@@ -3053,6 +3080,7 @@ fn carried_conditions<DB: DatabaseLike>(
                         .map(|(_, to)| Term::Column((*to).to_owned()))
                 },
                 |_| None,
+                |_| None,
             )
         })
         .collect())
@@ -3582,6 +3610,102 @@ fn written_over_joined<DB: DatabaseLike>(
         ControlFlow::<()>::Continue(())
     });
     Some((rewritten, reads_joined))
+}
+
+/// The value `call` returns as its function's body writes it, when `call`
+/// passes nothing to one schema function [`CallerBound::invoked_alike`]
+/// accepts, whose body selects a cast to its declared type or a call of a
+/// function declared to return that type, every name of which means alike
+/// wherever it is written.
+fn helper_value<DB: DatabaseLike>(
+    confinement: &Confinement<'_, DB>,
+    call: &Function,
+) -> Option<Expr> {
+    let database = confinement.database;
+    if !matches!(&call.args, FunctionArguments::List(list) if list.args.is_empty() && list.clauses.is_empty())
+        || call.filter.is_some()
+        || call.over.is_some()
+    {
+        return None;
+    }
+    let [function] = reached(database, call)?[..] else {
+        return None;
+    };
+    if function.target_name().schema() == Some("pg_catalog")
+        || function.returns_set()
+        || !CallerBound::new(confinement, None, None)
+            .invoked_alike(function)
+            .ok()?
+    {
+        return None;
+    }
+    let declared = function.normalized_return_type_name(database)?;
+    let query = sql_query_body(database, function).ok()??;
+    let value = selected_expression(&query)?;
+    let typed = match value {
+        Expr::Cast {
+            kind: CastKind::Cast | CastKind::DoubleColon,
+            data_type,
+            ..
+        } => normalize_postgres_type(&data_type.to_string()) == declared,
+        Expr::Function(inner) => reached(database, inner).is_some_and(|functions| {
+            !functions.is_empty()
+                && functions.iter().all(|function| {
+                    function.normalized_return_type_name(database).as_ref() == Some(&declared)
+                })
+        }),
+        _ => false,
+    };
+    (typed && reads_alike_anywhere(database, value)).then(|| value.clone())
+}
+
+/// The functions `call` may reach.
+fn reached<'a, DB: DatabaseLike>(
+    database: &'a DB,
+    call: &Function,
+) -> Option<Vec<&'a DB::Function>> {
+    database
+        .functions_reached_by(call, IdentifierCase::Folded)
+        .ok()
+        .map(Iterator::collect)
+}
+
+/// Whether every name `value` holds means alike wherever it is written: it
+/// reads no column or query, casts to no type the search path picks, and
+/// calls functions written schema-qualified or reaching only `pg_catalog`.
+fn reads_alike_anywhere<DB: DatabaseLike>(database: &DB, value: &Expr) -> bool {
+    visit_expressions(value, |expression| {
+        let anywhere = match expression {
+            Expr::Identifier(_)
+            | Expr::CompoundIdentifier(_)
+            | Expr::Subquery(_)
+            | Expr::Exists { .. }
+            | Expr::In {
+                target: InTarget::Subquery(_),
+                ..
+            } => false,
+            Expr::Cast { data_type, .. } => match data_type {
+                DataType::Regclass => false,
+                DataType::Custom(name, _) => name.0.len() > 1,
+                _ => true,
+            },
+            Expr::Function(call) => {
+                call.name.0.len() > 1
+                    || reached(database, call).is_some_and(|functions| {
+                        functions
+                            .iter()
+                            .all(|function| function.target_name().schema() == Some("pg_catalog"))
+                    })
+            }
+            _ => true,
+        };
+        if anywhere {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
+    })
+    .is_continue()
 }
 
 /// The input parameter of the function whose body holds `reference` that
