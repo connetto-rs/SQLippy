@@ -1232,6 +1232,15 @@ fn a_definer_writing_a_table_whose_triggers_may_run_otherwise_is_reported() {
         ),
         (
             trigger(
+                "stamp_qualified",
+                "BEFORE UPDATE",
+                "",
+                "NEW.edited_at = public.resources.edited_at; RETURN NEW;",
+            ),
+            &["hide()"],
+        ),
+        (
+            trigger(
                 "stamp_caller",
                 "BEFORE UPDATE",
                 "",
@@ -1285,6 +1294,27 @@ fn a_definer_writing_a_table_whose_triggers_may_run_otherwise_is_reported() {
             ),
             reported,
             "{triggers}"
+        );
+    }
+}
+
+#[test]
+fn a_definer_with_an_unresolved_or_unsupported_write_is_reported() {
+    for body in [
+        "DELETE FROM (SELECT * FROM public.resources) resource",
+        "DELETE FROM public.missing USING public.resources",
+        "UPDATE public.resources JOIN public.resources other USING (id) SET hidden = true",
+        "UPDATE public.resources SET resources.hidden = true",
+        "UPDATE public.resources FROM public.resources other SET hidden = true",
+    ] {
+        assert_eq!(
+            written_exposed(
+                "SELECT, UPDATE, DELETE",
+                OWN_ROWS,
+                &writing_definer("write_rows()", body),
+            ),
+            ["write_rows()"],
+            "{body}"
         );
     }
 }
