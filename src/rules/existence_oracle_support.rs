@@ -10,29 +10,31 @@ use sql_traits::{
         RowStatement, RowVersion, TargetName, WrittenCall,
     },
     traits::{ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, TableLike},
-    utils::identifier_resolution::normalize_identifier,
+    utils::{identifier_resolution::normalize_identifier, scalar_family::scalar_family},
 };
 use sqlparser::{
     ast::{
         AccessExpr, BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr,
         FunctionArguments, FunctionSecurity, Ident, InTarget, JoinConstraint, JoinOperator,
-        ObjectName, Query, Select, SelectItem, SetExpr, SetOperator, TableAlias, TableFactor,
-        Value, Visit, VisitMut, VisitorMut, visit_expressions,
+        ObjectName, Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier, TableAlias,
+        TableFactor, Value, Visit, VisitMut, VisitorMut, WildcardAdditionalOptions,
+        visit_expressions,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
 
 use crate::{
-    deployment::Deployment,
+    deployment::{Deployment, fully_unfolded},
     rules::{
         closed_set_support::{names_cast_column, same_identity, stored_name},
         consumed_key_support::Consumption,
         cte_support::stored_table,
         grant_support::schema_of,
         implication_support::{
-            Columns, Condition, Operand, admits, clause_implies, column_of, is_column, membership,
-            query_members, reads_column_or_parameter,
+            Columns, Condition, Operand, admits, clause_implies, column_of, filters_nothing,
+            is_column, limits_nothing, membership, reads_column_or_parameter, renamed_column_call,
+            select_members,
         },
         key_support::{binds, equality_keys, instances, key_pairs, named, no_inheritors},
         ladder_support::Ladders,
@@ -151,6 +153,9 @@ struct HelperArms<'db, DB: DatabaseLike> {
     arms: Vec<Arm<'db, DB>>,
 }
 
+/// A helper a call reaches, with the query its body runs.
+type HelperBody<'db, DB> = (&'db <DB as DatabaseLike>::Function, Cow<'db, Query>);
+
 /// A condition admitting a referenced column into the values one column of
 /// the rows of a table takes.
 struct Sublink<'db, DB: DatabaseLike> {
@@ -183,6 +188,8 @@ pub(crate) struct Confinement<'a, DB: DatabaseLike> {
     helpers: RefCell<HashMap<*const Expr, Option<Rc<HelperArms<'a, DB>>>>>,
     /// The spelling each set unfolds to, by the set.
     unfoldings: RefCell<HashMap<Expr, Option<Expr>>>,
+    /// The sets seeding the recursive walk each set reads, by the set.
+    seeds: RefCell<HashMap<Expr, Rc<[Expr]>>>,
     /// Triggers taking each held key out of the sets a check may draw it
     /// from.
     consumptions: Vec<Consumption<'a, DB>>,
@@ -226,6 +233,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             null_skips,
             helpers: RefCell::new(HashMap::new()),
             unfoldings: RefCell::new(HashMap::new()),
+            seeds: RefCell::new(HashMap::new()),
             consumptions: Vec::new(),
             reading: RefCell::new(Vec::new()),
             ladders: Ladders::new(database),
@@ -1120,8 +1128,39 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             narrower,
             wider,
             |set| self.unfolded(set),
-            |narrower, wider| self.ladders.within(narrower, wider),
+            |narrower, wider| self.within(narrower, wider),
         )
+    }
+
+    /// Whether every value the fully unfolded set `narrower` yields is one
+    /// `wider` yields as the schema reads them, off a ladder, or as a set
+    /// seeding the recursive walk of the helper `wider` calls, or of a
+    /// helper such a set calls.
+    fn within(&self, narrower: &Expr, wider: &Expr) -> Result<bool, LookupError> {
+        if self.ladders.within(narrower, wider)? {
+            return Ok(true);
+        }
+        let seeds = self.seeds_of(wider)?;
+        if seeds.is_empty() {
+            return Ok(false);
+        }
+        // `seeds_of` hands out one handle per set, so a walk met again,
+        // as a helper seeding itself is, is skipped by its handle.
+        let mut walks: Vec<Rc<[Expr]>> = vec![seeds];
+        let mut next = 0;
+        while let Some(seeds) = walks.get(next).map(Rc::clone) {
+            for seed in seeds.iter() {
+                if seed == narrower || self.ladders.within(narrower, seed)? {
+                    return Ok(true);
+                }
+                let further = self.seeds_of(seed)?;
+                if !further.is_empty() && !walks.iter().any(|walk| Rc::ptr_eq(walk, &further)) {
+                    walks.push(further);
+                }
+            }
+            next += 1;
+        }
+        Ok(false)
     }
 
     /// Another spelling of the set `set` yields, read from the helper it
@@ -1138,11 +1177,9 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 
     /// [`Self::unfolded`] uncached. The one column of a call, written
-    /// `(call).column`, is the call. A call taking no argument to a
-    /// set-returning `LANGUAGE sql` helper is the set its body selects, when
-    /// the body selects one set expression that yields there what it yields
-    /// to the writer, it sets no parameter besides the search path, and the
-    /// names in it reach on that path what they reach on the schema's own.
+    /// `(call).column`, is the call. A call to a helper [`Self::helper_body`]
+    /// reads is the set its body selects, when the body selects one set
+    /// expression that yields there what it yields to the writer.
     fn read_unfolded(&self, set: &Expr) -> Result<Option<Expr>, LookupError> {
         if let Expr::CompoundFieldAccess { root, access_chain } = set
             && let (Expr::Nested(call), [AccessExpr::Dot(Expr::Identifier(column))]) =
@@ -1163,6 +1200,63 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 _ => None,
             });
         }
+        let Some((function, body)) = self.helper_body(set)? else {
+            return Ok(None);
+        };
+        let Some(members) = self.body_members(&body)? else {
+            return Ok(None);
+        };
+        let reader = Reader::Body {
+            definer: function.security_mode() == FunctionSecurity::Definer,
+        };
+        Ok(self
+            .admissible(&members, reader)?
+            .then(|| members.into_owned()))
+    }
+
+    /// The sets the arms seeding the recursive walk of the helper `set`
+    /// calls select, fully unfolded, cached by the set.
+    fn seeds_of(&self, set: &Expr) -> Result<Rc<[Expr]>, LookupError> {
+        if let Some(cached) = self.seeds.borrow().get(set) {
+            return Ok(Rc::clone(cached));
+        }
+        let found: Rc<[Expr]> = self.read_seeds(set)?.into();
+        self.seeds
+            .borrow_mut()
+            .insert(set.clone(), Rc::clone(&found));
+        Ok(found)
+    }
+
+    /// [`Self::seeds_of`] uncached, read from a helper [`Self::helper_body`]
+    /// reads whose body is a walk [`recursive_seeds`] reads, from each seed
+    /// arm selecting one set expression that yields there what it yields to
+    /// the writer.
+    fn read_seeds(&self, set: &Expr) -> Result<Vec<Expr>, LookupError> {
+        let Some((function, body)) = self.helper_body(set)? else {
+            return Ok(Vec::new());
+        };
+        let Some(arms) = recursive_seeds(&body) else {
+            return Ok(Vec::new());
+        };
+        let reader = Reader::Body {
+            definer: function.security_mode() == FunctionSecurity::Definer,
+        };
+        let mut seeds = Vec::with_capacity(arms.len());
+        for arm in arms {
+            if let Some(members) = self.arm_members(arm)?
+                && self.admissible(&members, reader)?
+            {
+                seeds.push(fully_unfolded(&members, &mut |set| self.unfolded(set))?.into_owned());
+            }
+        }
+        Ok(seeds)
+    }
+
+    /// The helper a call `set` taking no argument reaches, with the query
+    /// its body runs, when it is a set-returning `LANGUAGE sql` function
+    /// that sets no parameter besides the search path and whose body names
+    /// reach on that path what they reach on the schema's own.
+    fn helper_body(&self, set: &Expr) -> Result<Option<HelperBody<'a, DB>>, LookupError> {
         let Expr::Function(call) = set else {
             return Ok(None);
         };
@@ -1183,15 +1277,61 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         {
             return Ok(None);
         }
-        let Some(members) = query_members(&body) else {
+        Ok(Some((function, body)))
+    }
+
+    /// The expression yielding the rows of `query`, when it declares no
+    /// `WITH`, limits nothing and runs one arm [`Self::arm_members`] reads.
+    fn body_members<'q>(&self, query: &'q Query) -> Result<Option<Cow<'q, Expr>>, LookupError> {
+        if query.with.is_some() || !limits_nothing(query) {
             return Ok(None);
+        }
+        self.arm_members(&query.body)
+    }
+
+    /// The expression yielding the rows of the arm `arm`, as
+    /// [`select_members`] reads a select, or the call a select projects the
+    /// one column of through an alias naming that column, when the call
+    /// yields one column.
+    fn arm_members<'q>(&self, arm: &'q SetExpr) -> Result<Option<Cow<'q, Expr>>, LookupError> {
+        match arm {
+            SetExpr::Select(select) => {
+                if let Some(members) = select_members(select) {
+                    return Ok(Some(members));
+                }
+                Ok(match renamed_column_call(select) {
+                    Some(call) if self.yields_one_column(&call)? => Some(Cow::Owned(call)),
+                    _ => None,
+                })
+            }
+            SetExpr::Query(query) => self.body_members(query),
+            _ => Ok(None),
+        }
+    }
+
+    /// Whether `call` reaches one set-returning function whose rows have
+    /// one column, a built-in scalar it returns a set of or the one column
+    /// it declares.
+    fn yields_one_column(&self, call: &Expr) -> Result<bool, LookupError> {
+        let Expr::Function(call) = call else {
+            return Ok(false);
         };
-        let reader = Reader::Body {
-            definer: function.security_mode() == FunctionSecurity::Definer,
+        let Some(function) = self
+            .sole_function(call)?
+            .filter(|function| function.returns_set())
+        else {
+            return Ok(false);
         };
-        Ok(self
-            .admissible(&members, reader)?
-            .then(|| members.into_owned()))
+        let mut returned = function.returned_columns(self.database);
+        Ok(match (returned.next(), returned.next()) {
+            (Some(_), None) => true,
+            (None, _) => function
+                .return_type_name(self.database)
+                .as_deref()
+                .and_then(|name| name.strip_prefix("SETOF "))
+                .is_some_and(|element| scalar_family(element).is_some()),
+            _ => false,
+        })
     }
 
     /// The one function `call` reaches.
@@ -2247,6 +2387,122 @@ fn plain_select(query: &Query) -> Option<&Select> {
     match query.body.as_ref() {
         SetExpr::Select(select) if query.with.is_none() => Some(select),
         _ => None,
+    }
+}
+
+/// The arms seeding the walk `query` runs, when it is `WITH RECURSIVE walk
+/// AS (<seed arms> UNION <step arms>)` reselecting every column of the walk
+/// in order, without filtering or limiting it. PostgreSQL returns every row
+/// of the arms left of the last top-level `UNION`, and the arms right of it
+/// only add rows.
+fn recursive_seeds(query: &Query) -> Option<Vec<&SetExpr>> {
+    let with = query.with.as_ref().filter(|with| with.recursive)?;
+    let [walk] = with.cte_tables.as_slice() else {
+        return None;
+    };
+    let SetExpr::Select(outer) = query.body.as_ref() else {
+        return None;
+    };
+    if !limits_nothing(query)
+        || !filters_nothing(outer)
+        || !reselects(outer, &walk.alias)
+        || walk.from.is_some()
+        || walk.query.with.is_some()
+        || !limits_nothing(&walk.query)
+    {
+        return None;
+    }
+    let SetExpr::SetOperation {
+        op: SetOperator::Union,
+        set_quantifier,
+        left,
+        ..
+    } = walk.query.body.as_ref()
+    else {
+        return None;
+    };
+    let mut seeds = Vec::new();
+    (positional(*set_quantifier) && union_arms(left, &mut seeds)).then_some(seeds)
+}
+
+/// Collects into `arms` the arms of `body` that `UNION` joins, or returns
+/// false when one joins them by name.
+fn union_arms<'q>(body: &'q SetExpr, arms: &mut Vec<&'q SetExpr>) -> bool {
+    match body {
+        SetExpr::SetOperation {
+            op: SetOperator::Union,
+            set_quantifier,
+            left,
+            right,
+        } => positional(*set_quantifier) && union_arms(left, arms) && union_arms(right, arms),
+        arm => {
+            arms.push(arm);
+            true
+        }
+    }
+}
+
+/// Whether a set operation under `quantifier` pairs columns by position.
+fn positional(quantifier: SetQuantifier) -> bool {
+    matches!(
+        quantifier,
+        SetQuantifier::None | SetQuantifier::All | SetQuantifier::Distinct
+    )
+}
+
+/// Whether `select` reads the walk `walk` names alone and projects each of
+/// its columns once, in order, as `*` or by the names `walk` lists.
+fn reselects(select: &Select, walk: &TableAlias) -> bool {
+    let [from] = select.from.as_slice() else {
+        return false;
+    };
+    let TableFactor::Table {
+        name,
+        alias,
+        args: None,
+        version: None,
+        with_ordinality: false,
+        sample: None,
+        ..
+    } = &from.relation
+    else {
+        return false;
+    };
+    let walked = identifier(&walk.name);
+    if !from.joins.is_empty()
+        || !matches!(name.0.as_slice(), [part] if part.as_ident().map(identifier).as_ref() == Some(&walked))
+        || alias
+            .as_ref()
+            .is_some_and(|alias| !alias.columns.is_empty())
+    {
+        return false;
+    }
+    let exposed = alias.as_ref().map(|alias| identifier(&alias.name));
+    let exposed = exposed.as_ref().unwrap_or(&walked);
+    match select.projection.as_slice() {
+        [SelectItem::Wildcard(options)] => *options == WildcardAdditionalOptions::default(),
+        items => {
+            !walk.columns.is_empty()
+                && items.len() == walk.columns.len()
+                && items.iter().zip(&walk.columns).all(|(item, column)| {
+                    let (SelectItem::UnnamedExpr(expression)
+                    | SelectItem::ExprWithAlias {
+                        expr: expression, ..
+                    }) = item
+                    else {
+                        return false;
+                    };
+                    let named = match expression {
+                        Expr::Identifier(named) => named,
+                        Expr::CompoundIdentifier(parts) => match parts.as_slice() {
+                            [relation, named] if identifier(relation) == *exposed => named,
+                            _ => return false,
+                        },
+                        _ => return false,
+                    };
+                    identifier(named) == identifier(&column.name)
+                })
+        }
     }
 }
 

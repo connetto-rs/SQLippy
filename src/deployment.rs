@@ -201,7 +201,7 @@ fn parse_expression(expression: &str) -> Result<Expr, ParserError> {
 
 /// `set` unfolded by `unfolded` until it gives no other spelling or one it
 /// gave before, as a helper calling itself does.
-fn fully_unfolded<'e, E>(
+pub(crate) fn fully_unfolded<'e, E>(
     set: &'e Expr,
     unfolded: &mut impl FnMut(&Expr) -> Result<Option<Expr>, E>,
 ) -> Result<Cow<'e, Expr>, E> {
@@ -796,7 +796,9 @@ impl Deployment {
     /// `id IN (SELECT share.resource_id FROM authz.grants() share)`, yields
     /// `(authz.grants()).resource_id`. The existence oracles read a call
     /// taking no argument to a set-returning `LANGUAGE sql` helper as the
-    /// set its body selects, so a declaration on either spelling serves both.
+    /// set its body selects, so a declaration on either spelling serves both,
+    /// and read every set an arm seeding the `WITH RECURSIVE` walk such a
+    /// helper returns selects as within the call.
     ///
     /// # Errors
     ///

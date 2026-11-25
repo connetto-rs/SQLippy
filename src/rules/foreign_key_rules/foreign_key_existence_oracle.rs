@@ -68,11 +68,15 @@ use crate::{
 /// permissive `SELECT` policy of the referenced table tests the columns the
 /// key maps onto as the check tests their key columns, or tests one against a
 /// set the check confines its key column within, as written, as the body of
-/// a helper taking no argument selects it, declared with
+/// a helper taking no argument selects it, as an arm seeding the `WITH
+/// RECURSIVE` walk such a helper returns selects it, declared with
 /// [`Deployment::with_set_within`](crate::deployment::Deployment::with_set_within),
 /// or read off a ladder of the schema, where a helper called with a higher
 /// label of an enum parameter returns only rows it returns for a lower one,
-/// as the rule `exposed_definer_over_protected_table` reads it.
+/// as the rule `exposed_definer_over_protected_table` reads it. A body
+/// selecting the one column of a call returning a set of one column, through
+/// an alias naming that column, as `SELECT g.id FROM f() g (id)`, selects
+/// the call.
 /// A check may draw the key from the rows of a set-returning `LANGUAGE sql`
 /// helper, as `IN (SELECT helper())`, `= ANY (ARRAY(SELECT helper()))` or
 /// `IN (SELECT ... FROM helper())`. Every arm of the helper's body must then

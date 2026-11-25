@@ -528,13 +528,15 @@ fn an_arm_forcing_a_key_column_null_checks_nothing() {
 const SLOTS_READ: &str = "template_id = ANY (ARRAY(SELECT readable('reader')))";
 
 /// A typed template whose slot key reaches slots `readable` admits, after a
-/// restrictive policy hiding blocked organizations.
-fn slot_schema(readable: &str, check: &str, key: &str, referenced: &str) -> String {
+/// restrictive policy hiding blocked organizations, with the objects
+/// `helpers` defines ahead of the tables.
+fn slot_schema(readable: &str, check: &str, key: &str, referenced: &str, helpers: &str) -> String {
     format!(
         "CREATE ROLE app;
          CREATE FUNCTION readable(level TEXT) RETURNS SETOF INT LANGUAGE sql STABLE AS $$ SELECT 1 $$;
          CREATE FUNCTION reader_ids() RETURNS INT[] LANGUAGE sql STABLE AS $$ SELECT ARRAY[1] $$;
          CREATE FUNCTION blocking() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ SELECT 1 $$;
+         {helpers}
          CREATE TABLE slots (id INT PRIMARY KEY, template_id INT NOT NULL, organization_id INT NOT NULL,
              UNIQUE (id, template_id), UNIQUE (id, template_id, organization_id));
          ALTER TABLE slots ENABLE ROW LEVEL SECURITY;
@@ -630,7 +632,7 @@ fn a_key_column_confined_to_the_set_its_referenced_rows_are_read_through_is_clea
         let objects: Vec<String> = findings(
             &constrainer,
             "foreign_key_existence_oracle",
-            &slot_schema(SLOTS_READ, check, key, referenced),
+            &slot_schema(SLOTS_READ, check, key, referenced, ""),
         )
         .into_iter()
         .map(|(_, object, _)| object)
@@ -669,12 +671,119 @@ fn a_referenced_policy_implied_through_the_key_part_by_part_is_clean() {
                 &check,
                 "slot_id, id, organization_id",
                 "id, template_id, organization_id",
+                "",
             ),
         )
         .into_iter()
         .map(|(_, object, _)| object)
         .collect();
         assert_eq!(objects, expected, "{check} into {readable}");
+    }
+}
+
+/// The typed templates [`slot_schema`] reports under `readable` and `check`,
+/// beside `walk()`, a helper selecting `body` over `steps`, which links each
+/// template to the templates below it.
+fn walked_slots(readable: &str, body: &str, check: &str) -> Vec<String> {
+    let sql = slot_schema(
+        readable,
+        check,
+        "slot_id, id, organization_id",
+        "id, template_id, organization_id",
+        &format!(
+            "CREATE TABLE steps (parent_id INT NOT NULL, child_id INT NOT NULL);
+             CREATE FUNCTION walk() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ {body} $$;"
+        ),
+    );
+    let mut constrainer: GenericConstrainer<ParserDB> = ForeignKeyExistenceOracle::default().into();
+    constrainer.set_deployment(Deployment::default().with_app_role("app"));
+    findings(&constrainer, "foreign_key_existence_oracle", &sql)
+        .into_iter()
+        .map(|(_, object, _)| object)
+        .collect()
+}
+
+const WALKED: &str = "template_id = ANY (ARRAY(SELECT walk()))";
+
+/// A recursive walk over `steps` from the arms `seeds`, reselected by
+/// `outer`.
+fn walk_from(seeds: &str, outer: &str) -> String {
+    format!(
+        "WITH RECURSIVE walked (id) AS ({seeds} UNION SELECT step.child_id FROM steps step
+         JOIN walked ON walked.id = step.parent_id) {outer}"
+    )
+}
+
+const READER: &str = "id = ANY (ARRAY(SELECT readable('reader')))";
+
+#[test]
+fn a_key_confined_to_the_seed_of_a_recursive_helper_the_referenced_rows_are_read_through_is_clean()
+{
+    let aliased = "SELECT granted.id FROM readable('reader') granted (id)";
+    let outer = "SELECT walked.id FROM walked";
+    for body in [
+        aliased.to_owned(),
+        walk_from("SELECT readable('reader')", outer),
+        walk_from(aliased, outer),
+        walk_from(&format!("SELECT readable('writer') UNION {aliased}"), outer),
+        walk_from(aliased, "SELECT id FROM walked"),
+    ] {
+        assert_eq!(
+            walked_slots(WALKED, &body, READER),
+            Vec::<String>::new(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_key_a_recursive_helper_may_not_reach_is_reported() {
+    let seed = "SELECT readable('reader')";
+    for (readable, body, check) in [
+        (
+            WALKED,
+            walk_from("SELECT readable('writer')", "SELECT walked.id FROM walked"),
+            READER,
+        ),
+        (
+            WALKED,
+            walk_from(seed, "SELECT walked.id FROM walked WHERE walked.id > 0"),
+            READER,
+        ),
+        (
+            WALKED,
+            walk_from(seed, "SELECT walked.id FROM walked LIMIT 1"),
+            READER,
+        ),
+        (
+            WALKED,
+            walk_from(seed, "SELECT step.child_id FROM steps step"),
+            READER,
+        ),
+        (
+            WALKED,
+            "WITH RECURSIVE walked (id) AS (SELECT step.child_id FROM steps step UNION
+             SELECT granted.id FROM readable('reader') granted (id) JOIN walked ON walked.id = granted.id)
+             SELECT walked.id FROM walked"
+                .to_owned(),
+            READER,
+        ),
+        (
+            WALKED,
+            "SELECT granted.id FROM readable('reader') granted (id) WHERE granted.id > 0".to_owned(),
+            READER,
+        ),
+        (
+            SLOTS_READ,
+            walk_from(seed, "SELECT walked.id FROM walked"),
+            "id = ANY (ARRAY(SELECT walk()))",
+        ),
+    ] {
+        assert_eq!(
+            walked_slots(readable, &body, check),
+            vec!["typed_templates.typed_slot"],
+            "{body} under {check}"
+        );
     }
 }
 

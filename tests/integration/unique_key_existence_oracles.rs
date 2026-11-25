@@ -438,6 +438,33 @@ fn a_projected_helper_column_is_declared_within_a_set_as_a_field_of_the_call() {
 }
 
 #[test]
+fn a_key_drawn_from_the_seed_of_a_recursive_helper_it_is_read_through_is_clean() {
+    let walked = "CREATE FUNCTION walked_resources() RETURNS SETOF INT LANGUAGE sql STABLE
+        SECURITY DEFINER AS $$ WITH RECURSIVE walked (id) AS (
+          SELECT share.resource_id FROM sharable_grants() share
+          UNION SELECT resource.id FROM resources resource JOIN walked ON walked.id = resource.owner_id
+        ) SELECT walked.id FROM walked $$;";
+    let read = "resource_id IN (SELECT walked_resources())";
+    for (read, check, expected) in [
+        (read, SHARED, vec![]),
+        (read, RESOURCES, vec![]),
+        (read, OTHER, vec!["grants.grants_pkey"]),
+        (
+            SHARED,
+            "resource_id IN (SELECT walked_resources())",
+            vec!["grants.grants_pkey"],
+        ),
+    ] {
+        let sql = grants(read, check).replacen(
+            "CREATE TABLE grants",
+            &format!("{walked} CREATE TABLE grants"),
+            1,
+        );
+        assert_eq!(objects(&sql), expected, "{read} / {check}");
+    }
+}
+
+#[test]
 fn a_key_the_trigger_leaves_in_the_checked_set_is_reported() {
     for edits in [
         &[("SET accepted = true", "SET accepted = false")][..],
