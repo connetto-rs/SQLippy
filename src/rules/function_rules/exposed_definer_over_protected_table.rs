@@ -58,8 +58,8 @@ use crate::{
         literal_support::literal,
         null_support::rejects_null,
         policy_support::{
-            acting, client_roles, conjuncts, is_role_read, sets_only_search_path, sql_query_body,
-            unnested, unwrapped,
+            acting, client_roles, conjuncts, is_column_reference, is_role_read,
+            sets_only_search_path, sql_query_body, unnested, unwrapped,
         },
         type_support::user_type_named,
         walk_support::walk,
@@ -1178,6 +1178,9 @@ struct Source<'s> {
     /// The names the `WITH` item gives its columns, which `aliased`
     /// overrides.
     renamed: &'s [TableAliasColumnDef],
+    /// Whether the body's query holds a `WITH` of its own, whose items may
+    /// stand where its names read stored tables.
+    scoped: bool,
 }
 
 impl Source<'_> {
@@ -1385,11 +1388,30 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         owners: &[&'e Query],
     ) -> Result<Filters<'e>, LookupError> {
         let filter: Vec<&Expr> = select.selection.iter().flat_map(conjuncts).collect();
-        let sources = self.sources(select, owners);
-        let witnessed = filter
+        let mut sources = self.sources(select, owners);
+        let found: Vec<&Select> = filter.iter().copied().filter_map(semi_join).collect();
+        let nested: Vec<Source<'_>> = filter
             .iter()
             .copied()
-            .filter_map(semi_join)
+            .filter_map(unscoped_semi_join)
+            .flat_map(|found| self.sources(found, owners))
+            .collect();
+        let merges = self.merges(select, &sources)?;
+        let once: Vec<Source<'_>> = nested
+            .iter()
+            .filter(|source| {
+                sources
+                    .iter()
+                    .chain(&nested)
+                    .filter(|other| ptr::eq(other.body, source.body))
+                    .count()
+                    == 1
+            })
+            .copied()
+            .collect();
+        sources.extend(once);
+        let witnessed = found
+            .into_iter()
             .chain(sources.iter().map(|source| source.body))
             .flat_map(|found| found.selection.iter().flat_map(conjuncts))
             .collect();
@@ -1397,7 +1419,6 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         for from in &select.from {
             rejected.push(self.rejected(from, &filter)?);
         }
-        let merges = self.merges(select, &sources)?;
         Ok(Filters {
             held,
             filter,
@@ -1458,6 +1479,14 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 }
             }
         }
+        if let Some(found) = self.joined_rows(filters, &resolver, &equalities, relation, &dropping)
+        {
+            if self.reads_alike(&found)? {
+                conditions.push(found);
+            } else {
+                caller_bound.push(found);
+            }
+        }
         Ok(Stated {
             resolver,
             equalities,
@@ -1476,6 +1505,112 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             CallerBound::new(self.body.confinement, self.path, Some(&self.items));
         positive_relations(expression, &mut caller_bound.positive);
         caller_bound.reads_alike(expression)
+    }
+
+    /// `EXISTS`, written as [`renamed`] writes a subquery, over the stored
+    /// tables besides `relation` holding a row on every row the `SELECT`
+    /// yields, of its `FROM`, its sources and the queries its `WHERE` finds
+    /// a row of, under the conjuncts and `IN` equalities that read them.
+    fn joined_rows<'r>(
+        &self,
+        filters: &Filters<'_>,
+        resolver: &Resolver<'r, '_, 'a, DB>,
+        equalities: &Equalities<'r>,
+        relation: &TableFactor,
+        dropping: &[(Clause, &Expr)],
+    ) -> Option<Expr> {
+        let mut joined = Vec::new();
+        let mut read = Vec::new();
+        let found = filters
+            .filter
+            .iter()
+            .copied()
+            .filter_map(unscoped_semi_join);
+        for select in iter::once(filters.from).chain(found.map(|select| select.from.as_slice())) {
+            self.found_tables(select, &filters.sources, relation, &mut joined, &mut read);
+        }
+        let write =
+            |expression| written_over_joined(resolver, equalities, relation, &joined, expression);
+        let mut conditions: Vec<String> = dropping
+            .iter()
+            .filter(|(clause, _)| !matches!(clause, Clause::Held))
+            .filter_map(|(_, conjunct)| write(conjunct))
+            .filter(|(_, reads_joined)| *reads_joined)
+            .map(|(conjunct, _)| conjunct.to_string())
+            .collect();
+        for conjunct in &filters.filter {
+            if let Expr::In { expr, .. } = unnested(conjunct)
+                && let Some((projected, _)) = semi_join(conjunct).and_then(carried_column)
+                && let Some((tested, tested_joined)) = write(expr)
+                && let Some((projected, projected_joined)) = write(projected)
+                && (tested_joined || projected_joined)
+            {
+                conditions.push(format!("{tested} = {projected}"));
+            }
+        }
+        if conditions.is_empty() {
+            return None;
+        }
+        Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(&format!(
+                "EXISTS (SELECT 1 FROM {} WHERE {})",
+                read.join(", "),
+                conditions.join(" AND ")
+            ))
+            .and_then(|mut parser| parser.parse_expr())
+            .ok()
+            .and_then(|found| {
+                renamed(
+                    &found,
+                    |reference| match reference {
+                        Expr::CompoundIdentifier(parts) => parts
+                            .last()
+                            .map(|column| Term::Column(column.value.clone())),
+                        _ => None,
+                    },
+                    |name| self.subquery_relation(name),
+                )
+            })
+    }
+
+    /// Adds to `joined` each stored table but `relation` that holds a row on
+    /// every row `from` yields, of `from` itself or of the body of one of
+    /// `sources` that does, and to `read` the `FROM` item reading it under
+    /// the alias `"1.i"` of its index `i` in `joined`.
+    fn found_tables(
+        &self,
+        from: &[TableWithJoins],
+        sources: &[Source<'_>],
+        relation: &TableFactor,
+        joined: &mut Vec<*const TableFactor>,
+        read: &mut Vec<String>,
+    ) {
+        for item in from {
+            for (position, factor) in relations(item).enumerate() {
+                if !present(item, position) || ptr::eq(factor, relation) {
+                    continue;
+                }
+                if let Some(source) = sources
+                    .iter()
+                    .find(|source| ptr::eq(source.relation, factor))
+                {
+                    if !source.scoped {
+                        self.found_tables(&source.body.from, &[], relation, joined, read);
+                    }
+                } else if let TableFactor::Table {
+                    name,
+                    alias,
+                    args: None,
+                    ..
+                } = factor
+                    && alias.as_ref().is_none_or(|alias| alias.columns.is_empty())
+                    && let Some(stored) = self.subquery_relation(name)
+                {
+                    read.push(format!("{} AS \"1.{}\"", stored.name, joined.len()));
+                    joined.push(ptr::from_ref(factor));
+                }
+            }
+        }
     }
 
     /// `column IN (SELECT schema.f(…))` when `conjunct` holds the `column` of
@@ -2089,6 +2224,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                         body,
                         aliased: alias.as_ref().map_or(&[], |alias| alias.columns.as_slice()),
                         renamed,
+                        scoped: query.with.is_some(),
                     });
                 }
             }
@@ -3277,6 +3413,20 @@ fn carried_column(select: &Select) -> Option<(&Expr, &[Ident])> {
 /// The `SELECT` that `condition`, an `EXISTS` or `IN` over a query, finds
 /// a row of that passes its `WHERE` whenever `condition` holds.
 fn semi_join(condition: &Expr) -> Option<&Select> {
+    witnessed(semi_joined(condition)?)
+}
+
+/// [`semi_join`] when its query holds no `WITH` of its own, so that each
+/// name it reads resolves as it would around it.
+fn unscoped_semi_join(condition: &Expr) -> Option<&Select> {
+    semi_joined(condition)
+        .filter(|query| query.with.is_none())
+        .and_then(witnessed)
+}
+
+/// The query of `condition`, an `EXISTS` or `IN` that holds when it finds
+/// a row.
+fn semi_joined(condition: &Expr) -> Option<&Query> {
     let (Expr::Exists {
         subquery,
         negated: false,
@@ -3289,7 +3439,7 @@ fn semi_join(condition: &Expr) -> Option<&Select> {
     else {
         return None;
     };
-    witnessed(subquery)
+    Some(subquery)
 }
 
 /// The expression `select` projects as its output column at `ordinal`,
@@ -3342,6 +3492,80 @@ fn relation_at(from: &TableWithJoins, position: usize) -> &TableFactor {
         Some(join) => &from.joins[join].relation,
         None => &from.relation,
     }
+}
+
+/// `expression` with each column of a relation of `joined` it reads written
+/// `"1.i".name` by the index `i` of the relation, each column [`term`]
+/// states of `relation` written `"0".name` and each input parameter `$n`,
+/// with whether it reads a column of `joined`, when it holds no subquery.
+fn written_over_joined<DB: DatabaseLike>(
+    resolver: &Resolver<'_, '_, '_, DB>,
+    equalities: &Equalities<'_>,
+    relation: &TableFactor,
+    joined: &[*const TableFactor],
+    expression: &Expr,
+) -> Option<(Expr, bool)> {
+    let qualified = |row: String, column: String| {
+        Expr::CompoundIdentifier(vec![
+            Ident::with_quote('"', row),
+            Ident::with_quote('"', column),
+        ])
+    };
+    let mut written = Vec::new();
+    let mut reads_joined = false;
+    let unwritable = visit_expressions(expression, |expression| {
+        if matches!(
+            expression,
+            Expr::Subquery(_)
+                | Expr::Exists { .. }
+                | Expr::In {
+                    target: InTarget::Subquery(_),
+                    ..
+                }
+        ) {
+            return ControlFlow::Break(());
+        }
+        if !is_column_reference(expression) {
+            return ControlFlow::Continue(());
+        }
+        let joined_column = resolver
+            .reference(expression)
+            .and_then(|(_, binding)| match resolver.node(&binding)? {
+                Node::Column { factor, name } => joined
+                    .iter()
+                    .position(|joined| ptr::eq(*joined, factor))
+                    .map(|index| qualified(format!("1.{index}"), name.into_owned())),
+                Node::Merged { .. } => None,
+            });
+        reads_joined |= joined_column.is_some();
+        let column = joined_column.or_else(|| {
+            Some(match term(resolver, expression, relation, equalities)? {
+                Term::Column(name) => qualified("0".to_owned(), name),
+                Term::Parameter(ordinal) => parameter(ordinal),
+            })
+        });
+        match column {
+            Some(column) => {
+                written.push(column);
+                ControlFlow::Continue(())
+            }
+            None => ControlFlow::Break(()),
+        }
+    });
+    if unwritable.is_break() {
+        return None;
+    }
+    let mut written = written.into_iter();
+    let mut rewritten = expression.clone();
+    let _ = visit_expressions_mut(&mut rewritten, |expression| {
+        if is_column_reference(expression)
+            && let Some(column) = written.next()
+        {
+            *expression = column;
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    Some((rewritten, reads_joined))
 }
 
 /// The input parameter of the function whose body holds `reference` that
