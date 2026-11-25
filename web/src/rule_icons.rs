@@ -264,6 +264,7 @@ rule_icons! {
     "deferred_check_deleted_row" => FaHourglassStart,
     "snapshot_before_lock" => FaLockOpen,
     "plpgsql_ambiguous_name" => FaCircleQuestion,
+    "dead_branch" => FaCodeBranch,
     "decided_branch" => FaCodeMerge,
     "case_without_match" => FaCircleXmark,
     "failing_assert" => FaBan,

@@ -30,6 +30,7 @@ mod credential_free_writes;
 mod credential_patterns;
 mod cross_tenant_caps;
 mod cte_shadows_relations;
+mod dead_branches;
 mod decided_branches;
 mod deferred_checks_deleted_rows;
 mod definer_acting_user;
