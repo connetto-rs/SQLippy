@@ -2201,11 +2201,18 @@ fn a_sql_definer_running_a_statement_the_caller_may_not_run_alike_is_reported() 
                 "DELETE FROM public.resources resource WHERE resource.hidden; {HIDE_OWN_BY_ID}"
             ),
         ),
+        "CREATE FUNCTION bound_count_all() RETURNS BIGINT LANGUAGE sql SECURITY DEFINER
+           RETURN (SELECT count(*) FROM public.resources);"
+            .to_owned(),
     ]
     .concat();
     assert_eq!(
         written_exposed("SELECT, UPDATE, DELETE", OWN_ROWS, &definers),
-        ["hide_and_count_all(INT)", "purge_any_and_hide(INT)"]
+        [
+            "bound_count_all()",
+            "hide_and_count_all(INT)",
+            "purge_any_and_hide(INT)"
+        ]
     );
 }
 
