@@ -2238,6 +2238,92 @@ fn a_plpgsql_definer_returning_next_rows_the_caller_may_not_read_is_reported() {
     );
 }
 
+/// A loop over the caller's own `resources` rows, each in `found_row`.
+const EACH_OWN: &str = "FOR found_row IN SELECT resource.id, resource.hidden
+    FROM public.resources resource WHERE resource.owner = uid LOOP";
+
+#[test]
+fn a_plpgsql_definer_writing_each_row_it_reads_alike_is_not_reported() {
+    let definers = [
+        block_definer(
+            "hide_each()",
+            "VOID",
+            "found_row RECORD;",
+            &format!(
+                "{EACH_OWN} UPDATE public.resources resource SET hidden = true
+                   WHERE resource.id = found_row.id AND resource.owner = uid;
+                 END LOOP;"
+            ),
+        ),
+        block_definer(
+            "flip_each()",
+            "VOID",
+            "found_row RECORD;",
+            &format!(
+                "{EACH_OWN} UPDATE public.resources resource SET hidden = NOT found_row.hidden
+                   WHERE resource.id = found_row.id AND resource.owner = uid;
+                 END LOOP;"
+            ),
+        ),
+        block_definer(
+            "purge_each()",
+            "VOID",
+            "found_row RECORD;",
+            &format!(
+                "{EACH_OWN} DELETE FROM public.resources resource
+                   WHERE resource.id = found_row.id AND resource.owner = uid;
+                 IF NOT FOUND THEN RAISE EXCEPTION 'gone %', found_row.id; END IF;
+                 END LOOP;"
+            ),
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, UPDATE, DELETE", OWN_ROWS, &definers),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_plpgsql_definer_writing_each_row_otherwise_is_reported() {
+    let definers = [
+        block_definer(
+            "hide_each_by_id()",
+            "VOID",
+            "found_row RECORD;",
+            &format!(
+                "{EACH_OWN} UPDATE public.resources resource SET hidden = true
+                   WHERE resource.id = found_row.id;
+                 END LOOP;"
+            ),
+        ),
+        block_definer(
+            "copy_each_flag()",
+            "VOID",
+            "found_row RECORD;",
+            "FOR found_row IN SELECT resource.id, resource.hidden FROM public.resources resource LOOP
+               UPDATE public.resources resource SET hidden = found_row.hidden
+                 WHERE resource.id = found_row.id AND resource.owner = uid;
+             END LOOP;",
+        ),
+        block_definer(
+            "hide_each_whole()",
+            "VOID",
+            "found_row RECORD;",
+            &format!(
+                "{EACH_OWN} UPDATE public.resources resource SET hidden = found_row IS NULL
+                   WHERE resource.owner = uid;
+                 END LOOP;"
+            ),
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, UPDATE, DELETE", OWN_ROWS, &definers),
+        ["copy_each_flag()", "hide_each_by_id()", "hide_each_whole()"]
+    );
+}
+
 /// The caller's own `resources` rows hidden, by `id = p_id`.
 const HIDE_OWN_BY_ID: &str = "UPDATE public.resources resource SET hidden = true
     WHERE resource.id = p_id AND resource.owner = current_setting('app.user_id', true)";
