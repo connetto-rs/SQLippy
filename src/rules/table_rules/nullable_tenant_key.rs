@@ -7,14 +7,14 @@ use crate::{
     engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::grant_support::tenant_column,
+    rules::grant_support::tenant_columns,
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
 /// Struct defining a rule that reports a table whose declared tenant key
-/// allows `NULL`.
+/// allows `NULL` in any of its columns.
 ///
-/// A row whose tenant key is `NULL` belongs to no tenant, so a policy
+/// A row whose tenant key holds `NULL` belongs to no tenant, so a policy
 /// comparing the key with `=` hides it from every tenant, and an arm such as
 /// `organization_id IS NULL OR ...` shows it to all of them. The rule is
 /// inactive until the deployment declares a tenant key, and does not run on
@@ -30,7 +30,7 @@ use crate::{
 /// constrainer.set_deployment(Deployment::default().with_tenant_key(
 ///     "public",
 ///     "documents",
-///     "organization_id",
+///     ["organization_id"],
 /// ));
 /// let nullable = ParserDB::parse::<PostgreSqlDialect>(
 ///     "CREATE TABLE documents (id INT PRIMARY KEY, organization_id INT);",
@@ -93,18 +93,38 @@ impl<DB: DatabaseLike> TableRule for NullableTenantKey<DB> {
         table: &<Self::Database as DatabaseLike>::Table,
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
-        let Some(column) = tenant_column(database, reporter.deployment(), table)? else {
+        let Some(key) = tenant_columns(database, reporter.deployment(), table)? else {
             return Ok(());
         };
-        if !column.is_nullable(database)? {
+        let mut nullable = Vec::new();
+        for column in key {
+            if column.is_nullable(database)? {
+                nullable.push(column.column_name());
+            }
+        }
+        if nullable.is_empty() {
             return Ok(());
         }
         let name = table.table_name();
-        let column = column.column_name();
+        let (noun, verb) = if nullable.len() == 1 {
+            ("Column", "allows")
+        } else {
+            ("Columns", "allow")
+        };
+        let quoted = nullable
+            .iter()
+            .map(|column| format!("'{column}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let alterations = nullable
+            .iter()
+            .map(|column| format!("ALTER COLUMN {column} SET NOT NULL"))
+            .collect::<Vec<_>>()
+            .join(", ");
         reporter.table(
             table,
-            format!("Column '{column}', the declared tenant key of '{name}', allows NULL, so a row without a tenant is hidden from every tenant or shown to all of them, depending on how each policy treats NULL."),
-            format!("ALTER TABLE {name} ALTER COLUMN {column} SET NOT NULL; once every row carries its tenant."),
+            format!("{noun} {quoted} of the declared tenant key of '{name}' {verb} NULL, so a row without a tenant is hidden from every tenant or shown to all of them, depending on how each policy treats NULL."),
+            format!("ALTER TABLE {name} {alterations}; once every row carries its tenant."),
         )?;
         Ok(())
     }

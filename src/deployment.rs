@@ -56,7 +56,7 @@ pub struct Deployment {
     binary_replication_all_tables: bool,
     self_asserted_claims: Fact<Expr>,
     self_asserted_columns: Fact<StoredColumn>,
-    tenant_keys: Fact<StoredColumn>,
+    tenant_keys: Fact<TenantKey>,
     irreversible_columns: Fact<StoredColumn>,
     audit_functions: Fact<AuditFunction>,
     pooled: Option<bool>,
@@ -172,6 +172,15 @@ impl StoredColumn {
     }
 }
 
+/// A table's tenant key, by the stored names of its schema, table and
+/// columns in their declared order.
+#[derive(Debug, Clone)]
+struct TenantKey {
+    schema: String,
+    table: String,
+    columns: Vec<String>,
+}
+
 /// A trigger function that records the writes to the tables it is attached
 /// to, by stored names.
 #[derive(Debug, Clone)]
@@ -243,7 +252,7 @@ impl Deployment {
     /// assert!(deployment.is_pooled());
     /// assert!(deployment.is_client_written("public", "drafts"));
     /// assert!(deployment.is_binary_replicated("public", "events"));
-    /// assert_eq!(deployment.tenant_key("public", "caps"), Some("organization_id"));
+    /// assert_eq!(deployment.tenant_key("public", "caps"), Some(&["organization_id".to_owned()][..]));
     /// ```
     #[must_use]
     pub fn example() -> Self {
@@ -254,8 +263,8 @@ impl Deployment {
             .with_pooled(true)
             .with_client_written_table("public", "drafts")
             .with_binary_replication_table("public", "events")
-            .with_tenant_key("public", "resources", "organization_id")
-            .with_tenant_key("public", "caps", "organization_id")
+            .with_tenant_key("public", "resources", ["organization_id"])
+            .with_tenant_key("public", "caps", ["organization_id"])
             .with_irreversible_column("public", "tokens", "revoked_at")
             .with_audit_function(
                 "public",
@@ -618,18 +627,47 @@ impl Deployment {
         self.request_settings.contains(expression)
     }
 
-    /// Declares the column holding the tenant a table's rows belong to, by
-    /// the stored names of its schema, table and column. Rows of two tables
-    /// belong to the same tenant when their tenant keys are equal.
+    /// Declares the columns holding the tenant a table's rows belong to, by
+    /// the stored names of its schema, table and columns, such as
+    /// `organization_namespace_id` and `organization_id` where only both tell
+    /// one organization apart. Rows of two tables belong to the same tenant
+    /// when their tenant keys are equal column by column, in the declared
+    /// order.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `columns` is empty, since a tenant key without a column
+    /// would put every row in one tenant.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlippy::prelude::*;
+    ///
+    /// let deployment = Deployment::default().with_tenant_key(
+    ///     "public",
+    ///     "projects",
+    ///     ["organization_namespace_id", "organization_id"],
+    /// );
+    /// assert_eq!(
+    ///     deployment.tenant_key("public", "projects"),
+    ///     Some(&["organization_namespace_id".to_owned(), "organization_id".to_owned()][..])
+    /// );
+    /// ```
     #[must_use]
     pub fn with_tenant_key(
         mut self,
         schema: impl Into<String>,
         table: impl Into<String>,
-        column: impl Into<String>,
+        columns: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        self.tenant_keys
-            .push(StoredColumn::new(schema, table, column));
+        let columns: Vec<String> = columns.into_iter().map(Into::into).collect();
+        assert!(!columns.is_empty(), "a tenant key has at least one column");
+        self.tenant_keys.push(TenantKey {
+            schema: schema.into(),
+            table: table.into(),
+            columns,
+        });
         self
     }
 
@@ -641,15 +679,16 @@ impl Deployment {
         self
     }
 
-    /// Returns the stored name of the declared tenant key of the table with
-    /// these stored schema and table names.
+    /// Returns the stored names of the columns of the declared tenant key of
+    /// the table with these stored schema and table names, in their declared
+    /// order.
     #[must_use]
-    pub fn tenant_key(&self, schema: &str, table: &str) -> Option<&str> {
+    pub fn tenant_key(&self, schema: &str, table: &str) -> Option<&[String]> {
         self.tenant_keys
             .entries()
             .iter()
             .find(|key| key.schema == schema && key.table == table)
-            .map(|key| key.column.as_str())
+            .map(|key| key.columns.as_slice())
     }
 
     /// Declares a foreign key another party checks, by the stored names of

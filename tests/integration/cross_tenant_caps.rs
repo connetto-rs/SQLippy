@@ -193,8 +193,8 @@ fn natural_join_with_absent_declared_key_does_not_prove_equality() {
     let mut constrainer: GenericConstrainer<ParserDB> = CrossTenantCap::default().into();
     constrainer.set_deployment(
         Deployment::default()
-            .with_tenant_key("public", "resources", "missing")
-            .with_tenant_key("public", "caps", "organization_id"),
+            .with_tenant_key("public", "resources", ["missing"])
+            .with_tenant_key("public", "caps", ["organization_id"]),
     );
     let database = ParserDB::parse::<PostgreSqlDialect>(&format!(
         "{TABLES} CREATE FUNCTION capped_rank(cap_id TEXT) RETURNS INT LANGUAGE sql AS $$ SELECT caps.rank FROM resources NATURAL JOIN caps WHERE caps.id = cap_id $$;"
@@ -222,4 +222,47 @@ fn natural_join_resolves_renamed_tenant_keys() {
         "SELECT cap.rank FROM resources resource(resource_id, tenant, rank) NATURAL JOIN caps cap(cap_id, other_tenant, rank, owner_id) WHERE cap.cap_id = wanted",
         "wanted TEXT"
     ));
+}
+
+#[test]
+fn composite_tenant_keys_require_every_column_equal() {
+    let tenant = ["organization_namespace_id", "organization_id"];
+    let mut constrainer: GenericConstrainer<ParserDB> = CrossTenantCap::default().into();
+    constrainer.set_deployment(
+        Deployment::default()
+            .with_tenant_key("public", "resources", tenant)
+            .with_tenant_key("public", "caps", tenant),
+    );
+    let reported = |from: &str| {
+        let schema = ParserDB::parse::<PostgreSqlDialect>(&format!(
+            "CREATE TABLE resources (id TEXT PRIMARY KEY, organization_namespace_id TEXT,
+               organization_id TEXT, rank INT);
+             CREATE TABLE caps (id TEXT PRIMARY KEY, organization_namespace_id TEXT,
+               organization_id TEXT, rank INT);
+             CREATE FUNCTION capped_rank(cap_id TEXT) RETURNS INT LANGUAGE sql AS $$
+               SELECT LEAST(resources.rank, caps.rank) FROM {from} $$;"
+        ))
+        .unwrap();
+        constrainer.validate_schema(&schema).is_err()
+    };
+    for from in [
+        "resources JOIN caps ON caps.id = cap_id AND caps.organization_id = resources.organization_id",
+        "resources JOIN caps USING (organization_id) WHERE caps.id = cap_id",
+        "resources JOIN caps ON caps.id = cap_id
+           AND caps.organization_id = resources.organization_namespace_id
+           AND caps.organization_namespace_id = resources.organization_id",
+    ] {
+        assert!(reported(from), "{from}");
+    }
+    for from in [
+        "resources JOIN caps ON caps.id = cap_id
+           AND caps.organization_id = resources.organization_id
+           AND resources.organization_namespace_id = caps.organization_namespace_id",
+        "resources JOIN caps USING (organization_namespace_id, organization_id) WHERE caps.id = cap_id",
+        "resources JOIN caps USING (organization_id)
+           WHERE caps.id = cap_id AND caps.organization_namespace_id = resources.organization_namespace_id",
+        "resources NATURAL JOIN caps WHERE caps.id = cap_id",
+    ] {
+        assert!(!reported(from), "{from}");
+    }
 }

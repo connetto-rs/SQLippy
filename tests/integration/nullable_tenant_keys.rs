@@ -8,8 +8,13 @@ fn constrainer() -> GenericConstrainer<ParserDB> {
     let mut constrainer: GenericConstrainer<ParserDB> = NullableTenantKey::default().into();
     constrainer.set_deployment(
         Deployment::default()
-            .with_tenant_key("public", "documents", "organization_id")
-            .with_tenant_key("billing", "Invoices", "Org"),
+            .with_tenant_key("public", "documents", ["organization_id"])
+            .with_tenant_key("billing", "Invoices", ["Org"])
+            .with_tenant_key(
+                "public",
+                "projects",
+                ["organization_namespace_id", "organization_id"],
+            ),
     );
     constrainer
 }
@@ -65,6 +70,25 @@ fn the_declaration_is_matched_by_stored_names() {
     );
     assert_eq!(
         reported("CREATE SCHEMA billing; CREATE TABLE billing.invoices (org INT);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn every_column_of_a_composite_tenant_key_must_not_hold_null() {
+    for projects in [
+        "CREATE TABLE projects (id INT PRIMARY KEY, organization_namespace_id INT,
+           organization_id INT NOT NULL);",
+        "CREATE TABLE projects (id INT PRIMARY KEY, organization_namespace_id INT NOT NULL,
+           organization_id INT);",
+    ] {
+        assert_eq!(reported(projects), ["projects"], "{projects}");
+    }
+    assert_eq!(
+        reported(
+            "CREATE TABLE projects (id INT PRIMARY KEY, organization_namespace_id INT NOT NULL,
+               organization_id INT NOT NULL);"
+        ),
         Vec::<String>::new()
     );
 }
