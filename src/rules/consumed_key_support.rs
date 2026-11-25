@@ -32,8 +32,8 @@ use crate::{
             sets_only_search_path, unwrapped,
         },
         trigger_support::{
-            WritesTable, fires_for_clients, fires_on_insert, names_new_field, new_field, row,
-            row_trigger, stored, stored_parts,
+            WritesTable, fires_for_clients, fires_on_insert, names_new_field, new_field,
+            new_fields_as_columns, row, row_trigger, stored, stored_parts,
         },
     },
 };
@@ -484,7 +484,7 @@ fn updated(
             return None;
         };
         let assigned = stored_parts(target).pop()?.into_owned();
-        if let Some(value) = written_value(&assignment.value, reads_new) {
+        if let Some(value) = new_fields_as_columns(&assignment.value, |_| reads_new) {
             set.push((assigned, value));
         }
     }
@@ -645,39 +645,6 @@ fn updated_column(expression: &Expr) -> Option<String> {
         _ => return None,
     };
     Some(stored(name).into_owned())
-}
-
-/// `value` with each `NEW.field` written as the column `field`, or `None`
-/// when it reads another column or a query, or `NEW` unless `reads_new`.
-fn written_value(value: &Expr, reads_new: bool) -> Option<Expr> {
-    /// Rewrites `NEW`'s fields, breaking on any other column or a query.
-    struct Fields {
-        reads_new: bool,
-    }
-
-    impl VisitorMut for Fields {
-        type Break = ();
-
-        fn pre_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
-            ControlFlow::Break(())
-        }
-
-        fn post_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<()> {
-            if !is_column_reference(expression) {
-                return ControlFlow::Continue(());
-            }
-            let Some(field) = new_field(expression).filter(|_| self.reads_new) else {
-                return ControlFlow::Break(());
-            };
-            *expression = Expr::Identifier(Ident::new(field));
-            ControlFlow::Continue(())
-        }
-    }
-
-    let mut rewritten = value.clone();
-    VisitMut::visit(&mut rewritten, &mut Fields { reads_new })
-        .is_continue()
-        .then_some(rewritten)
 }
 
 /// `fact` with each column in `assignments` replaced by its value, or `None`
