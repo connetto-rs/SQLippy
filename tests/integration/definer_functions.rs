@@ -2016,6 +2016,79 @@ fn an_unreadable_guard_helper_surfaces_a_lookup_error() {
     );
 }
 
+#[test]
+fn a_plpgsql_definer_assigning_alike_before_its_reads_is_not_reported() {
+    let definers = [
+        block_definer(
+            "assigned_list()",
+            "SETOF INT",
+            "owner_name TEXT; floor INT;",
+            "floor := 0;
+             owner_name := current_setting('app.user_id', true);
+             RETURN QUERY SELECT resource.id FROM public.resources resource
+               WHERE resource.owner = owner_name AND resource.id > floor;",
+        ),
+        block_definer(
+            "purge_counted()",
+            "INT",
+            "purged INT;",
+            &format!("{PURGE_MINE}; GET DIAGNOSTICS purged = ROW_COUNT; RETURN purged;"),
+        ),
+        block_definer(
+            "purge_checked_counted()",
+            "INT",
+            "purged INT;",
+            &format!(
+                "{PURGE_MINE}; IF NOT FOUND THEN RAISE EXCEPTION 'none'; END IF;
+                 GET DIAGNOSTICS purged = ROW_COUNT; RETURN purged;"
+            ),
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, DELETE", OWN_ROWS, &definers),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_plpgsql_definer_assigning_otherwise_is_reported() {
+    let definers = [
+        block_definer(
+            "assigned_role_list()",
+            "SETOF INT",
+            "owner_name TEXT;",
+            "owner_name := current_user;
+             RETURN QUERY SELECT resource.id FROM public.resources resource
+               WHERE resource.owner = owner_name;",
+        ),
+        block_definer(
+            "reassigned_list()",
+            "SETOF INT",
+            "owner_name TEXT;",
+            "owner_name := uid; owner_name := current_user;
+             RETURN QUERY SELECT resource.id FROM public.resources resource
+               WHERE resource.owner = owner_name;",
+        ),
+        block_definer(
+            "purge_any_counted()",
+            "INT",
+            "purged INT;",
+            "DELETE FROM public.resources resource WHERE resource.hidden;
+             GET DIAGNOSTICS purged = ROW_COUNT; RETURN purged;",
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, DELETE", OWN_ROWS, &definers),
+        [
+            "assigned_role_list()",
+            "purge_any_counted()",
+            "reassigned_list()"
+        ]
+    );
+}
+
 /// The caller's own `resources` rows, locked with `lock`.
 fn locking_own(lock: &str) -> String {
     format!(

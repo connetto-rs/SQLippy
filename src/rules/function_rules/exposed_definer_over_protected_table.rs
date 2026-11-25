@@ -102,7 +102,8 @@ use super::plpgsql_ambiguous_name::collision;
 /// subquery or a `SELECT ... INTO` of the variable it returns, maybe past
 /// guards `IF condition THEN RAISE EXCEPTION ...` or `IF condition THEN
 /// RETURN`, and names no column a variable also answers to. Every other
-/// variable it declares holds the default it is declared with. A guard's
+/// variable it declares holds the default it is declared with or the value
+/// one assignment among the guards gives it. A guard's
 /// condition evaluates alike for a caller and the owner, each query it holds
 /// confining its reads by the test below, so the owner finds there the rows
 /// a caller finds, and each argument and `USING` option of its exception
@@ -170,9 +171,10 @@ use super::plpgsql_ambiguous_name::collision;
 /// its own test, since a caller running them in the same order meets the
 /// same rows at each. A write may be followed by a guard `IF NOT FOUND THEN
 /// ...`, which raises where the caller's own write would find no row too,
-/// and one write may assign its `RETURNING` `INTO` the variable declared
-/// without a default, which the block's last `RETURN` returns and no
-/// statement reads. A `DELETE` or an `UPDATE` is read as the `SELECT` of the
+/// and one write may assign its `RETURNING` `INTO`, or its row count through
+/// `GET DIAGNOSTICS ... = ROW_COUNT`, the variable declared without a
+/// default, which the block's last `RETURN` returns and no statement reads.
+/// A `DELETE` or an `UPDATE` is read as the `SELECT` of the
 /// rows it writes joined to the tables its `USING` or `FROM` names,
 /// projecting what its `RETURNING` returns. That `SELECT` is held to the
 /// test above, the written table to each caller's policies for the command
