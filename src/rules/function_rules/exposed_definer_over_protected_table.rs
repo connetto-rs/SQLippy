@@ -49,7 +49,7 @@ use crate::{
         grant_support::{function_callers, granted_callers, schema_of},
         implication_support::{
             Columns, Condition, ParameterValues, StoredRelation, Term, admits, clause_implies,
-            membership, parameter, parameter_ordinal, renamed,
+            keeps_existence, membership, parameter, parameter_ordinal, renamed, witnessed,
         },
         key_support::{binds, equality_keys, key_pairs, no_inheritors},
         ladder_support::{
@@ -92,13 +92,18 @@ use crate::{
 /// that table admit, while each caller may select every column of the table.
 /// The filter has to imply every restrictive policy and one permissive one,
 /// stating each condition as written, where a scalar subquery reading no
-/// relation such as `(SELECT auth.uid())` stands for its value and a
-/// subquery reading stored tables, such as an `EXISTS` over a membership
-/// table, compares by the tables and columns its names resolve to, or
-/// testing the same column against a set within the policy's, as written,
-/// declared with [`Deployment::with_set_within`] or read off a ladder of the
-/// schema. A filter whose `OR` arms each imply another permissive policy
-/// counts too, since PostgreSQL admits a row any permissive policy admits.
+/// relation such as `(SELECT auth.uid())` stands for its value, or testing
+/// the same column against a set within the policy's, as written, declared
+/// with [`Deployment::with_set_within`] or read off a ladder of the schema.
+/// A non-negated `EXISTS` or `IN` over stored tables, such as one over a
+/// membership table, implies the policy's when its names resolve to the same
+/// tables and columns and it finds a row only where the policy's does,
+/// reading each of the policy's tables as one of its own and stating every
+/// condition of the policy's `ON` and `WHERE` and, for an `IN`, the tested
+/// value. Its projection and a positive `LIMIT` of an `EXISTS` find nothing
+/// else.
+/// A filter whose `OR` arms each imply another permissive policy counts too,
+/// since PostgreSQL admits a row any permissive policy admits.
 /// A set read through an input parameter of an enum type, such as
 /// `resources_with(min_role)`, has to lie within the policy's for every
 /// label of the enum. It has to for `NULL`
@@ -114,10 +119,10 @@ use crate::{
 /// parameter, that every caller may execute and whose body reads alike in
 /// turn. A stored table with row-level security reads alike only in a
 /// subquery the term holds true for finding a row in, a non-negated `EXISTS`
-/// or `IN` reached through `AND` and `OR` over an unlimited query
-/// inner-joining its relations, since its own read is confined, so each
-/// caller finds every row the owner finds. A table read under an alias
-/// renaming its columns confines nothing.
+/// or `IN` reached through `AND` and `OR` over a query inner-joining its
+/// relations, which an `IN` does not limit, since its own read is confined,
+/// so each caller finds every row the owner finds. A table read under an
+/// alias renaming its columns confines nothing.
 /// Every function of the schema the body calls is held to the same test,
 /// except a `SECURITY DEFINER` function every caller may execute directly,
 /// which this rule judges on its own. Functions in `pg_catalog` are trusted.
@@ -1106,31 +1111,32 @@ fn reads_session_state(call: &Function) -> bool {
 
 /// Pushes onto `found` the relations of each subquery `condition` holds true
 /// only for finding a row in, reached through `AND` and `OR`. That is an
-/// `EXISTS` or `IN` over a query unlimited, inner-joining its relations, and
-/// yielding one row of columns or constants for each row passing its
-/// `WHERE`, and in turn each such subquery of that `WHERE`. Finding more
-/// rows in them never turns `condition` false.
+/// `EXISTS` or `IN` over a query inner-joining its relations and yielding
+/// one row of columns or constants for each row passing its `WHERE`, which
+/// an `IN` does not limit and an `EXISTS` limits to no fewer than one, and
+/// in turn each such subquery of that `WHERE`. Finding more rows in them
+/// never turns `condition` false.
 fn positive_relations(condition: &Expr, found: &mut Vec<*const TableFactor>) {
-    let (Expr::Exists {
-        subquery,
-        negated: false,
-    }
-    | Expr::In {
-        target: InTarget::Subquery(subquery),
-        negated: false,
-        ..
-    }) = unnested(condition)
-    else {
-        if let Expr::BinaryOp {
+    let subquery = match unnested(condition) {
+        Expr::Exists {
+            subquery,
+            negated: false,
+        } if keeps_existence(subquery) => subquery,
+        Expr::In {
+            target: InTarget::Subquery(subquery),
+            negated: false,
+            ..
+        } if subquery.limit_clause.is_none() => subquery,
+        Expr::BinaryOp {
             left,
             op: BinaryOperator::And | BinaryOperator::Or,
             right,
-        } = unnested(condition)
-        {
+        } => {
             positive_relations(left, found);
             positive_relations(right, found);
+            return;
         }
-        return;
+        _ => return,
     };
     let Some(select) = witnessed(subquery) else {
         return;
@@ -1141,11 +1147,7 @@ fn positive_relations(condition: &Expr, found: &mut Vec<*const TableFactor>) {
             JoinOperator::Join(_) | JoinOperator::Inner(_) | JoinOperator::CrossJoin(_)
         )
     });
-    if !inner
-        || subquery.limit_clause.is_some()
-        || subquery.fetch.is_some()
-        || !subquery.pipe_operators.is_empty()
-    {
+    if !inner || subquery.fetch.is_some() || !subquery.pipe_operators.is_empty() {
         return;
     }
     found.extend(select.from.iter().flat_map(relations).map(ptr::from_ref));
@@ -3304,29 +3306,6 @@ fn projection_at(select: &Select, ordinal: usize) -> Option<&Expr> {
         }
     }
     projected
-}
-
-/// The `SELECT` of `query` each row of which comes from a row of its `FROM`
-/// passing its `WHERE`, with no row when none passes, projecting columns,
-/// constants or `*`.
-fn witnessed(query: &Query) -> Option<&Select> {
-    let SetExpr::Select(select) = query.body.as_ref() else {
-        return None;
-    };
-    let projected = select.projection.iter().all(|item| match item {
-        SelectItem::UnnamedExpr(projected)
-        | SelectItem::ExprWithAlias {
-            expr: projected, ..
-        } => matches!(
-            projected,
-            Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_)
-        ),
-        _ => matches!(
-            item,
-            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)
-        ),
-    });
-    (query.order_by.is_none() && plain(select) && projected).then_some(select)
 }
 
 /// The name of the one column `query` yields, given by its leftmost
