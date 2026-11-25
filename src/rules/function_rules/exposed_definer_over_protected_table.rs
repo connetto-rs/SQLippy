@@ -186,6 +186,11 @@ use super::plpgsql_ambiguous_name::collision;
 /// run before the query, the item read as the rows the write writes
 /// projecting what its `RETURNING` returns, since PostgreSQL runs both on
 /// one snapshot, as it runs the caller's own statement.
+/// A `FOR` loop over a query whose statements are such writes, each maybe
+/// followed by its guard, is read as the query, held to the read test, and
+/// then those writes, each field of the loop record they name read as an
+/// input of its own, since the caller's own loop reaches the same rows and
+/// a write held alike for every value of a field is held alike for each.
 /// A `DELETE` or an `UPDATE` is read as the `SELECT` of the
 /// rows it writes joined to the tables its `USING` or `FROM` names,
 /// projecting what its `RETURNING` returns. That `SELECT` is held to the
@@ -702,11 +707,15 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         block: Block,
         path: Option<&[(Cow<'_, str>, bool)]>,
     ) -> Result<Option<Vec<Statement>>, LookupError> {
+        let inputs = function
+            .argument_modes()
+            .filter(|mode| !matches!(mode, ArgMode::Out))
+            .count();
         let Some(Ran {
             statements,
             guards,
             raised,
-        }) = ran_statements(block)
+        }) = ran_statements(block, inputs)
         else {
             return Ok(None);
         };

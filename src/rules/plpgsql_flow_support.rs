@@ -1,12 +1,12 @@
 //! Walks a PL/pgSQL body in the order it can run, carrying what a rule tracks
 //! along every path through branches, loops, exits and handlers.
 
-use std::{convert::Infallible, iter, ops::ControlFlow};
+use std::{borrow::Cow, convert::Infallible, iter, ops::ControlFlow};
 
 use sql_traits::{traits::FunctionLike, utils::identifier_resolution::normalize_identifier};
 use sqlparser::{
     ast::{
-        Expr, Query, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableAlias,
+        Expr, Ident, Query, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableAlias,
         TableFactor, TableWithJoins, UnaryOperator, VisitMut, visit_expressions_mut,
     },
     dialect::PostgreSqlDialect,
@@ -22,7 +22,7 @@ use sqlparser_plpgsql::{
     embedded_sql,
 };
 
-use crate::rules::inline_support::selected_expression;
+use crate::rules::{implication_support::parameter, inline_support::selected_expression};
 
 /// The body of a PL/pgSQL function, `None` for another language or a body
 /// that does not parse.
@@ -50,10 +50,11 @@ pub(crate) struct Ran {
 /// What `block` runs when it does nothing else. Its statements are guards
 /// `IF condition THEN RAISE EXCEPTION ...; END IF;` or `IF condition THEN
 /// RETURN; END IF;` and assignments `variable := value;` of variables
-/// declared without a default, then the statements [`ran_by`] reads. Every
+/// declared without a default, then the statements [`ran_by`] reads, the
+/// function taking `inputs` input parameters. Every
 /// variable but one is declared with a default or assigned once among the
 /// guards and, as no later statement assigns it, reads as that value.
-pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
+pub(crate) fn ran_statements(block: Block, inputs: usize) -> Option<Ran> {
     let Block {
         declarations,
         statements,
@@ -105,7 +106,7 @@ pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
         _ => return None,
     };
     let mut later = Vec::new();
-    let mut statements = ran_by(statements, target, &mut later)?;
+    let mut statements = ran_by(statements, target, inputs, &mut later)?;
     for statement in &mut statements {
         substitute(statement, &defaults);
     }
@@ -128,7 +129,9 @@ pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
 /// `raised`. A node may also be a `RETURN QUERY` of a query, or a `FOR`
 /// loop over a query whose one statement is a `RETURN NEXT`, as
 /// [`next_rows`] reads it, consecutive ones read as the `UNION ALL`
-/// of them. One `SELECT ... INTO`, write
+/// of them. A `FOR` loop over a query whose statements are writes runs the
+/// query and then those writes, as [`row_writes`] reads them past the
+/// function's `inputs`. One `SELECT ... INTO`, write
 /// `RETURNING ... INTO`, or `GET DIAGNOSTICS ... = ROW_COUNT` after a write
 /// and its guard assigns `target`, which the last node returns, since a
 /// caller running the same write changes as many rows. A last bare `RETURN`
@@ -136,6 +139,7 @@ pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
 fn ran_by(
     nodes: impl Iterator<Item = Node>,
     target: Option<&str>,
+    inputs: usize,
     raised: &mut Vec<Expr>,
 ) -> Option<Vec<Statement>> {
     let mut ran: Vec<Statement> = Vec::new();
@@ -145,13 +149,9 @@ fn ran_by(
     let mut nodes = nodes.peekable();
     while let Some(node) = nodes.next() {
         let last = nodes.peek().is_none();
-        let returns_rows = match &node.kind {
-            NodeKind::ReturnQuery(ReturnQuery::Query(statement)) => {
-                matches!(statement.as_ref(), Statement::Query(_))
-            }
-            kind => matches!(kind, NodeKind::Loop(_)),
-        };
-        if !returns_rows && let Some(query) = returning.take() {
+        if !returns_rows(&node.kind)
+            && let Some(query) = returning.take()
+        {
             ran.push(Statement::Query(query));
         }
         let (written, found) = match node.kind {
@@ -184,7 +184,7 @@ fn ran_by(
                 (written, written)
             }
             NodeKind::Loop(looped) => {
-                returned(&mut returning, next_rows(looped, target?)?);
+                ran_loop(looped, target?, inputs, &mut ran, &mut returning, raised)?;
                 (false, false)
             }
             NodeKind::Diagnostics(Diagnostics {
@@ -234,6 +234,24 @@ fn ran_by(
     (!ran.is_empty()).then_some(ran)
 }
 
+/// Whether `kind` returns the rows of a query, as a `RETURN QUERY` of one or
+/// a `FOR` loop of one `RETURN NEXT` does, joining those returned before.
+fn returns_rows(kind: &NodeKind) -> bool {
+    match kind {
+        NodeKind::ReturnQuery(ReturnQuery::Query(statement)) => {
+            matches!(statement.as_ref(), Statement::Query(_))
+        }
+        NodeKind::Loop(Loop { statements, .. }) => matches!(
+            statements.as_slice(),
+            [Node {
+                kind: NodeKind::ReturnNext { .. },
+                ..
+            }]
+        ),
+        _ => false,
+    }
+}
+
 /// Whether `statement` is a `DELETE`, an `UPDATE` or an `INSERT`.
 fn writes(statement: &Statement) -> bool {
     matches!(
@@ -251,11 +269,20 @@ fn returned(returning: &mut Option<Box<Query>>, query: Box<Query>) {
     });
 }
 
-/// The query whose rows `looped` returns, when it is a `FOR record IN query
-/// LOOP RETURN NEXT value; END LOOP` over the variable `record`, as `SELECT
-/// value FROM (query) AS record`, or the query itself when `value` is the
-/// record.
-fn next_rows(looped: Loop, record: &str) -> Option<Box<Query>> {
+/// Reads `looped`, a `FOR` loop over a query into the variable named
+/// `record`. A loop of one `RETURN NEXT` adds the query [`next_rows`] gives
+/// to the rows `returning` holds, and a loop of writes pushes onto `ran` its
+/// query and then the writes [`row_writes`] reads, the function taking
+/// `inputs` inputs and the values their guards raise pushed onto `raised`.
+/// `None` for another loop.
+fn ran_loop(
+    looped: Loop,
+    record: &str,
+    inputs: usize,
+    ran: &mut Vec<Statement>,
+    returning: &mut Option<Box<Query>>,
+    raised: &mut Vec<Expr>,
+) -> Option<()> {
     let Loop {
         control: LoopControl::Query { targets, query },
         statements,
@@ -264,22 +291,36 @@ fn next_rows(looped: Loop, record: &str) -> Option<Box<Query>> {
     else {
         return None;
     };
-    let (
-        [variable],
-        [
-            Node {
-                kind: NodeKind::ReturnNext { value: Some(value) },
-                ..
-            },
-        ],
-        Statement::Query(rows),
-    ) = (targets.as_slice(), statements.as_slice(), *query)
-    else {
+    let ([variable], Statement::Query(rows)) = (targets.as_slice(), *query) else {
         return None;
     };
     if !assigns(variable, record) {
         return None;
     }
+    if let [
+        Node {
+            kind: NodeKind::ReturnNext { value: Some(value) },
+            ..
+        },
+    ] = statements.as_slice()
+    {
+        returned(returning, next_rows(rows, variable, record, value)?);
+        return Some(());
+    }
+    ran.push(Statement::Query(rows));
+    ran.extend(row_writes(statements, record, inputs, raised)?);
+    Some(())
+}
+
+/// The query whose rows a `FOR record IN rows LOOP RETURN NEXT value; END
+/// LOOP` over `variable`, the variable named `record`, returns, as `SELECT
+/// value FROM (rows) AS record`, or `rows` itself when `value` is the record.
+fn next_rows(
+    rows: Box<Query>,
+    variable: &Target,
+    record: &str,
+    value: &Query,
+) -> Option<Box<Query>> {
     let value = selected_expression(value)?;
     if let Expr::Identifier(name) = value
         && normalize_identifier(&name.value, name.quote_style.is_some()) == record
@@ -335,6 +376,88 @@ pub(crate) fn rows_query(
         format_clause: None,
         pipe_operators: Vec::new(),
     }
+}
+
+/// The writes `nodes`, the statements of a `FOR` loop over the variable
+/// named `record`, run for each row, when each is a `DELETE`, `UPDATE` or
+/// `INSERT` maybe followed by a guard `IF NOT FOUND THEN ...`, the values
+/// its exception carries pushed onto `raised`. Each field of the record they
+/// name reads as an input numbered past the function's `inputs`, the same
+/// field as the same input, so a write held alike for every value of it is
+/// held alike for each row the loop reaches. `None` for another statement
+/// or one naming the record whole.
+fn row_writes(
+    nodes: Vec<Node>,
+    record: &str,
+    inputs: usize,
+    raised: &mut Vec<Expr>,
+) -> Option<Vec<Statement>> {
+    let mut fields = Vec::new();
+    let mut written = Vec::new();
+    let mut nodes = nodes.into_iter().peekable();
+    while let Some(node) = nodes.next() {
+        let NodeKind::Statement {
+            statement,
+            into: None,
+        } = node.kind
+        else {
+            return None;
+        };
+        let mut statement = *statement;
+        if !writes(&statement) {
+            return None;
+        }
+        record_fields(&mut statement, record, inputs, &mut fields)?;
+        written.push(statement);
+        if let Some((condition, mut values)) = nodes.peek().and_then(guard)
+            && not_found(&condition)
+        {
+            record_fields(&mut values, record, inputs, &mut fields)?;
+            raised.extend(values);
+            nodes.next();
+        }
+    }
+    (!written.is_empty()).then_some(written)
+}
+
+/// `node` with each field of the variable named `record` replaced by the
+/// input numbered past `inputs` by the field's place in `fields`, which
+/// gains each field not yet in it. `None` when `node` names the record whole
+/// or a field of a field.
+fn record_fields<N: VisitMut>(
+    node: &mut N,
+    record: &str,
+    inputs: usize,
+    fields: &mut Vec<String>,
+) -> Option<()> {
+    /// `name` folded as PostgreSQL folds an identifier.
+    fn named(name: &Ident) -> Cow<'_, str> {
+        normalize_identifier(&name.value, name.quote_style.is_some())
+    }
+    let flow = visit_expressions_mut(node, |expression| {
+        match expression {
+            Expr::Identifier(name) if named(name) == record => return ControlFlow::Break(()),
+            Expr::CompoundIdentifier(parts)
+                if parts.first().is_some_and(|first| named(first) == record) =>
+            {
+                let [_, field] = parts.as_slice() else {
+                    return ControlFlow::Break(());
+                };
+                let field = named(field).into_owned();
+                let place = fields
+                    .iter()
+                    .position(|known| *known == field)
+                    .unwrap_or_else(|| {
+                        fields.push(field);
+                        fields.len() - 1
+                    });
+                *expression = parameter(inputs + place);
+            }
+            _ => {}
+        }
+        ControlFlow::Continue(())
+    });
+    flow.is_continue().then_some(())
 }
 
 /// Whether `into` assigns only the variable `target`, as a whole.
