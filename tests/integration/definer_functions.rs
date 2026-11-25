@@ -1810,6 +1810,13 @@ fn a_definer_locking_rows_the_caller_may_lock_is_not_reported() {
             &locking_own("FOR KEY SHARE"),
         ),
         returning_definer("lock_own_of()", "SETOF INT", &locking_of("resource")),
+        returning_definer(
+            "lock_unaliased()",
+            "SETOF INT",
+            "SELECT resources.id FROM public.resources
+             WHERE resources.owner = current_setting('app.user_id', true)
+             FOR UPDATE OF resources",
+        ),
         block_definer(
             "lock_listed()",
             "SETOF INT",
@@ -1831,6 +1838,18 @@ fn a_definer_locking_rows_the_caller_may_lock_is_not_reported() {
             "SELECT",
             &format!("{OWN_ROWS} {KINDS}"),
             &returning_definer("lock_kind()", "SETOF INT", &locking_of("kind")),
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        written_exposed(
+            "SELECT",
+            &format!("{OWN_ROWS} {KINDS}"),
+            &returning_definer(
+                "lock_qualified_of()",
+                "SETOF INT",
+                &locking_of("public.resources")
+            ),
         ),
         Vec::<String>::new()
     );
@@ -1883,11 +1902,19 @@ fn a_definer_locking_rows_the_caller_may_not_lock_is_reported() {
                     "SETOF INT",
                     &format!("SELECT mine.id FROM ({}) mine FOR UPDATE", locking_own("")),
                 ),
+                returning_definer(
+                    "lock_derived_of()",
+                    "SETOF INT",
+                    &format!(
+                        "SELECT mine.id FROM ({}) mine FOR UPDATE OF mine",
+                        locking_own("")
+                    ),
+                ),
                 returning_definer("lock_of_resource()", "SETOF INT", &locking_of("resource")),
             ]
             .concat(),
         ),
-        ["lock_derived()", "lock_of_resource()"]
+        ["lock_derived()", "lock_derived_of()", "lock_of_resource()"]
     );
 }
 
