@@ -135,6 +135,7 @@ mod name_support;
 mod not_in_support;
 mod null_support;
 mod plpgsql_flow_support;
+mod plpgsql_site_support;
 mod policy_filter_support;
 mod policy_read_support;
 mod policy_support;
