@@ -157,9 +157,8 @@ fn each_subject_column_is_named_once() {
     constrainer.set_deployment(deployment());
     let found = findings(
         &constrainer,
-        "CREATE POLICY users_write ON users FOR UPDATE
-           USING (tenant_id = current_setting('app.tenant', true)::int)
-           WITH CHECK (tenant_id = current_setting('app.tenant', true)::int);",
+        "CREATE POLICY users_read ON users FOR SELECT
+           USING (tenant_id = current_setting('app.tenant', true)::int);",
     );
     assert_eq!(
         found
@@ -169,5 +168,30 @@ fn each_subject_column_is_named_once() {
         [
             "Unique constraint 'users_handle_key' on 'users' leaves out 'tenant_id', so a duplicate-key error reveals values in rows the caller's policies hide."
         ]
+    );
+}
+
+#[test]
+fn a_credential_only_write_policies_compare_scopes_no_key() {
+    let mut constrainer: GenericConstrainer<ParserDB> =
+        UnscopedUniqueConstraintOnRowLevelSecurityTable::default().into();
+    constrainer.set_deployment(deployment());
+    let found = findings(
+        &constrainer,
+        "CREATE TABLE runs (id INT PRIMARY KEY, code TEXT UNIQUE, performed_by INT);
+         ALTER TABLE runs ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY runs_read ON runs FOR SELECT USING (true);
+         CREATE POLICY runs_insert ON runs FOR INSERT
+           WITH CHECK (performed_by IS NULL OR performed_by = current_setting('app.tenant', true)::int);
+         CREATE POLICY runs_update ON runs FOR UPDATE
+           USING (performed_by = current_setting('app.tenant', true)::int);
+         CREATE POLICY runs_delete ON runs FOR DELETE
+           USING (performed_by = current_setting('app.tenant', true)::int);",
+    );
+    assert!(
+        found
+            .iter()
+            .all(|(_, message)| !message.contains("on 'runs'")),
+        "{found:?}"
     );
 }

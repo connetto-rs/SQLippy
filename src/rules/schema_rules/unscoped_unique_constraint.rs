@@ -11,7 +11,7 @@ use crate::{
     engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::{authority_support::authority_columns, index_support::read_columns},
+    rules::{authority_support::read_authority_columns, index_support::read_columns},
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::index_name},
 };
 
@@ -80,15 +80,18 @@ fn label<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
 
 /// Struct defining a rule that reports a unique constraint or unique index on
 /// a table with row-level security whose columns omit the table's subject
-/// column, the column its policies compare with a credential.
+/// column, the column the `USING` clause of a policy applying to `SELECT`
+/// compares with a credential.
 ///
 /// A duplicate-key error then tells a caller that the value exists in rows
-/// its policies hide, such as another tenant's. The primary key is not
-/// reported, and neither is an index no declared client role can write
-/// under, by an `INSERT` into the table or an `UPDATE` of a column the index
-/// reads, since a duplicate-key error needs one of them. Writes a
-/// `SECURITY DEFINER` function makes for a caller are not considered. The
-/// rule needs declared credentials.
+/// its policies hide, such as another tenant's. A comparison only a
+/// `WITH CHECK` clause or an `UPDATE` or `DELETE` policy makes hides no row
+/// from reads and makes no subject. The primary key is not reported, and
+/// neither is an index no declared client role can write under, by an
+/// `INSERT` into the table or an `UPDATE` of a column the index reads, since
+/// a duplicate-key error needs one of them. Writes a `SECURITY DEFINER`
+/// function makes for a caller are not considered. The rule needs declared
+/// credentials.
 ///
 /// The rule does not run on SQLite, which has no row-level security.
 ///
@@ -175,7 +178,7 @@ impl<DB: DatabaseLike> SchemaRule for UnscopedUniqueConstraintOnRowLevelSecurity
         reporter: &mut Reporter<'_, Self::Database>,
     ) -> Result<(), Interruption> {
         let deployment = reporter.deployment();
-        let subjects = authority_columns(database, deployment)?.subjects;
+        let subjects = read_authority_columns(database, deployment)?.subjects;
         for table in database.tables() {
             let own: Vec<&str> = subjects
                 .iter()
