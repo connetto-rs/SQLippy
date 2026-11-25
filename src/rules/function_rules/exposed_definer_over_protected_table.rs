@@ -46,10 +46,10 @@ use crate::{
         cte_support::{
             WithScopes, join_constraint, same_name, stored_column, stored_relation, stored_table,
         },
-        grant_support::{function_callers, granted_callers},
+        grant_support::{function_callers, granted_callers, schema_of},
         implication_support::{
-            Columns, Condition, ParameterValues, Term, admits, clause_implies, membership,
-            parameter, parameter_ordinal, renamed,
+            Columns, Condition, ParameterValues, StoredRelation, Term, admits, clause_implies,
+            membership, parameter, parameter_ordinal, renamed,
         },
         key_support::{binds, equality_keys, key_pairs, no_inheritors},
         ladder_support::{
@@ -92,9 +92,12 @@ use crate::{
 /// that table admit, while each caller may select every column of the table.
 /// The filter has to imply every restrictive policy and one permissive one,
 /// stating each condition as written, where a scalar subquery reading no
-/// relation such as `(SELECT auth.uid())` stands for its value, or testing
-/// the same column against a set within the policy's, as written, declared
-/// with [`Deployment::with_set_within`] or read off a ladder of the schema.
+/// relation such as `(SELECT auth.uid())` stands for its value and a
+/// subquery reading stored tables, such as an `EXISTS` over a membership
+/// table, compares by the tables and columns its names resolve to, or
+/// testing the same column against a set within the policy's, as written,
+/// declared with [`Deployment::with_set_within`] or read off a ladder of the
+/// schema.
 /// A set read through an input parameter of an enum type, such as
 /// `resources_with(min_role)`, has to lie within the policy's for every
 /// label of the enum. It has to for `NULL`
@@ -879,6 +882,11 @@ impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
         stored_name(column).is_some_and(|name| name == *tested)
     }
 
+    /// A policy names a relation as the schema's search path resolves it.
+    fn relation(&self, name: &ObjectName) -> Option<StoredRelation> {
+        stored_relation_named(self.confinement.database, name, None)
+    }
+
     fn parameter_values(&self, ordinal: usize) -> Option<&ParameterValues> {
         self.parameters.get(ordinal)?.as_ref()
     }
@@ -1360,9 +1368,11 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         let mut caller_bound = Vec::new();
         let mut whole = true;
         for &(clause, conjunct) in &dropping {
-            let stated = renamed(conjunct, |reference| {
-                term(&resolver, reference, relation, &equalities)
-            });
+            let stated = renamed(
+                conjunct,
+                |reference| term(&resolver, reference, relation, &equalities),
+                |name| self.subquery_relation(name),
+            );
             match stated {
                 Some(stated) if self.reads_alike(conjunct)? => {
                     conditions.push(stated);
@@ -1478,6 +1488,15 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             return Ok(Some(condition.clone()));
         }
         self.drawn_condition(table, condition, conditions)
+    }
+
+    /// The stored table `name` reads in a subquery of a filter, which no
+    /// `WITH` item in reach shadows.
+    fn subquery_relation(&self, name: &ObjectName) -> Option<StoredRelation> {
+        if self.items.binding(name).is_some() {
+            return None;
+        }
+        stored_relation_named(self.body.confinement.database, name, self.path)
     }
 
     /// The stored table `relation` reads every row of under its own column
@@ -2720,6 +2739,27 @@ fn reads_parameter(condition: &Expr) -> bool {
     .is_break()
 }
 
+/// The stored table `name` reads on `path`, under its schema-qualified
+/// stored name, `None` for any other relation or one that fails to resolve.
+fn stored_relation_named<DB: DatabaseLike>(
+    database: &DB,
+    name: &ObjectName,
+    path: Option<&[(Cow<'_, str>, bool)]>,
+) -> Option<StoredRelation> {
+    let table = stored_table(database, name, path).ok()??;
+    let columns = table.columns(database).ok()?;
+    let schema = schema_of(database, table.stored_table_schema());
+    Some(StoredRelation {
+        name: ObjectName::from(vec![
+            Ident::with_quote('"', schema.as_ref()),
+            Ident::with_quote('"', table.stored_table_name().as_ref()),
+        ]),
+        columns: columns
+            .map(|column| column.column_name().to_owned())
+            .collect(),
+    })
+}
+
 /// Whether `column` alone is a unique key of `table`.
 fn unique_alone<DB: DatabaseLike>(
     database: &DB,
@@ -2780,13 +2820,17 @@ fn carried_conditions<DB: DatabaseLike>(
     Ok(conditions
         .iter()
         .filter_map(|condition| {
-            renamed(condition, |reference| {
-                let name = stored_name(reference)?;
-                renames
-                    .iter()
-                    .find(|(from, _)| *from == name)
-                    .map(|(_, to)| Term::Column((*to).to_owned()))
-            })
+            renamed(
+                condition,
+                |reference| {
+                    let name = stored_name(reference)?;
+                    renames
+                        .iter()
+                        .find(|(from, _)| *from == name)
+                        .map(|(_, to)| Term::Column((*to).to_owned()))
+                },
+                |_| None,
+            )
         })
         .collect())
 }

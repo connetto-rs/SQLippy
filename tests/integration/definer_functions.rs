@@ -387,6 +387,122 @@ fn a_policys_scalar_subquery_reads_as_the_value_it_projects() {
     );
 }
 
+/// Notes a policy shows to members found in `open_members`, a table without
+/// row-level security, through a subquery reading its columns.
+const MEMBER_NOTES: &str = "
+    CREATE TABLE open_members (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+    CREATE TABLE open_admins (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+    CREATE TABLE notes (id INT, organization_id INT);
+    ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+    GRANT SELECT ON open_members, open_admins, notes TO app;
+    CREATE POLICY member_notes ON notes FOR SELECT TO app
+      USING (EXISTS (SELECT 1 FROM open_members m
+        WHERE m.organization_id = notes.organization_id
+          AND m.user_id = current_setting('app.user_id', true)));
+    CREATE POLICY listed_notes ON notes FOR SELECT TO app
+      USING (organization_id IN (SELECT m.organization_id FROM open_members m
+        WHERE m.user_id = current_setting('app.user_id', true)));";
+
+#[test]
+fn a_filter_repeating_a_policys_subquery_over_its_own_columns_confines_as_the_policy() {
+    assert_eq!(
+        exposed_to_app(&format!(
+            "{MEMBER_NOTES}
+             CREATE FUNCTION existing_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE EXISTS (SELECT 1 FROM public.open_members member
+                   WHERE member.organization_id = note.organization_id
+                     AND member.user_id = current_setting('app.user_id', true)) $$;
+             CREATE FUNCTION listed_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE note.organization_id IN (SELECT member.organization_id
+                   FROM public.open_members member
+                   WHERE member.user_id = current_setting('app.user_id', true)) $$;
+             CREATE FUNCTION bare_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE EXISTS (SELECT 1 FROM public.open_members member
+                   WHERE organization_id = note.organization_id
+                     AND user_id = current_setting('app.user_id', true)) $$;"
+        )),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_subquery_column_resolving_elsewhere_than_the_policys_confines_nothing() {
+    assert_eq!(
+        exposed_to_app(&format!(
+            "{MEMBER_NOTES}
+             CREATE FUNCTION shadowed_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE EXISTS (SELECT 1 FROM public.open_members note
+                   WHERE note.organization_id = note.organization_id
+                     AND note.user_id = current_setting('app.user_id', true)) $$;
+             CREATE FUNCTION captured_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE EXISTS (SELECT 1 FROM public.open_members m
+                   WHERE m.organization_id = organization_id
+                     AND m.user_id = current_setting('app.user_id', true)) $$;
+             CREATE FUNCTION admin_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE EXISTS (SELECT 1 FROM public.open_admins m
+                   WHERE m.organization_id = note.organization_id
+                     AND m.user_id = current_setting('app.user_id', true)) $$;
+             CREATE FUNCTION derived_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE EXISTS (SELECT 1 FROM (SELECT * FROM public.open_members) m
+                   WHERE m.organization_id = note.organization_id
+                     AND m.user_id = current_setting('app.user_id', true)) $$;"
+        )),
+        [
+            "admin_note_ids()",
+            "captured_note_ids()",
+            "derived_note_ids()",
+            "shadowed_note_ids()"
+        ]
+    );
+}
+
+#[test]
+fn a_subquery_naming_its_relation_in_ways_the_renaming_does_not_follow_confines_nothing() {
+    assert_eq!(
+        exposed_to_app(&format!(
+            "{MEMBER_NOTES}
+             CREATE FUNCTION aliased_columns_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE EXISTS (SELECT 1 FROM public.open_members m (member, organization)
+                   WHERE m.organization = note.organization_id
+                     AND m.member = current_setting('app.user_id', true)) $$;
+             CREATE FUNCTION schema_named_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE EXISTS (SELECT 1 FROM public.open_members
+                   WHERE public.open_members.organization_id = note.organization_id
+                     AND public.open_members.user_id = current_setting('app.user_id', true)) $$;
+             CREATE FUNCTION with_shadowed_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+                 WITH open_members AS (SELECT * FROM open_admins)
+                 SELECT note.id FROM notes note
+                 WHERE EXISTS (SELECT 1 FROM open_members m
+                   WHERE m.organization_id = note.organization_id
+                     AND m.user_id = current_setting('app.user_id', true)) $$;"
+        )),
+        [
+            "aliased_columns_note_ids()",
+            "schema_named_note_ids()",
+            "with_shadowed_note_ids()"
+        ]
+    );
+}
+
 #[test]
 fn a_value_list_confines_when_each_value_meets_a_policy_arm() {
     assert_eq!(
