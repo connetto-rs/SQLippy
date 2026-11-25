@@ -2657,7 +2657,9 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     /// value from that the keys do not keep apart from the row meets its
     /// conditions that carry over to the row, those reading a parameter
     /// stated of the argument the call passes when each is a literal or a
-    /// parameter.
+    /// parameter. A function running as the body's owner draws from the
+    /// rows the body reads, so the row it draws from also stands in the
+    /// sets of the policies of `table` that [`Self::found_in_sets`] finds.
     fn drawn_condition(
         &self,
         table: &'a DB::Table,
@@ -2682,6 +2684,13 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         if !arms.complete {
             return Ok(None);
         }
+        let sets = if function.security_mode() != FunctionSecurity::Definer
+            || function.owner(database)? == self.body.function.owner(database)?
+        {
+            self.policy_sets(table)?
+        } else {
+            Vec::new()
+        };
         let arguments = positional_arguments(call, function).filter(|arguments| {
             arguments.iter().all(|argument| {
                 literal(argument).is_some() || parameter_ordinal(unwrapped(argument)).is_some()
@@ -2696,7 +2705,9 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             if apart(&tested_kinds, &kinds) {
                 continue;
             }
-            let met = drawn.known(arguments.as_deref());
+            let mut met = drawn.known(arguments.as_deref());
+            let found = self.found_in_sets(&sets, drawn, &met)?;
+            met.to_mut().extend(found);
             let carried = carried_conditions(database, drawn, &met, table, column)?;
             if carried.is_empty() {
                 return Ok(None);
@@ -2710,6 +2721,41 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 op: BinaryOperator::Or,
                 right: Box::new(right),
             }))
+    }
+
+    /// `column IN (SELECT helper())` over the columns of the table of
+    /// `drawn`, for each set of `sets` with an exhaustive arm over that
+    /// table whose conditions, those reading a parameter stated of the
+    /// literal its call passes, `met` implies, the column that arm returns.
+    fn found_in_sets(
+        &self,
+        sets: &[SetCall<'a, DB>],
+        drawn: &Drawn<'_, DB>,
+        met: &[Expr],
+    ) -> Result<Vec<Expr>, LookupError> {
+        let clause = conjunction(met.to_vec());
+        let mut found = Vec::new();
+        for set in sets {
+            let arguments = set.literals.then(|| listed_arguments(&set.call)).flatten();
+            for arm in set
+                .arms
+                .arms
+                .iter()
+                .filter(|arm| arm.exhaustive && arm.drawn.table == drawn.table)
+            {
+                let Some(required) = arm.drawn.under(arguments.as_deref()) else {
+                    continue;
+                };
+                if self.implies_every(&clause, &required)?
+                    && let Some(membership) =
+                        set_membership(arm.drawn.column.column_name(), &set.call)
+                    && !found.contains(&membership)
+                {
+                    found.push(membership);
+                }
+            }
+        }
+        Ok(found)
     }
 
     /// `column IN (SELECT helper())` for `relation`, a read of `table` its

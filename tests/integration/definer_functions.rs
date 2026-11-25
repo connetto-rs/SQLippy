@@ -3429,7 +3429,7 @@ fn a_filter_confines_when_each_arm_meets_a_different_permissive_policy() {
 fn a_set_declared_within_the_policys_set_confines_a_read() {
     let helper = "
         CREATE FUNCTION admin_organizations() RETURNS SETOF INT
-          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+          LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
             SELECT membership.organization_id FROM public.memberships membership
             WHERE membership.user_id = current_setting('app.user_id', true)
               AND membership.organization_id > 100 $$;
@@ -5014,6 +5014,88 @@ fn a_helper_filter_reaches_the_row_its_returned_key_references() {
         ),
         ["volatile_admin_organizations()"]
     );
+}
+
+/// Functions reported over teams visible to the members of each, and a
+/// definer returning the organizations of the teams in the set of
+/// `authz.administered_teams()`, `callee` declaring that function.
+fn administered_organizations(callee: &str, tested: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE ROLE auditor NOLOGIN;
+             CREATE SCHEMA authz;
+             CREATE TABLE public.teams (id INT PRIMARY KEY, organization_id INT NOT NULL);
+             CREATE TABLE public.team_members (team_id INT NOT NULL REFERENCES public.teams (id),
+               user_id TEXT NOT NULL, admin BOOLEAN NOT NULL, PRIMARY KEY (team_id, user_id));
+             ALTER TABLE public.teams ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE public.team_members ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON public.teams, public.team_members TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE FUNCTION authz.member_teams() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT member.team_id FROM public.team_members member
+                 WHERE member.user_id = current_setting('app.user_id', true) $$;
+             CREATE POLICY team_members_select ON public.team_members FOR SELECT TO app
+               USING (user_id = current_setting('app.user_id', true));
+             CREATE POLICY teams_select ON public.teams FOR SELECT TO app
+               USING (id = ANY (ARRAY(SELECT authz.member_teams())));
+             {callee}
+             CREATE FUNCTION authz.team_admin_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT team.organization_id FROM public.teams team WHERE {tested} $$;"
+        ),
+    )
+}
+
+#[test]
+fn a_callee_set_carries_the_policy_sets_its_arm_rows_stand_in() {
+    let callee = |security: &str, volatility: &str, body: &str| {
+        format!(
+            "CREATE FUNCTION authz.administered_teams() RETURNS SETOF INT
+               LANGUAGE sql {volatility} SECURITY {security}
+               SET search_path = pg_catalog, pg_temp AS $$ {body} $$;"
+        )
+    };
+    let own = "SELECT team_id FROM public.team_members
+        WHERE user_id = current_setting('app.user_id', true) AND admin";
+    let other = "SELECT team_id FROM public.team_members
+        WHERE user_id = current_setting('app.user_id', true) AND NOT admin";
+    let any = "SELECT team_id FROM public.team_members WHERE admin";
+    let tested = "team.id IN (SELECT authz.administered_teams())";
+    let listed = "team.id = ANY (ARRAY(SELECT authz.administered_teams()))";
+    let united = format!("{own} UNION {other}");
+    for tested in [tested, listed] {
+        for callee in [
+            callee("DEFINER", "STABLE", own),
+            callee("INVOKER", "STABLE", own),
+            callee("DEFINER", "STABLE", &united),
+        ] {
+            assert_eq!(
+                administered_organizations(&callee, tested),
+                Vec::<String>::new(),
+                "{callee} {tested}"
+            );
+        }
+        for callee in [
+            callee("DEFINER", "STABLE", any),
+            callee("DEFINER", "STABLE", &format!("{own} UNION {any}")),
+            callee("DEFINER", "STABLE", &format!("{own} UNION VALUES (1)")),
+            callee("DEFINER", "VOLATILE", own),
+            format!(
+                "{}ALTER FUNCTION authz.administered_teams() OWNER TO auditor;",
+                callee("DEFINER", "STABLE", own)
+            ),
+        ] {
+            assert!(
+                administered_organizations(&callee, tested)
+                    .contains(&"team_admin_organizations()".to_owned()),
+                "{callee} {tested}"
+            );
+        }
+    }
 }
 
 #[test]
