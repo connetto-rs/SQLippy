@@ -197,8 +197,9 @@ impl<'e, T> Condition<'e, T> {
 /// states it, finds rows only where the condition's subquery finds one,
 /// tests the same row against a set within the condition's, or draws its
 /// row from rows meeting it, when it implies the condition in every arm or
-/// for every value of an `IN` list or in one of its conjuncts, or when it
-/// implies each conjunct or one arm of `condition`.
+/// for every value it lists or in one of its conjuncts, or when it implies
+/// each conjunct, one arm or the equality with one value `condition` lists.
+/// A list is written `x IN (v, ...)` or `x = ANY (ARRAY[v, ...])`.
 ///
 /// # Errors
 ///
@@ -248,26 +249,12 @@ pub(crate) fn clause_implies<C: Columns>(
     {
         return Ok(true);
     }
-    if let Expr::In {
-        expr,
-        target: InTarget::List(list),
-        negated: false,
-        ..
-    } = clause
-    {
-        let arms: Vec<Expr> = list
-            .iter()
-            .map(|value| Expr::BinaryOp {
-                left: expr.clone(),
-                op: BinaryOperator::Eq,
-                right: Box::new(value.clone()),
-            })
-            .collect();
-        if every(&arms, |arm| {
+    if let Some((operand, values)) = listed(clause)
+        && every(&equalities(operand, values), |arm| {
             clause_implies(columns, arm, condition, context)
-        })? {
-            return Ok(true);
-        }
+        })?
+    {
+        return Ok(true);
     }
     if !condition.parts.is_empty()
         && every(&condition.parts, |part| {
@@ -297,7 +284,51 @@ pub(crate) fn clause_implies<C: Columns>(
             return Ok(true);
         }
     }
+    if let Some((operand, values)) = listed(condition.original) {
+        for equality in equalities(operand, values) {
+            let arm = Condition::new(columns, &equality);
+            if clause_implies(columns, clause, &arm, context)? {
+                return Ok(true);
+            }
+        }
+    }
     Ok(false)
+}
+
+/// The operand `expression` tests and the values it lists, when it is
+/// `x IN (v, ...)` or `x = ANY (ARRAY[v, ...])`, either of which holds,
+/// fails or is `NULL` where the `OR` of `x = v` over the values does.
+fn listed(expression: &Expr) -> Option<(&Expr, &[Expr])> {
+    match expression {
+        Expr::In {
+            expr,
+            target: InTarget::List(values),
+            negated: false,
+            ..
+        } => Some((expr, values)),
+        Expr::AnyOp {
+            left,
+            compare_op: BinaryOperator::Eq,
+            right,
+            ..
+        } => match unnested(right) {
+            Expr::Array(array) => Some((left, &array.elem)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `operand = value` for each of `values`.
+fn equalities(operand: &Expr, values: &[Expr]) -> Vec<Expr> {
+    values
+        .iter()
+        .map(|value| Expr::BinaryOp {
+            left: Box::new(operand.clone()),
+            op: BinaryOperator::Eq,
+            right: Box::new(value.clone()),
+        })
+        .collect()
 }
 
 /// The name and the `missing_ok` argument, when passed, of a call of

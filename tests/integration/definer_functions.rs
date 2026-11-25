@@ -4801,3 +4801,76 @@ fn an_auth_helper_without_its_own_search_path_confines_a_filter() {
         assert_eq!(reported(tested), Vec::<String>::new(), "{tested}");
     }
 }
+
+/// The definers the rule reports where a policy keeps the `resources` rows
+/// meeting `policy` and definer `probe_<n>()` returns those meeting the
+/// `n`-th of `filters`.
+fn listed_exposed(policy: &str, filters: &[&str]) -> Vec<String> {
+    let definers = filters
+        .iter()
+        .enumerate()
+        .map(|(index, filter)| {
+            format!(
+                "CREATE FUNCTION probe_{index}() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id FROM public.resources resource WHERE {filter} $$;"
+            )
+        })
+        .collect::<Vec<_>>()
+        .concat();
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE TABLE memberships (user_id TEXT, organization_id INT, role TEXT);
+             CREATE TABLE resources (id INT, organization_id INT, kind TEXT);
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON memberships, resources TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE POLICY listed ON resources FOR SELECT TO app USING ({policy});
+             {definers}"
+        ),
+    )
+}
+
+#[test]
+fn a_value_within_a_policys_list_confines_a_filter() {
+    for policy in ["kind IN ('a', 'b')", "kind = ANY (ARRAY['a', 'b'])"] {
+        assert_eq!(
+            listed_exposed(
+                policy,
+                &[
+                    "resource.kind = 'a'",
+                    "'b' = resource.kind",
+                    "resource.kind IN ('b', 'a')",
+                    "resource.kind IN ('a', 'c')",
+                    "resource.kind = 'c'",
+                ],
+            ),
+            ["probe_3()", "probe_4()"],
+            "{policy}"
+        );
+    }
+    let member = |row: &str, role: &str| {
+        format!(
+            "EXISTS (SELECT 1 FROM public.memberships m
+               WHERE m.organization_id = {row}.organization_id
+                 AND m.user_id = current_setting('app.user_id', true) AND m.role {role})"
+        )
+    };
+    for listed in ["IN ('admin', 'owner')", "= ANY (ARRAY['admin', 'owner'])"] {
+        assert_eq!(
+            listed_exposed(
+                &member("resources", listed),
+                &[
+                    &member("resource", "= 'admin'"),
+                    &member("resource", "IN ('owner')"),
+                    &member("resource", "IN ('admin', 'guest')"),
+                ],
+            ),
+            ["probe_2()"],
+            "{listed}"
+        );
+    }
+}
