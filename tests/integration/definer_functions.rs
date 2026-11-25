@@ -2159,6 +2159,65 @@ fn a_plpgsql_definer_checking_found_after_reads_the_caller_may_not_run_is_report
     );
 }
 
+#[test]
+fn a_plpgsql_definer_returning_next_each_row_it_reads_alike_is_not_reported() {
+    let definers = [
+        block_definer(
+            "listed_next()",
+            "SETOF INT",
+            "found_row RECORD;",
+            "FOR found_row IN SELECT resource.id FROM public.resources resource
+               WHERE resource.owner = uid ORDER BY resource.id
+             LOOP RETURN NEXT found_row.id; END LOOP;",
+        ),
+        block_definer(
+            "rows_next()",
+            "SETOF INT",
+            "found_row RECORD;",
+            "FOR found_row IN SELECT resource.id FROM public.resources resource
+               WHERE resource.owner = uid
+             LOOP RETURN NEXT found_row; END LOOP;
+             RETURN QUERY SELECT resource.id FROM public.resources resource
+               WHERE resource.hidden AND resource.owner = uid;
+             RETURN;",
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT", OWN_ROWS, &definers),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_plpgsql_definer_returning_next_rows_the_caller_may_not_read_is_reported() {
+    let definers = [
+        block_definer(
+            "listed_any_next()",
+            "SETOF INT",
+            "found_row RECORD;",
+            "FOR found_row IN SELECT resource.id FROM public.resources resource
+             LOOP RETURN NEXT found_row.id; END LOOP;",
+        ),
+        block_definer(
+            "listed_and_hidden_next()",
+            "SETOF INT",
+            "found_row RECORD;",
+            "FOR found_row IN SELECT resource.id FROM public.resources resource
+               WHERE resource.owner = uid
+             LOOP
+               UPDATE public.resources resource SET hidden = true WHERE resource.id = found_row.id;
+               RETURN NEXT found_row.id;
+             END LOOP;",
+        ),
+    ]
+    .concat();
+    assert_eq!(
+        written_exposed("SELECT, UPDATE", OWN_ROWS, &definers),
+        ["listed_and_hidden_next()", "listed_any_next()"]
+    );
+}
+
 /// The caller's own `resources` rows hidden, by `id = p_id`.
 const HIDE_OWN_BY_ID: &str = "UPDATE public.resources resource SET hidden = true
     WHERE resource.id = p_id AND resource.owner = current_setting('app.user_id', true)";

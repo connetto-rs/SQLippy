@@ -99,8 +99,10 @@ use super::plpgsql_ambiguous_name::collision;
 ///
 /// A function is not reported when every caller already reads what it
 /// returns. Its body is then one `LANGUAGE sql` query, or a PL/pgSQL block
-/// that only returns queries, through `RETURN QUERY`, a `RETURN` of a scalar
-/// subquery or a `SELECT ... INTO` of the variable it returns, maybe past
+/// that only returns queries, through `RETURN QUERY`, a `FOR` loop over a
+/// query whose one statement `RETURN NEXT`s a value of its record, read as
+/// the `RETURN QUERY` of that value over the query's rows, a `RETURN` of a
+/// scalar subquery or a `SELECT ... INTO` of the variable it returns, maybe past
 /// guards `IF condition THEN RAISE EXCEPTION ...` or `IF condition THEN
 /// RETURN`, and names no column a variable also answers to. Every other
 /// variable it declares holds the default it is declared with or the value
