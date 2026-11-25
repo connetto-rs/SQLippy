@@ -882,21 +882,21 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 let (
                     false,
                     None,
-                    SetExpr::Delete(write) | SetExpr::Update(write) | SetExpr::Insert(write),
+                    SetExpr::Delete(write @ Statement::Delete(Delete { returning, .. }))
+                    | SetExpr::Update(write @ Statement::Update(Update { returning, .. }))
+                    | SetExpr::Insert(write @ Statement::Insert(Insert { returning, .. })),
                 ) = (recursive, &item.query.with, item.query.body.as_ref())
                 else {
                     return Ok(None);
                 };
-                let Some(names) = returned_names(write) else {
+                let Some(names) = returned_names(returning.as_deref().unwrap_or_default()) else {
                     return Ok(None);
                 };
                 let Some((Statement::Query(mut rows), ..)) = self.queried(write.clone(), path)?
                 else {
                     return Ok(None);
                 };
-                if returned_only(&mut rows.body, &names).is_none() {
-                    return Ok(None);
-                }
+                returned_only(&mut rows.body, &names);
                 ran.push(write.clone());
                 item.query = rows;
             }
@@ -3994,19 +3994,10 @@ fn locks_relation(lock: &LockClause, relation: &TableFactor) -> bool {
     })
 }
 
-/// The name PostgreSQL gives each column the `RETURNING` of `write` returns,
-/// when it is an alias or a column, or `None` when it returns a wildcard or
-/// is no `DELETE`, `UPDATE` or `INSERT`.
-fn returned_names(write: &Statement) -> Option<Vec<Option<Ident>>> {
-    let (Statement::Delete(Delete { returning, .. })
-    | Statement::Update(Update { returning, .. })
-    | Statement::Insert(Insert { returning, .. })) = write
-    else {
-        return None;
-    };
+/// The names of returned aliases and columns, or `None` for a wildcard.
+fn returned_names(returning: &[SelectItem]) -> Option<Vec<Option<Ident>>> {
     returning
         .iter()
-        .flatten()
         .map(|item| match item {
             SelectItem::ExprWithAlias { alias, .. } => Some(Some(alias.clone())),
             SelectItem::UnnamedExpr(Expr::Identifier(column)) => Some(Some(column.clone())),
@@ -4017,37 +4008,29 @@ fn returned_names(write: &Statement) -> Option<Vec<Option<Ident>>> {
         .collect()
 }
 
-/// Keeps of each `SELECT` of `body`, which projects what a write writes and
-/// then what its `RETURNING` returns, the last of its columns, one for each
-/// of `names`, each named as its `RETURNING` names it. `None` when a
-/// `SELECT` projects fewer or `body` holds another set expression.
-fn returned_only(body: &mut SetExpr, names: &[Option<Ident>]) -> Option<()> {
-    match body {
-        SetExpr::Select(select) => {
-            let written = select.projection.len().checked_sub(names.len())?;
-            let returned = select.projection.split_off(written);
-            select.projection = returned
-                .into_iter()
-                .zip(names)
-                .map(|(item, name)| match (item, name) {
-                    (
-                        SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. },
-                        Some(alias),
-                    ) => SelectItem::ExprWithAlias {
-                        expr,
-                        alias: alias.clone(),
-                    },
-                    (item, _) => item,
-                })
-                .collect();
-            Some(())
-        }
-        SetExpr::SetOperation { left, right, .. } => {
-            returned_only(left, names)?;
-            returned_only(right, names)
-        }
-        SetExpr::Query(query) => returned_only(&mut query.body, names),
-        _ => None,
+/// Keeps the generated write query's returned columns and their names.
+fn returned_only(body: &mut SetExpr, names: &[Option<Ident>]) {
+    if let SetExpr::SetOperation { left, right, .. } = body {
+        returned_only(left, names);
+        returned_only(right, names);
+    }
+    if let SetExpr::Select(select) = body {
+        let written = select.projection.len() - names.len();
+        let returned = select.projection.split_off(written);
+        select.projection = returned
+            .into_iter()
+            .zip(names)
+            .map(|(item, name)| match (item, name) {
+                (
+                    SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. },
+                    Some(alias),
+                ) => SelectItem::ExprWithAlias {
+                    expr,
+                    alias: alias.clone(),
+                },
+                (item, _) => item,
+            })
+            .collect();
     }
 }
 

@@ -2246,7 +2246,8 @@ fn a_definer_querying_what_a_write_in_with_returns_alike_is_not_reported() {
             "SETOF INT",
             "WITH created AS (
                INSERT INTO public.resources AS resource (id, owner, hidden)
-               VALUES (p_id, current_setting('app.user_id'), false)
+               VALUES (p_id, current_setting('app.user_id'), false),
+                      (p_id + 1, current_setting('app.user_id'), true)
                RETURNING resource.id)
              SELECT created.id FROM created",
         ),
@@ -2255,6 +2256,19 @@ fn a_definer_querying_what_a_write_in_with_returns_alike_is_not_reported() {
             "SETOF INT",
             "",
             &format!("RETURN QUERY WITH hid AS ({HIDE_OWN_RETURNING}) SELECT hid.id FROM hid;"),
+        ),
+        returning_definer(
+            "purge_alias()",
+            "SETOF INT",
+            &format!(
+                "WITH purged AS ({DELETE_OWN} RETURNING resource.id AS identifier)
+                 SELECT purged.identifier FROM purged"
+            ),
+        ),
+        returning_definer(
+            "purge_constant()",
+            "BIGINT",
+            &format!("WITH purged AS ({DELETE_OWN} RETURNING 1) SELECT count(*) FROM purged"),
         ),
     ]
     .concat();
@@ -2296,15 +2310,31 @@ fn a_definer_whose_write_in_with_or_query_the_caller_may_not_run_alike_is_report
                VALUES (1, current_setting('app.user_id', true)) RETURNING id)
              SELECT count(*) FROM created",
         ),
+        returning_definer(
+            "recursive_write()",
+            "BIGINT",
+            &format!("WITH RECURSIVE hid AS ({HIDE_OWN_RETURNING}) SELECT count(*) FROM hid"),
+        ),
+        returning_definer(
+            "conflicting_write()",
+            "BIGINT",
+            "WITH created AS (
+               INSERT INTO public.resources (id, owner)
+               VALUES (1, current_setting('app.user_id', true))
+               ON CONFLICT DO NOTHING RETURNING id)
+             SELECT count(*) FROM created",
+        ),
     ]
     .concat();
     assert_eq!(
         written_exposed("SELECT, INSERT, UPDATE, DELETE", OWN_ROWS, &definers),
         [
+            "conflicting_write()",
             "create_unsigned_counted()",
             "hide_all_returned()",
             "hide_and_count_all()",
-            "hide_any_counted()"
+            "hide_any_counted()",
+            "recursive_write()"
         ]
     );
 }
