@@ -3351,12 +3351,11 @@ fn deleted_rows(delete: Delete) -> Option<Query> {
     let mut query = Parser::new(&PostgreSqlDialect {})
         .try_with_sql("SELECT NULL")
         .and_then(|mut parser| parser.parse_query())
-        .ok()?;
-    let SetExpr::Select(select) = query.body.as_mut() else {
-        return None;
-    };
-    select.from = from;
-    select.selection = selection;
+        .expect("SELECT NULL parses");
+    if let SetExpr::Select(select) = query.body.as_mut() {
+        select.from = from;
+        select.selection = selection;
+    }
     Some(*query)
 }
 

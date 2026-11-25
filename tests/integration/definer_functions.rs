@@ -729,6 +729,15 @@ fn a_definer_deleting_rows_the_caller_may_not_delete_is_reported() {
             OWN_ROWS,
             &[
                 writing_definer(
+                    "purge_joined()",
+                    "DELETE FROM public.resources resource JOIN public.resources other ON other.id = resource.id
+                     WHERE resource.owner = current_setting('app.user_id', true)",
+                ),
+                writing_definer(
+                    "purge_sequence()",
+                    &format!("{DELETE_OWN}; SELECT 1"),
+                ),
+                writing_definer(
                     "purge_any()",
                     "DELETE FROM public.resources resource WHERE resource.hidden",
                 ),
@@ -755,7 +764,9 @@ fn a_definer_deleting_rows_the_caller_may_not_delete_is_reported() {
             "hide()",
             "purge_any()",
             "purge_beside()",
-            "purge_returning()"
+            "purge_joined()",
+            "purge_returning()",
+            "purge_sequence()"
         ]
     );
 }
