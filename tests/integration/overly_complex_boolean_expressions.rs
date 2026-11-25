@@ -7,11 +7,11 @@ use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
 /// The object, the written expression and the minimal form of every finding
-/// of `overly_complex_boolean_expression` on `sql`.
+/// of `overly_complex_boolean_expression` on `sql`, sorted.
 fn reported(sql: &str) -> Vec<(String, String, String)> {
     let constrainer: GenericConstrainer<ParserDB> =
         OverlyComplexBooleanExpression::default().into();
-    findings(&constrainer, "overly_complex_boolean_expression", sql)
+    let mut found: Vec<_> = findings(&constrainer, "overly_complex_boolean_expression", sql)
         .into_iter()
         .map(|(_, object, message)| {
             let quoted: Vec<&str> = message.split('`').skip(1).step_by(2).collect();
@@ -20,7 +20,9 @@ fn reported(sql: &str) -> Vec<(String, String, String)> {
             };
             (object, (*written).to_owned(), (*form).to_owned())
         })
-        .collect()
+        .collect();
+    found.sort();
+    found
 }
 
 /// A finding on `object` of `written`, which `form` decides alike.
@@ -79,8 +81,8 @@ fn a_filter_drops_a_term_only_when_the_term_is_never_null() {
     assert_eq!(
         reported(&schema("NOT NULL")),
         [
-            finding("t.p", "(a AND b) OR (a AND NOT b)", "a"),
             finding("t.i", "(a AND b) OR (a AND NOT b)", "a"),
+            finding("t.p", "(a AND b) OR (a AND NOT b)", "a"),
         ]
     );
 }
@@ -132,8 +134,8 @@ fn view_filters_and_values_are_reported() {
              CREATE VIEW v AS SELECT (a AND b) OR (a AND NOT b) AS c FROM t WHERE (b AND a) OR (NOT b AND a);"
         ),
         [
-            finding("v", "(b AND a) OR (NOT b AND a)", "a"),
             finding("v", "(a AND b) OR (a AND NOT b)", "a"),
+            finding("v", "(b AND a) OR (NOT b AND a)", "a"),
         ]
     );
 }
@@ -217,6 +219,112 @@ fn a_plpgsql_assigned_value_is_reported() {
             "(flag AND x > 0) OR (flag AND NOT x > 0)".to_owned(),
             "flag".to_owned()
         )]
+    );
+}
+
+#[test]
+fn a_plpgsql_declared_default_and_embedded_statement_are_reported() {
+    let value = "(flag IS TRUE AND x IS NOT NULL) OR (flag IS TRUE AND NOT x IS NOT NULL)";
+    assert_eq!(
+        reported(&format!(
+            "CREATE TABLE t (a BOOLEAN NOT NULL, b BOOLEAN NOT NULL);
+             CREATE FUNCTION pick(flag BOOLEAN, x INT) RETURNS INT LANGUAGE plpgsql AS $$
+             DECLARE r BOOLEAN := {value};
+             BEGIN DELETE FROM t WHERE (a AND b) OR (a AND NOT b); RETURN 0; END $$;"
+        )),
+        [
+            finding("pick(BOOLEAN, INT)", "(a AND b) OR (a AND NOT b)", "a"),
+            finding("pick(BOOLEAN, INT)", value, "flag IS TRUE"),
+        ]
+    );
+}
+
+#[test]
+fn a_plpgsql_query_value_reads_variables_where_it_runs() {
+    let schema = |first: &str| {
+        format!(
+            "CREATE TABLE t (a BOOLEAN);
+             CREATE FUNCTION pick(flag BOOLEAN, x INT) RETURNS INT LANGUAGE plpgsql AS $$
+             BEGIN {first} INSERT INTO t SELECT (flag AND x > 0) OR (flag AND NOT x > 0); RETURN 0; END $$;"
+        )
+    };
+    assert_eq!(reported(&schema("")), []);
+    assert_eq!(
+        reported(&schema("x := coalesce(x, 0);")),
+        [finding(
+            "pick(BOOLEAN, INT)",
+            "(flag AND x > 0) OR (flag AND NOT x > 0)",
+            "flag"
+        )]
+    );
+}
+
+#[test]
+fn a_plpgsql_condition_the_body_never_reaches_is_not_reported() {
+    assert_eq!(
+        body_findings(
+            "BEGIN RETURN 0; IF (flag IS TRUE AND x IS NOT NULL) OR (flag IS TRUE AND NOT x IS NOT NULL) THEN RETURN 1; END IF; END"
+        ),
+        []
+    );
+}
+
+#[test]
+fn sql_function_bodies_are_reported_when_their_value_agrees_on_null() {
+    let value = "(a IS TRUE AND b IS TRUE) OR (a IS TRUE AND NOT b IS TRUE)";
+    assert_eq!(
+        reported(&format!(
+            "CREATE TABLE t (a BOOLEAN NOT NULL, b BOOLEAN NOT NULL);
+             CREATE FUNCTION f(a BOOLEAN, b BOOLEAN) RETURNS BOOLEAN LANGUAGE sql RETURN {value};
+             CREATE FUNCTION g() RETURNS SETOF INT LANGUAGE sql AS $$ SELECT 1 FROM t WHERE (a AND b) OR (a AND NOT b) $$;
+             CREATE FUNCTION h(a BOOLEAN, b BOOLEAN) RETURNS BOOLEAN LANGUAGE sql RETURN (a AND b) OR (a AND NOT b);"
+        )),
+        [
+            finding("f(BOOLEAN, BOOLEAN)", value, "a IS TRUE"),
+            finding("g()", "(a AND b) OR (a AND NOT b)", "a"),
+        ]
+    );
+}
+
+#[test]
+fn join_conditions_and_materialized_views_are_reported() {
+    let condition = "(t.a AND u.b) OR (t.a AND NOT u.b)";
+    assert_eq!(
+        reported(&format!(
+            "CREATE TABLE t (id INT, a BOOLEAN NOT NULL);
+             CREATE TABLE u (id INT, b BOOLEAN NOT NULL);
+             CREATE MATERIALIZED VIEW m AS SELECT 1 FROM t JOIN u ON {condition};
+             CREATE VIEW v AS SELECT 1 FROM (t JOIN u ON {condition});"
+        )),
+        [
+            finding("m", condition, "t.a"),
+            finding("v", condition, "t.a"),
+        ]
+    );
+}
+
+#[test]
+fn a_filter_redundant_term_reports_is_left_to_it() {
+    assert_eq!(
+        reported(
+            "CREATE TABLE t (a BOOLEAN NOT NULL, b BOOLEAN NOT NULL);
+             CREATE POLICY p ON t USING (a OR (a AND b));
+             CREATE INDEX i ON t (a) WHERE a OR (a AND b);
+             CREATE VIEW v AS SELECT 1 FROM t WHERE a OR (a AND b);"
+        ),
+        []
+    );
+}
+
+#[test]
+fn a_domain_check_is_read_under_the_domain_s_other_checks() {
+    let check = "(VALUE > 5 AND VALUE % 2 = 0) OR (VALUE > 5 AND NOT VALUE % 2 = 0)";
+    assert_eq!(
+        reported(&format!(
+            "CREATE DOMAIN d AS INT CHECK (VALUE > 0) CHECK ({check});
+             CREATE DOMAIN e AS INT CHECK (VALUE > 0) CHECK (VALUE > 5 OR (VALUE > 5 AND VALUE < 9));"
+        )),
+        [finding("d", check, "VALUE > 5")]
     );
 }
 
