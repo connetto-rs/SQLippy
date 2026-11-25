@@ -93,8 +93,9 @@ use super::plpgsql_ambiguous_name::collision;
 /// returns. Its body is then one `LANGUAGE sql` query, or a PL/pgSQL block
 /// that only returns queries, through `RETURN QUERY`, a `RETURN` of a scalar
 /// subquery or a `SELECT ... INTO` of the variable it returns, and names no
-/// column a variable also answers to. That query writes nothing and the
-/// function sets no parameter besides `search_path`, and every read of a
+/// column a variable also answers to. That query writes nothing, the
+/// function sets no parameter besides `search_path` and neither it nor a
+/// function it calls runs `set_config`, and every read of a
 /// table with row-level security in it is filtered, by its `WHERE` and the
 /// `ON` of the joins that drop its rows, to rows each caller's own `SELECT`
 /// policies on that table admit, while each caller may select every column
@@ -134,7 +135,8 @@ use super::plpgsql_ambiguous_name::collision;
 /// alias renaming its columns confines nothing.
 /// Every function of the schema the body calls is held to the same test,
 /// except a `SECURITY DEFINER` function every caller may execute directly,
-/// which this rule judges on its own. Functions in `pg_catalog` are trusted.
+/// which this rule judges on its own. Functions in `pg_catalog` besides
+/// `set_config` are trusted.
 /// A `SECURITY DEFINER` function the callers may not execute counts too
 /// when neither it nor a function it reaches is `VOLATILE`, so none writes,
 /// and the function the callers execute is one whose every value is the
@@ -429,8 +431,10 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         confined
     }
 
-    /// Whether the functions `function` calls confine their reads, and its
-    /// own body reads no table with row-level security or confines each read.
+    /// Whether the functions `function` calls confine their reads, call no
+    /// `set_config`, whose setting a filter may then read in place of the
+    /// caller's, and its own body reads no table with row-level security or
+    /// confines each read.
     fn confines_body(&mut self, function: &'a DB::Function) -> Result<bool, LookupError> {
         let (tables, callees) = match function
             .referenced_tables(self.database)
@@ -441,11 +445,14 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             Err(error) => return Err(error),
         };
         for callee in callees {
-            if callee.target_name().schema() != Some("pg_catalog")
-                && !self.runs_for_every_caller(callee)?
-                && !self.confines(callee)?
-                && !self.releases_through_policy_sets(callee)?
-            {
+            let confined = if callee.target_name().schema() == Some("pg_catalog") {
+                callee.target_name().name() != "set_config"
+            } else {
+                self.runs_for_every_caller(callee)?
+                    || self.confines(callee)?
+                    || self.releases_through_policy_sets(callee)?
+            };
+            if !confined {
                 return Ok(false);
             }
         }
