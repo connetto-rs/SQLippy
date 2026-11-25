@@ -265,6 +265,7 @@ rule_icons! {
     "plpgsql_ambiguous_name" => FaCircleQuestion,
     "decided_branch" => FaCodeMerge,
     "case_without_match" => FaCircleXmark,
+    "failing_assert" => FaBan,
 }
 #[cfg(test)]
 mod tests {
