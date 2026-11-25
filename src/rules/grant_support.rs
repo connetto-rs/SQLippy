@@ -231,19 +231,29 @@ pub(crate) fn is_subscribed<DB: DatabaseLike>(
     )
 }
 
-/// The column of `table` the deployment declares as its tenant key.
-pub(crate) fn tenant_column<'db, DB: DatabaseLike>(
+/// The columns of `table` the deployment declares as its tenant key, in the
+/// declared order, or `None` when the table has no declared tenant key or
+/// lacks one of its columns.
+pub(crate) fn tenant_columns<'db, DB: DatabaseLike>(
     database: &'db DB,
     deployment: &Deployment,
     table: &'db DB::Table,
-) -> Result<Option<&'db DB::Column>, LookupError> {
+) -> Result<Option<Vec<&'db DB::Column>>, LookupError> {
     let schema = schema_of(database, table.stored_table_schema());
     let Some(key) = deployment.tenant_key(&schema, &table.stored_table_name()) else {
         return Ok(None);
     };
-    Ok(table
-        .columns(database)?
-        .find(|column| column.stored_column_name() == key))
+    let mut columns = Vec::with_capacity(key.len());
+    for name in key {
+        let Some(column) = table
+            .columns(database)?
+            .find(|column| column.stored_column_name() == name.as_str())
+        else {
+            return Ok(None);
+        };
+        columns.push(column);
+    }
+    Ok(Some(columns))
 }
 
 /// Whether the deployment selects `table` for binary replication, by its own

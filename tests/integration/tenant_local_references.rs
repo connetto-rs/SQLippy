@@ -10,15 +10,15 @@ const PROJECTS: &str = "CREATE TABLE projects (id INT PRIMARY KEY, organization_
 
 fn deployment() -> Deployment {
     Deployment::default()
-        .with_tenant_key("public", "organizations", "id")
-        .with_tenant_key("public", "projects", "organization_id")
-        .with_tenant_key("public", "documents", "organization_id")
-        .with_tenant_key("public", "apps", "organization_id")
-        .with_tenant_key("public", "app_installations", "organization_id")
-        .with_tenant_key("public", "resources", "organization_id")
-        .with_tenant_key("public", "parents", "organization_id")
-        .with_tenant_key("public", "children", "organization_id")
-        .with_tenant_key("billing", "Invoices", "Org")
+        .with_tenant_key("public", "organizations", ["id"])
+        .with_tenant_key("public", "projects", ["organization_id"])
+        .with_tenant_key("public", "documents", ["organization_id"])
+        .with_tenant_key("public", "apps", ["organization_id"])
+        .with_tenant_key("public", "app_installations", ["organization_id"])
+        .with_tenant_key("public", "resources", ["organization_id"])
+        .with_tenant_key("public", "parents", ["organization_id"])
+        .with_tenant_key("public", "children", ["organization_id"])
+        .with_tenant_key("billing", "Invoices", ["Org"])
 }
 
 fn constrainer() -> GenericConstrainer<ParserDB> {
@@ -336,5 +336,148 @@ fn the_rule_is_inactive_without_tenant_keys() {
     assert_eq!(
         inactive_declarations(&constrainer),
         [("tenant_local_reference", Declaration::TenantKeys)]
+    );
+}
+
+const NAMESPACE: [&str; 2] = ["organization_namespace_id", "organization_id"];
+
+/// A constrainer whose organizations are told apart by their namespace and
+/// local identifier together, while `labels` keeps a single-column tenant key.
+fn namespaced() -> GenericConstrainer<ParserDB> {
+    let mut constrainer: GenericConstrainer<ParserDB> = TenantLocalReference::default().into();
+    constrainer.set_deployment(
+        Deployment::default()
+            .with_tenant_key("public", "organizations", ["namespace_id", "id"])
+            .with_tenant_key("public", "projects", NAMESPACE)
+            .with_tenant_key("public", "documents", NAMESPACE)
+            .with_tenant_key("public", "resources", NAMESPACE)
+            .with_tenant_key("public", "parents", NAMESPACE)
+            .with_tenant_key("public", "children", NAMESPACE)
+            .with_tenant_key("public", "labels", ["organization_id"]),
+    );
+    constrainer
+}
+
+const NAMESPACED_PROJECTS: &str = "CREATE TABLE organizations (namespace_id INT NOT NULL,
+      id INT NOT NULL, PRIMARY KEY (namespace_id, id));
+    CREATE TABLE projects (id INT PRIMARY KEY, organization_namespace_id INT NOT NULL,
+      organization_id INT NOT NULL, UNIQUE (organization_id, id),
+      UNIQUE (organization_namespace_id, id),
+      UNIQUE (organization_namespace_id, organization_id, id));";
+
+/// A `documents` table with both tenant key columns and a `project_id`,
+/// constrained by `key`.
+fn namespaced_documents(key: &str) -> String {
+    format!(
+        "{NAMESPACED_PROJECTS} CREATE TABLE documents (id INT PRIMARY KEY,
+           organization_namespace_id INT NOT NULL, organization_id INT NOT NULL,
+           project_id INT NOT NULL, FOREIGN KEY {key});"
+    )
+}
+
+#[test]
+fn a_key_omitting_a_column_of_a_composite_tenant_key_is_reported() {
+    for key in [
+        "(organization_id, project_id) REFERENCES projects (organization_id, id)",
+        "(organization_namespace_id, project_id) REFERENCES projects (organization_namespace_id, id)",
+        "(organization_namespace_id, organization_id, project_id)
+           REFERENCES projects (organization_id, organization_namespace_id, id)",
+        "(organization_id, organization_namespace_id) REFERENCES organizations (namespace_id, id)",
+    ] {
+        assert_eq!(
+            reported(&namespaced(), &namespaced_documents(key)).len(),
+            1,
+            "{key}"
+        );
+    }
+    let [(_, resolution)] = reported(
+        &namespaced(),
+        &namespaced_documents(
+            "(organization_id, project_id) REFERENCES projects (organization_id, id)",
+        ),
+    )
+    .try_into()
+    .expect("one finding");
+    assert!(
+        resolution.starts_with(
+            "Make the key reference projects (organization_namespace_id, organization_id, id) \
+             from (organization_namespace_id, organization_id, project_id) of 'documents'"
+        ),
+        "{resolution}"
+    );
+}
+
+#[test]
+fn a_key_pairing_every_column_of_a_composite_tenant_key_is_clean() {
+    for key in [
+        "(organization_namespace_id, organization_id, project_id)
+           REFERENCES projects (organization_namespace_id, organization_id, id)",
+        "(project_id, organization_id, organization_namespace_id)
+           REFERENCES projects (id, organization_id, organization_namespace_id)",
+        "(organization_namespace_id, organization_id) REFERENCES organizations (namespace_id, id)",
+    ] {
+        assert_eq!(
+            reported(&namespaced(), &namespaced_documents(key)),
+            Vec::<(String, String)>::new(),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn tenant_keys_of_different_lengths_are_never_paired() {
+    let [(_, resolution)] = reported(
+        &namespaced(),
+        &format!(
+            "{NAMESPACED_PROJECTS} CREATE TABLE labels (id INT PRIMARY KEY,
+               organization_id INT NOT NULL, project_id INT NOT NULL,
+               FOREIGN KEY (organization_id, project_id) REFERENCES projects (organization_id, id));"
+        ),
+    )
+    .try_into()
+    .expect("one finding");
+    assert!(
+        resolution.starts_with(
+            "Declare the tenant keys of 'labels' and 'projects' with corresponding columns"
+        ),
+        "{resolution}"
+    );
+}
+
+#[test]
+fn a_shared_root_pins_rows_to_one_tenant_only_through_every_tenant_key_column() {
+    let root = "CREATE TABLE resources (id INT PRIMARY KEY, organization_namespace_id INT NOT NULL,
+          organization_id INT NOT NULL,
+          UNIQUE (organization_namespace_id, organization_id, id), UNIQUE (organization_id, id));
+        CREATE TABLE parents (id INT PRIMARY KEY, organization_namespace_id INT NOT NULL,
+          organization_id INT NOT NULL,
+          FOREIGN KEY (organization_namespace_id, organization_id, id)
+            REFERENCES resources (organization_namespace_id, organization_id, id));";
+    let children = |key: &str| {
+        format!(
+            "{root} CREATE TABLE children (id INT PRIMARY KEY REFERENCES parents (id),
+               organization_namespace_id INT NOT NULL, organization_id INT NOT NULL,
+               FOREIGN KEY {key});"
+        )
+    };
+    assert_eq!(
+        reported(
+            &namespaced(),
+            &children(
+                "(organization_namespace_id, organization_id, id)
+                   REFERENCES resources (organization_namespace_id, organization_id, id)"
+            )
+        ),
+        Vec::<(String, String)>::new()
+    );
+    let crossed = reported(
+        &namespaced(),
+        &children("(organization_id, id) REFERENCES resources (organization_id, id)"),
+    );
+    assert!(
+        crossed
+            .iter()
+            .any(|(object, _)| object == "children.children_id_fkey"),
+        "{crossed:?}"
     );
 }

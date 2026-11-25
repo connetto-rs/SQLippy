@@ -31,7 +31,7 @@ struct TenantRelation<'query, 'database, DB: DatabaseLike> {
     table: &'database DB::Table,
     alias: Option<&'query TableAlias>,
     name: &'query sqlparser::ast::ObjectName,
-    tenant: &'database str,
+    tenant: &'database [String],
     from: &'query TableWithJoins,
     position: usize,
 }
@@ -151,22 +151,7 @@ impl<'database, DB: DatabaseLike> TenantJoins<'database, '_, DB> {
                 continue;
             }
             for (other_position, other) in relations.iter().enumerate() {
-                if position == other_position {
-                    continue;
-                }
-                let mut equal = self.implicit_equality(relation, other)?;
-                for &(left, right) in &pairs {
-                    for (first, second) in [(left, right), (right, left)] {
-                        if column(self.database, relation, first)?
-                            .is_some_and(|column| column.stored_column_name() == relation.tenant)
-                            && column(self.database, other, second)?
-                                .is_some_and(|column| column.stored_column_name() == other.tenant)
-                        {
-                            equal = true;
-                        }
-                    }
-                }
-                if !equal {
+                if position != other_position && !self.tenants_equal(&pairs, relation, other)? {
                     return Ok(Some([relation.table, other.table]));
                 }
             }
@@ -174,16 +159,61 @@ impl<'database, DB: DatabaseLike> TenantJoins<'database, '_, DB> {
         Ok(None)
     }
 
-    /// Whether a `USING` or `NATURAL` join equates the declared tenant columns.
-    fn implicit_equality(
+    /// Whether the select equates every column of the tenant key of `first`
+    /// with the column in the same position of the tenant key of `second`,
+    /// through a `USING` or `NATURAL` join or one of the equality `pairs`.
+    fn tenants_equal(
         &self,
+        pairs: &[(&Expr, &Expr)],
         first: &TenantRelation<'_, '_, DB>,
         second: &TenantRelation<'_, '_, DB>,
     ) -> Result<bool, LookupError> {
-        if !std::ptr::eq(first.from, second.from) {
+        if first.tenant.len() != second.tenant.len() {
             return Ok(false);
         }
-        let (left, right) = if first.position < second.position {
+        for (first_key, second_key) in first.tenant.iter().zip(second.tenant) {
+            if !self.implicit_equality((first, first_key), (second, second_key))?
+                && !self.explicit_equality(pairs, (first, first_key), (second, second_key))?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether one of the equality `pairs` equates column `first_key` of the
+    /// first relation with column `second_key` of the second.
+    fn explicit_equality(
+        &self,
+        pairs: &[(&Expr, &Expr)],
+        (first, first_key): (&TenantRelation<'_, '_, DB>, &str),
+        (second, second_key): (&TenantRelation<'_, '_, DB>, &str),
+    ) -> Result<bool, LookupError> {
+        for &(left, right) in pairs {
+            for (first_side, second_side) in [(left, right), (right, left)] {
+                if column(self.database, first, first_side)?
+                    .is_some_and(|column| column.stored_column_name() == first_key)
+                    && column(self.database, second, second_side)?
+                        .is_some_and(|column| column.stored_column_name() == second_key)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether a `USING` or `NATURAL` join equates column `first_key` of the
+    /// first relation with column `second_key` of the second.
+    fn implicit_equality(
+        &self,
+        first: (&TenantRelation<'_, '_, DB>, &str),
+        second: (&TenantRelation<'_, '_, DB>, &str),
+    ) -> Result<bool, LookupError> {
+        if !std::ptr::eq(first.0.from, second.0.from) {
+            return Ok(false);
+        }
+        let ((left, left_key), (right, right_key)) = if first.0.position < second.0.position {
             (first, second)
         } else {
             (second, first)
@@ -191,9 +221,9 @@ impl<'database, DB: DatabaseLike> TenantJoins<'database, '_, DB> {
         let join = &right.from.joins[right.position - 1];
         let tenant_matches = |name: &Ident| -> Result<bool, LookupError> {
             Ok(stored_column(self.database, left.table, left.alias, name)?
-                .is_some_and(|column| column.stored_column_name() == left.tenant)
+                .is_some_and(|column| column.stored_column_name() == left_key)
                 && stored_column(self.database, right.table, right.alias, name)?
-                    .is_some_and(|column| column.stored_column_name() == right.tenant))
+                    .is_some_and(|column| column.stored_column_name() == right_key))
         };
         match join_constraint(&join.join_operator) {
             Some(JoinConstraint::Using(names)) => {
@@ -208,8 +238,8 @@ impl<'database, DB: DatabaseLike> TenantJoins<'database, '_, DB> {
             }
             Some(JoinConstraint::Natural) => {
                 for (position, column) in left.table.columns(self.database)?.enumerate() {
-                    if column.stored_column_name() == left.tenant {
-                        let stored = Ident::with_quote('"', left.tenant);
+                    if column.stored_column_name() == left_key {
+                        let stored = Ident::with_quote('"', left_key);
                         let name = left
                             .alias
                             .and_then(|alias| alias.columns.get(position))
