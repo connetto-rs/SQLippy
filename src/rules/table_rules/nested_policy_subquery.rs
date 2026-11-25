@@ -6,9 +6,9 @@ use sql_traits::{
     errors::LookupError,
     traits::{DataStatementLike, DatabaseLike, PolicyLike, Relation, TableLike},
 };
-use sqlparser::ast::{Expr, Query, Visitor};
+use sqlparser::ast::{Query, Visitor};
 
-use crate::rules::walk_support::walk;
+use crate::rules::walk_support::{holds_subquery, walk};
 use crate::{
     engine::Engine,
     error::{Interruption, PolicySite},
@@ -16,18 +16,6 @@ use crate::{
     rules::policy_support::{Command, held_by_name, policy_roles, reads_row, walked_clauses},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
-
-/// Whether an expression holds a sublink.
-fn holds_subquery(expression: &Expr) -> bool {
-    struct Sublink;
-    impl Visitor for Sublink {
-        type Break = ();
-        fn pre_visit_query(&mut self, _query: &Query) -> ControlFlow<()> {
-            ControlFlow::Break(())
-        }
-    }
-    walk(expression, &mut Sublink).is_break()
-}
 
 /// The tables the outermost query of each sublink joined to the row of
 /// `table` reads directly, with the sublink rendered as SQL.

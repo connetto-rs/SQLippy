@@ -366,6 +366,9 @@ fn plpgsql_definer(name: &str, returns: &str, body: &str) -> String {
 const MEMBER_RESOURCES: &str = "SELECT resource.id FROM public.resources resource
     WHERE resource.organization_id IN (SELECT public.member_organizations())";
 
+/// The declaration of a variable holding the caller's user id.
+const SIGNED_IN: &str = "uid TEXT := current_setting('app.user_id', true);";
+
 #[test]
 fn a_plpgsql_definer_returning_only_confined_queries_reads_as_those_queries() {
     assert_eq!(
@@ -402,6 +405,120 @@ fn a_plpgsql_definer_returning_only_confined_queries_reads_as_those_queries() {
             .concat()
         ),
         Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_plpgsql_definer_reads_its_variables_as_their_defaults_past_its_guards() {
+    let raise =
+        "IF uid IS NULL THEN RAISE EXCEPTION 'not signed in' USING ERRCODE = '28000'; END IF;";
+    let definer = |name: &str, body: String| plpgsql_definer(name, "SETOF INT", &body);
+    assert_eq!(
+        exposed_to_app(
+            &[
+                definer(
+                    "floored()",
+                    format!("DECLARE floor INT := 0; BEGIN RETURN QUERY {MEMBER_RESOURCES} AND resource.id > floor; END"),
+                ),
+                definer(
+                    "chained()",
+                    format!(
+                        "DECLARE floor INT := 0; ceiling INT := floor + 100;
+                         BEGIN RETURN QUERY {MEMBER_RESOURCES} AND resource.id < ceiling; END"
+                    ),
+                ),
+                definer(
+                    "held()",
+                    "DECLARE organizations INT[] := ARRAY(SELECT public.member_organizations());
+                     BEGIN RETURN QUERY SELECT resource.id FROM public.resources resource
+                       WHERE resource.organization_id = ANY (organizations); END"
+                        .to_owned(),
+                ),
+                definer(
+                    "raised()",
+                    format!("DECLARE {SIGNED_IN} BEGIN {raise} RETURN QUERY {MEMBER_RESOURCES}; END"),
+                ),
+                definer(
+                    "left_early()",
+                    format!(
+                        "BEGIN IF current_setting('app.user_id', true) IS NULL THEN RETURN; END IF;
+                         RETURN QUERY {MEMBER_RESOURCES}; END"
+                    ),
+                ),
+                plpgsql_definer(
+                    "selected_into()",
+                    "INT",
+                    &format!(
+                        "DECLARE owned_id INT; {SIGNED_IN} BEGIN {raise}
+                         SELECT resource.id INTO owned_id FROM public.resources resource
+                         WHERE resource.organization_id IN (SELECT public.member_organizations());
+                         RETURN owned_id; END"
+                    ),
+                ),
+            ]
+            .concat()
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_plpgsql_definer_whose_variable_or_guard_may_read_otherwise_is_reported() {
+    let definer = |name: &str, body: String| plpgsql_definer(name, "SETOF INT", &body);
+    assert_eq!(
+        exposed_to_app(
+            &[
+                definer(
+                    "reassigned()",
+                    format!("DECLARE floor INT := 0; BEGIN floor := 1; RETURN QUERY {MEMBER_RESOURCES}; END"),
+                ),
+                definer(
+                    "probed()",
+                    format!(
+                        "BEGIN IF EXISTS (SELECT 1 FROM public.resources resource WHERE resource.id = 1)
+                           THEN RAISE EXCEPTION 'found'; END IF;
+                         RETURN QUERY {MEMBER_RESOURCES}; END"
+                    ),
+                ),
+                definer(
+                    "told()",
+                    format!(
+                        "DECLARE {SIGNED_IN} BEGIN IF uid IS NULL THEN
+                           RAISE EXCEPTION 'largest %', (SELECT max(resource.id) FROM public.resources resource);
+                         END IF; RETURN QUERY {MEMBER_RESOURCES}; END"
+                    ),
+                ),
+                definer(
+                    "noticed()",
+                    format!(
+                        "DECLARE {SIGNED_IN} BEGIN IF uid IS NULL THEN RAISE NOTICE 'anonymous'; END IF;
+                         RETURN QUERY {MEMBER_RESOURCES}; END"
+                    ),
+                ),
+                definer(
+                    "branched()",
+                    format!(
+                        "DECLARE {SIGNED_IN} BEGIN IF uid IS NULL THEN RETURN; ELSE RETURN; END IF;
+                         RETURN QUERY {MEMBER_RESOURCES}; END"
+                    ),
+                ),
+                definer(
+                    "unconfined()",
+                    "DECLARE floor INT := 0; BEGIN RETURN QUERY SELECT resource.id
+                       FROM public.resources resource WHERE resource.id > floor; END"
+                        .to_owned(),
+                ),
+            ]
+            .concat()
+        ),
+        [
+            "branched()",
+            "noticed()",
+            "probed()",
+            "reassigned()",
+            "told()",
+            "unconfined()"
+        ]
     );
 }
 

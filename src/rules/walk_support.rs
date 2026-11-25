@@ -22,6 +22,18 @@ where
     node.visit(&mut Dynamic(visitor))
 }
 
+/// Whether an expression holds a sublink.
+pub(crate) fn holds_subquery(expression: &Expr) -> bool {
+    struct Sublink;
+    impl Visitor for Sublink {
+        type Break = ();
+        fn pre_visit_query(&mut self, _query: &Query) -> ControlFlow<()> {
+            ControlFlow::Break(())
+        }
+    }
+    walk(expression, &mut Sublink).is_break()
+}
+
 /// Forwards every hook to a borrowed visitor, so each `Visitor` method needs
 /// an override here or the inner visitor never sees that hook.
 struct Dynamic<'v, B>(&'v mut dyn Visitor<Break = B>);

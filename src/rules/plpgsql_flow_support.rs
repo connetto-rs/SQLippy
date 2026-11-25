@@ -1,12 +1,17 @@
 //! Walks a PL/pgSQL body in the order it can run, carrying what a rule tracks
 //! along every path through branches, loops, exits and handlers.
 
-use sql_traits::traits::FunctionLike;
-use sqlparser::ast::{Expr, Query, SetExpr, SetOperator, SetQuantifier, Statement};
+use std::{convert::Infallible, ops::ControlFlow};
+
+use sql_traits::{traits::FunctionLike, utils::identifier_resolution::normalize_identifier};
+use sqlparser::ast::{
+    Expr, Query, SetExpr, SetOperator, SetQuantifier, Statement, VisitMut, visit_expressions_mut,
+};
 use sqlparser_plpgsql::{
     embedded::{
-        Block, BoundCursor, Case, Declaration, DeclarationKind, Dynamic, Exit, ExitKind, Fetch, If,
-        Indirection, Loop, LoopControl, Node, NodeKind, Open, RaiseLevel, ReturnQuery, Variable,
+        Block, BoundCursor, Branch, Case, DeclarationKind, Dynamic, Exit, ExitKind, Fetch, If,
+        Indirection, Loop, LoopControl, Node, NodeKind, Open, Raise, RaiseLevel, ReturnQuery,
+        Variable,
     },
     embedded_sql,
 };
@@ -22,106 +27,212 @@ pub(crate) fn plpgsql_block<F: FunctionLike>(function: &F) -> Option<Block> {
     embedded_sql(function.body()?).ok()
 }
 
-/// The query whose rows `block` returns when it does nothing else. That is
+/// The query a PL/pgSQL body returns, and the conditions of the guards it
+/// passes first.
+pub(crate) struct Returned {
+    /// The query whose rows the body returns.
+    pub(crate) query: Query,
+    /// The condition of each guard, under which the body raises an exception
+    /// or returns before any query runs.
+    pub(crate) guards: Vec<Expr>,
+}
+
+/// What `block` returns when it does nothing else. Its statements are
+/// guards `IF condition THEN RAISE EXCEPTION ...; END IF;` or `IF condition
+/// THEN RETURN; END IF;`, the exception carrying no argument, then
 /// `RETURN QUERY` statements, maybe followed by a bare `RETURN`, read as the
 /// `UNION ALL` of their queries, a `RETURN` of one scalar subquery, or a
-/// `SELECT ... INTO` in a block declaring one variable, without a default,
-/// followed by a `RETURN` of a name, which reads nothing.
-pub(crate) fn returned_query(block: Block) -> Option<Query> {
+/// `SELECT ... INTO` the one variable declared without a default followed
+/// by a `RETURN` of a name. Every other variable is declared with a default
+/// and, as no statement but these assigns it, reads as that default.
+pub(crate) fn returned_query(block: Block) -> Option<Returned> {
     let Block {
         declarations,
-        mut statements,
+        statements,
         handlers,
         ..
     } = block;
     if !handlers.is_empty() {
         return None;
     }
-    match declarations.as_slice() {
-        [] => {
-            if let [
-                Node {
-                    kind: NodeKind::Return { value: Some(value) },
-                    ..
-                },
-            ] = statements.as_slice()
-            {
-                let Expr::Subquery(query) = selected_expression(value)? else {
-                    return None;
-                };
-                return Some(query.as_ref().clone());
+    let mut defaults: Vec<(String, Expr)> = Vec::new();
+    let mut target = None;
+    for declaration in declarations {
+        let DeclarationKind::Variable(Variable { default, .. }) = declaration.kind else {
+            return None;
+        };
+        match default {
+            Some(default) => {
+                let mut value = selected_expression(&default)?.clone();
+                substitute(&mut value, &defaults);
+                defaults.push((declaration.name, value));
             }
-            if let Some(Node {
+            None if target.is_none() => target = Some(declaration.name),
+            None => return None,
+        }
+    }
+    let mut statements = statements.into_iter().peekable();
+    let mut guards = Vec::new();
+    while let Some(condition) = statements.peek().and_then(guard) {
+        guards.push(condition);
+        statements.next();
+    }
+    let statements: Vec<Node> = statements.collect();
+    let mut query = match target {
+        None => returned_by(statements)?,
+        Some(_) => selected_into(&statements)?,
+    };
+    substitute(&mut query, &defaults);
+    for guard in &mut guards {
+        substitute(guard, &defaults);
+    }
+    Some(Returned { query, guards })
+}
+
+/// The condition of `node`, when it is an `IF` whose one branch raises an
+/// exception carrying no argument or returns, without `ELSE`.
+fn guard(node: &Node) -> Option<Expr> {
+    let NodeKind::If(If {
+        branches,
+        otherwise,
+    }) = &node.kind
+    else {
+        return None;
+    };
+    let [
+        Branch {
+            condition,
+            statements,
+        },
+    ] = branches.as_slice()
+    else {
+        return None;
+    };
+    let leaves = match statements.as_slice() {
+        [
+            Node {
                 kind: NodeKind::Return { value: None },
                 ..
-            }) = statements.last()
-            {
-                statements.pop();
-            }
-            statements
-                .into_iter()
-                .map(|node| match node.kind {
-                    NodeKind::ReturnQuery(ReturnQuery::Query(statement)) => match *statement {
-                        Statement::Query(query) => Some(query),
-                        _ => None,
-                    },
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()?
-                .into_iter()
-                .reduce(|left, right| {
-                    Box::new(Query {
-                        with: None,
-                        body: Box::new(SetExpr::SetOperation {
-                            op: SetOperator::Union,
-                            set_quantifier: SetQuantifier::All,
-                            left: Box::new(SetExpr::Query(left)),
-                            right: Box::new(SetExpr::Query(right)),
-                        }),
-                        order_by: None,
-                        limit_clause: None,
-                        fetch: None,
-                        locks: Vec::new(),
-                        for_clause: None,
-                        settings: None,
-                        format_clause: None,
-                        pipe_operators: Vec::new(),
-                    })
-                })
-                .map(|query| *query)
-        }
+            },
+        ] => true,
         [
-            Declaration {
-                kind: DeclarationKind::Variable(Variable { default: None, .. }),
+            Node {
+                kind:
+                    NodeKind::Raise(Raise {
+                        level: RaiseLevel::Exception,
+                        arguments,
+                        options,
+                        ..
+                    }),
                 ..
             },
         ] => {
-            let [
-                Node {
-                    kind:
-                        NodeKind::Statement {
-                            statement,
-                            into: Some(_),
-                        },
-                    ..
-                },
-                Node {
-                    kind: NodeKind::Return { value: Some(value) },
-                    ..
-                },
-            ] = statements.as_slice()
-            else {
-                return None;
-            };
-            match (statement.as_ref(), selected_expression(value)) {
-                (Statement::Query(query), Some(Expr::Identifier(_))) => {
-                    Some(query.as_ref().clone())
-                }
-                _ => None,
-            }
+            arguments.is_empty()
+                && options.iter().all(|option| {
+                    matches!(selected_expression(&option.value), Some(Expr::Value(_)))
+                })
         }
+        _ => false,
+    };
+    (leaves && otherwise.is_empty())
+        .then(|| selected_expression(condition).cloned())
+        .flatten()
+}
+
+/// The query whose rows `statements` return, `RETURN QUERY` statements
+/// maybe followed by a bare `RETURN` or a `RETURN` of one scalar subquery.
+fn returned_by(mut statements: Vec<Node>) -> Option<Query> {
+    if let [
+        Node {
+            kind: NodeKind::Return { value: Some(value) },
+            ..
+        },
+    ] = statements.as_slice()
+    {
+        let Expr::Subquery(query) = selected_expression(value)? else {
+            return None;
+        };
+        return Some(query.as_ref().clone());
+    }
+    if let Some(Node {
+        kind: NodeKind::Return { value: None },
+        ..
+    }) = statements.last()
+    {
+        statements.pop();
+    }
+    statements
+        .into_iter()
+        .map(|node| match node.kind {
+            NodeKind::ReturnQuery(ReturnQuery::Query(statement)) => match *statement {
+                Statement::Query(query) => Some(query),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .reduce(|left, right| {
+            Box::new(Query {
+                with: None,
+                body: Box::new(SetExpr::SetOperation {
+                    op: SetOperator::Union,
+                    set_quantifier: SetQuantifier::All,
+                    left: Box::new(SetExpr::Query(left)),
+                    right: Box::new(SetExpr::Query(right)),
+                }),
+                order_by: None,
+                limit_clause: None,
+                fetch: None,
+                locks: Vec::new(),
+                for_clause: None,
+                settings: None,
+                format_clause: None,
+                pipe_operators: Vec::new(),
+            })
+        })
+        .map(|query| *query)
+}
+
+/// The query of `statements` when they are a `SELECT ... INTO` followed by
+/// a `RETURN` of a name, which reads nothing.
+fn selected_into(statements: &[Node]) -> Option<Query> {
+    let [
+        Node {
+            kind:
+                NodeKind::Statement {
+                    statement,
+                    into: Some(_),
+                },
+            ..
+        },
+        Node {
+            kind: NodeKind::Return { value: Some(value) },
+            ..
+        },
+    ] = statements
+    else {
+        return None;
+    };
+    match (statement.as_ref(), selected_expression(value)) {
+        (Statement::Query(query), Some(Expr::Identifier(_))) => Some(query.as_ref().clone()),
         _ => None,
     }
+}
+
+/// `node` with every name of a variable in `defaults` replaced by that
+/// variable's default.
+fn substitute<N: VisitMut>(node: &mut N, defaults: &[(String, Expr)]) {
+    let ControlFlow::Continue(()) = visit_expressions_mut(node, |expression| {
+        if let Expr::Identifier(name) = expression
+            && let Some((_, default)) = defaults.iter().find(|(variable, _)| {
+                *variable == normalize_identifier(&name.value, name.quote_style.is_some())
+            })
+        {
+            *expression = Expr::Nested(Box::new(default.clone()));
+        }
+        ControlFlow::<Infallible>::Continue(())
+    });
 }
 
 /// What a rule knows at one point of a body, merged where paths meet.
