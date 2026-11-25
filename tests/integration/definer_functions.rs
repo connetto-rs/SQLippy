@@ -848,6 +848,26 @@ fn a_definer_updating_rows_the_caller_may_not_update_alike_is_reported() {
             OWN_ROWS,
             &[
                 writing_definer(
+                    "absent_column()",
+                    "UPDATE public.resources resource SET missing = true
+                     WHERE resource.owner = current_setting('app.user_id', true)",
+                ),
+                writing_definer(
+                    "joined_target()",
+                    "UPDATE public.resources resource JOIN public.resources twin ON twin.id = resource.id
+                     SET hidden = true WHERE resource.owner = current_setting('app.user_id', true)",
+                ),
+                writing_definer(
+                    "qualified_target()",
+                    "UPDATE public.resources resource SET resource.hidden = true
+                     WHERE resource.owner = current_setting('app.user_id', true)",
+                ),
+                writing_definer(
+                    "from_before_set()",
+                    "UPDATE public.resources resource FROM public.resources twin
+                     SET hidden = true WHERE resource.owner = current_setting('app.user_id', true)",
+                ),
+                writing_definer(
                     "give_away()",
                     "UPDATE public.resources resource SET owner = 'admin'
                      WHERE resource.owner = current_setting('app.user_id', true)",
@@ -876,12 +896,46 @@ fn a_definer_updating_rows_the_caller_may_not_update_alike_is_reported() {
             .concat(),
         ),
         [
+            "absent_column()",
+            "from_before_set()",
             "give_away()",
             "hide_any()",
             "hide_beside()",
             "hide_returning()",
+            "joined_target()",
+            "qualified_target()",
             "stamp()"
         ]
+    );
+}
+
+#[test]
+fn a_definer_update_with_an_unproved_subquery_check_is_reported() {
+    assert_eq!(
+        written_exposed(
+            "SELECT, UPDATE",
+            &format!(
+                "{OWN_ROWS}
+                 CREATE FUNCTION public.visible_flag() RETURNS BOOLEAN LANGUAGE sql STABLE
+                   SET search_path = pg_catalog, pg_temp AS $$ SELECT true $$;
+                 CREATE POLICY checked ON resources AS RESTRICTIVE FOR UPDATE TO app
+                   WITH CHECK (EXISTS (SELECT 1));"
+            ),
+            &[
+                writing_definer(
+                    "helper_value()",
+                    "UPDATE public.resources resource SET hidden = public.visible_flag()
+                     WHERE resource.owner = current_setting('app.user_id', true)",
+                ),
+                writing_definer(
+                    "nested_value()",
+                    "UPDATE public.resources resource SET hidden = EXISTS (SELECT 1 FROM public.resources twin
+                       WHERE twin.owner = current_setting('app.user_id', true))
+                     WHERE resource.owner = current_setting('app.user_id', true)",
+                ),
+            ].concat(),
+        ),
+        ["helper_value()", "nested_value()"]
     );
 }
 

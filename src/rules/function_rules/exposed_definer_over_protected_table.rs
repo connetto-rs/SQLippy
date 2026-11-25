@@ -641,12 +641,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         };
         let written = match write {
             Some(write) => {
-                let SetExpr::Select(select) = query.body.as_ref() else {
-                    return Ok(None);
-                };
-                let Some(from) = select.from.first() else {
-                    return Ok(None);
-                };
+                let select = query.body.as_select().expect("writes select their target");
+                let from = select.from.first().expect("writes have a target");
                 Some((ptr::from_ref(&from.relation), write))
             }
             None => None,
@@ -1610,12 +1606,10 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     ) -> Result<Option<Vec<(String, Expr)>>, LookupError> {
         let mut assigned = Vec::with_capacity(columns.len());
         for (column, item) in columns.iter().zip(&select.projection) {
-            let SelectItem::UnnamedExpr(value) = item else {
-                return Ok(None);
+            let value = match item {
+                SelectItem::UnnamedExpr(value) if self.reads_alike(value)? => value,
+                _ => return Ok(None),
             };
-            if !self.reads_alike(value)? {
-                return Ok(None);
-            }
             let Some(value) = renamed(
                 value,
                 |reference| term(resolver, reference, relation, equalities),
