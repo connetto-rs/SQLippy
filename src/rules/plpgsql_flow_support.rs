@@ -4,9 +4,13 @@
 use std::{convert::Infallible, iter, ops::ControlFlow};
 
 use sql_traits::{traits::FunctionLike, utils::identifier_resolution::normalize_identifier};
-use sqlparser::ast::{
-    Expr, Query, SetExpr, SetOperator, SetQuantifier, Statement, UnaryOperator, VisitMut,
-    visit_expressions_mut,
+use sqlparser::{
+    ast::{
+        Expr, Query, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableFactor,
+        TableWithJoins, UnaryOperator, VisitMut, visit_expressions_mut,
+    },
+    dialect::PostgreSqlDialect,
+    parser::Parser,
 };
 use sqlparser_plpgsql::{
     embedded::{
@@ -121,8 +125,10 @@ pub(crate) fn ran_statements(block: Block) -> Option<Ran> {
 /// that query, or a `SELECT ... INTO`, each maybe followed by a guard `IF
 /// NOT FOUND THEN ...`, which raises or returns where a caller running the
 /// same statement would too, the values its exception carries pushed onto
-/// `raised`. A node may also be a `RETURN QUERY` of a query, consecutive
-/// ones read as the `UNION ALL` of them. One `SELECT ... INTO`, write
+/// `raised`. A node may also be a `RETURN QUERY` of a query, or a `FOR`
+/// loop over a query whose one statement is a `RETURN NEXT`, as
+/// [`next_rows`] reads it, consecutive ones read as the `UNION ALL`
+/// of them. One `SELECT ... INTO`, write
 /// `RETURNING ... INTO`, or `GET DIAGNOSTICS ... = ROW_COUNT` after a write
 /// and its guard assigns `target`, which the last node returns, since a
 /// caller running the same write changes as many rows. A last bare `RETURN`
@@ -139,12 +145,13 @@ fn ran_by(
     let mut nodes = nodes.peekable();
     while let Some(node) = nodes.next() {
         let last = nodes.peek().is_none();
-        if !matches!(
-            &node.kind,
-            NodeKind::ReturnQuery(ReturnQuery::Query(statement))
-                if matches!(statement.as_ref(), Statement::Query(_))
-        ) && let Some(query) = returning.take()
-        {
+        let returns_rows = match &node.kind {
+            NodeKind::ReturnQuery(ReturnQuery::Query(statement)) => {
+                matches!(statement.as_ref(), Statement::Query(_))
+            }
+            kind => matches!(kind, NodeKind::Loop(_)),
+        };
+        if !returns_rows && let Some(query) = returning.take() {
             ran.push(Statement::Query(query));
         }
         let (written, found) = match node.kind {
@@ -171,15 +178,14 @@ fn ran_by(
             NodeKind::ReturnQuery(ReturnQuery::Query(statement)) => {
                 let written = writes(&statement);
                 match *statement {
-                    Statement::Query(query) => {
-                        returning = Some(match returning.take() {
-                            Some(previous) => union_all(previous, query),
-                            None => query,
-                        });
-                    }
+                    Statement::Query(query) => returned(&mut returning, query),
                     statement => ran.push(statement),
                 }
                 (written, written)
+            }
+            NodeKind::Loop(looped) => {
+                returned(&mut returning, next_rows(looped, target?)?);
+                (false, false)
             }
             NodeKind::Diagnostics(Diagnostics {
                 stacked: false,
@@ -234,6 +240,77 @@ fn writes(statement: &Statement) -> bool {
         statement,
         Statement::Delete(_) | Statement::Update(_) | Statement::Insert(_)
     )
+}
+
+/// Appends the rows of `query`, which a `RETURN QUERY` or a `RETURN NEXT`
+/// loop returns, to those `returning` holds, as their `UNION ALL`.
+fn returned(returning: &mut Option<Box<Query>>, query: Box<Query>) {
+    *returning = Some(match returning.take() {
+        Some(previous) => union_all(previous, query),
+        None => query,
+    });
+}
+
+/// The query whose rows `looped` returns, when it is a `FOR record IN query
+/// LOOP RETURN NEXT value; END LOOP` over the variable `record`, as `SELECT
+/// value FROM (query) AS record`, or the query itself when `value` is the
+/// record.
+fn next_rows(looped: Loop, record: &str) -> Option<Box<Query>> {
+    let Loop {
+        control: LoopControl::Query { targets, query },
+        statements,
+        ..
+    } = looped
+    else {
+        return None;
+    };
+    let (
+        [variable],
+        [
+            Node {
+                kind: NodeKind::ReturnNext { value: Some(value) },
+                ..
+            },
+        ],
+        Statement::Query(rows),
+    ) = (targets.as_slice(), statements.as_slice(), *query)
+    else {
+        return None;
+    };
+    if !assigns(variable, record) {
+        return None;
+    }
+    let value = selected_expression(value)?;
+    if let Expr::Identifier(name) = value
+        && normalize_identifier(&name.value, name.quote_style.is_some()) == record
+    {
+        return Some(rows);
+    }
+    let mut query = Parser::new(&PostgreSqlDialect {})
+        .try_with_sql("SELECT NULL FROM (SELECT NULL) AS record")
+        .and_then(|mut parser| parser.parse_query())
+        .ok()?;
+    let SetExpr::Select(select) = query.body.as_mut() else {
+        return None;
+    };
+    let [
+        TableWithJoins {
+            relation:
+                TableFactor::Derived {
+                    subquery,
+                    alias: Some(alias),
+                    ..
+                },
+            ..
+        },
+    ] = select.from.as_mut_slice()
+    else {
+        return None;
+    };
+    *subquery = rows;
+    alias.name = variable.name.0.first()?.as_ident()?.clone();
+    select.projection = vec![SelectItem::UnnamedExpr(value.clone())];
+    Some(query)
 }
 
 /// Whether `into` assigns only the variable `target`, as a whole.
