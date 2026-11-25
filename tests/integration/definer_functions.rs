@@ -425,7 +425,13 @@ fn a_filter_repeating_a_policys_subquery_over_its_own_columns_confines_as_the_po
                  SELECT note.id FROM public.notes note
                  WHERE EXISTS (SELECT 1 FROM public.open_members member
                    WHERE organization_id = note.organization_id
-                     AND user_id = current_setting('app.user_id', true)) $$;"
+                     AND user_id = current_setting('app.user_id', true)) $$;
+             CREATE FUNCTION schema_named_note_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT note.id FROM public.notes note
+                 WHERE EXISTS (SELECT 1 FROM public.open_members
+                   WHERE public.open_members.organization_id = note.organization_id
+                     AND public.open_members.user_id = current_setting('app.user_id', true)) $$;"
         )),
         Vec::<String>::new()
     );
@@ -481,12 +487,6 @@ fn a_subquery_naming_its_relation_in_ways_the_renaming_does_not_follow_confines_
                  WHERE EXISTS (SELECT 1 FROM public.open_members m (member, organization)
                    WHERE m.organization = note.organization_id
                      AND m.member = current_setting('app.user_id', true)) $$;
-             CREATE FUNCTION schema_named_note_ids() RETURNS SETOF INT
-               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                 SELECT note.id FROM public.notes note
-                 WHERE EXISTS (SELECT 1 FROM public.open_members
-                   WHERE public.open_members.organization_id = note.organization_id
-                     AND public.open_members.user_id = current_setting('app.user_id', true)) $$;
              CREATE FUNCTION with_shadowed_note_ids() RETURNS SETOF INT
                LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
                  WITH open_members AS (SELECT * FROM open_admins)
@@ -495,11 +495,7 @@ fn a_subquery_naming_its_relation_in_ways_the_renaming_does_not_follow_confines_
                    WHERE m.organization_id = note.organization_id
                      AND m.user_id = current_setting('app.user_id', true)) $$;"
         )),
-        [
-            "aliased_columns_note_ids()",
-            "schema_named_note_ids()",
-            "with_shadowed_note_ids()"
-        ]
+        ["aliased_columns_note_ids()", "with_shadowed_note_ids()"]
     );
 }
 
@@ -581,7 +577,6 @@ fn a_subquery_over_a_protected_table_confines_only_where_finding_more_rows_admit
     assert_eq!(
         exposed(deployment(), &protected),
         [
-            "first_note_ids()",
             "outsider_note_ids()",
             "single_note_ids()",
             "unjoined_note_ids()"
@@ -849,6 +844,218 @@ fn a_subquery_confines_when_every_row_it_finds_is_one_the_policys_finds() {
     }
 }
 
+/// The condition holding a membership to the caller.
+const OWN_MEMBERSHIP: &str = "m.user_id = current_setting('app.user_id', true)";
+
+/// A `WITH` item of the caller's memberships.
+const MINE: &str = "WITH mine AS (SELECT m.organization_id, m.user_id FROM public.memberships m
+    WHERE m.user_id = current_setting('app.user_id', true))";
+
+/// A `WITH` item of every membership.
+const ALL: &str = "WITH mine AS (SELECT m.organization_id, m.user_id FROM public.memberships m)";
+
+/// A `WITH` item named as the memberships table that reads guests.
+const FAKE: &str = "WITH memberships AS (SELECT organization_id, user_id FROM guests)";
+
+/// The functions reported where `body` reads resources and notes, whose
+/// policies admit the rows of organizations the caller is a member of,
+/// under `path`.
+fn joined_exposed(path: &str, body: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE TABLE memberships (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+             CREATE TABLE guests (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+             CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL);
+             CREATE TABLE notes (id INT PRIMARY KEY, organization_id INT NOT NULL);
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON memberships, guests, resources, notes TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE POLICY member_resources ON resources FOR SELECT TO app
+               USING (EXISTS (SELECT 1 FROM memberships m
+                 WHERE m.organization_id = resources.organization_id AND {OWN_MEMBERSHIP}));
+             CREATE POLICY member_notes ON notes FOR SELECT TO app
+               USING (organization_id IN (SELECT m.organization_id FROM memberships m
+                 WHERE {OWN_MEMBERSHIP}));
+             CREATE FUNCTION member_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = {path} AS $$
+                 {body} $$;"
+        ),
+    )
+}
+
+/// A read of `table` under the alias `item` joined by `operator` to the
+/// memberships `m` of its organization, `on` ending the `ON` condition.
+fn joined_memberships(operator: &str, table: &str, on: &str) -> String {
+    format!(
+        "SELECT item.id FROM public.{table} item {operator} public.memberships m
+           ON m.organization_id = item.organization_id{on}"
+    )
+}
+
+#[test]
+fn a_row_joined_to_the_policys_rows_confines_as_its_subquery_does() {
+    let safe = "pg_catalog, pg_temp";
+    for (path, body) in [
+        (
+            safe,
+            format!(
+                "{} WHERE {OWN_MEMBERSHIP}",
+                joined_memberships("JOIN", "resources", "")
+            ),
+        ),
+        (
+            safe,
+            format!(
+                "SELECT item.id FROM public.memberships m, public.resources item
+                 WHERE item.organization_id = m.organization_id AND {OWN_MEMBERSHIP}"
+            ),
+        ),
+        (
+            safe,
+            joined_memberships("INNER JOIN", "notes", &format!(" AND {OWN_MEMBERSHIP}")),
+        ),
+        (
+            safe,
+            format!(
+                "SELECT item.id FROM public.guests g RIGHT JOIN public.resources item
+                   ON g.organization_id = item.organization_id
+                 JOIN public.memberships m ON m.organization_id = item.organization_id
+                 WHERE {OWN_MEMBERSHIP}"
+            ),
+        ),
+        (
+            safe,
+            format!(
+                "{MINE} SELECT item.id FROM public.resources item
+                 JOIN mine ON mine.organization_id = item.organization_id"
+            ),
+        ),
+        (
+            safe,
+            format!(
+                "{MINE} SELECT item.id FROM public.resources item
+                 WHERE item.organization_id IN (SELECT mine.organization_id FROM mine)"
+            ),
+        ),
+        (
+            safe,
+            format!(
+                "{MINE} SELECT item.id FROM public.resources item
+                 WHERE EXISTS (SELECT 1 FROM mine
+                   WHERE mine.organization_id = item.organization_id)"
+            ),
+        ),
+        (
+            safe,
+            format!(
+                "SELECT item.id FROM public.resources item
+                 JOIN (SELECT m.organization_id FROM public.memberships m
+                   WHERE {OWN_MEMBERSHIP}) mine
+                 ON mine.organization_id = item.organization_id"
+            ),
+        ),
+        (
+            "public, pg_temp",
+            format!(
+                "SELECT item.id FROM resources item
+                 JOIN memberships m ON m.organization_id = item.organization_id
+                 WHERE {OWN_MEMBERSHIP}"
+            ),
+        ),
+    ] {
+        assert_eq!(joined_exposed(path, &body), Vec::<String>::new(), "{body}");
+    }
+}
+
+#[test]
+fn a_row_joined_where_it_may_lack_the_policys_rows_is_reported() {
+    let safe = "pg_catalog, pg_temp";
+    for (path, body) in [
+        (
+            safe,
+            joined_memberships("LEFT JOIN", "resources", &format!(" AND {OWN_MEMBERSHIP}")),
+        ),
+        (
+            safe,
+            format!(
+                "{} WHERE {OWN_MEMBERSHIP}",
+                joined_memberships("FULL JOIN", "resources", "")
+            ),
+        ),
+        (safe, joined_memberships("JOIN", "resources", "")),
+        (
+            safe,
+            format!(
+                "SELECT item.id FROM public.resources item
+                 JOIN public.memberships m ON m.organization_id = item.id
+                 WHERE {OWN_MEMBERSHIP}"
+            ),
+        ),
+        (
+            safe,
+            format!(
+                "SELECT item.id FROM public.resources item JOIN public.guests m
+                   ON m.organization_id = item.organization_id
+                 WHERE {OWN_MEMBERSHIP}"
+            ),
+        ),
+        (
+            safe,
+            format!(
+                "{MINE} SELECT item.id FROM public.resources item
+                 LEFT JOIN mine ON mine.organization_id = item.organization_id"
+            ),
+        ),
+        (
+            safe,
+            format!(
+                "{ALL} SELECT item.id FROM public.resources item
+                 JOIN mine ON mine.organization_id = item.organization_id"
+            ),
+        ),
+        (
+            safe,
+            format!(
+                "{ALL} SELECT item.id FROM public.resources item
+                 JOIN mine joined ON joined.organization_id = item.organization_id
+                 WHERE EXISTS (SELECT 1 FROM mine other
+                   WHERE other.user_id = current_setting('app.user_id', true))"
+            ),
+        ),
+        (
+            safe,
+            format!(
+                "{MINE} SELECT item.id FROM public.resources item
+                 WHERE EXISTS ({ALL} SELECT 1 FROM mine
+                   WHERE mine.organization_id = item.organization_id)"
+            ),
+        ),
+        (
+            "public, pg_temp",
+            format!(
+                "SELECT item.id FROM resources item WHERE EXISTS ({FAKE}
+                   SELECT 1 FROM memberships m
+                   WHERE m.organization_id = item.organization_id AND {OWN_MEMBERSHIP})"
+            ),
+        ),
+        (
+            "public, pg_temp",
+            format!(
+                "SELECT item.id FROM resources item
+                 JOIN ({FAKE} SELECT m.organization_id FROM memberships m
+                   WHERE {OWN_MEMBERSHIP}) own
+                 ON own.organization_id = item.organization_id"
+            ),
+        ),
+    ] {
+        assert_eq!(joined_exposed(path, &body), ["member_ids()"], "{body}");
+    }
+}
+
 #[test]
 fn a_policy_subquery_reading_a_table_twice_is_met_by_one_read_of_it() {
     let reading = |name: &str, filter: &str| {
@@ -942,6 +1149,72 @@ fn a_subquery_nested_in_a_policy_subquery_is_met_by_one_finding_fewer_rows() {
         ),
         ["active_ids()"]
     );
+}
+
+#[test]
+fn a_join_or_with_item_finding_the_policys_rows_confines_like_its_subquery() {
+    const OWN: &str = "m.user_id = current_setting('app.user_id', true)";
+    let reported = |body: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "CREATE ROLE app NOLOGIN;
+                 CREATE TABLE memberships (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+                 CREATE TABLE guests (user_id TEXT NOT NULL, organization_id INT NOT NULL);
+                 CREATE TABLE resources (id INT PRIMARY KEY, organization_id INT NOT NULL);
+                 ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+                 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+                 GRANT SELECT ON memberships, guests, resources TO app;
+                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+                 CREATE POLICY own_memberships ON memberships FOR SELECT TO app
+                   USING (user_id = current_setting('app.user_id', true));
+                 CREATE POLICY member_resources ON resources FOR SELECT TO app
+                   USING (EXISTS (SELECT 1 FROM memberships m
+                     WHERE m.organization_id = resources.organization_id AND {OWN}));
+                 CREATE FUNCTION member_ids() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     {body} $$;"
+            ),
+        )
+    };
+    for body in [
+        format!(
+            "SELECT resource.id FROM public.resources resource
+               JOIN public.memberships m ON m.organization_id = resource.organization_id
+             WHERE {OWN}"
+        ),
+        format!(
+            "SELECT resource.id FROM public.memberships m, public.resources resource
+             WHERE m.organization_id = resource.organization_id AND {OWN}"
+        ),
+        format!(
+            "WITH mine AS (SELECT m.organization_id FROM public.memberships m WHERE {OWN})
+             SELECT resource.id FROM public.resources resource
+             WHERE resource.organization_id IN (SELECT mine.organization_id FROM mine)"
+        ),
+    ] {
+        assert_eq!(reported(&body), Vec::<String>::new(), "{body}");
+    }
+    for body in [
+        format!(
+            "SELECT resource.id FROM public.resources resource
+               LEFT JOIN public.memberships m
+               ON m.organization_id = resource.organization_id AND {OWN}"
+        ),
+        format!(
+            "SELECT resource.id FROM public.resources resource
+               JOIN public.guests m ON m.organization_id = resource.organization_id
+             WHERE {OWN}"
+        ),
+        format!(
+            "WITH mine AS (SELECT m.organization_id FROM public.guests m WHERE {OWN})
+             SELECT resource.id FROM public.resources resource
+             WHERE resource.organization_id IN (SELECT mine.organization_id FROM mine)"
+        ),
+    ] {
+        assert_eq!(reported(&body), ["member_ids()"], "{body}");
+    }
 }
 
 #[test]
