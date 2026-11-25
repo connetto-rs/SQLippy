@@ -28,8 +28,8 @@ pub(crate) fn plpgsql_block<F: FunctionLike>(function: &F) -> Option<Block> {
 }
 
 /// The one statement a PL/pgSQL body runs, the query whose rows it returns,
-/// a `DELETE` or an `UPDATE`, and the conditions of the guards it passes
-/// first.
+/// a `DELETE`, an `UPDATE` or an `INSERT`, and the conditions of the guards
+/// it passes first.
 pub(crate) struct Ran {
     /// The statement the body runs.
     pub(crate) statement: Statement,
@@ -40,13 +40,13 @@ pub(crate) struct Ran {
 
 /// What `block` runs when it does nothing else. Its statements are guards
 /// `IF condition THEN RAISE EXCEPTION ...; END IF;` or `IF condition THEN
-/// RETURN; END IF;`, the exception carrying no argument, then one `DELETE`
-/// or `UPDATE`, bare or as a `RETURN QUERY`, or `RETURN QUERY` statements,
-/// either maybe followed by a bare `RETURN`, the queries read as the `UNION
-/// ALL` of them, a `RETURN` of one scalar subquery, or a `SELECT ... INTO`
-/// the one variable declared without a default followed by a `RETURN` of a
-/// name. Every other variable is declared with a default and, as no
-/// statement but these assigns it, reads as that default.
+/// RETURN; END IF;`, the exception carrying no argument, then one `DELETE`,
+/// `UPDATE` or `INSERT`, bare or as a `RETURN QUERY`, or `RETURN QUERY`
+/// statements, either maybe followed by a bare `RETURN`, the queries read as
+/// the `UNION ALL` of them, a `RETURN` of one scalar subquery, or a `SELECT
+/// ... INTO` the one variable declared without a default followed by a
+/// `RETURN` of a name. Every other variable is declared with a default and,
+/// as no statement but these assigns it, reads as that default.
 pub(crate) fn ran_statement(block: Block) -> Option<Ran> {
     let Block {
         declarations,
@@ -114,7 +114,7 @@ fn ran_by(mut statements: Vec<Node>) -> Option<Statement> {
                 ..
             } if matches!(
                 statement.as_ref(),
-                Statement::Delete(_) | Statement::Update(_)
+                Statement::Delete(_) | Statement::Update(_) | Statement::Insert(_)
             ) =>
             {
                 return Some(*statement);

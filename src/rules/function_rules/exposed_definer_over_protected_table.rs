@@ -26,13 +26,13 @@ use sqlparser::{
     ast::{
         ArgMode, Assignment, AssignmentTarget, BinaryOperator, CaseWhen, CastKind, DataType,
         Delete, Expr, FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-        FunctionBehavior, FunctionCalledOnNull, FunctionSecurity, Ident, InTarget, JoinConstraint,
-        JoinOperator, ObjectName, ObjectNamePart, Query, Select, SelectItem, SetExpr, SetOperator,
-        SetQuantifier, Statement, TableAliasColumnDef, TableFactor, TableInheritance,
-        TableWithJoins, TriggerEvent, TriggerObject, TriggerObjectKind, TriggerPeriod, Update,
-        UpdateTableFromKind, Value, Visit, VisitMut, Visitor, VisitorMut, With,
-        helpers::attached_token::AttachedToken, visit_expressions, visit_expressions_mut,
-        visit_relations,
+        FunctionBehavior, FunctionCalledOnNull, FunctionSecurity, Ident, InTarget, Insert,
+        JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, Query, Select, SelectItem,
+        SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Statement,
+        TableAliasColumnDef, TableFactor, TableInheritance, TableObject, TableWithJoins,
+        TriggerEvent, TriggerObject, TriggerObjectKind, TriggerPeriod, Update, UpdateTableFromKind,
+        Value, Visit, VisitMut, Visitor, VisitorMut, With, helpers::attached_token::AttachedToken,
+        visit_expressions, visit_expressions_mut, visit_relations,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -53,7 +53,8 @@ use crate::{
         grant_support::{function_callers, granted_callers, schema_of},
         implication_support::{
             Columns, Condition, ParameterValues, StoredRelation, Term, admits, clause_implies,
-            keeps_existence, membership, parameter, parameter_ordinal, renamed, witnessed,
+            keeps_existence, left_to_prove, membership, parameter, parameter_ordinal, renamed,
+            witnessed,
         },
         inline_support::selected_expression,
         key_support::{binds, equality_keys, key_pairs, no_inheritors},
@@ -154,31 +155,48 @@ use super::plpgsql_ambiguous_name::collision;
 ///
 /// A function is not reported either when each caller could run what it
 /// writes and change the same rows the same way. Its body is then one
-/// `DELETE` or `UPDATE` of one table, in `LANGUAGE sql` or in a PL/pgSQL
-/// block past such guards, bare or as its `RETURN QUERY`, read as the
-/// `SELECT` of the rows it writes joined to the tables its `USING` or `FROM`
-/// names, projecting what its `RETURNING` returns. That `SELECT` is held to
-/// the test above, the written table to each caller's policies for the
-/// command besides the `SELECT` ones, as PostgreSQL holds a write reading a
-/// column of its table. An `UPDATE` sets each column, named alone, to a value
-/// that evaluates alike for a caller and the owner and names no column of
-/// another relation it joins, and the policies judging the updated row, its
-/// `WITH CHECK` and the `SELECT` ones, have to hold of the row the filter
-/// admits with those values in place. Its `RETURNING` reads each set column
-/// as its value. A policy or a `RETURNING` naming a set column inside a
-/// subquery fails that. Every caller holds `DELETE` on the table, or `UPDATE`
-/// on each column set.
+/// `DELETE`, `UPDATE` or `INSERT` of one table, in `LANGUAGE sql` or in a
+/// PL/pgSQL block past such guards, bare or as its `RETURN QUERY`. A `DELETE`
+/// or an `UPDATE` is read as the `SELECT` of the rows it writes joined to
+/// the tables its `USING` or `FROM` names, projecting what its `RETURNING`
+/// returns. That `SELECT` is held to the test above, the written table to
+/// each caller's policies for the command besides the `SELECT` ones, as
+/// PostgreSQL holds a write reading a column of its table. An `UPDATE` sets
+/// each column, named alone, to a value that evaluates alike for a caller
+/// and the owner and names no column of another relation it joins, and the
+/// policies judging the updated row, its `WITH CHECK` and the `SELECT` ones,
+/// have to hold of the row the filter admits with those values in place.
+/// Its `RETURNING` reads each set column as its value. A policy or a
+/// `RETURNING` naming a set column inside a subquery fails that. Every
+/// caller holds `DELETE` on the table, or `UPDATE` on each column set.
+///
+/// An `INSERT` of one table naming each column it writes, with no `ON
+/// CONFLICT`, is read as the `SELECT` of the values each row of its `VALUES`
+/// list or of its one `SELECT` writes, held to the test above and reading at
+/// most one table. Each value evaluates alike for a caller and the owner, as
+/// a `SET` value does, and every caller holds `INSERT` on each column named.
+/// Each other column holds its default, which has to name alike anywhere and
+/// call no `VOLATILE` function, or `NULL` without one. The value of an
+/// identity or generated column is not followed, so a policy naming one
+/// fails. The `WITH CHECK` of each caller's `INSERT` policies, and the
+/// `SELECT` ones with a `RETURNING`, have to hold of the new row with those
+/// values in place, for each row the read rows admit.
+///
+/// A policy comparing a value a write writes with that same value holds when
+/// the value cannot be `NULL`, as for a literal, a `current_setting` without
+/// `missing_ok`, or a value of a `NOT NULL` column, whose write of `NULL`
+/// fails for the owner too.
 ///
 /// A trigger runs as the owner inside the function, so each one that may
 /// fire on the write, enabled and declared for its command, and for an
 /// `UPDATE OF` naming a column the `SET` names, has to act alike for a
 /// caller. An `AFTER` trigger whose function is `SECURITY DEFINER` runs as
-/// its owner either way. A `BEFORE ROW` trigger of an `UPDATE` whose
-/// PL/pgSQL body only assigns fields of `NEW` and returns it writes those
-/// columns too, in the order of the trigger names, and its values are held
-/// to the `SET` values' test, the row the policies judge holding them. A
-/// column it writes needs no `UPDATE` grant. Any other trigger keeps the
-/// function reported.
+/// its owner either way. A `BEFORE ROW` trigger of an `UPDATE` or an
+/// `INSERT` whose PL/pgSQL body only assigns fields of `NEW` and returns it
+/// writes those columns too, in the order of the trigger names, and its
+/// values are held to the written values' test, the row the policies judge
+/// holding them. A column it writes needs no `UPDATE` or `INSERT` grant. Any
+/// other trigger keeps the function reported.
 ///
 /// A call `f(a)` passing a label of an enum lies within `f(b)` passing a
 /// lower label of the same enum, all other arguments alike, when `f` is a
@@ -589,13 +607,12 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
 
     /// What `walk` finds reading the body of `function`, one `LANGUAGE sql`
     /// statement or the one a `plpgsql` block [`ran_statement`] reads, with
-    /// the lineage `lineage` gives it. A query is read as it stands, a
-    /// `DELETE` as [`deleted_rows`] gives it and an `UPDATE` as
-    /// [`Updated::rows`] does. `None` when the body is no such
-    /// statement, its names do not resolve, a name of the block may read a
-    /// variable where the statement reads a column, or a guard of the block
-    /// reads a subquery or may evaluate otherwise for a caller than for the
-    /// owner, so that whether it raises tells what the owner reads.
+    /// the lineage `lineage` gives it, read as [`Self::queried`] reads it.
+    /// `None` when the body is no such statement, its names do not resolve,
+    /// a name of the block may read a variable where the statement reads a
+    /// column, or a guard of the block reads a subquery or may evaluate
+    /// otherwise for a caller than for the owner, so that whether it raises
+    /// tells what the owner reads.
     fn read_body<T>(
         &self,
         function: &'a DB::Function,
@@ -625,37 +642,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 None => return Ok(None),
             },
         };
-        let (statement, write) = match statement {
-            query @ Statement::Query(_) => (query, None),
-            Statement::Delete(delete) => {
-                let Some((query, target)) = deleted_rows(delete) else {
-                    return Ok(None);
-                };
-                if self.triggered(&target, path.as_deref(), None)?.is_none() {
-                    return Ok(None);
-                }
-                (Statement::Query(Box::new(query)), Some(Write::Delete))
-            }
-            Statement::Update(update) => {
-                let Some(mut updated) = Updated::new(update) else {
-                    return Ok(None);
-                };
-                let Some(maintained) =
-                    self.triggered(&updated.target, path.as_deref(), Some(updated.set()))?
-                else {
-                    return Ok(None);
-                };
-                for maintenance in maintained {
-                    if updated.maintain(maintenance).is_none() {
-                        return Ok(None);
-                    }
-                }
-                let Some((query, write)) = updated.rows() else {
-                    return Ok(None);
-                };
-                (Statement::Query(Box::new(query)), Some(write))
-            }
-            _ => return Ok(None),
+        let Some((statement, write, insertion)) = self.queried(statement, path.as_deref())? else {
+            return Ok(None);
         };
         let scope = ExpressionScope::FunctionBody(function);
         let (Statement::Query(query), Ok(context)) = (
@@ -677,6 +665,10 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             }
             None => None,
         };
+        let inserted = insertion.map(|mut insertion| {
+            insertion.rows = selects(&query.body);
+            insertion
+        });
         let lineage = lineage(query);
         let mut reads = Reads {
             body: Body {
@@ -689,8 +681,70 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             items: WithScopes::default(),
             lineage: &lineage,
             written,
+            inserted,
         };
         walk(&mut reads, query).map(Some)
+    }
+
+    /// `statement`, a query as it stands, a `DELETE` as [`deleted_rows`]
+    /// gives it, an `UPDATE` as [`Updated::rows`] and an `INSERT` as
+    /// [`Inserted::rows`] do, with how it writes the rows its query yields,
+    /// its names resolving on `path`. `None` for another statement or a
+    /// write whose triggers may act otherwise for a caller.
+    fn queried(
+        &self,
+        statement: Statement,
+        path: Option<&[(Cow<'_, str>, bool)]>,
+    ) -> Result<Option<Queried<'a, DB>>, LookupError> {
+        Ok(Some(match statement {
+            query @ Statement::Query(_) => (query, None, None),
+            Statement::Delete(delete) => {
+                let Some((query, target)) = deleted_rows(delete) else {
+                    return Ok(None);
+                };
+                if self.triggered(&target, path, Fired::Delete)?.is_none() {
+                    return Ok(None);
+                }
+                (Statement::Query(Box::new(query)), Some(Write::Delete), None)
+            }
+            Statement::Update(update) => {
+                let Some(mut updated) = Updated::new(update) else {
+                    return Ok(None);
+                };
+                let Some(maintained) =
+                    self.triggered(&updated.target, path, Fired::Update(updated.set()))?
+                else {
+                    return Ok(None);
+                };
+                for maintenance in &maintained {
+                    if updated.maintain(maintenance).is_none() {
+                        return Ok(None);
+                    }
+                }
+                let Some((query, write)) = updated.rows() else {
+                    return Ok(None);
+                };
+                (Statement::Query(Box::new(query)), Some(write), None)
+            }
+            Statement::Insert(insert) => {
+                let Some(inserted) = Inserted::new(insert) else {
+                    return Ok(None);
+                };
+                let (Some(table), Some(maintained)) = (
+                    stored_table(self.database, &inserted.target, path)?,
+                    self.triggered(&inserted.target, path, Fired::Insert)?,
+                ) else {
+                    return Ok(None);
+                };
+                let Some((query, insertion)) =
+                    inserted.rows(table, self.filled(table)?, &maintained)
+                else {
+                    return Ok(None);
+                };
+                (Statement::Query(Box::new(query)), None, Some(insertion))
+            }
+            _ => return Ok(None),
+        }))
     }
 
     /// The values each input parameter of `function` may hold, in the order
@@ -775,19 +829,18 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         Ok(true)
     }
 
-    /// The `BEFORE ROW` maintenance triggers, as `sql-traits` reads one, a
-    /// write of the table `name` names runs, in the order they fire, when
-    /// every other trigger that may fire on it is an `AFTER` trigger whose
-    /// function runs as its owner, as it does called from the caller too.
-    /// `set` holds what an `UPDATE` sets each column to, `None` for a
-    /// `DELETE`. `None` when `name` names no table or another trigger may
-    /// fire, since a trigger runs as the owner inside the function and one
-    /// running `BEFORE` may change the row past the caller's policies.
+    /// The `BEFORE ROW` maintenance triggers, as `sql-traits` reads one, the
+    /// write `fired` of the table `name` names runs, in the order they fire,
+    /// when every other trigger that may fire on it is an `AFTER` trigger
+    /// whose function runs as its owner, as it does called from the caller
+    /// too. `None` when `name` names no table or another trigger may fire,
+    /// since a trigger runs as the owner inside the function and one running
+    /// `BEFORE` may change the row past the caller's policies.
     fn triggered(
         &self,
         name: &ObjectName,
         path: Option<&[(Cow<'_, str>, bool)]>,
-        set: Option<&[(String, Expr)]>,
+        fired: Fired<'_>,
     ) -> Result<Option<Vec<Maintenance>>, LookupError> {
         let database = self.database;
         let Some(table) = stored_table(database, name, path)? else {
@@ -798,7 +851,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         let mut maintained = Vec::new();
         for trigger in triggers {
             if trigger.enablement(database)? == TriggerEnablement::Disabled
-                || !trigger.events().iter().any(|event| fires_on(event, set))
+                || !trigger.events().iter().any(|event| fires_on(event, fired))
             {
                 continue;
             }
@@ -815,7 +868,9 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                         function.security_mode() == FunctionSecurity::Definer
                     }) => {}
                 Some(TriggerPeriod::Before)
-                    if row && set.is_some() && trigger.is_maintenance_trigger(database)? =>
+                    if row
+                        && !matches!(fired, Fired::Delete)
+                        && trigger.is_maintenance_trigger(database)? =>
                 {
                     maintained.push(Maintenance {
                         assignments: trigger
@@ -858,6 +913,54 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             }
         }
         Ok(true)
+    }
+
+    /// Whether every caller holds `INSERT` on each column of `table` whose
+    /// stored name `named` holds.
+    fn insertable_by_every_caller(
+        &self,
+        table: &DB::Table,
+        named: &[String],
+    ) -> Result<bool, LookupError> {
+        for caller in &self.callers {
+            let held = table.privileges(acting(*caller), self.database)?;
+            for name in named {
+                let Some(column) = column_named(self.database, table, name)? else {
+                    return Ok(false);
+                };
+                if !held.insert.on_column(column) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// What an `INSERT` into `table` not naming a column writes it, for each
+    /// column by its stored name.
+    fn filled(&self, table: &DB::Table) -> Result<Vec<(String, Fill)>, LookupError> {
+        let database = self.database;
+        let mut filled = Vec::new();
+        for column in table.columns(database)? {
+            let fill = if column.identity_generation(database).is_some()
+                || column.is_generated(database)
+            {
+                Fill::Opaque
+            } else {
+                match column.default_expression() {
+                    None => Fill::Value(Box::new(Expr::Value(Value::Null.into()))),
+                    Some(default)
+                        if reads_alike_anywhere(database, default)
+                            && !calls_volatile(database, default) =>
+                    {
+                        Fill::Value(Box::new(default.clone()))
+                    }
+                    Some(_) => Fill::Otherwise,
+                }
+            };
+            filled.push((column.stored_column_name().into_owned(), fill));
+        }
+        Ok(filled)
     }
 
     /// The rows `function` draws the values it returns from, read once.
@@ -1053,7 +1156,56 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
         statement: RowStatement,
         assigned: &[(String, Expr)],
     ) -> Result<bool, LookupError> {
+        Ok(self.gates_admit(table, filter, statement, assigned, &[])?
+            && self.confinement.selectable_by_every_caller(table)?)
+    }
+
+    /// Whether every caller's policies admit inserting into `table` the row
+    /// `row` writes, each column by its stored name, its values stating
+    /// columns of the row `filter` tests as [`Self::admits_every_caller`]
+    /// reads them, and the columns of `opaque` holding values the rule does
+    /// not follow. One that `returning` reads back every caller has to be
+    /// allowed to select too.
+    fn admits_inserted(
+        &self,
+        table: &DB::Table,
+        filter: &Expr,
+        returning: bool,
+        row: &[(String, Expr)],
+        opaque: &[String],
+    ) -> Result<bool, LookupError> {
+        Ok(self.gates_admit(
+            table,
+            filter,
+            RowStatement::Insert { returning },
+            row,
+            opaque,
+        )? && (!returning || self.confinement.selectable_by_every_caller(table)?))
+    }
+
+    /// Whether the gates of every caller's policies for `statement` on
+    /// `table` admit the rows `filter` admits, a condition on the written
+    /// row tested with each column of `assigned` set to its value and none
+    /// naming a column of `opaque`. A conjunct comparing a written value
+    /// with itself holds as [`left_to_prove`] reads it, the value not `NULL`
+    /// where its column is `NOT NULL`.
+    fn gates_admit(
+        &self,
+        table: &DB::Table,
+        filter: &Expr,
+        statement: RowStatement,
+        assigned: &[(String, Expr)],
+        opaque: &[String],
+    ) -> Result<bool, LookupError> {
         let database = self.confinement.database;
+        let mut written = Vec::with_capacity(assigned.len());
+        for (column, value) in assigned {
+            let refused = match column_named(database, table, column)? {
+                Some(column) => !column.is_nullable(database)?,
+                None => false,
+            };
+            written.push((value, refused));
+        }
         for caller in &self.confinement.callers {
             let security = match table.row_security(statement, acting(*caller), database) {
                 Ok(security) => security,
@@ -1062,16 +1214,22 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
             };
             let admitted = match security.gates() {
                 Some(gates) => {
-                    let (existing, written): (Vec<_>, Vec<_>) = gates
+                    let (existing, rewritten): (Vec<_>, Vec<_>) = gates
                         .iter()
                         .partition(|gate| gate.row() == RowVersion::Existing);
                     admits(database, table, existing, self, |condition| {
                         clause_implies(self, filter, condition, &[])
-                    })? && admits(database, table, written, self, |condition| {
+                    })? && admits(database, table, rewritten, self, |condition| {
+                        if names_any(condition.original, opaque) {
+                            return Ok(false);
+                        }
                         match new_row(condition.original, assigned) {
-                            Some(new) => {
-                                clause_implies(self, filter, &Condition::new(self, &new), &[])
-                            }
+                            Some(new) => match left_to_prove(&new, &written) {
+                                Some(left) => {
+                                    clause_implies(self, filter, &Condition::new(self, &left), &[])
+                                }
+                                None => Ok(true),
+                            },
                             None => Ok(false),
                         }
                     })?
@@ -1082,7 +1240,7 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
                 return Ok(false);
             }
         }
-        self.confinement.selectable_by_every_caller(table)
+        Ok(true)
     }
 }
 
@@ -1493,6 +1651,9 @@ struct Reads<'c, 'q, 'a, DB: DatabaseLike> {
     /// The relation the body writes and how, read as a `SELECT` of the rows
     /// it writes, which each caller has to be allowed to write alike.
     written: Option<(*const TableFactor, Write)>,
+    /// The `INSERT` the body runs, read as the `SELECT`s of the rows it
+    /// inserts, which each caller has to be allowed to insert alike.
+    inserted: Option<Insertion<'a, DB>>,
 }
 
 /// How a body writes the rows of the relation it reads them from.
@@ -1598,11 +1759,20 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         owners: &[&Query],
     ) -> Result<bool, LookupError> {
         let filters = self.filters(select, held, owners)?;
+        let inserted = self
+            .inserted
+            .as_ref()
+            .filter(|insertion| insertion.rows.iter().any(|row| ptr::eq(*row, select)));
+        if let Some(insertion) = inserted
+            && let Some(admitted) = self.admits_inserted_alone(insertion, select)?
+        {
+            return Ok(admitted);
+        }
         for from in &select.from {
             for (position, relation) in relations(from).enumerate() {
                 let table = match self.read(relation)? {
-                    Read::Open => continue,
-                    Read::Unconfined => return Ok(false),
+                    Read::Open if inserted.is_none() => continue,
+                    Read::Open | Read::Unconfined => return Ok(false),
                     Read::Protected(table) => table,
                 };
                 let Stated {
@@ -1651,13 +1821,9 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                                     &[],
                                 )?,
                                 Write::Update { columns, .. } => {
-                                    match self.assigned(
-                                        select,
-                                        columns,
-                                        &resolver,
-                                        relation,
-                                        &equalities,
-                                    )? {
+                                    match self.assigned(select, columns, |reference| {
+                                        term(&resolver, reference, relation, &equalities)
+                                    })? {
                                         Some(assigned) => self.body.admits_every_caller(
                                             table,
                                             &filter,
@@ -1674,6 +1840,15 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                             .admits_every_caller(table, &filter, RowStatement::Select, &[])?
                     }
                 };
+                let admitted = admitted
+                    && match inserted {
+                        Some(insertion) => {
+                            self.admits_inserted(insertion, select, &filter, |reference| {
+                                term(&resolver, reference, relation, &equalities)
+                            })?
+                        }
+                        None => true,
+                    };
                 if !admitted {
                     return Ok(false);
                 }
@@ -1682,18 +1857,69 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         Ok(true)
     }
 
-    /// The value each column of `columns` an `UPDATE` sets takes in the
-    /// written row of `relation`, the expression `select` projects at its
-    /// position over the stored names of the row's columns, or `None` when
-    /// one may evaluate otherwise for a caller than for the owner or reads
-    /// another relation.
+    /// Whether every caller may insert, alike, the rows `select` projects as
+    /// `insertion` writes them, when `select` reads no relation, or `false`
+    /// when it reads more than one. `None` when it reads one, whose filters
+    /// the rows meet.
+    fn admits_inserted_alone(
+        &self,
+        insertion: &Insertion<'a, DB>,
+        select: &Select,
+    ) -> Result<Option<bool>, LookupError> {
+        match select.from.as_slice() {
+            [] => {
+                self.admits_inserted(insertion, select, &conjunction(Vec::new()), |reference| {
+                    match self.context.reference(reference).ok()?? {
+                        (ColumnDefinition::Parameter { ordinal, .. }, _) => {
+                            Some(Term::Parameter(ordinal))
+                        }
+                        _ => None,
+                    }
+                })
+                .map(Some)
+            }
+            [from] if from.joins.is_empty() => Ok(None),
+            _ => Ok(Some(false)),
+        }
+    }
+
+    /// Whether every caller may insert, alike, the rows `select` projects as
+    /// `insertion` writes them. Those rows meet `filter`, stated over the
+    /// stored names of the columns of the row they are drawn from, and
+    /// `rename` resolves each column and parameter they read.
+    fn admits_inserted(
+        &self,
+        insertion: &Insertion<'a, DB>,
+        select: &Select,
+        filter: &Expr,
+        rename: impl Fn(&Expr) -> Option<Term>,
+    ) -> Result<bool, LookupError> {
+        let Some(mut row) = self.assigned(select, &insertion.columns, rename)? else {
+            return Ok(false);
+        };
+        row.extend(insertion.defaults.iter().cloned());
+        let confinement = self.body.confinement;
+        Ok(confinement
+            .insertable_by_every_caller(insertion.table, &insertion.columns[..insertion.named])?
+            && self.body.admits_inserted(
+                insertion.table,
+                filter,
+                insertion.returning,
+                &row,
+                &insertion.opaque,
+            )?)
+    }
+
+    /// The value each column of `columns` a write writes takes, the
+    /// expression `select` projects at its position, with each column and
+    /// parameter it reads named as `rename` resolves it, or `None` when one
+    /// may evaluate otherwise for a caller than for the owner or `rename`
+    /// resolves none for a name it reads.
     fn assigned(
         &self,
         select: &Select,
         columns: &[String],
-        resolver: &Resolver<'_, 'q, 'a, DB>,
-        relation: &TableFactor,
-        equalities: &Equalities<'_>,
+        rename: impl Fn(&Expr) -> Option<Term>,
     ) -> Result<Option<Vec<(String, Expr)>>, LookupError> {
         let mut assigned = Vec::with_capacity(columns.len());
         for (column, item) in columns.iter().zip(&select.projection) {
@@ -1703,7 +1929,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             };
             let Some(value) = renamed(
                 value,
-                |reference| term(resolver, reference, relation, equalities),
+                &rename,
                 |name| self.subquery_relation(name),
                 |call| helper_value(self.body.confinement, call),
             ) else {
@@ -3572,12 +3798,22 @@ fn deleted_rows(delete: Delete) -> Option<(Query, ObjectName)> {
     ))
 }
 
-/// Whether a trigger firing on `event` fires on a write setting the columns
-/// `set` holds, a `DELETE` when `None`.
-fn fires_on(event: &TriggerEvent, set: Option<&[(String, Expr)]>) -> bool {
-    match (event, set) {
-        (TriggerEvent::Delete, None) => true,
-        (TriggerEvent::Update(columns), Some(set)) => {
+/// A write of a table, as the triggers on it fire on it.
+#[derive(Clone, Copy)]
+enum Fired<'s> {
+    /// A `DELETE`.
+    Delete,
+    /// An `UPDATE` setting each column, by its stored name, to its value.
+    Update(&'s [(String, Expr)]),
+    /// An `INSERT`.
+    Insert,
+}
+
+/// Whether a trigger firing on `event` fires on the write `fired`.
+fn fires_on(event: &TriggerEvent, fired: Fired<'_>) -> bool {
+    match (event, fired) {
+        (TriggerEvent::Delete, Fired::Delete) | (TriggerEvent::Insert, Fired::Insert) => true,
+        (TriggerEvent::Update(columns), Fired::Update(set)) => {
             columns.is_empty()
                 || columns.iter().any(|column| {
                     let name = normalize_identifier(&column.value, column.quote_style.is_some());
@@ -3675,28 +3911,13 @@ impl Updated {
     /// Writes what `maintenance` assigns, when it fires, over what the
     /// update writes before it runs, or `None` when what it assigns or the
     /// condition it fires under reads the row in a nested query.
-    fn maintain(&mut self, maintenance: Maintenance) -> Option<()> {
-        let condition = match &maintenance.condition {
-            Some(condition) => Some(self.row(condition)?),
-            None => None,
-        };
-        let mut folded = Vec::with_capacity(maintenance.assignments.len());
-        for (column, value) in maintenance.assignments {
-            let mut value = self.row(&value)?;
-            if let Some(condition) = &condition {
-                value = Expr::Case {
-                    case_token: AttachedToken::empty(),
-                    end_token: AttachedToken::empty(),
-                    operand: None,
-                    conditions: vec![CaseWhen {
-                        condition: condition.clone(),
-                        result: value,
-                    }],
-                    else_result: Some(Box::new(self.written(&column))),
-                };
-            }
-            folded.push((column, value));
-        }
+    fn maintain(&mut self, maintenance: &Maintenance) -> Option<()> {
+        let folded = maintained(maintenance, |record, field| {
+            Some(match record {
+                Record::Old => self.column(field),
+                Record::New => self.written(field),
+            })
+        })?;
         for (column, value) in folded {
             match self.assigned.iter_mut().find(|(held, _)| *held == column) {
                 Some((_, held)) => *held = value,
@@ -3704,27 +3925,6 @@ impl Updated {
             }
         }
         Some(())
-    }
-
-    /// `expression` of a trigger on the updated table, each field of `OLD`
-    /// read as the column of the row before the update and each of `NEW` as
-    /// what the update writes it, or `None` when a query nested in it reads
-    /// either.
-    fn row(&self, expression: &Expr) -> Option<Expr> {
-        replaced(expression, |reference| {
-            let Expr::CompoundIdentifier(parts) = reference else {
-                return None;
-            };
-            let [record, field] = parts.as_slice() else {
-                return None;
-            };
-            let field = normalize_identifier(&field.value, field.quote_style.is_some());
-            match normalize_identifier(&record.value, record.quote_style.is_some()).as_ref() {
-                "old" => Some(self.column(&field)),
-                "new" => Some(self.written(&field)),
-                _ => None,
-            }
-        })
     }
 
     /// What the update writes the column whose stored name is `column`.
@@ -3782,6 +3982,442 @@ impl Updated {
             Write::Update { columns, set },
         ))
     }
+}
+
+/// A record a trigger reads the written row through.
+#[derive(Clone, Copy)]
+enum Record {
+    /// `OLD`, the row before the write.
+    Old,
+    /// `NEW`, the row the write writes.
+    New,
+}
+
+/// What `maintenance` assigns each column, by its stored name, when it
+/// fires, each field of `OLD` and `NEW` it reads read as `field` gives it by
+/// the field's stored name. `None` when `field` gives none for one, or a
+/// query nested in an assignment or in the condition reads either record.
+fn maintained(
+    maintenance: &Maintenance,
+    field: impl Fn(Record, &str) -> Option<Expr>,
+) -> Option<Vec<(String, Expr)>> {
+    let unread = Cell::new(false);
+    let row = |expression: &Expr| {
+        let row = replaced(expression, |reference| {
+            let Expr::CompoundIdentifier(parts) = reference else {
+                return None;
+            };
+            let [record, name] = parts.as_slice() else {
+                return None;
+            };
+            let record =
+                match normalize_identifier(&record.value, record.quote_style.is_some()).as_ref() {
+                    "old" => Record::Old,
+                    "new" => Record::New,
+                    _ => return None,
+                };
+            let read = field(
+                record,
+                &normalize_identifier(&name.value, name.quote_style.is_some()),
+            );
+            unread.set(unread.get() || read.is_none());
+            read
+        });
+        row.filter(|_| !unread.get())
+    };
+    let condition = match &maintenance.condition {
+        Some(condition) => Some(row(condition)?),
+        None => None,
+    };
+    let mut folded = Vec::with_capacity(maintenance.assignments.len());
+    for (column, value) in &maintenance.assignments {
+        let mut value = row(value)?;
+        if let Some(condition) = &condition {
+            value = Expr::Case {
+                case_token: AttachedToken::empty(),
+                end_token: AttachedToken::empty(),
+                operand: None,
+                conditions: vec![CaseWhen {
+                    condition: condition.clone(),
+                    result: value,
+                }],
+                else_result: Some(Box::new(field(Record::New, column)?)),
+            };
+        }
+        folded.push((column.clone(), value));
+    }
+    Some(folded)
+}
+
+/// What an `INSERT` writes a column it does not name.
+enum Fill {
+    /// Its default, or `NULL` without one, reading alike anywhere.
+    Value(Box<Expr>),
+    /// The value of an identity or generated column, which the rule does
+    /// not follow.
+    Opaque,
+    /// A default that may evaluate otherwise for a caller than for the
+    /// owner.
+    Otherwise,
+}
+
+/// An `INSERT` into one table naming each column it writes.
+struct Inserted {
+    /// The name of the table it inserts into.
+    target: ObjectName,
+    /// The name its `RETURNING` qualifies the columns of that table by.
+    visible: Ident,
+    /// The stored name of each column it names.
+    named: Vec<String>,
+    /// The values each row it inserts writes the named columns with.
+    rows: Vec<Vec<Expr>>,
+    /// The query of the one `SELECT` yielding the rows, whose projection
+    /// `rows` holds, or `None` for the rows of a `VALUES` list.
+    source: Option<Box<Query>>,
+    returning: Vec<SelectItem>,
+}
+
+impl Inserted {
+    /// `insert`, when it inserts into one table the rows of a `VALUES` list
+    /// or of one `SELECT`, naming each column it writes by its name, with no
+    /// `ON CONFLICT`.
+    fn new(insert: Insert) -> Option<Self> {
+        let Insert {
+            or: None,
+            ignore: false,
+            table: TableObject::TableName(target),
+            table_alias,
+            columns,
+            by_name: false,
+            overwrite: false,
+            source: Some(mut source),
+            assignments,
+            partitioned: None,
+            after_columns,
+            overriding: None,
+            on: None,
+            returning,
+            output: None,
+            replace_into: false,
+            priority: None,
+            insert_alias: None,
+            settings: None,
+            format_clause: None,
+            multi_table_insert_type: None,
+            multi_table_into_clauses,
+            multi_table_when_clauses,
+            multi_table_else_clause: None,
+            ..
+        } = insert
+        else {
+            return None;
+        };
+        if columns.is_empty()
+            || !assignments.is_empty()
+            || !after_columns.is_empty()
+            || !multi_table_into_clauses.is_empty()
+            || !multi_table_when_clauses.is_empty()
+        {
+            return None;
+        }
+        let visible = match table_alias {
+            Some(alias) => alias.alias,
+            None => target.0.last()?.as_ident()?.clone(),
+        };
+        let named = columns
+            .iter()
+            .map(|column| match column.0.as_slice() {
+                [ObjectNamePart::Identifier(column)] => Some(
+                    normalize_identifier(&column.value, column.quote_style.is_some()).into_owned(),
+                ),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let plain = source.with.is_none()
+            && source.order_by.is_none()
+            && source.limit_clause.is_none()
+            && source.fetch.is_none()
+            && source.locks.is_empty();
+        let (rows, source) = match source.body.as_mut() {
+            SetExpr::Values(values) if plain => (
+                mem::take(&mut values.rows)
+                    .into_iter()
+                    .map(|row| row.content)
+                    .collect(),
+                None,
+            ),
+            SetExpr::Select(select) => {
+                let values = mem::take(&mut select.projection)
+                    .into_iter()
+                    .map(|item| match item {
+                        SelectItem::UnnamedExpr(value)
+                        | SelectItem::ExprWithAlias { expr: value, .. } => Some(value),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                (vec![values], Some(source))
+            }
+            _ => return None,
+        };
+        Some(Self {
+            target,
+            visible,
+            named,
+            rows,
+            source,
+            returning: returning.unwrap_or_default(),
+        })
+    }
+
+    /// `SELECT value…, returned…` of the rows the insert writes into
+    /// `table`, those of its `SELECT` or the `UNION ALL` of one for each row
+    /// of its `VALUES`, projecting the value it writes each column, with
+    /// what its triggers `maintained` assign folded in, then what
+    /// `RETURNING` returns, with how it writes them. `filled` gives what it
+    /// writes the columns it does not name. A column `RETURNING` names reads
+    /// as the value it is written, `NULL` for an identity or generated one,
+    /// and a wildcard as every column. `None` when it names a column `table`
+    /// lacks or one column twice, leaves a column to a default that may
+    /// evaluate otherwise, a trigger reads `OLD` or a column of an identity
+    /// or generated value, or a query nested in `RETURNING` names a column.
+    fn rows<'a, DB: DatabaseLike>(
+        self,
+        table: &'a DB::Table,
+        filled: Vec<(String, Fill)>,
+        maintained_by: &[Maintenance],
+    ) -> Option<(Query, Insertion<'a, DB>)> {
+        let Self {
+            visible,
+            named,
+            rows,
+            source,
+            returning,
+            ..
+        } = self;
+        let order: Vec<String> = filled.iter().map(|(column, _)| column.clone()).collect();
+        for (index, column) in named.iter().enumerate() {
+            if !order.contains(column) || named[..index].contains(column) {
+                return None;
+            }
+        }
+        let mut defaults = Vec::new();
+        let mut opaque = Vec::new();
+        for (column, fill) in filled {
+            if named.contains(&column) {
+                continue;
+            }
+            match fill {
+                Fill::Value(value) => defaults.push((column, *value)),
+                Fill::Opaque => opaque.push(column),
+                Fill::Otherwise => return None,
+            }
+        }
+        let mut written = Vec::with_capacity(rows.len());
+        for values in rows {
+            if values.len() != named.len() {
+                return None;
+            }
+            let row = named.iter().cloned().zip(values).collect();
+            written.push(maintained_row(row, &defaults, maintained_by)?);
+        }
+        let columns: Vec<String> = written
+            .first()?
+            .iter()
+            .map(|(column, _)| column.clone())
+            .collect();
+        defaults.retain(|(column, _)| !columns.contains(column));
+        opaque.retain(|column| !columns.contains(column));
+        let mut selects = Vec::with_capacity(written.len());
+        for row in written {
+            let full: Vec<(String, Expr)> = row
+                .iter()
+                .chain(&defaults)
+                .cloned()
+                .chain(
+                    opaque
+                        .iter()
+                        .map(|column| (column.clone(), Expr::Value(Value::Null.into()))),
+                )
+                .collect();
+            let mut projection: Vec<SelectItem> = row
+                .into_iter()
+                .map(|(_, value)| SelectItem::UnnamedExpr(value))
+                .collect();
+            projection.extend(returned_items(&returning, &full, &visible, &order)?);
+            selects.push(projection);
+        }
+        let query = inserted_query(source, selects)?;
+        Some((
+            query,
+            Insertion {
+                rows: Vec::new(),
+                table,
+                columns,
+                named: named.len(),
+                defaults,
+                opaque,
+                returning: !returning.is_empty(),
+            },
+        ))
+    }
+}
+
+/// `row`, the value an insert writes each column it names, with what each
+/// trigger of `maintained_by` assigns folded in, `NEW` reading the row as
+/// written so far and each other column as `defaults` gives it. `None` when
+/// a trigger reads `OLD`, a column `defaults` lacks, or the row in a nested
+/// query.
+fn maintained_row(
+    mut row: Vec<(String, Expr)>,
+    defaults: &[(String, Expr)],
+    maintained_by: &[Maintenance],
+) -> Option<Vec<(String, Expr)>> {
+    for maintenance in maintained_by {
+        let folded = maintained(maintenance, |record, field| match record {
+            Record::Old => None,
+            Record::New => row
+                .iter()
+                .chain(defaults)
+                .find(|(column, _)| column == field)
+                .map(|(_, value)| Expr::Nested(Box::new(value.clone()))),
+        })?;
+        for (column, value) in folded {
+            match row.iter_mut().find(|(held, _)| *held == column) {
+                Some((_, held)) => *held = value,
+                None => row.push((column, value)),
+            }
+        }
+    }
+    Some(row)
+}
+
+/// What `returning` returns of a row an insert writes each column of as
+/// `full` gives it, each column a `RETURNING` item names, bare or qualified
+/// by `visible`, read as its value, and a wildcard as every column in the
+/// table's `order`. `None` when a query nested in an item names a column or
+/// an item is another wildcard.
+fn returned_items(
+    returning: &[SelectItem],
+    full: &[(String, Expr)],
+    visible: &Ident,
+    order: &[String],
+) -> Option<Vec<SelectItem>> {
+    let every = || {
+        order
+            .iter()
+            .filter_map(|column| full.iter().find(|(held, _)| held == column))
+            .map(|(_, value)| SelectItem::UnnamedExpr(Expr::Nested(Box::new(value.clone()))))
+    };
+    let mut returned = Vec::with_capacity(returning.len());
+    for item in returning {
+        match item {
+            SelectItem::UnnamedExpr(expression) => returned.push(SelectItem::UnnamedExpr(
+                with_assigned(expression, full, Some(visible))?,
+            )),
+            SelectItem::ExprWithAlias { expr, alias } => {
+                returned.push(SelectItem::ExprWithAlias {
+                    expr: with_assigned(expr, full, Some(visible))?,
+                    alias: alias.clone(),
+                });
+            }
+            SelectItem::Wildcard(_) => returned.extend(every()),
+            SelectItem::QualifiedWildcard(
+                SelectItemQualifiedWildcardKind::ObjectName(ObjectName(parts)),
+                _,
+            ) if matches!(parts.as_slice(), [ObjectNamePart::Identifier(named)] if same_name(named, visible)) =>
+            {
+                returned.extend(every());
+            }
+            _ => return None,
+        }
+    }
+    Some(returned)
+}
+
+/// The query of the rows an insert writes, its `source` query projecting
+/// the one projection of `selects`, or the `UNION ALL` of a `SELECT` of each
+/// of them for the rows of a `VALUES` list.
+fn inserted_query(source: Option<Box<Query>>, selects: Vec<Vec<SelectItem>>) -> Option<Query> {
+    if let Some(mut source) = source {
+        let [projection] = <[_; 1]>::try_from(selects).ok()?;
+        let SetExpr::Select(select) = source.body.as_mut() else {
+            return None;
+        };
+        select.projection = projection;
+        return Some(*source);
+    }
+    let mut bodies = selects
+        .into_iter()
+        .map(|projection| rows_query(projection, Vec::new(), None));
+    let mut query = bodies.next()?;
+    for row in bodies {
+        query.body = Box::new(SetExpr::SetOperation {
+            op: SetOperator::Union,
+            set_quantifier: SetQuantifier::All,
+            left: query.body,
+            right: row.body,
+        });
+    }
+    Some(query)
+}
+
+/// A body's statement read as a query, with how it writes the rows of the
+/// relation the query reads them from, or the `INSERT` of the rows it yields.
+type Queried<'a, DB> = (Statement, Option<Write>, Option<Insertion<'a, DB>>);
+
+/// An `INSERT` a body runs, read as the `SELECT`s of the rows it inserts.
+struct Insertion<'a, DB: DatabaseLike> {
+    /// The `SELECT` of each row it inserts, or of all of them.
+    rows: Vec<*const Select>,
+    /// The table it inserts into.
+    table: &'a DB::Table,
+    /// Each column it writes, by its stored name, as the expression each
+    /// `SELECT` projects at the same position. The first `named` are those
+    /// it names, the others those its triggers assign.
+    columns: Vec<String>,
+    named: usize,
+    /// Each other column, by its stored name, with its default or `NULL`.
+    defaults: Vec<(String, Expr)>,
+    /// The other columns, of an identity or generated value.
+    opaque: Vec<String>,
+    /// Whether it has a `RETURNING`.
+    returning: bool,
+}
+
+/// The `SELECT`s of `body` outside nested queries, through its set
+/// operations.
+fn selects(body: &SetExpr) -> Vec<*const Select> {
+    match body {
+        SetExpr::Select(select) => vec![ptr::from_ref(select.as_ref())],
+        SetExpr::SetOperation { left, right, .. } => {
+            let mut found = selects(left);
+            found.extend(selects(right));
+            found
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Whether `condition` names, bare or qualified, a column whose stored name
+/// `columns` holds.
+fn names_any(condition: &Expr, columns: &[String]) -> bool {
+    !columns.is_empty()
+        && visit_expressions(condition, |expression| {
+            let name = match expression {
+                Expr::Identifier(name) => Some(name),
+                Expr::CompoundIdentifier(parts) => parts.last(),
+                _ => None,
+            };
+            if name.is_some_and(|name| {
+                let name = normalize_identifier(&name.value, name.quote_style.is_some());
+                columns.iter().any(|column| *column == name)
+            }) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .is_break()
 }
 
 /// `SELECT projection FROM from WHERE selection`, projecting `NULL` when
@@ -4322,6 +4958,25 @@ fn reached<'a, DB: DatabaseLike>(
         .functions_reached_by(call, IdentifierCase::Folded)
         .ok()
         .map(Iterator::collect)
+}
+
+/// Whether `value` calls a function that may be `VOLATILE`, whose result a
+/// policy evaluating the call again need not see.
+fn calls_volatile<DB: DatabaseLike>(database: &DB, value: &Expr) -> bool {
+    visit_expressions(value, |expression| match expression {
+        Expr::Function(call)
+            if !reached(database, call).is_some_and(|functions| {
+                !functions.is_empty()
+                    && functions
+                        .iter()
+                        .all(|function| function.volatility() != FunctionBehavior::Volatile)
+            }) =>
+        {
+            ControlFlow::Break(())
+        }
+        _ => ControlFlow::Continue(()),
+    })
+    .is_break()
 }
 
 /// Whether every name `value` holds means alike wherever it is written: it
