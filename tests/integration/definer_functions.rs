@@ -1298,6 +1298,303 @@ fn a_definer_writing_a_table_whose_triggers_may_run_otherwise_is_reported() {
     }
 }
 
+/// The definers the rule reports among `definers` over a `resources` table
+/// with row-level security whose `id` is an identity, whose `owner` is
+/// `NOT NULL` and whose `hidden` defaults to `FALSE`, `grants` granted on it
+/// to the caller `app` under `policies`.
+fn inserted_exposed(grants: &str, policies: &str, definers: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE TABLE resources (id INT GENERATED ALWAYS AS IDENTITY, owner TEXT NOT NULL,
+               hidden BOOLEAN NOT NULL DEFAULT FALSE, note TEXT);
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             GRANT {grants} ON resources TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             {policies}
+             {definers}"
+        ),
+    )
+}
+
+/// An `INSERT` of a row the caller owns.
+const INSERT_OWN: &str =
+    "INSERT INTO public.resources (owner) VALUES (current_setting('app.user_id', true))";
+
+#[test]
+fn a_definer_inserting_rows_the_caller_may_insert_alike_is_not_reported() {
+    let definers = [
+        writing_definer("insert_own()", INSERT_OWN),
+        writing_definer(
+            "insert_note(p_note TEXT)",
+            "INSERT INTO public.resources AS resource (owner, hidden, note)
+             VALUES (current_setting('app.user_id', true), TRUE, p_note)",
+        ),
+        returning_definer(
+            "insert_returning()",
+            "SETOF INT",
+            &format!("{INSERT_OWN} RETURNING id"),
+        ),
+        returning_definer(
+            "insert_rows()",
+            "SETOF public.resources",
+            &format!("{INSERT_OWN} RETURNING *"),
+        ),
+        returning_definer(
+            "insert_aliased()",
+            "SETOF public.resources",
+            "INSERT INTO public.resources AS resource (owner)
+             VALUES (current_setting('app.user_id', true)) RETURNING resource.*",
+        ),
+        returning_definer(
+            "insert_named()",
+            "SETOF BOOLEAN",
+            &format!("{INSERT_OWN} RETURNING hidden AS shown"),
+        ),
+        writing_definer(
+            "insert_pair()",
+            "INSERT INTO public.resources (owner)
+             VALUES (current_setting('app.user_id', true)), (current_setting('app.user_id', true))",
+        ),
+        writing_definer(
+            "copy_own()",
+            "INSERT INTO public.resources (owner, hidden, note)
+             SELECT resource.owner, resource.hidden, resource.note FROM public.resources resource
+             WHERE resource.owner = current_setting('app.user_id', true)",
+        ),
+        format!(
+            "CREATE FUNCTION guarded_insert() RETURNS VOID LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+               SET search_path = pg_catalog, pg_temp AS $$
+             DECLARE {SIGNED_IN} BEGIN
+               IF uid IS NULL THEN RAISE EXCEPTION 'not signed in'; END IF;
+               INSERT INTO public.resources (owner) VALUES (uid);
+             END $$;"
+        ),
+    ]
+    .concat();
+    let grants = "SELECT, INSERT (owner, hidden, note)";
+    assert_eq!(
+        inserted_exposed(grants, OWN_ROWS, &definers),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        inserted_exposed(
+            grants,
+            "CREATE POLICY own_read ON resources FOR SELECT TO app
+               USING (owner = current_setting('app.user_id', true));
+             CREATE POLICY own_insert ON resources FOR INSERT TO app
+               WITH CHECK (owner = current_setting('app.user_id', true));",
+            &definers,
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        inserted_exposed(
+            "SELECT, INSERT (owner)",
+            "CREATE POLICY own_read ON resources FOR SELECT TO app USING (TRUE);
+             CREATE POLICY own_insert ON resources FOR INSERT TO app
+               WITH CHECK (owner = current_setting('app.user_id', true) AND hidden = FALSE);",
+            &writing_definer("insert_own()", INSERT_OWN),
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_definer_inserting_into_a_table_whose_triggers_and_defaults_act_alike_is_not_reported() {
+    let insert_own = writing_definer("insert_own()", INSERT_OWN);
+    for policies in [
+        own_rows_triggered(&[trigger(
+            "stamp",
+            "BEFORE INSERT",
+            "",
+            "NEW.edited_at = now(); RETURN NEW;",
+        )]),
+        own_rows_triggered(&[
+            "CREATE FUNCTION public.stamp() RETURNS TRIGGER LANGUAGE plpgsql
+               AS $$ BEGIN NEW.edited_at = now(); NEW.hidden = NOT NEW.hidden; RETURN NEW; END $$;
+             CREATE TRIGGER stamp BEFORE INSERT ON resources FOR EACH ROW
+               WHEN (NOT NEW.hidden) EXECUTE FUNCTION public.stamp();"
+                .to_owned(),
+        ]),
+        format!("ALTER TABLE resources ADD COLUMN created_at TIMESTAMP DEFAULT now(); {OWN_ROWS}"),
+    ] {
+        assert_eq!(
+            inserted_exposed("SELECT, INSERT (owner)", &policies, &insert_own),
+            Vec::<String>::new(),
+            "{policies}"
+        );
+    }
+}
+
+#[test]
+fn a_definer_inserting_a_value_that_may_be_null_is_reported_where_the_owner_writes_it() {
+    assert_eq!(
+        written_exposed(
+            "SELECT, INSERT",
+            OWN_ROWS,
+            &writing_definer("insert_own()", INSERT_OWN)
+        ),
+        ["insert_own()"]
+    );
+    assert_eq!(
+        written_exposed(
+            "SELECT, INSERT",
+            OWN_ROWS,
+            &writing_definer(
+                "insert_signed_in()",
+                "INSERT INTO public.resources (owner) VALUES (current_setting('app.user_id'))",
+            ),
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_definer_inserting_rows_the_caller_may_not_insert_alike_is_reported() {
+    let insert_own = writing_definer("insert_own()", INSERT_OWN);
+    for (grants, policies) in [
+        ("SELECT", OWN_ROWS.to_owned()),
+        ("SELECT, INSERT (note)", OWN_ROWS.to_owned()),
+        (
+            "SELECT, INSERT",
+            "CREATE POLICY own ON resources FOR SELECT TO app
+               USING (owner = current_setting('app.user_id', true));"
+                .to_owned(),
+        ),
+        (
+            "SELECT, INSERT",
+            "CREATE POLICY own ON resources FOR ALL TO app
+               USING (owner = current_setting('app.user_id', true))
+               WITH CHECK (owner = current_setting('app.user_id', true) AND resources.hidden);"
+                .to_owned(),
+        ),
+        (
+            "SELECT, INSERT",
+            "CREATE POLICY own ON resources FOR ALL TO app
+               USING (owner = current_setting('app.user_id', true))
+               WITH CHECK (owner = current_setting('app.user_id', true) AND id > 0);"
+                .to_owned(),
+        ),
+    ] {
+        assert_eq!(
+            inserted_exposed(grants, &policies, &insert_own),
+            ["insert_own()"],
+            "{grants} {policies}"
+        );
+    }
+    assert_eq!(
+        inserted_exposed(
+            "SELECT, INSERT",
+            OWN_ROWS,
+            &[
+                writing_definer(
+                    "give_away()",
+                    "INSERT INTO public.resources (owner) VALUES ('admin')",
+                ),
+                writing_definer(
+                    "insert_for(p_owner TEXT)",
+                    "INSERT INTO public.resources (owner) VALUES (p_owner)",
+                ),
+                writing_definer(
+                    "stamp()",
+                    "INSERT INTO public.resources (owner, hidden)
+                     VALUES (current_setting('app.user_id', true), current_user = 'app')",
+                ),
+                writing_definer(
+                    "copy_any()",
+                    "INSERT INTO public.resources (owner)
+                     SELECT resource.owner FROM public.resources resource",
+                ),
+                writing_definer(
+                    "copy_as_own()",
+                    "INSERT INTO public.resources (owner, note)
+                     SELECT current_setting('app.user_id', true), resource.note
+                     FROM public.resources resource",
+                ),
+                writing_definer(
+                    "copy_joined()",
+                    "INSERT INTO public.resources (owner)
+                     SELECT resource.owner FROM public.resources resource
+                     JOIN public.resources twin ON twin.id = resource.id
+                     WHERE resource.owner = current_setting('app.user_id', true)
+                       AND twin.owner = current_setting('app.user_id', true)",
+                ),
+                writing_definer(
+                    "insert_twice()",
+                    "INSERT INTO public.resources (owner)
+                     VALUES (current_setting('app.user_id', true)), ('admin')",
+                ),
+                writing_definer(
+                    "insert_quietly()",
+                    &format!("{INSERT_OWN} ON CONFLICT DO NOTHING"),
+                ),
+                returning_definer(
+                    "insert_peeking()",
+                    "SETOF INT",
+                    &format!(
+                        "{INSERT_OWN} RETURNING (SELECT max(other.id) FROM public.resources other)"
+                    ),
+                ),
+            ]
+            .concat(),
+        ),
+        [
+            "copy_any()",
+            "copy_as_own()",
+            "copy_joined()",
+            "give_away()",
+            "insert_for(TEXT)",
+            "insert_peeking()",
+            "insert_quietly()",
+            "insert_twice()",
+            "stamp()"
+        ]
+    );
+}
+
+#[test]
+fn a_definer_inserting_into_a_table_whose_triggers_or_defaults_may_act_otherwise_is_reported() {
+    let insert_own = writing_definer("insert_own()", INSERT_OWN);
+    for policies in [
+        format!(
+            "ALTER TABLE resources ADD COLUMN token UUID DEFAULT gen_random_uuid(); {OWN_ROWS}"
+        ),
+        own_rows_triggered(&[trigger(
+            "stamp_old",
+            "BEFORE INSERT",
+            "",
+            "NEW.edited_at = OLD.edited_at; RETURN NEW;",
+        )]),
+        own_rows_triggered(&[trigger(
+            "stamp_caller",
+            "BEFORE INSERT",
+            "",
+            "NEW.hidden = (current_user = 'app'); RETURN NEW;",
+        )]),
+        own_rows_triggered(&[trigger(
+            "give_away",
+            "BEFORE INSERT",
+            "",
+            "NEW.owner = 'admin'; RETURN NEW;",
+        )]),
+        own_rows_triggered(&[trigger(
+            "audited",
+            "BEFORE INSERT",
+            "",
+            "RAISE NOTICE 'inserting'; RETURN NEW;",
+        )]),
+    ] {
+        assert_eq!(
+            inserted_exposed("SELECT, INSERT", &policies, &insert_own),
+            ["insert_own()"],
+            "{policies}"
+        );
+    }
+}
+
 #[test]
 fn a_definer_with_an_unresolved_or_unsupported_write_is_reported() {
     for body in [

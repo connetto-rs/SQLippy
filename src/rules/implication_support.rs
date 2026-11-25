@@ -398,6 +398,54 @@ fn missing_ok(expression: &Expr) -> Option<Expr> {
     })
 }
 
+/// `condition`, tested on a written row, without each conjunct comparing a
+/// value the row is written with to that same value, or `None` when no other
+/// conjunct remains. `written` holds each value the row is written with, as
+/// the condition holds it in parentheses, and whether a write of `NULL`
+/// there fails. The comparison holds wherever the write completes once the
+/// value cannot be `NULL` there, since such a write fails or the value is a
+/// literal other than `NULL` or a setting read erroring where it is unset.
+/// Two reads of a setting compare alike once both read it with `missing_ok`.
+pub(crate) fn left_to_prove(condition: &Expr, written: &[(&Expr, bool)]) -> Option<Expr> {
+    let not_null = |value: &Expr| {
+        written.iter().any(|(held, refused)| {
+            *held == value
+                && (*refused
+                    || matches!(unnested(value), Expr::Value(literal) if literal.value != Value::Null)
+                    || erroring_setting(unnested(value)).is_some())
+        })
+    };
+    let read_alike = |expression: &Expr| {
+        let expression = unnested(expression);
+        missing_ok(expression).unwrap_or_else(|| expression.clone())
+    };
+    let compared_with_itself = |conjunct: &Expr| {
+        let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } = unnested(conjunct)
+        else {
+            return false;
+        };
+        [(left, right), (right, left)]
+            .into_iter()
+            .any(|(written, other)| match written.as_ref() {
+                Expr::Nested(value) => not_null(value) && read_alike(value) == read_alike(other),
+                _ => false,
+            })
+    };
+    conjuncts(condition)
+        .into_iter()
+        .filter(|conjunct| !compared_with_itself(conjunct))
+        .cloned()
+        .reduce(|left, right| Expr::BinaryOp {
+            left: Box::new(left),
+            op: BinaryOperator::And,
+            right: Box::new(right),
+        })
+}
+
 /// Whether `condition` is never true while a setting [`erroring_setting`]
 /// finds in it is `NULL`, since for each such setting [`rejected`] holds.
 fn rejects_unset(condition: &Expr) -> bool {
