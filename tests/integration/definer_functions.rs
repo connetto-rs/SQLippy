@@ -2316,11 +2316,33 @@ fn a_plpgsql_definer_writing_each_row_otherwise_is_reported() {
                  END LOOP;"
             ),
         ),
+        block_definer(
+            "truncate_each()",
+            "VOID",
+            "found_row RECORD;",
+            &format!("{EACH_OWN} TRUNCATE public.resources; END LOOP;"),
+        ),
+        block_definer(
+            "nested_field()",
+            "VOID",
+            "found_row RECORD;",
+            &format!(
+                "{EACH_OWN} UPDATE public.resources resource SET hidden = found_row.nested.hidden
+                   WHERE resource.owner = uid;
+                 END LOOP;"
+            ),
+        ),
     ]
     .concat();
     assert_eq!(
         written_exposed("SELECT, UPDATE, DELETE", OWN_ROWS, &definers),
-        ["copy_each_flag()", "hide_each_by_id()", "hide_each_whole()"]
+        [
+            "copy_each_flag()",
+            "hide_each_by_id()",
+            "hide_each_whole()",
+            "nested_field()",
+            "truncate_each()"
+        ]
     );
 }
 
