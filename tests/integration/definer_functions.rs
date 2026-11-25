@@ -5664,14 +5664,31 @@ fn a_policy_helper_parameter_takes_the_literal_the_policy_passes() {
         )
     };
     let granted = "resource.owner_id = authz.caller_id() AND resource.granted_role >= 'reader'";
+    let cast =
+        "resource.owner_id = authz.caller_id() AND resource.granted_role >= 'reader'::authz.role";
     assert_eq!(reported("'reader'", granted), Vec::<String>::new());
+    assert_eq!(reported("'reader'", cast), Vec::<String>::new());
+    assert_eq!(
+        reported("'reader'::authz.role", granted),
+        Vec::<String>::new()
+    );
     assert_eq!(
         reported("'reader'", "resource.owner_id = authz.caller_id()"),
         ["readable_ids()"]
     );
+    for filter in [granted, cast] {
+        assert_eq!(
+            reported("'admin'", filter),
+            ["granted_ids(authz.role)", "readable_ids()"],
+            "{filter}"
+        );
+    }
     assert_eq!(
-        reported("'admin'", granted),
-        ["granted_ids(authz.role)", "readable_ids()"]
+        reported(
+            "'reader'",
+            "resource.owner_id = authz.caller_id() AND resource.granted_role::text >= 'reader'::text"
+        ),
+        ["readable_ids()"]
     );
 }
 
