@@ -29,7 +29,7 @@ use sqlparser::{
         InTarget, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, Query, Select,
         SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableAliasColumnDef,
         TableFactor, TableInheritance, TableWithJoins, Value, Visit, Visitor, With,
-        visit_expressions, visit_expressions_mut,
+        visit_expressions, visit_expressions_mut, visit_relations,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -1009,8 +1009,10 @@ impl<'r, 'a, DB: DatabaseLike> CallerBound<'r, 'a, DB> {
 
     /// Whether `function`, running as its caller, returns alike for the
     /// caller and the owner. It has to be one `LANGUAGE sql` query that is
-    /// not `VOLATILE`, sets its own `search_path` and no other parameter,
-    /// and that every caller may execute, whose body reads alike in turn.
+    /// not `VOLATILE`, sets no parameter but `search_path`, and that every
+    /// caller may execute, whose body reads alike in turn. A body without
+    /// its own `search_path` resolves its names on the caller's, so each has
+    /// to mean alike on any path, as [`names_alike_anywhere`] takes them.
     fn invoked_alike(&mut self, function: &'a DB::Function) -> Result<bool, LookupError> {
         let confinement = self.confinement;
         let database = confinement.database;
@@ -1022,13 +1024,14 @@ impl<'r, 'a, DB: DatabaseLike> CallerBound<'r, 'a, DB> {
         {
             return Ok(false);
         }
-        let (Some(path), Some(query)) = (
-            function.search_path(database)?,
-            sql_query_body(database, function)?,
-        ) else {
+        let Some(query) = sql_query_body(database, function)? else {
             return Ok(false);
         };
-        let mut within = CallerBound::new(confinement, Some(&path), None);
+        let path = function.search_path(database)?;
+        if path.is_none() && !names_alike_anywhere(database, &query) {
+            return Ok(false);
+        }
+        let mut within = CallerBound::new(confinement, path.as_deref(), None);
         within.reading = mem::take(&mut self.reading);
         within.reading.push(address);
         let alike = within.reads_alike(query.as_ref());
@@ -3671,34 +3674,21 @@ fn reached<'a, DB: DatabaseLike>(
 }
 
 /// Whether every name `value` holds means alike wherever it is written: it
-/// reads no column or query, casts to no type the search path picks, and
-/// calls functions written schema-qualified or reaching only `pg_catalog`.
+/// reads no column or query, and every call and cast is one
+/// [`named_alike_anywhere`] accepts.
 fn reads_alike_anywhere<DB: DatabaseLike>(database: &DB, value: &Expr) -> bool {
     visit_expressions(value, |expression| {
-        let anywhere = match expression {
+        let anywhere = !matches!(
+            expression,
             Expr::Identifier(_)
-            | Expr::CompoundIdentifier(_)
-            | Expr::Subquery(_)
-            | Expr::Exists { .. }
-            | Expr::In {
-                target: InTarget::Subquery(_),
-                ..
-            } => false,
-            Expr::Cast { data_type, .. } => match data_type {
-                DataType::Regclass => false,
-                DataType::Custom(name, _) => name.0.len() > 1,
-                _ => true,
-            },
-            Expr::Function(call) => {
-                call.name.0.len() > 1
-                    || reached(database, call).is_some_and(|functions| {
-                        functions
-                            .iter()
-                            .all(|function| function.target_name().schema() == Some("pg_catalog"))
-                    })
-            }
-            _ => true,
-        };
+                | Expr::CompoundIdentifier(_)
+                | Expr::Subquery(_)
+                | Expr::Exists { .. }
+                | Expr::In {
+                    target: InTarget::Subquery(_),
+                    ..
+                }
+        ) && named_alike_anywhere(database, expression);
         if anywhere {
             ControlFlow::Continue(())
         } else {
@@ -3706,6 +3696,50 @@ fn reads_alike_anywhere<DB: DatabaseLike>(database: &DB, value: &Expr) -> bool {
         }
     })
     .is_continue()
+}
+
+/// Whether every name `query` writes means alike on any search path: each
+/// relation is written schema-qualified, and each call and cast is one
+/// [`named_alike_anywhere`] accepts.
+fn names_alike_anywhere<DB: DatabaseLike>(database: &DB, query: &Query) -> bool {
+    let qualified = |relation: &ObjectName| {
+        if relation.0.len() > 1 {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
+    };
+    visit_relations(query, qualified).is_continue()
+        && visit_expressions(query, |expression| {
+            if named_alike_anywhere(database, expression) {
+                ControlFlow::Continue(())
+            } else {
+                ControlFlow::Break(())
+            }
+        })
+        .is_continue()
+}
+
+/// Whether `expression`, when a call or a cast, names alike on any search
+/// path: it casts to no type the path picks and calls a function written
+/// schema-qualified or reaching only `pg_catalog`.
+fn named_alike_anywhere<DB: DatabaseLike>(database: &DB, expression: &Expr) -> bool {
+    match expression {
+        Expr::Cast { data_type, .. } => match data_type {
+            DataType::Regclass => false,
+            DataType::Custom(name, _) => name.0.len() > 1,
+            _ => true,
+        },
+        Expr::Function(call) => {
+            call.name.0.len() > 1
+                || reached(database, call).is_some_and(|functions| {
+                    functions
+                        .iter()
+                        .all(|function| function.target_name().schema() == Some("pg_catalog"))
+                })
+        }
+        _ => true,
+    }
 }
 
 /// The input parameter of the function whose body holds `reference` that
