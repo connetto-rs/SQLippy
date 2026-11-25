@@ -27,9 +27,9 @@ use sqlparser::{
         ArgMode, Assignment, AssignmentTarget, BinaryOperator, CaseWhen, CastKind, DataType,
         Delete, Expr, FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
         FunctionBehavior, FunctionCalledOnNull, FunctionSecurity, Ident, InTarget, Insert,
-        JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, Query, Select, SelectItem,
-        SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Statement,
-        TableAliasColumnDef, TableFactor, TableInheritance, TableObject, TableWithJoins,
+        JoinConstraint, JoinOperator, LockClause, ObjectName, ObjectNamePart, Query, Select,
+        SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier,
+        Statement, TableAliasColumnDef, TableFactor, TableInheritance, TableObject, TableWithJoins,
         TriggerEvent, TriggerObject, TriggerObjectKind, TriggerPeriod, Update, UpdateTableFromKind,
         Value, Values, Visit, VisitMut, Visitor, VisitorMut, With,
         helpers::attached_token::AttachedToken, visit_expressions, visit_expressions_mut,
@@ -109,7 +109,11 @@ use super::plpgsql_ambiguous_name::collision;
 /// table with row-level security in it is filtered, by its `WHERE` and the
 /// `ON` of the joins that drop its rows, to rows each caller's own `SELECT`
 /// policies on that table admit, while each caller may select every column
-/// of the table.
+/// of the table. A read locking its rows with `FOR UPDATE`, `FOR SHARE` or
+/// their key forms locks stored tables only, and the rows it locks of a
+/// table with row-level security are those each caller's `UPDATE` policies
+/// admit too, each caller holding `UPDATE` on a column of the table, as
+/// PostgreSQL requires of a caller locking them directly.
 /// The filter has to imply every restrictive policy and one permissive one,
 /// stating each condition as written, where a scalar subquery reading no
 /// relation such as `(SELECT auth.uid())` stands for its value, or testing
@@ -966,6 +970,21 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         Ok(true)
     }
 
+    /// Whether every caller holds `UPDATE` on a column of `table`, which
+    /// PostgreSQL requires of a caller locking its rows.
+    fn lockable_by_every_caller(&self, table: &DB::Table) -> Result<bool, LookupError> {
+        for caller in &self.callers {
+            if !table
+                .privileges(acting(*caller), self.database)?
+                .update
+                .on_any_column()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// What an `INSERT` into `table` not naming a column writes it, for each
     /// column by its stored name.
     fn filled(&self, table: &DB::Table) -> Result<Vec<(String, Fill)>, LookupError> {
@@ -1718,16 +1737,13 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         held: &[&Expr],
         owners: &[&Query],
     ) -> Result<bool, LookupError> {
-        if !query.locks.is_empty() {
-            return Ok(false);
-        }
         let mut owners = owners.to_vec();
         if query.with.is_some() {
             owners.push(query);
         }
         self.items.enter(query);
         let confined = match self.confines_nested(query, held, &owners) {
-            Ok(true) => self.confines(&query.body, held, &owners),
+            Ok(true) => self.confines(&query.body, held, &owners, &query.locks),
             other => other,
         };
         self.items.leave(query);
@@ -1764,17 +1780,22 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     }
 
     /// Whether every `SELECT` of `body`, outside nested queries, confines its
-    /// reads, a body that writes or reads `TABLE` never.
+    /// reads and the locks `locks` takes on its rows, a body that writes or
+    /// reads `TABLE` never, nor one locking the rows of a set operation, a
+    /// parenthesized query or a `VALUES` list.
     fn confines(
         &self,
         body: &SetExpr,
         held: &[&Expr],
         owners: &[&Query],
+        locks: &[LockClause],
     ) -> Result<bool, LookupError> {
         match body {
-            SetExpr::Select(select) => self.confines_select(select, held, owners),
+            SetExpr::Select(select) => self.confines_select(select, held, owners, locks),
+            _ if !locks.is_empty() => Ok(false),
             SetExpr::SetOperation { left, right, .. } => {
-                Ok(self.confines(left, held, owners)? && self.confines(right, held, owners)?)
+                Ok(self.confines(left, held, owners, &[])?
+                    && self.confines(right, held, owners, &[])?)
             }
             SetExpr::Query(_) | SetExpr::Values(_) => Ok(true),
             _ => Ok(false),
@@ -1784,11 +1805,16 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     /// Whether each relation with row-level security a `SELECT` reads is
     /// confined by the filters that drop its rows, the conditions `held` of
     /// the outer rows, and what the sets they test its columns against tell.
+    /// A relation `locks` locks has to be a stored table, and one with
+    /// row-level security has its rows admitted by each caller's gates for
+    /// a locking `SELECT`, which every caller holds `UPDATE` on a column of,
+    /// as PostgreSQL requires of a caller locking those rows directly.
     fn confines_select(
         &self,
         select: &Select,
         held: &[&Expr],
         owners: &[&Query],
+        locks: &[LockClause],
     ) -> Result<bool, LookupError> {
         let filters = self.filters(select, held, owners)?;
         let inserted = self
@@ -1802,6 +1828,13 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         }
         for from in &select.from {
             for (position, relation) in relations(from).enumerate() {
+                let locked = locks.iter().any(|lock| locks_relation(lock, relation));
+                if locked
+                    && !matches!(relation, TableFactor::Table { name, args: None, .. }
+                        if self.items.binding(name).is_none())
+                {
+                    return Ok(false);
+                }
                 let table = match self.read(relation)? {
                     Read::Open if inserted.is_none() => continue,
                     Read::Open | Read::Unconfined => return Ok(false),
@@ -1840,44 +1873,12 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     conditions.push(membership);
                 }
                 let filter = conjunction(conditions);
-                let admitted = match &self.written {
-                    Some((written, write)) if ptr::eq(*written, relation) => {
-                        self.body
-                            .confinement
-                            .writable_by_every_caller(table, write)?
-                            && match write {
-                                Write::Delete => self.body.admits_every_caller(
-                                    table,
-                                    &filter,
-                                    RowStatement::Delete { reads: true },
-                                    &[],
-                                )?,
-                                Write::Update { columns, .. } => {
-                                    match self.assigned(select, columns, |reference| {
-                                        term(&resolver, reference, relation, &equalities)
-                                    })? {
-                                        Some(assigned) => self.body.admits_every_caller(
-                                            table,
-                                            &filter,
-                                            RowStatement::Update { reads: true },
-                                            &assigned,
-                                        )?,
-                                        None => false,
-                                    }
-                                }
-                            }
-                    }
-                    _ => {
-                        self.body
-                            .admits_every_caller(table, &filter, RowStatement::Select, &[])?
-                    }
-                };
-                let admitted = admitted
+                let rename = |reference: &Expr| term(&resolver, reference, relation, &equalities);
+                let admitted = self
+                    .admits_relation(select, table, relation, &filter, locked, rename)?
                     && match inserted {
                         Some(insertion) => {
-                            self.admits_inserted(insertion, select, &filter, |reference| {
-                                term(&resolver, reference, relation, &equalities)
-                            })?
+                            self.admits_inserted(insertion, select, &filter, rename)?
                         }
                         None => true,
                     };
@@ -1887,6 +1888,51 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             }
         }
         Ok(true)
+    }
+
+    /// Whether every caller may read, alike, the rows of `table`, read as
+    /// `relation` of `select`, that `filter` admits, writing them as the body
+    /// does, or locking them where `locked`, `rename` naming each column the
+    /// `SELECT` projects as a column of the rows.
+    fn admits_relation(
+        &self,
+        select: &Select,
+        table: &DB::Table,
+        relation: &TableFactor,
+        filter: &Expr,
+        locked: bool,
+        rename: impl Fn(&Expr) -> Option<Term>,
+    ) -> Result<bool, LookupError> {
+        let body = &self.body;
+        Ok(match &self.written {
+            Some((written, write)) if ptr::eq(*written, relation) => {
+                body.confinement.writable_by_every_caller(table, write)?
+                    && match write {
+                        Write::Delete => body.admits_every_caller(
+                            table,
+                            filter,
+                            RowStatement::Delete { reads: true },
+                            &[],
+                        )?,
+                        Write::Update { columns, .. } => {
+                            match self.assigned(select, columns, rename)? {
+                                Some(assigned) => body.admits_every_caller(
+                                    table,
+                                    filter,
+                                    RowStatement::Update { reads: true },
+                                    &assigned,
+                                )?,
+                                None => false,
+                            }
+                        }
+                    }
+            }
+            _ if locked => {
+                body.confinement.lockable_by_every_caller(table)?
+                    && body.admits_every_caller(table, filter, RowStatement::SelectLocking, &[])?
+            }
+            _ => body.admits_every_caller(table, filter, RowStatement::Select, &[])?,
+        })
     }
 
     /// Whether every caller may insert, alike, the rows `select` projects as
@@ -3784,6 +3830,30 @@ fn apart<DB: DatabaseLike>(left: &[Pinned<'_, DB>], right: &[Pinned<'_, DB>]) ->
 /// The relations of `from`, in order.
 fn relations(from: &TableWithJoins) -> impl Iterator<Item = &TableFactor> {
     iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation))
+}
+
+/// Whether `lock` may lock the rows of `relation`, every relation of its
+/// `SELECT` without `OF`, or the stored table `OF` names by its alias or,
+/// unaliased, by its own name. A relation other than a table may hold the
+/// one `OF` names.
+fn locks_relation(lock: &LockClause, relation: &TableFactor) -> bool {
+    let Some(of) = &lock.of else {
+        return true;
+    };
+    let TableFactor::Table { name, alias, .. } = relation else {
+        return true;
+    };
+    let [locked] = of.0.as_slice() else {
+        return false;
+    };
+    let named = match alias {
+        Some(alias) => Some(&alias.name),
+        None => name.0.last().and_then(ObjectNamePart::as_ident),
+    };
+    locked.as_ident().zip(named).is_some_and(|(locked, named)| {
+        normalize_identifier(&locked.value, locked.quote_style.is_some())
+            == normalize_identifier(&named.value, named.quote_style.is_some())
+    })
 }
 
 /// `SELECT returned… FROM target, using… WHERE selection`, the rows `delete`
