@@ -193,7 +193,7 @@ fn probes<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
             let Some(read) = row_security(database, table, RowStatement::Select, role)? else {
                 continue;
             };
-            if !hides_rows(database, table, &read)? {
+            if !hides_rows(database, table, role, &read)? {
                 continue;
             }
             Some(read)

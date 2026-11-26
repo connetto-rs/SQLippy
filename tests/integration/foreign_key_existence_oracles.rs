@@ -55,6 +55,32 @@ fn a_key_the_writer_may_insert_into_hidden_rows_is_reported() {
 }
 
 #[test]
+fn a_parent_read_through_policies_the_writer_cannot_evaluate_hides_every_row() {
+    for (granted, expected) in [
+        ("GRANT SELECT ON flags TO app;", vec![]),
+        ("", vec!["refs.refs_shown"]),
+    ] {
+        assert_eq!(
+            objects(&format!(
+                "CREATE TABLE flags (id INT);
+                 CREATE TABLE shown (id INT PRIMARY KEY);
+                 ALTER TABLE shown ENABLE ROW LEVEL SECURITY;
+                 GRANT SELECT ON shown TO app;
+                 CREATE POLICY shown_all ON shown FOR SELECT TO app USING (true);
+                 CREATE POLICY shown_flagged ON shown FOR SELECT TO app
+                   USING (EXISTS (SELECT 1 FROM flags));
+                 CREATE TABLE refs (id INT PRIMARY KEY,
+                   shown_id INT CONSTRAINT refs_shown REFERENCES shown (id));
+                 GRANT INSERT ON refs TO app;
+                 {granted}"
+            )),
+            expected,
+            "{granted}"
+        );
+    }
+}
+
+#[test]
 fn updating_the_key_columns_alone_is_enough() {
     assert_eq!(
         objects(&format!(
@@ -765,6 +791,7 @@ fn walked_slots(readable: &str, body: &str, check: &str) -> Vec<String> {
         "id, template_id, organization_id",
         &format!(
             "CREATE TABLE steps (parent_id INT NOT NULL, child_id INT NOT NULL);
+             GRANT SELECT ON steps TO app;
              CREATE FUNCTION readable_rows(level TEXT) RETURNS TABLE (template INT)
                LANGUAGE sql STABLE AS $$ SELECT 1 $$;
              CREATE FUNCTION readable_pairs(level TEXT) RETURNS TABLE (template INT, organization INT)
@@ -986,7 +1013,7 @@ fn walk(header: &str, body: &str) -> String {
 fn a_helper_body_is_read_only_where_it_yields_what_the_check_reads() {
     let reader = "SELECT readable('reader')";
     let counted = "SELECT readable((SELECT count(*) FROM levels)::text)";
-    let levels = "CREATE TABLE levels (id INT);";
+    let levels = "CREATE TABLE levels (id INT); GRANT SELECT ON levels TO app;";
     let counted_check = format!("id = ANY (ARRAY({counted}))");
     let rows = "CREATE FUNCTION readable_rows(level TEXT) RETURNS TABLE (template INT)
         LANGUAGE sql STABLE AS $$ SELECT 1 $$;";
@@ -1861,7 +1888,7 @@ fn a_key_confined_to_a_helper_called_with_a_higher_role_is_clean() {
              ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
              CREATE POLICY notes_insert ON notes FOR INSERT TO app
                WITH CHECK (resource_id IN (SELECT readable('writer')));
-             GRANT SELECT ON resources TO app;
+             GRANT SELECT ON resources, grants TO app;
              GRANT INSERT ON notes TO app;"
         )
     };

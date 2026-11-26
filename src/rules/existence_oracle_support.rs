@@ -40,8 +40,8 @@ use crate::{
         ladder_support::called,
         policy_read_support::{reads_every_row, sublink_reads},
         policy_support::{
-            acting, client_roles, conjuncts, disjuncts, is_column_reference, is_contradiction,
-            is_tautology, sets_only_search_path, sql_set_body, unwrapped,
+            acting, client_roles, conjuncts, disjuncts, evaluates_every_term, is_column_reference,
+            is_contradiction, is_tautology, sets_only_search_path, sql_set_body, unwrapped,
         },
     },
 };
@@ -61,16 +61,22 @@ pub(crate) fn row_security<'db, DB: DatabaseLike>(
     }
 }
 
-/// Whether the `SELECT` policies of `table` in `security` leave some row out.
+/// Whether the `SELECT` policies of `table` in `security`, which `role`
+/// meets, leave some row out. Policies the role may not evaluate leave out
+/// every row.
 pub(crate) fn hides_rows<DB: DatabaseLike>(
     database: &DB,
     table: &DB::Table,
+    role: Option<&DB::Role>,
     security: &RowSecurity<'_, DB::Policy>,
 ) -> Result<bool, LookupError> {
     let Some(gates) = security.gates() else {
         // An exempt role reads every row, and a refused read reads none.
         return Ok(security.infinite_recursion().is_some());
     };
+    if !evaluates_every_term(database, role, gates)? {
+        return Ok(true);
+    }
     for gate in gates {
         let mut admitted = false;
         for term in gate.permissive() {
@@ -862,7 +868,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
 
     /// Whether every row of the referenced table the key can match passes
     /// the `SELECT` policies `read`, for every row `written` admits, or every
-    /// row when no gate applies, meeting each of `guards`.
+    /// row when no gate applies, meeting each of `guards`. Policies `role`
+    /// may not evaluate pass no row.
     fn reads_matched_rows(
         &self,
         written: Option<&RowGate<'_, DB::Policy>>,
@@ -873,6 +880,9 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         let Some(gates) = read.gates() else {
             return Ok(false);
         };
+        if !evaluates_every_term(self.database, role, gates)? {
+            return Ok(false);
+        }
         let reading = Reading {
             confinement: self,
             role,
