@@ -3037,7 +3037,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 let Some(required) = arm.drawn.under(arguments.as_deref()) else {
                     continue;
                 };
-                if self.implies_every(&clause, &required)? {
+                if self.implies_every(&clause, drawn.table, &required, &mut Vec::new())? {
                     add_membership(&mut found, in_set(&arm.drawn.column_names(), &set.call));
                 }
             }
@@ -3114,7 +3114,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     };
                     let clause = conjunction(row.to_vec());
                     for (members, drawn, met) in arms {
-                        if !self.implies_every(&clause, &met)? {
+                        if !self.implies_every(&clause, drawn.table, &met, &mut Vec::new())? {
                             continue;
                         }
                         let columns = if same {
@@ -3144,19 +3144,93 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         Ok(witnessed)
     }
 
-    /// Whether `clause` implies each of `conditions`.
-    fn implies_every(&self, clause: &Expr, conditions: &[Expr]) -> Result<bool, LookupError> {
+    /// Whether `clause`, stated of a row of `table`, implies each of
+    /// `conditions`. A test of columns of the row against the set of a
+    /// function is also implied when `clause` implies every condition of an
+    /// exhaustive arm of the function over `table` returning those columns,
+    /// since the function then returns those of the row. `visited` holds the
+    /// functions whose arms are being read.
+    fn implies_every(
+        &self,
+        clause: &Expr,
+        table: &DB::Table,
+        conditions: &[Expr],
+        visited: &mut Vec<*const DB::Function>,
+    ) -> Result<bool, LookupError> {
         for condition in conditions {
             if !clause_implies(
                 &self.body,
                 clause,
                 &Condition::new(&self.body, condition),
                 &[],
-            )? {
+            )? && !self.met_through_callee(clause, table, condition, visited)?
+            {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    /// Whether `clause`, stated of a row of `table`, implies every condition
+    /// of an exhaustive arm over `table` of the function `condition` tests
+    /// columns of the row against, the arm returning those columns, those
+    /// reading a parameter stated of the literal the call passes. The
+    /// function has to run as the body's owner, as `SECURITY INVOKER` or as
+    /// `SECURITY DEFINER` owned by that role, so that it draws from the rows
+    /// the body reads.
+    fn met_through_callee(
+        &self,
+        clause: &Expr,
+        table: &DB::Table,
+        condition: &Expr,
+        visited: &mut Vec<*const DB::Function>,
+    ) -> Result<bool, LookupError> {
+        let confinement = self.body.confinement;
+        let database = confinement.database;
+        let owner = self.body.function.owner(database)?;
+        let tested_set = membership(condition);
+        let Some((call, names, function)) = (match &tested_set {
+            Some((tested, members))
+                if let Expr::Function(call) = members.as_ref()
+                    && let Some(names) =
+                        tested.iter().map(stored_name).collect::<Option<Vec<_>>>()
+                    && let Some(function) = called(database, call)?
+                    && !visited.contains(&ptr::from_ref(function))
+                    && (function.security_mode() != FunctionSecurity::Definer
+                        || function.owner(database)? == owner) =>
+            {
+                Some((call, names, function))
+            }
+            _ => None,
+        }) else {
+            return Ok(false);
+        };
+        let address = ptr::from_ref(function);
+        let arguments = listed_arguments(call)
+            .filter(|arguments| arguments.iter().all(|argument| literal(argument).is_some()));
+        let arms = confinement.arms(function)?;
+        visited.push(address);
+        let mut met = false;
+        for arm in &arms.arms {
+            if !arm.exhaustive
+                || arm.drawn.table != table
+                || !arm
+                    .drawn
+                    .column_names()
+                    .into_iter()
+                    .eq(names.iter().map(AsRef::as_ref))
+            {
+                continue;
+            }
+            if let Some(required) = arm.drawn.under(arguments.as_deref())
+                && self.implies_every(clause, table, &required, visited)?
+            {
+                met = true;
+                break;
+            }
+        }
+        visited.pop();
+        Ok(met)
     }
 
     /// The calls of `SECURITY DEFINER` functions the policies of `table` test

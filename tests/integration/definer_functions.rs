@@ -5098,6 +5098,98 @@ fn a_callee_set_carries_the_policy_sets_its_arm_rows_stand_in() {
     }
 }
 
+/// Functions reported over resources granted to their users, visible to a
+/// user granted their organization or, for other kinds, the resource itself
+/// through `authz.residual_read_resources()`, which reads the resources in
+/// the set of `authz.residual_read_containers()` declared by `containers`.
+fn residual_resources(containers: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+             CREATE ROLE auditor NOLOGIN BYPASSRLS;
+             CREATE SCHEMA authz;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             CREATE TYPE authz.role AS ENUM ('reader', 'writer', 'admin');
+             CREATE TYPE authz.resource_kind AS ENUM ('organization', 'folder', 'project');
+             CREATE TABLE public.resources (id INT PRIMARY KEY, kind authz.resource_kind NOT NULL,
+               organization_id INT NOT NULL);
+             CREATE TABLE public.grants (resource_id INT NOT NULL REFERENCES public.resources (id),
+               grantee_id TEXT NOT NULL, role authz.role NOT NULL, PRIMARY KEY (resource_id, grantee_id));
+             ALTER TABLE public.resources ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE public.grants ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON public.resources, public.grants TO app;
+             CREATE FUNCTION authz.granted_resources(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT permission.resource_id FROM public.grants permission
+                 WHERE permission.grantee_id = current_setting('app.user_id', true)
+                   AND permission.role >= min_role $$;
+             CREATE FUNCTION authz.organizations_with(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.organization_id FROM public.resources resource
+                 WHERE resource.kind = 'organization'
+                   AND resource.id IN (SELECT authz.granted_resources(min_role)) $$;
+             {containers}
+             CREATE FUNCTION authz.residual_read_resources() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE resource.id IN (SELECT authz.residual_read_containers()) $$;
+             CREATE FUNCTION authz.resources_with(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE resource.id IN (SELECT authz.granted_resources(min_role)) $$;
+             ALTER FUNCTION authz.granted_resources(authz.role) OWNER TO authz_owner;
+             ALTER FUNCTION authz.organizations_with(authz.role) OWNER TO authz_owner;
+             ALTER FUNCTION authz.residual_read_resources() OWNER TO authz_owner;
+             ALTER FUNCTION authz.resources_with(authz.role) OWNER TO authz_owner;
+             REVOKE EXECUTE ON FUNCTION authz.granted_resources(authz.role),
+               authz.residual_read_containers() FROM app;
+             GRANT EXECUTE ON FUNCTION authz.organizations_with(authz.role),
+               authz.residual_read_resources(), authz.resources_with(authz.role) TO app;
+             CREATE POLICY grants_select ON public.grants FOR SELECT TO app
+               USING (grantee_id = current_setting('app.user_id', true));
+             CREATE POLICY resources_select ON public.resources FOR SELECT TO app
+               USING (organization_id = ANY (ARRAY(SELECT authz.organizations_with('reader')))
+                 OR id = ANY (ARRAY(SELECT authz.residual_read_resources())));"
+        ),
+    )
+    .into_iter()
+    .filter(|function| function.starts_with("resources_with"))
+    .collect()
+}
+
+#[test]
+fn a_policy_helper_arm_is_met_through_the_arms_of_the_helper_it_calls() {
+    let containers = |volatility: &str, returned: &str, kinds: &str, owner: &str| {
+        format!(
+            "CREATE FUNCTION authz.residual_read_containers() RETURNS SETOF INT
+               LANGUAGE sql {volatility} SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.{returned} FROM public.resources resource
+                 WHERE resource.id IN (SELECT authz.granted_resources('reader'))
+                   AND resource.kind IN ({kinds}) $$;
+             ALTER FUNCTION authz.residual_read_containers() OWNER TO {owner};"
+        )
+    };
+    let kinds = "'folder', 'project'";
+    assert_eq!(
+        residual_resources(&containers("STABLE", "id", kinds, "authz_owner")),
+        Vec::<String>::new()
+    );
+    for declared in [
+        containers("STABLE", "id", "'folder'", "authz_owner"),
+        containers("STABLE", "organization_id", kinds, "authz_owner"),
+        containers("VOLATILE", "id", kinds, "authz_owner"),
+        containers("STABLE", "id", kinds, "auditor"),
+    ] {
+        assert_eq!(
+            residual_resources(&declared),
+            ["resources_with(authz.role)"],
+            "{declared}"
+        );
+    }
+}
+
 /// Functions reported over `tables`, declaring `public.teams` and
 /// `public.team_members`, and `definer`, the body of a function returning
 /// the organizations of teams. A team and a member are visible in the
