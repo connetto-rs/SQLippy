@@ -3355,14 +3355,16 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             else {
                 return Ok(None);
             };
-            let Some((ColumnDefinition::Base { column, .. }, binding)) =
-                self.context.reference(unnested(projected)).ok().flatten()
+            let Some((ColumnDefinition::Base { column, .. }, Some(entry))) = self
+                .context
+                .reference(unnested(projected))
+                .ok()
+                .flatten()
+                .map(|(definition, binding)| (definition, binding.entry()))
             else {
                 return Ok(None);
             };
-            let Some(relation) = binding.entry().map(|entry| entry.factor()) else {
-                return Ok(None);
-            };
+            let relation = entry.factor();
             let preserved = select.from.iter().any(|from| {
                 relations(from)
                     .position(|read| ptr::eq(read, relation))
@@ -4823,12 +4825,11 @@ fn tested_set(test: &Expr) -> Option<(&Expr, &Query)> {
     };
     match set {
         Expr::Subquery(query) => Some((key, query)),
-        Expr::Function(function) if function.name.to_string().eq_ignore_ascii_case("array") => {
-            match &function.args {
-                FunctionArguments::Subquery(query) => Some((key, query)),
-                _ => None,
-            }
-        }
+        Expr::Function(Function {
+            name,
+            args: FunctionArguments::Subquery(query),
+            ..
+        }) if name.to_string().eq_ignore_ascii_case("array") => Some((key, query)),
         _ => None,
     }
 }
