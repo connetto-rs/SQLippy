@@ -5747,6 +5747,27 @@ fn a_helper_drawing_the_tested_row_by_its_key_carries_every_condition_of_it() {
 /// The functions `exposed` reports when `authz.reached()`, private, runs
 /// `helper` and `authz.owned_reached()`, granted to `app`, runs `body`.
 fn reported_over_keyed_helper(helper: &str, body: &str) -> Vec<String> {
+    reported_over_resources(&format!(
+        "{}{}",
+        set_definer("reached()", "sql", helper),
+        set_definer("owned_reached()", "sql", body)
+    ))
+}
+
+/// `CREATE FUNCTION authz.{signature}`, a `STABLE SECURITY DEFINER`
+/// function written in `language` returning a set of `INT` by running
+/// `body`.
+fn set_definer(signature: &str, language: &str, body: &str) -> String {
+    format!(
+        "CREATE FUNCTION authz.{signature} RETURNS SETOF INT
+           LANGUAGE {language} STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+             {body} $$;"
+    )
+}
+
+/// The functions `exposed` reports over `functions`, which declare
+/// `authz.owned_reached()`, granted to `app`, and every function it calls.
+fn reported_over_resources(functions: &str) -> Vec<String> {
     exposed(
         Deployment::default().with_app_role("app"),
         &format!(
@@ -5765,12 +5786,7 @@ fn reported_over_keyed_helper(helper: &str, body: &str) -> Vec<String> {
              ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
              CREATE POLICY owned ON public.resources FOR SELECT TO app
                USING (owner_id = current_setting('app.user_id', true));
-             CREATE FUNCTION authz.reached() RETURNS SETOF INT
-               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                 {helper} $$;
-             CREATE FUNCTION authz.owned_reached() RETURNS SETOF INT
-               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                 {body} $$;
+             {functions}
              GRANT EXECUTE ON FUNCTION authz.owned_reached() TO app;"
         ),
     )
@@ -5837,6 +5853,33 @@ fn a_private_helper_keyed_by_the_rows_it_reads_confines_a_test_of_their_key() {
              WHERE resource.owner_id = current_setting('app.user_id', true)"
                 .to_owned(),
         ),
+        (every, filtered("resource.id = ANY (SELECT authz.reached())")),
+        (
+            every,
+            filtered("resource.id IN (SELECT authz.reached()) AND resource.kind_id = ANY (ARRAY[1, 2])"),
+        ),
+        (
+            every,
+            filtered(
+                "resource.id IN (SELECT authz.reached())
+                 AND EXISTS (SELECT 1 FROM generate_series(1, 3) listed WHERE listed = resource.kind_id)",
+            ),
+        ),
+        (every, format!("SELECT count(*)::INT FROM public.kinds; {tested}")),
+        (
+            "(SELECT resource.id FROM public.resources resource WHERE NOT resource.hidden)
+             UNION SELECT resource.id FROM public.resources resource WHERE resource.parent_id IS NULL",
+            tested.clone(),
+        ),
+        (
+            "SELECT resource.id FROM public.resources resource WHERE NOT resource.hidden;
+             SELECT resource.id FROM public.resources resource",
+            tested.clone(),
+        ),
+        (
+            "SELECT resource.id FROM public.resources resource WHERE resource.owner_id <> lower('x')",
+            tested.clone(),
+        ),
     ] {
         assert_eq!(reported(helper, &body), Vec::<String>::new(), "{helper} {body}");
     }
@@ -5900,8 +5943,180 @@ fn a_private_helper_reading_more_than_the_keyed_row_or_tested_otherwise_is_repor
                          WHERE other.parent_id = resource.id AND other.id IN (SELECT authz.reached()))",
             ),
         ),
+        (
+            "SELECT resource.id FROM public.resources resource;
+             SELECT resource.code FROM public.resources resource",
+            tested.clone(),
+        ),
+        (
+            "SELECT resource.id FROM public.resources resource
+             WHERE set_config('app.user_id', 'x', true) IS NOT NULL",
+            tested.clone(),
+        ),
+        (
+            "SELECT * FROM (SELECT resource.id FROM public.resources resource) listed",
+            tested.clone(),
+        ),
+        (
+            "SELECT listed.id FROM (SELECT resource.id FROM public.resources resource) listed",
+            tested.clone(),
+        ),
+        (
+            "SELECT resource.id FROM public.resources resource UNION SELECT 0",
+            tested.clone(),
+        ),
+        (
+            "SELECT resource.id FROM public.resources resource UNION VALUES (0)",
+            tested.clone(),
+        ),
+        (
+            "SELECT resource.id FROM public.resources resource
+             UNION SELECT kind.id FROM public.kinds kind",
+            tested.clone(),
+        ),
+        (
+            "(SELECT resource.id FROM public.resources resource LIMIT 1)
+             UNION SELECT resource.id FROM public.resources resource",
+            tested.clone(),
+        ),
     ] {
         assert_eq!(reported(helper, &body), ["owned_reached()"], "{helper} {body}");
+    }
+}
+
+#[test]
+fn a_test_of_a_private_helper_set_other_than_the_whole_call_against_the_key_is_reported() {
+    for test in [
+        "resource.id IN (SELECT authz.reached() UNION SELECT 0)",
+        "resource.id IN (SELECT authz.reached() + 0)",
+        "resource.id IN (SELECT reached.id FROM authz.reached() reached (id), public.kinds kind)",
+        "EXISTS (SELECT 1 FROM authz.reached() reached WHERE reached = resource.id UNION SELECT 1)",
+        "EXISTS (SELECT 1 FROM authz.reached())",
+        "EXISTS (SELECT 1 FROM authz.reached() reached
+                 JOIN public.kinds kind ON kind.id = reached WHERE reached = resource.id)",
+        "EXISTS (SELECT 1 FROM authz.reached() WITH ORDINALITY reached (id, position)
+                 WHERE reached.id = resource.id)",
+    ] {
+        assert_eq!(
+            reported_over_keyed_helper(EVERY_RESOURCE, &owned_where(test)),
+            ["owned_reached()"],
+            "{test}"
+        );
+    }
+}
+
+#[test]
+fn a_plpgsql_caller_or_helper_confines_a_key_test_only_where_each_statement_does() {
+    let tested = owned_where("resource.id IN (SELECT authz.reached())");
+    let over_plpgsql_caller = |body: &str| {
+        format!(
+            "{}{}",
+            set_definer("reached()", "sql", EVERY_RESOURCE),
+            set_definer("owned_reached()", "plpgsql", body)
+        )
+    };
+    let over_plpgsql_helper = |helper: &str| {
+        format!(
+            "{}{}",
+            set_definer("reached()", "plpgsql", helper),
+            set_definer("owned_reached()", "sql", &tested)
+        )
+    };
+    for functions in [
+        over_plpgsql_caller(&format!("BEGIN RETURN QUERY {tested}; END")),
+        over_plpgsql_caller(&format!(
+            "BEGIN
+               IF current_setting('app.user_id', true) IS NULL THEN RETURN; END IF;
+               RETURN QUERY {tested};
+             END"
+        )),
+        over_plpgsql_helper(
+            "BEGIN
+               RETURN QUERY SELECT resource.id FROM public.resources resource WHERE NOT resource.hidden;
+               RETURN QUERY SELECT resource.id FROM public.resources resource WHERE resource.parent_id IS NULL;
+             END",
+        ),
+    ] {
+        assert_eq!(reported_over_resources(&functions), Vec::<String>::new(), "{functions}");
+    }
+    for functions in [
+        over_plpgsql_caller(&format!(
+            "BEGIN RETURN QUERY {tested}; EXCEPTION WHEN others THEN RETURN; END"
+        )),
+        over_plpgsql_caller(&format!(
+            "BEGIN
+               IF NOT EXISTS (SELECT 1 FROM authz.reached()) THEN RETURN; END IF;
+               RETURN QUERY {tested};
+             END"
+        )),
+        over_plpgsql_caller(&format!(
+            "BEGIN
+               IF current_setting('app.user_id', true) IS NULL THEN
+                 RAISE EXCEPTION 'none of %', ARRAY(SELECT authz.reached());
+               END IF;
+               RETURN QUERY {tested};
+             END"
+        )),
+        over_plpgsql_helper(
+            "BEGIN
+               RETURN QUERY SELECT resource.id FROM public.resources resource;
+               RETURN QUERY SELECT resource.code FROM public.resources resource;
+             END",
+        ),
+    ] {
+        assert_eq!(
+            reported_over_resources(&functions),
+            ["owned_reached()"],
+            "{functions}"
+        );
+    }
+}
+
+#[test]
+fn a_private_helper_passed_arguments_that_differ_or_reading_another_definer_is_reported() {
+    let over_parameter = |test: &str| {
+        format!(
+            "{}{}",
+            set_definer("reached(wanted TEXT)", "sql", EVERY_RESOURCE),
+            set_definer("owned_reached()", "sql", &owned_where(test))
+        )
+    };
+    assert_eq!(
+        reported_over_resources(&over_parameter(
+            "resource.id IN (SELECT authz.reached('x'))"
+        )),
+        Vec::<String>::new()
+    );
+    for functions in [
+        over_parameter("resource.id IN (SELECT authz.reached(wanted => 'x'))"),
+        over_parameter("resource.id IN (SELECT authz.reached((SELECT 'x')))"),
+        over_parameter("resource.id IN (SELECT authz.reached(current_user))"),
+        over_parameter(
+            "EXISTS (SELECT 1 FROM authz.reached(wanted => 'x') reached WHERE reached = resource.id)",
+        ),
+        format!(
+            "CREATE FUNCTION authz.secret_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT secret.resource_id FROM public.secrets secret $$;
+             {}{}",
+            set_definer(
+                "reached()",
+                "sql",
+                "SELECT resource.id FROM public.resources resource
+                 WHERE resource.id IN (SELECT authz.secret_ids())"
+            ),
+            set_definer(
+                "owned_reached()",
+                "sql",
+                &owned_where("resource.id IN (SELECT authz.reached())")
+            )
+        ),
+    ] {
+        assert_eq!(
+            reported_over_resources(&functions),
+            ["owned_reached()"],
+            "{functions}"
+        );
     }
 }
 
