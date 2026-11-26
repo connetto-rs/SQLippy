@@ -45,7 +45,7 @@ fn select_over(
 /// `DELETE` a `SELECT` over the same relations, assigned values and
 /// `WHERE`, under the `WITH` clause the statement carries.
 pub(crate) fn root_query(statement: &Statement) -> Option<Cow<'_, Query>> {
-    under(statement, None)
+    statement_root(statement, None)
 }
 
 /// The query whose expressions the query rules read for `query`: `query`
@@ -54,15 +54,19 @@ pub(crate) fn root_query(statement: &Statement) -> Option<Cow<'_, Query>> {
 pub(crate) fn query_root(query: &Query) -> Option<Cow<'_, Query>> {
     match query.body.as_ref() {
         SetExpr::Update(inner) | SetExpr::Delete(inner) | SetExpr::Insert(inner) => {
-            under(inner, query.with.as_ref())
+            statement_root(inner, query.with.as_ref())
         }
         _ => Some(Cow::Borrowed(query)),
     }
 }
 
 /// The query of `statement` written under `with`, the `WITH` clause of a
-/// query whose body is the data-modifying statement.
-fn under<'s>(statement: &'s Statement, with: Option<&With>) -> Option<Cow<'s, Query>> {
+/// query whose body is the data-modifying statement or that declares it as
+/// one of its items.
+pub(crate) fn statement_root<'s>(
+    statement: &'s Statement,
+    with: Option<&With>,
+) -> Option<Cow<'s, Query>> {
     match statement {
         Statement::Query(query) => query_root(query),
         Statement::Insert(Insert {

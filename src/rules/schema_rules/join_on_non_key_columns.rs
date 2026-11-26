@@ -9,8 +9,8 @@ use sql_traits::{
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::ast::{
-    BinaryOperator, Expr, Ident, JoinConstraint, Query, Select, Statement, TableAlias, TableFactor,
-    TableWithJoins, Visit, Visitor,
+    BinaryOperator, Expr, Ident, JoinConstraint, ObjectName, Query, Select, SetExpr, Statement,
+    TableAlias, TableFactor, TableWithJoins, Visit, Visitor,
 };
 
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
         expression_site_support::{ExpressionFinder, check_schema, check_statement},
         key_support::{equality_keys, references},
         policy_support::conjuncts,
-        statement_support::{check_query_selects, query_root, root_query},
+        statement_support::{check_query_selects, query_root, root_query, statement_root},
         walk_support::walk,
     },
     traits::{Constrainer, GenericConstrainer, QueryRule, Reporter, SchemaRule},
@@ -31,23 +31,13 @@ use crate::{
 struct Stored<'s, DB: DatabaseLike> {
     /// The position of the table among the `SELECT`'s relations.
     relation: usize,
+    /// The name the query refers to the table by.
+    name: &'s Ident,
     /// The catalog table.
     table: &'s DB::Table,
     /// The stored column.
     column: &'s DB::Column,
 }
-
-#[expect(
-    clippy::expl_impl_clone_on_copy,
-    reason = "deriving would require the database type itself to be `Copy`"
-)]
-impl<DB: DatabaseLike> Clone for Stored<'_, DB> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<DB: DatabaseLike> Copy for Stored<'_, DB> {}
 
 /// What one operand of an equality reads.
 enum Operand<'s, DB: DatabaseLike> {
@@ -83,9 +73,9 @@ struct Links<'s, 'r, 'a, 'b, 'c, DB: DatabaseLike> {
     database: &'s DB,
     scope: &'s ColumnDefinitionScope<'a, 'b, 'c, DB>,
     relations: &'r [&'s TableFactor],
-    /// The catalog table each relation reads, `None` for a `WITH` item, a
-    /// view, a derived table or a function.
-    tables: Vec<Option<&'s DB::Table>>,
+    /// The name and catalog table of each relation, `None` for a `WITH`
+    /// item, a view, a derived table or a function.
+    tables: Vec<Option<(&'s Ident, &'s DB::Table)>>,
     equalities: Vec<Equality<'s, DB>>,
     fixed: Vec<(usize, &'s DB::Column)>,
 }
@@ -153,9 +143,12 @@ impl<'s, DB: DatabaseLike> Links<'s, '_, '_, '_, '_, DB> {
                     return Ok(Operand::Fixed);
                 };
                 Ok(match (definition, self.tables[relation]) {
-                    (ColumnDefinition::Base { table, column, .. }, Some(own)) if table == own => {
+                    (ColumnDefinition::Base { table, column, .. }, Some((name, own)))
+                        if table == own =>
+                    {
                         Operand::Stored(Stored {
                             relation,
+                            name,
                             table: own,
                             column,
                         })
@@ -225,16 +218,15 @@ impl<'s, DB: DatabaseLike> Links<'s, '_, '_, '_, '_, DB> {
             return Ok(());
         };
         let right_reference = qualified(right_name, column);
-        let Operand::Stored(right_column) = self.operand(&right_reference)? else {
-            return Ok(());
-        };
         for &relation in left {
             let Some((left_name, _)) = exposed(self.relations[relation]) else {
                 continue;
             };
             let left_reference = qualified(left_name, column);
-            if let Operand::Stored(left_column) = self.operand(&left_reference)?
-                && left_column.relation == relation
+            if let (Operand::Stored(left_column), Operand::Stored(right_column)) = (
+                self.operand(&left_reference)?,
+                self.operand(&right_reference)?,
+            ) && left_column.relation == relation
             {
                 self.equalities.push(Equality {
                     left: left_column,
@@ -319,27 +311,23 @@ impl<'s, DB: DatabaseLike> Links<'s, '_, '_, '_, '_, DB> {
             .any(|key| key.iter().all(|column| columns.contains(column))))
     }
 
-    /// The foreign key condition that links the tables at `first` and
+    /// The foreign key condition that links the tables of `first` and
     /// `second`, such as `e.project_id = p.id`.
     fn link(
         &self,
-        first: Stored<'s, DB>,
-        second: Stored<'s, DB>,
+        first: &Stored<'s, DB>,
+        second: &Stored<'s, DB>,
     ) -> Result<Option<String>, LookupError> {
         for (child, parent) in [(first, second), (second, first)] {
-            let (Some((child_name, _)), Some((parent_name, _))) = (
-                exposed(self.relations[child.relation]),
-                exposed(self.relations[parent.relation]),
-            ) else {
-                return Ok(None);
-            };
             if let Some(pairs) = references(self.database, child.table, parent.table)?.first() {
                 let conditions: Vec<String> = pairs
                     .iter()
                     .map(|(host, referenced)| {
                         format!(
-                            "{child_name}.{} = {parent_name}.{}",
+                            "{}.{} = {}.{}",
+                            child.name,
                             host.column_name(),
+                            parent.name,
                             referenced.column_name()
                         )
                     })
@@ -350,44 +338,47 @@ impl<'s, DB: DatabaseLike> Links<'s, '_, '_, '_, '_, DB> {
         Ok(None)
     }
 
+    /// The columns of the table at `position` that `between` equates or the
+    /// conditions fix.
+    fn equated(&self, position: usize, between: &[&Equality<'s, DB>]) -> Vec<&'s DB::Column> {
+        self.fixed
+            .iter()
+            .filter(|(relation, _)| *relation == position)
+            .map(|(_, column)| *column)
+            .chain(
+                between
+                    .iter()
+                    .flat_map(|equality| [&equality.left, &equality.right])
+                    .filter(|end| end.relation == position)
+                    .map(|end| end.column),
+            )
+            .collect()
+    }
+
     /// The joins between two tables whose equalities cover a unique key of
     /// neither, each as its description and its condition.
     fn findings(&self) -> Result<Vec<(String, String)>, LookupError> {
-        let mut pairs: Vec<(usize, usize)> = self.equalities.iter().map(Equality::tables).collect();
-        pairs.sort_unstable();
-        pairs.dedup();
+        let mut pairs: Vec<((usize, usize), &Equality<'s, DB>)> = self
+            .equalities
+            .iter()
+            .map(|equality| (equality.tables(), equality))
+            .collect();
+        pairs.sort_by_key(|(pair, _)| *pair);
+        pairs.dedup_by_key(|(pair, _)| *pair);
         let mut found = Vec::new();
-        for pair in pairs {
+        for (pair, representative) in pairs {
             let between: Vec<&Equality<'s, DB>> = self
                 .equalities
                 .iter()
                 .filter(|equality| equality.tables() == pair)
                 .collect();
-            let side = |position: usize| {
-                let mut columns: Vec<&DB::Column> = self
-                    .fixed
-                    .iter()
-                    .filter(|(relation, _)| *relation == position)
-                    .map(|(_, column)| *column)
-                    .collect();
-                let mut stored = None;
-                for equality in &between {
-                    for end in [equality.left, equality.right] {
-                        if end.relation == position {
-                            columns.push(end.column);
-                            stored = Some(end);
-                        }
-                    }
-                }
-                stored.map(|stored| (stored, columns))
+            let (first, second) = if representative.left.relation == pair.0 {
+                (&representative.left, &representative.right)
+            } else {
+                (&representative.right, &representative.left)
             };
-            let (Some((first, first_columns)), Some((second, second_columns))) =
-                (side(pair.0), side(pair.1))
-            else {
-                continue;
-            };
-            if self.covers_key(first.table, &first_columns)?
-                || self.covers_key(second.table, &second_columns)?
+            if self.covers_key(first.table, &self.equated(pair.0, &between))?
+                || self.covers_key(second.table, &self.equated(pair.1, &between))?
             {
                 continue;
             }
@@ -410,12 +401,9 @@ impl<'s, DB: DatabaseLike> Links<'s, '_, '_, '_, '_, DB> {
     }
 }
 
-/// Whether `factor` names a `WITH` item, one of `ctes`, rather than a stored
+/// Whether `name` names a `WITH` item, one of `ctes`, rather than a stored
 /// relation.
-fn names_with_item(factor: &TableFactor, ctes: &[String]) -> bool {
-    let TableFactor::Table { name, .. } = factor else {
-        return false;
-    };
+fn names_with_item(name: &ObjectName, ctes: &[String]) -> bool {
     match name.0.as_slice() {
         [part] => part.as_ident().is_some_and(|ident| {
             ctes.iter()
@@ -443,12 +431,17 @@ fn non_key_joins<DB: DatabaseLike>(
     }
     let mut tables = Vec::with_capacity(own.len());
     for factor in &own {
-        tables.push(match factor {
+        let table = match factor {
             TableFactor::Table {
                 name, args: None, ..
-            } if !names_with_item(factor, ctes) => stored_table(database, name, None)?,
+            } if !names_with_item(name, ctes) => stored_table(database, name, None)?,
             _ => None,
-        });
+        };
+        tables.push(
+            exposed(factor)
+                .zip(table)
+                .map(|((name, _), table)| (name, table)),
+        );
     }
     let mut links = Links {
         database,
@@ -468,8 +461,9 @@ fn non_key_joins<DB: DatabaseLike>(
     links.findings()
 }
 
-/// Reads every query of a node under the scope of its outermost query, and
-/// an `UPDATE` or `DELETE` as the `SELECT` over its relations.
+/// Reads every query of a node under the scope of its outermost query, an
+/// `UPDATE` or `DELETE` as the `SELECT` over its relations, and an `UPDATE`
+/// or `DELETE` a `WITH` item runs as that `SELECT` under the `WITH` clause.
 struct Roots<'d, DB: DatabaseLike> {
     database: &'d DB,
     /// How many enclosing queries or data-modifying statements were read.
@@ -549,6 +543,15 @@ impl<DB: DatabaseLike> Visitor for Roots<'_, DB> {
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<LookupError> {
         if self.depth == 0 {
             self.read(query_root(query))?;
+        }
+        // The scope of the query holding a `WITH` item reads no `SELECT` of
+        // an `UPDATE` or `DELETE` the item runs.
+        for item in query.with.iter().flat_map(|with| &with.cte_tables) {
+            if let SetExpr::Update(statement) | SetExpr::Delete(statement) =
+                item.query.body.as_ref()
+            {
+                self.read(statement_root(statement, query.with.as_ref()))?;
+            }
         }
         self.depth += 1;
         ControlFlow::Continue(())
