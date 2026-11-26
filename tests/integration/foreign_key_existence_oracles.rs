@@ -499,7 +499,7 @@ fn an_arm_forcing_a_key_column_null_checks_nothing() {
                 vec!["memberships.memberships_invitation"],
             ),
             (
-                "id IS NULL OR (organization_id, invitation_id) IN (SELECT organization_id, id FROM invitations)",
+                "note IS NULL OR (organization_id, invitation_id) IN (SELECT organization_id, id FROM invitations)",
                 vec!["memberships.memberships_invitation"],
             ),
             (
@@ -511,7 +511,7 @@ fn an_arm_forcing_a_key_column_null_checks_nothing() {
                 objects(&format!(
                     "CREATE TABLE invitations (organization_id INT, id INT, PRIMARY KEY (organization_id, id));
                      ALTER TABLE invitations ENABLE ROW LEVEL SECURITY;
-                     CREATE TABLE memberships (id INT PRIMARY KEY, organization_id INT NOT NULL, invitation_id INT,
+                     CREATE TABLE memberships (id INT PRIMARY KEY, organization_id INT NOT NULL, invitation_id INT, note TEXT,
                          CONSTRAINT memberships_invitation FOREIGN KEY (organization_id, invitation_id)
                              REFERENCES invitations (organization_id, id) {match_kind});
                      GRANT INSERT ON memberships TO app;
@@ -522,6 +522,76 @@ fn an_arm_forcing_a_key_column_null_checks_nothing() {
                 "{match_kind} {check}"
             );
         }
+    }
+}
+
+#[test]
+fn an_arm_whose_table_checks_force_a_key_column_null_checks_nothing() {
+    let pinned = "(kind IN ('folder', 'project') AND id > 0)
+        OR (kind = 'owned' AND created_by_id = caller_id())
+        OR kind = 'root'";
+    let discriminated = "CHECK ((kind = 'owned') = (created_by_id IS NOT NULL))";
+    for (kind, check, policy, expected) in [
+        ("kind TEXT NOT NULL", discriminated, pinned, vec![]),
+        ("kind TEXT", discriminated, pinned, vec![]),
+        (
+            "kind TEXT NOT NULL",
+            "CHECK (kind = 'owned' OR created_by_id IS NULL)",
+            pinned,
+            vec![],
+        ),
+        (
+            "kind TEXT NOT NULL",
+            discriminated,
+            "kind IN ('folder', 'owned') OR (kind = 'owned' AND created_by_id = caller_id())",
+            vec!["items.items_creator"],
+        ),
+        (
+            "kind TEXT NOT NULL",
+            "CHECK ((kind = 'owned') = (created_by_id IS NOT NULL)) NOT ENFORCED",
+            pinned,
+            vec!["items.items_creator"],
+        ),
+    ] {
+        assert_eq!(
+            objects(&format!(
+                "CREATE FUNCTION caller_id() RETURNS INT LANGUAGE sql STABLE AS
+                   $$ SELECT current_setting('app.user_id')::int $$;
+                 CREATE TABLE people (id INT PRIMARY KEY);
+                 ALTER TABLE people ENABLE ROW LEVEL SECURITY;
+                 CREATE POLICY people_select ON people FOR SELECT TO app USING (id = caller_id());
+                 CREATE TABLE items (id INT PRIMARY KEY, {kind},
+                   created_by_id INT CONSTRAINT items_creator REFERENCES people (id), {check});
+                 ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+                 GRANT INSERT ON items TO app;
+                 CREATE POLICY items_insert ON items FOR INSERT TO app WITH CHECK ({policy});"
+            )),
+            expected,
+            "{kind} {check} {policy}"
+        );
+    }
+}
+
+#[test]
+fn an_arm_whose_table_checks_force_one_column_of_a_composite_key_null_checks_nothing() {
+    for (check, expected) in [
+        ("kind = 'owned' OR owner_id IS NULL", vec![]),
+        ("kind = 'owned' OR owner_id > 0", vec!["items.items_owner"]),
+    ] {
+        assert_eq!(
+            objects(&format!(
+                "CREATE TABLE members (team_id INT, id INT, PRIMARY KEY (team_id, id));
+                 ALTER TABLE members ENABLE ROW LEVEL SECURITY;
+                 CREATE TABLE items (id INT PRIMARY KEY, kind TEXT NOT NULL, team_id INT, owner_id INT,
+                   CONSTRAINT items_owner FOREIGN KEY (team_id, owner_id) REFERENCES members (team_id, id),
+                   CHECK ({check}));
+                 ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+                 GRANT INSERT ON items TO app;
+                 CREATE POLICY items_insert ON items FOR INSERT TO app WITH CHECK (kind = 'folder');"
+            )),
+            expected,
+            "{check}"
+        );
     }
 }
 

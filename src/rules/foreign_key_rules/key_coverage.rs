@@ -1,95 +1,78 @@
 //! Submodule providing the `NullableCompositeForeignKey` and
 //! `UnindexedForeignKey` rules.
 
-use std::borrow::Cow;
-
 use sql_traits::{
     errors::LookupError,
+    structs::{Assumption, IdentifierCase, Outcomes},
     traits::{
         CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, TableIndexLike, TableLike,
     },
 };
-use sqlparser::ast::{BinaryOperator, Expr};
+use sqlparser::ast::{Expr, Ident};
 
 use crate::{
     engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        closed_set_support::stored_name,
         index_support::entry_columns,
         key_support::{indexed_keys, nullable_host_columns},
-        policy_support::conjuncts,
     },
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
-/// The stored name of the column a nullness test reads, with whether it
-/// tests `IS NOT NULL`.
-fn null_test(mut expression: &Expr) -> Option<(bool, Cow<'_, str>)> {
-    while let Expr::Nested(inner) = expression {
-        expression = inner;
-    }
-    match expression {
-        Expr::IsNull(column) => Some((false, stored_name(column)?)),
-        Expr::IsNotNull(column) => Some((true, stored_name(column)?)),
-        _ => None,
+/// `column IS NULL`, or `column IS NOT NULL` when `null` is unset.
+fn null_test<C: ColumnLike>(column: &C, null: bool) -> Expr {
+    let column = Box::new(Expr::Identifier(Ident::with_quote(
+        '"',
+        column.stored_column_name().into_owned(),
+    )));
+    if null {
+        Expr::IsNull(column)
+    } else {
+        Expr::IsNotNull(column)
     }
 }
 
-/// The stored names of the two columns a check conjunct, as `conjuncts`
-/// yields it outside parentheses, keeps `NULL` together, written
-/// `(a IS NULL) = (b IS NULL)` or `(a IS NOT NULL) = (b IS NOT NULL)`.
-fn tie(conjunct: &Expr) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
-    let Expr::BinaryOp {
-        left,
-        op: BinaryOperator::Eq,
-        right,
-    } = conjunct
-    else {
-        return None;
-    };
-    let ((left_negated, left), (right_negated, right)) = (null_test(left)?, null_test(right)?);
-    (left_negated == right_negated).then_some((left, right))
-}
-
-/// Whether the checks of the host table of `foreign_key` keep each of the
-/// nullable key columns `rest` `NULL` exactly when `first` is, through ties
-/// between two columns chained over shared ones.
+/// Whether the enforced and validated checks of `table` keep each of the
+/// nullable key columns `rest` `NULL` exactly when `first` is, so that no
+/// row they admit holds `first` `NULL` and one of `rest` set, or the
+/// reverse.
 fn null_together<DB: DatabaseLike>(
     database: &DB,
-    foreign_key: &DB::ForeignKey,
+    table: &DB::Table,
     first: &DB::Column,
     rest: &[&DB::Column],
 ) -> Result<bool, LookupError> {
-    let mut ties = Vec::new();
-    for check in foreign_key
-        .host_table(database)
-        .check_constraints(database)?
-        .filter(|check| check.is_enforced())
-    {
-        ties.extend(
-            conjuncts(check.expression(database))
-                .into_iter()
-                .filter_map(tie),
-        );
+    let assumed = [null_test(first, true), null_test(first, false)];
+    let targets: Vec<Expr> = rest.iter().map(|column| null_test(*column, true)).collect();
+    let mut assumptions = Vec::new();
+    for check in table.check_constraints(database)? {
+        if check.is_enforced() && check.is_validated(database)? {
+            assumptions.push(Assumption::Check(check));
+        }
     }
-    let first = first.stored_column_name();
-    let mut reached: Vec<&str> = vec![&*first];
-    let mut next = 0;
-    while let Some(&name) = reached.get(next) {
-        for (left, right) in &ties {
-            for (from, to) in [(left, right), (right, left)] {
-                if *from == name && !reached.contains(&&**to) {
-                    reached.push(to);
-                }
+    for (null, assumed) in [true, false].into_iter().zip(&assumed) {
+        assumptions.push(Assumption::Expression {
+            expression: assumed,
+            outcomes: Outcomes::TRUE,
+        });
+        for target in &targets {
+            let outcomes = table
+                .truth_under(database, target, IdentifierCase::AsWritten, &assumptions)?
+                .outcomes;
+            let apart = if null {
+                outcomes.falsity
+            } else {
+                outcomes.truth
+            };
+            if apart {
+                return Ok(false);
             }
         }
-        next += 1;
+        assumptions.pop();
     }
-    Ok(rest
-        .iter()
-        .all(|column| reached.contains(&&*column.stored_column_name())))
+    Ok(true)
 }
 
 /// Struct defining a rule that reports a composite foreign key with two or
@@ -100,11 +83,13 @@ fn null_together<DB: DatabaseLike>(
 /// nowhere. A key with one nullable column is an optional reference, such as
 /// `invitation_id` under `FOREIGN KEY (tenant_id, invitation_id)` with
 /// `tenant_id` `NOT NULL`, and is checked whole whenever that column is set.
-/// So is a key whose nullable columns the table's checks keep `NULL`
-/// together, each through `(a IS NULL) = (b IS NULL)` or a chain of such
-/// checks over a shared column, such as `previous_id` and `previous_version`
+/// So is a key whose nullable columns the table's enforced and validated
+/// checks keep `NULL` together, such as `previous_id` and `previous_version`
 /// under `FOREIGN KEY (previous_id, name, previous_version)` with `name`
-/// `NOT NULL`.
+/// `NOT NULL` and `CHECK ((previous_id IS NULL) = (previous_version IS
+/// NULL))`, or `parent_id` and `parent_kind` under
+/// `CHECK ((kind = 'root') = (parent_id IS NULL))` and
+/// `CHECK ((kind = 'root') = (parent_kind IS NULL))` with `kind` `NOT NULL`.
 ///
 /// SQLite applies `MATCH SIMPLE` semantics even to a declared `MATCH FULL`.
 ///
@@ -180,7 +165,9 @@ impl<DB: DatabaseLike> ForeignKeyRule for NullableCompositeForeignKey<DB> {
         let [first, rest @ ..] = nullable.as_slice() else {
             return Ok(());
         };
-        if rest.is_empty() || null_together(database, foreign_key, first, rest)? {
+        if rest.is_empty()
+            || null_together(database, foreign_key.host_table(database), first, rest)?
+        {
             return Ok(());
         }
         let host = foreign_key.host_table(database).table_name();

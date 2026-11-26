@@ -6,10 +6,12 @@ use std::{borrow::Cow, cell::RefCell, collections::HashMap, ops::ControlFlow, pt
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
     structs::{
-        ColumnDefinitionScope, ColumnPrivilege, ColumnScope, GateTerm, IdentifierCase, RowGate,
-        RowSecurity, RowStatement, RowVersion, TargetName, WrittenCall,
+        Assumption, ColumnDefinitionScope, ColumnPrivilege, ColumnScope, GateTerm, IdentifierCase,
+        Outcomes, RowGate, RowSecurity, RowStatement, RowVersion, TargetName, WrittenCall,
     },
-    traits::{ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, TableLike},
+    traits::{
+        CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, TableLike,
+    },
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::{
@@ -162,6 +164,124 @@ struct Sublink<'db, DB: DatabaseLike> {
     filters: Vec<Expr>,
 }
 
+/// What the checks of a written table force on the nullable key columns of
+/// its rows.
+struct NullForcing<'a, DB: DatabaseLike> {
+    written: &'a DB::Table,
+    /// The enforced and validated checks of `written` that read a column of
+    /// `linked`, which every written row meets.
+    checks: Vec<Assumption<'a, DB>>,
+    /// `IS NULL` over the nullable key columns, joined with `OR`.
+    test: Expr,
+    /// The stored names of the nullable key columns and of every column a
+    /// check of `checks` reads, one of which a clause must read to force a
+    /// key column `NULL`.
+    linked: Vec<Cow<'a, str>>,
+    /// The answer for each clause read so far.
+    answers: RefCell<HashMap<Expr, bool>>,
+}
+
+impl<'a, DB: DatabaseLike> NullForcing<'a, DB> {
+    /// The forcing on the `key_columns` of rows of `written`, `None` when
+    /// every key column is `NOT NULL`.
+    fn new(
+        database: &'a DB,
+        written: &'a DB::Table,
+        key_columns: &[Cow<'a, str>],
+    ) -> Result<Option<Self>, LookupError> {
+        let mut linked = Vec::new();
+        let mut test: Option<Expr> = None;
+        for column in written.columns(database)? {
+            let name = column.stored_column_name();
+            if key_columns.contains(&name) && column.is_nullable(database)? {
+                let null = Expr::IsNull(Box::new(Expr::Identifier(Ident::with_quote(
+                    '"',
+                    name.as_ref(),
+                ))));
+                test = Some(match test {
+                    Some(left) => Expr::BinaryOp {
+                        left: Box::new(left),
+                        op: BinaryOperator::Or,
+                        right: Box::new(null),
+                    },
+                    None => null,
+                });
+                linked.push(name);
+            }
+        }
+        let Some(test) = test else {
+            return Ok(None);
+        };
+        let mut reads = Vec::new();
+        for check in written.check_constraints(database)? {
+            if check.is_enforced() && check.is_validated(database)? {
+                let read: Vec<Cow<'a, str>> = check
+                    .columns(database)?
+                    .map(ColumnLike::stored_column_name)
+                    .collect();
+                reads.push((check, read));
+            }
+        }
+        // A check reading a linked column ties every column it reads to it.
+        let mut checks = Vec::new();
+        while let Some(index) = reads
+            .iter()
+            .position(|(_, read)| read.iter().any(|column| linked.contains(column)))
+        {
+            let (check, read) = reads.swap_remove(index);
+            for column in read {
+                if !linked.contains(&column) {
+                    linked.push(column);
+                }
+            }
+            checks.push(Assumption::Check(check));
+        }
+        Ok(Some(Self {
+            written,
+            checks,
+            test,
+            linked,
+            answers: RefCell::new(HashMap::new()),
+        }))
+    }
+
+    /// Whether every written row meeting `clause` holds a key column `NULL`
+    /// under the checks, which a clause the checks leave no row for does.
+    fn forces(&self, database: &DB, clause: &Expr) -> Result<bool, LookupError> {
+        let reads_linked = visit_expressions(clause, |expression| {
+            if stored_name(expression).is_some_and(|name| self.linked.contains(&name)) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .is_break();
+        if !reads_linked {
+            return Ok(false);
+        }
+        if let Some(&forced) = self.answers.borrow().get(clause) {
+            return Ok(forced);
+        }
+        let mut assumptions = self.checks.clone();
+        assumptions.push(Assumption::Expression {
+            expression: clause,
+            outcomes: Outcomes::TRUE,
+        });
+        let forced = !self
+            .written
+            .truth_under(
+                database,
+                &self.test,
+                IdentifierCase::AsWritten,
+                &assumptions,
+            )?
+            .outcomes
+            .falsity;
+        self.answers.borrow_mut().insert(clause.clone(), forced);
+        Ok(forced)
+    }
+}
+
 /// Decides whether the check on a written row confines a key to rows its
 /// writer may point at. A set of key columns is a bit mask over their
 /// positions in the key, which PostgreSQL caps at 32.
@@ -178,6 +298,9 @@ pub(crate) struct Confinement<'a, DB: DatabaseLike> {
     /// Whether a `NULL` key column skips the check, as it does for a foreign
     /// key and for a unique key whose `NULL` values are distinct.
     null_skips: bool,
+    /// What the written table's checks force on the nullable key columns,
+    /// when `NULL` skips the check.
+    null_forcing: Option<NullForcing<'a, DB>>,
     /// The key columns whose values only rows of their writer's principal
     /// hold, which a check pinning one to a principal accessor confines.
     principal_columns: u64,
@@ -194,12 +317,13 @@ pub(crate) struct Confinement<'a, DB: DatabaseLike> {
 }
 
 impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
-    /// A confinement of the written `key_columns` onto `referenced_columns`
-    /// of `parent`, by position, under a check that a `NULL` key column
-    /// skips when `null_skips` is set.
+    /// A confinement of the `key_columns` of rows written to `written` onto
+    /// `referenced_columns` of `parent`, by position, under a check that a
+    /// `NULL` key column skips when `null_skips` is set.
     pub(crate) fn new(
         database: &'a DB,
         deployment: &'a Deployment,
+        written: &'a DB::Table,
         key_columns: Vec<Cow<'a, str>>,
         parent: &'a DB::Table,
         referenced_columns: Vec<Cow<'a, str>>,
@@ -217,6 +341,11 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 })
             })
             .collect();
+        let null_forcing = if null_skips {
+            NullForcing::new(database, written, &key_columns)?
+        } else {
+            None
+        };
         Ok(Self {
             database,
             deployment,
@@ -225,6 +354,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             referenced_columns,
             row_keys,
             null_skips,
+            null_forcing,
             principal_columns: 0,
             helpers: RefCell::new(HashMap::new()),
             sets: HelperSets::new(database),
@@ -290,6 +420,25 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         self.key_columns
             .iter()
             .position(|column| names_cast_column(expression, column))
+    }
+
+    /// Whether every written row meeting `clause` holds a key column `NULL`,
+    /// which a check that `NULL` skips then looks up nothing for. The clause
+    /// tests the column `IS NULL` itself, or the written table's checks
+    /// force it under the clause.
+    fn forces_null(&self, clause: &Expr) -> Result<bool, LookupError> {
+        if !self.null_skips {
+            return Ok(false);
+        }
+        if let Expr::IsNull(column) = unwrapped(clause)
+            && self.key_position(column).is_some()
+        {
+            return Ok(true);
+        }
+        match &self.null_forcing {
+            Some(forcing) => forcing.forces(self.database, clause),
+            None => Ok(false),
+        }
     }
 
     /// Whether `query`, a plain `SELECT`, gives every column of a unique key
@@ -394,15 +543,15 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     }
 
     /// Whether the conjunct leaves the key check nothing hidden to find. It
-    /// forces a key column `NULL` under a check that `NULL` skips, so
-    /// PostgreSQL looks up no row, it ties the key to one row the writer
-    /// reads, or it draws a key column from a set no held key is in.
+    /// forces a key column `NULL`, alone or under the written table's
+    /// checks, under a check that `NULL` skips, so PostgreSQL looks up no
+    /// row, it ties the key to one row the writer reads, or it draws a key
+    /// column from a set no held key is in.
     fn settles_key(&self, conjunct: &Expr) -> Result<bool, LookupError> {
-        if self.excludes_held(conjunct)? {
+        if self.excludes_held(conjunct)? || self.forces_null(conjunct)? {
             return Ok(true);
         }
         match unwrapped(conjunct) {
-            Expr::IsNull(column) => Ok(self.null_skips && self.key_position(column).is_some()),
             Expr::BinaryOp {
                 left,
                 op: BinaryOperator::Eq,
@@ -1918,11 +2067,10 @@ impl<DB: DatabaseLike> Columns for Reading<'_, '_, DB> {
         self.confinement.key_columns_named(column) & tested != 0
     }
 
-    /// A clause leaving a key column `NULL` skips a check that `NULL` skips.
-    fn settles(&self, clause: &Expr) -> bool {
-        let confinement = self.confinement;
-        confinement.null_skips
-            && matches!(clause, Expr::IsNull(column) if confinement.key_columns_named(column) != 0)
+    /// A clause leaving a key column `NULL`, alone or under the written
+    /// table's checks, skips a check that `NULL` skips.
+    fn settles(&self, clause: &Expr) -> Result<bool, LookupError> {
+        self.confinement.forces_null(clause)
     }
 
     /// A clause drawing the key from a set-returning helper whose every arm
