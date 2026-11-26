@@ -1,7 +1,5 @@
 //! Submodule providing the `UniqueKeyExistenceOracle` rule.
 
-use std::borrow::Cow;
-
 use sql_traits::{
     errors::LookupError,
     structs::{RowStatement, RowVersion},
@@ -16,7 +14,7 @@ use crate::{
     rules::{
         consumed_key_support::consumptions,
         existence_oracle_support::{
-            Confinement, hides_rows, row_security, writes_free_key, writes_only_pinned,
+            Confinement, hides_rows, principal_columns, row_security, writes_free_key,
             writes_whole_key,
         },
         policy_support::{acting, client_roles},
@@ -246,50 +244,4 @@ fn probes<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
         "A unique key of '{name}' on ({list}) tells {} whether a row of '{name}' it cannot read holds a key, since the key is checked past row-level security.",
         probes.join(", ")
     )))
-}
-
-/// The stored names of `columns` that every client role writes only with the
-/// value a declared principal accessor yields for it, so that only rows of
-/// one principal hold each value.
-fn principal_columns<'db, DB: DatabaseLike>(
-    database: &'db DB,
-    deployment: &Deployment,
-    table: &'db DB::Table,
-    columns: &[&'db DB::Column],
-) -> Result<Vec<Cow<'db, str>>, LookupError> {
-    let mut pinned = Vec::new();
-    if deployment.principal_accessors().is_empty() {
-        return Ok(pinned);
-    }
-    let mut roles = Vec::new();
-    for (_, role) in client_roles(database, deployment) {
-        roles.push((role, table.privileges(acting(role), database)?));
-    }
-    'columns: for &column in columns {
-        let name = column.stored_column_name();
-        for (role, held) in &roles {
-            for (privilege, statement, written) in [
-                (
-                    &held.insert,
-                    RowStatement::Insert { returning: false },
-                    RowVersion::Inserted,
-                ),
-                (
-                    &held.update,
-                    RowStatement::Update { reads: false },
-                    RowVersion::Updated,
-                ),
-            ] {
-                if privilege.on_column(column)
-                    && !writes_only_pinned(
-                        database, deployment, table, statement, written, *role, &name,
-                    )?
-                {
-                    continue 'columns;
-                }
-            }
-        }
-        pinned.push(name);
-    }
-    Ok(pinned)
 }
