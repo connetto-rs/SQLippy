@@ -14,7 +14,7 @@ use sqlparser::ast::ReferentialAction;
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::key_support::checks_every_row_of,
+    rules::key_support::{checks_every_row_of, nullable_host_columns},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -142,7 +142,7 @@ fn implies<DB: DatabaseLike>(
     // `MATCH SIMPLE` key.
     if narrower.match_full(database)
         && !wider.match_full(database)
-        && narrower.has_nullable_host_columns(database)?
+        && !nullable_host_columns(database, narrower)?.is_empty()
     {
         return Ok(false);
     }

@@ -19,7 +19,7 @@ use sqlparser::ast::{
 use crate::rules::{
     expression_site_support::{ExpressionFinder, is_null_literal},
     null_support::{
-        extracts_part, find_null_passing_argument, rejects_null, strictness,
+        extracts_part, find_null_passing_argument, may_hold_null, rejects_null, strictness,
         yields_value_for_values,
     },
     policy_support::conjuncts,
@@ -161,7 +161,7 @@ impl<'scope, 'query: 'scope, 'database: 'scope, DB: DatabaseLike>
         };
         let mut columns = table.columns(self.database)?;
         match (columns.next(), columns.next()) {
-            (Some(column), None) if column.is_nullable(self.database)? => Ok(
+            (Some(column), None) if may_hold_null(self.database, column)? => Ok(
                 Nullability::Nullable(Culprit::Column(table.table_name(), column.column_name())),
             ),
             _ => Ok(Nullability::Unknown),
@@ -225,7 +225,7 @@ impl<'scope, 'query: 'scope, 'database: 'scope, DB: DatabaseLike>
                 column,
                 database,
             } => {
-                if column.is_nullable(database)? {
+                if may_hold_null(*database, column)? {
                     Nullability::Nullable(Culprit::Column(
                         (*table).table_name(),
                         (*column).column_name(),

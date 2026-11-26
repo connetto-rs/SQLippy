@@ -12,6 +12,7 @@ use crate::{
     rules::{
         external_key_support::external_host_columns,
         key_support::{Key, nullable_host_columns, unique_keys},
+        null_support::may_hold_null,
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule},
 };
@@ -32,7 +33,7 @@ fn is_optional_reference<DB: DatabaseLike>(
     for columns in external.iter().filter(|columns| columns.contains(&column)) {
         let mut nullable = 0;
         for host in columns {
-            nullable += usize::from(host.is_nullable(database)?);
+            nullable += usize::from(may_hold_null(database, *host)?);
         }
         if nullable == 1 {
             return Ok(true);
@@ -41,9 +42,9 @@ fn is_optional_reference<DB: DatabaseLike>(
     Ok(false)
 }
 
-/// The nullable columns of a unique index that treats nulls as distinct,
-/// other than optional references, none when its columns span one of the
-/// table's `keys` and so already tell its rows apart.
+/// The columns of a unique index that treats nulls as distinct whose rows
+/// may hold `NULL`, other than optional references, none when its columns
+/// span one of the table's `keys` and so already tell its rows apart.
 fn nullable_columns<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     database: &DB,
     external: &[Vec<&DB::Column>],
@@ -62,7 +63,7 @@ fn nullable_columns<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     }
     let mut nullable = Vec::new();
     for column in columns {
-        if column.is_nullable(database)? && !is_optional_reference(database, external, column)? {
+        if may_hold_null(database, column)? && !is_optional_reference(database, external, column)? {
             nullable.push(format!("'{}'", column.column_name()));
         }
     }
@@ -71,7 +72,9 @@ fn nullable_columns<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
 
 schema_rule!(
     /// Struct defining a rule that reports a unique constraint or unique
-    /// index over a nullable column without `NULLS NOT DISTINCT`.
+    /// index over a nullable column without `NULLS NOT DISTINCT`. A column
+    /// that the table's enforced and validated checks keep from `NULL`, as
+    /// `CHECK (slug IS NOT NULL)` does, counts as `NOT NULL`.
     ///
     /// An optional reference, the one nullable column of a foreign key such
     /// as `invitation_id` under `FOREIGN KEY (tenant_id, invitation_id)` with

@@ -38,6 +38,7 @@ use crate::{
         },
         key_support::{binds, equality_keys, instances, key_pairs, named, no_inheritors},
         ladder_support::called,
+        null_support::may_hold_null,
         policy_read_support::{reads_every_row, sublink_reads},
         policy_support::{
             acting, client_roles, conjuncts, disjuncts, is_column_reference, is_contradiction,
@@ -2606,8 +2607,9 @@ fn admits_nothing<DB: DatabaseLike>(
 /// Whether `privilege` lets its holder write a whole key over `columns` for
 /// PostgreSQL to check. An insert must name every key column, since an
 /// unnamed one takes its default. An update must set one, and every other
-/// column it leaves must be `NOT NULL` when `kept` is set, so that the
-/// stored value completes the key. A generated column follows the others.
+/// column it leaves must be one no row may hold `NULL` in when `kept` is
+/// set, so that the stored value completes the key. A generated column
+/// follows the others.
 pub(crate) fn writes_whole_key<'db, DB: DatabaseLike>(
     database: &'db DB,
     columns: impl IntoIterator<Item = &'db DB::Column>,
@@ -2618,7 +2620,7 @@ pub(crate) fn writes_whole_key<'db, DB: DatabaseLike>(
     for column in columns {
         if privilege.on_column(column) {
             sets_one = true;
-        } else if !column.is_generated(database) && (!kept || column.is_nullable(database)?) {
+        } else if !column.is_generated(database) && (!kept || may_hold_null(database, column)?) {
             return Ok(false);
         }
     }

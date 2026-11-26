@@ -76,7 +76,9 @@ fn null_together<DB: DatabaseLike>(
 }
 
 /// Struct defining a rule that reports a composite foreign key with two or
-/// more nullable columns under `MATCH SIMPLE`.
+/// more nullable columns under `MATCH SIMPLE`. A column the table's enforced
+/// and validated checks keep from `NULL`, as `CHECK (b IS NOT NULL)` does,
+/// counts as `NOT NULL`.
 ///
 /// Under `MATCH SIMPLE`, a row with any foreign key column `NULL` needs no
 /// match, so a key with one nullable column set and another `NULL` points

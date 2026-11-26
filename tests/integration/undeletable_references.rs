@@ -81,6 +81,11 @@ fn a_reference_the_role_cannot_clear_is_reported() {
          REVOKE DELETE ON notes FROM app;
          GRANT UPDATE (account_id) ON notes TO app;"
             .to_owned(),
+        // An updatable key a check keeps from NULL.
+        "CREATE TABLE notes (account_id INT REFERENCES accounts (id), CHECK (account_id IS NOT NULL));
+         REVOKE DELETE ON notes FROM app;
+         GRANT UPDATE (account_id) ON notes TO app;"
+            .to_owned(),
         // Deleting the account a cascading sibling key references first deletes
         // from the referenced table, whose immediate check may refuse it.
         "CREATE TABLE notes (id INT PRIMARY KEY,
@@ -360,6 +365,13 @@ fn a_reference_cleared_by_deleting_a_cascading_ancestor_passes() {
         "CREATE TABLE folders (id INT PRIMARY KEY);
          CREATE TABLE notes (account_id INT NOT NULL REFERENCES accounts (id),
            folder_id INT NOT NULL REFERENCES folders (id) ON DELETE CASCADE);
+         REVOKE DELETE ON notes FROM app;
+         GRANT DELETE ON folders TO app;"
+            .to_owned(),
+        // A check keeps the cascading column from NULL.
+        "CREATE TABLE folders (id INT PRIMARY KEY);
+         CREATE TABLE notes (account_id INT NOT NULL REFERENCES accounts (id),
+           folder_id INT REFERENCES folders (id) ON DELETE CASCADE, CHECK (folder_id IS NOT NULL));
          REVOKE DELETE ON notes FROM app;
          GRANT DELETE ON folders TO app;"
             .to_owned(),

@@ -22,6 +22,7 @@ use crate::{
         function_rules::readable,
         grant_support::is_subscribed,
         literal_support::literal,
+        null_support::may_hold_null,
         policy_support::conjuncts,
         trigger_support::{fires_on_insert, fires_on_update, row, row_trigger, stored},
         walk_support::walk,
@@ -30,15 +31,18 @@ use crate::{
 };
 
 rule_definition!(
-    /// Struct defining a rule that reports a `NOT NULL` column whose default
-    /// is a literal and whose check fixes it to that same literal.
+    /// Struct defining a rule that reports a column no row may hold `NULL`
+    /// in, through `NOT NULL` or the table's enforced and validated checks,
+    /// whose default is a literal and whose check fixes it to that same
+    /// literal.
     ///
     /// The check is a top-level conjunct `column = literal`, in either
     /// operand order, of a validated check of the column's table, compared
     /// with the default through parentheses and casts. A check added
     /// `NOT VALID` fixes nothing, since rows stored before it may hold any
-    /// value. A nullable column is not reported, since a generated column
-    /// computing the literal would refuse the `NULL` it admits. Nor is a
+    /// value. A column that may hold `NULL` is not reported, since a
+    /// generated column computing the literal would refuse the `NULL` it
+    /// admits. Nor is a
     /// column among the referencing columns of
     /// a foreign key whose `ON UPDATE` action is `CASCADE`, `SET NULL` or
     /// `SET DEFAULT`, or whose `ON DELETE` action is `SET NULL` or
@@ -182,7 +186,7 @@ impl<DB: DatabaseLike> ColumnRule for ConstantColumnNotGenerated<DB> {
             return Ok(());
         };
         if column.is_generated(database)
-            || column.is_nullable(database)?
+            || may_hold_null(database, column)?
             || is_subscribed(database, reporter.deployment(), column.table(database))
         {
             return Ok(());
