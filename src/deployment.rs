@@ -49,6 +49,7 @@ pub struct Deployment {
     exposed_schemas: Vec<String>,
     credentials: Fact<Expr>,
     request_settings: Vec<Expr>,
+    principal_accessors: Vec<Expr>,
     sets_within: Vec<(Expr, Expr)>,
     client_written_tables: Vec<(String, String)>,
     subscribed_tables: Vec<(String, String)>,
@@ -625,6 +626,33 @@ impl Deployment {
     #[must_use]
     pub fn is_request_setting(&self, expression: &Expr) -> bool {
         self.request_settings.contains(expression)
+    }
+
+    /// Declares an expression yielding, for each caller, `NULL` or a value
+    /// that identifies the principal the request acts for and never another,
+    /// such as a namespace the server assigns to one user and never
+    /// reassigns.
+    ///
+    /// The expression is matched as written, like a credential, also as the
+    /// one expression a scalar subquery selects, and one reading a column is
+    /// never matched. The declaration states that the server, as a definer
+    /// function or a trigger, writes a principal's value only into rows of
+    /// that principal, since the rules do not follow such writes.
+    /// [`UniqueKeyExistenceOracle`](crate::prelude::UniqueKeyExistenceOracle)
+    /// reads it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parser error when `expression` is not one PostgreSQL SQL
+    /// expression.
+    pub fn with_principal_accessor(mut self, expression: &str) -> Result<Self, ParserError> {
+        self.principal_accessors.push(parse_expression(expression)?);
+        Ok(self)
+    }
+
+    /// Returns the declared principal accessors.
+    pub(crate) fn principal_accessors(&self) -> &[Expr] {
+        &self.principal_accessors
     }
 
     /// Declares the columns holding the tenant a table's rows belong to, by
