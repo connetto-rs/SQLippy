@@ -471,7 +471,7 @@ checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
 [[package]]
 name = "diesel"
 version = "2.4.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#f354e06688811191f73342f452639380c9ae59a8"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#6f16b7c5fd82733eaedd3e4c5e88a9efb3926de0"
 dependencies = [
  "bigdecimal",
  "bitflags",
@@ -497,7 +497,7 @@ dependencies = [
 [[package]]
 name = "diesel_attribute_parser"
 version = "0.1.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#f354e06688811191f73342f452639380c9ae59a8"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#6f16b7c5fd82733eaedd3e4c5e88a9efb3926de0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -507,7 +507,7 @@ dependencies = [
 [[package]]
 name = "diesel_derives"
 version = "2.4.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#f354e06688811191f73342f452639380c9ae59a8"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#6f16b7c5fd82733eaedd3e4c5e88a9efb3926de0"
 dependencies = [
  "diesel_attribute_parser",
  "diesel_table_macro_syntax",
@@ -520,7 +520,7 @@ dependencies = [
 [[package]]
 name = "diesel_table_macro_syntax"
 version = "0.4.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#f354e06688811191f73342f452639380c9ae59a8"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#6f16b7c5fd82733eaedd3e4c5e88a9efb3926de0"
 dependencies = [
  "syn 3.0.10",
 ]
@@ -566,7 +566,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 [[package]]
 name = "dsl_auto_type"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#f354e06688811191f73342f452639380c9ae59a8"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#6f16b7c5fd82733eaedd3e4c5e88a9efb3926de0"
 dependencies = [
  "darling",
  "either",
@@ -2299,7 +2299,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#8ce1435731df083ce3b31d7b2b25d45e70d7bbfc"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#a3a38cf4be0edda72612efebbab889e84bee6cae"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -2347,7 +2347,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#590c51ba5741df9a60403cc125c6e4d269f4bcb7"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#323a60ea7bcd2e593cfea2f68fc851bf873f687e"
 dependencies = [
  "log",
  "recursive",
@@ -2369,7 +2369,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-expr-eval"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#b98dec250acd84397e52d893e5510bfb30e0ec51"
+source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#0747feeca17d09d257e708d14a667213350a5f88"
 dependencies = [
  "quine-mc_cluskey",
  "rpds",
@@ -2390,7 +2390,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-plpgsql-dataflow"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-plpgsql-dataflow?branch=main#33371f448377f181403f77917f3bc09f68648125"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql-dataflow?branch=main#d9353560282a17191b70bf650cbffbddf984c0c3"
 dependencies = [
  "sqlparser",
  "sqlparser-expr-eval",
@@ -2402,7 +2402,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#590c51ba5741df9a60403cc125c6e4d269f4bcb7"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#323a60ea7bcd2e593cfea2f68fc851bf873f687e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2418,7 +2418,7 @@ checksum = "858cea190fe7555971c35a5eb336858f1bf962a2bd7ceb8704fb1759b36af2cd"
 [[package]]
 name = "sqlstate"
 version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel?branch=main#f354e06688811191f73342f452639380c9ae59a8"
+source = "git+https://github.com/diesel-rs/diesel?branch=main#6f16b7c5fd82733eaedd3e4c5e88a9efb3926de0"
 
 [[package]]
 name = "stable_deref_trait"
