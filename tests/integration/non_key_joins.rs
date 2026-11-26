@@ -1,7 +1,7 @@
 //! Equality joins whose columns cover a unique key of neither table,
 //! observed through the public constrainer API.
 
-use crate::rule_findings::{findings, statement_findings};
+use crate::rule_findings::{findings, statement, statement_findings};
 use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
@@ -96,6 +96,33 @@ fn a_join_on_columns_that_are_a_key_of_neither_table_is_reported() {
             "SELECT e.id FROM employees e JOIN stamps s ON s.location = e.location",
             "s.location = e.location",
         ),
+        (
+            "SELECT e.id FROM employees e JOIN projects p ON (e.location) = (p.location)",
+            "(e.location) = (p.location)",
+        ),
+        (
+            "SELECT e.id FROM employees e JOIN public.projects p ON e.location = p.location",
+            "e.location = p.location",
+        ),
+        // A column alias list renames the columns `NATURAL` matches.
+        (
+            "SELECT b.serial FROM badges b NATURAL JOIN projects p(pid, location)",
+            "b.location = p.location",
+        ),
+        // A column `USING` merged belongs to neither table, so the equality
+        // the next join states on it is not judged.
+        (
+            "SELECT a.id FROM employees a JOIN employees b USING (project_id) JOIN projects p ON project_id = p.code",
+            "a.project_id = b.project_id",
+        ),
+        (
+            "WITH moved AS (DELETE FROM employees e USING projects p WHERE e.location = p.location RETURNING e.id) INSERT INTO sites DEFAULT VALUES",
+            "e.location = p.location",
+        ),
+        (
+            "WITH moved AS (UPDATE employees e SET project_id = p.id FROM projects p WHERE e.location = p.location RETURNING e.id) SELECT id FROM moved",
+            "e.location = p.location",
+        ),
     ] {
         assert_eq!(joins(sql), [object], "{sql}");
     }
@@ -133,6 +160,12 @@ fn semi_joins_derived_relations_and_other_joins_are_not_judged() {
         "SELECT e.id FROM employees e CROSS JOIN projects p",
         "SELECT e.id FROM employees e JOIN projects p ON e.location < p.location",
         "SELECT e.id FROM employees e JOIN projects p ON e.location = p.location OR e.project_id = p.id",
+        "SELECT e.id FROM employees e JOIN projects p ON e.location = p.code + 1",
+        "SELECT e.id FROM employees e JOIN (SELECT location FROM sites) d USING (location)",
+        "SELECT p.id FROM (SELECT location FROM sites) d JOIN projects p USING (location)",
+        "WITH c AS (SELECT location FROM projects) SELECT e.id FROM employees e JOIN c USING (location)",
+        "SELECT e.id FROM employees e NATURAL JOIN (SELECT location FROM projects) d",
+        "SELECT e.id FROM employees e NATURAL JOIN located",
     ] {
         assert!(joins(sql).is_empty(), "{sql}");
     }
@@ -199,4 +232,23 @@ fn a_function_parameter_fixes_a_key_column() {
         ),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn an_ambiguous_column_fails_the_lookup() {
+    let database = ParserDB::parse::<PostgreSqlDialect>(SCHEMA).expect("schema parses");
+    for sql in [
+        "SELECT e.id FROM employees e JOIN projects p ON location = p.code",
+        "UPDATE employees SET project_id = p.id FROM projects p WHERE location = p.code",
+    ] {
+        assert!(
+            matches!(
+                constrainer()
+                    .statement_diagnostics(&database, &statement(sql))
+                    .as_slice(),
+                [Error::Lookup(_)]
+            ),
+            "{sql}"
+        );
+    }
 }
