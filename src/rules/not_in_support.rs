@@ -620,18 +620,36 @@ fn guaranteed_null(body: &SetExpr) -> bool {
     }
 }
 
+/// Whether `operator` keeps the rows its left side lacks a match for.
+pub(crate) fn extends_left(operator: &JoinOperator) -> bool {
+    matches!(
+        operator,
+        JoinOperator::Right(_) | JoinOperator::RightOuter(_) | JoinOperator::FullOuter(_)
+    )
+}
+
+/// Every `FROM` item `joined` holds, those of nested joins included.
+pub(crate) fn factors(joined: &TableWithJoins) -> Vec<&TableFactor> {
+    let mut found = Vec::new();
+    for factor in
+        std::iter::once(&joined.relation).chain(joined.joins.iter().map(|join| &join.relation))
+    {
+        match factor {
+            TableFactor::NestedJoin {
+                table_with_joins, ..
+            } => found.extend(factors(table_with_joins)),
+            _ => found.push(factor),
+        }
+    }
+    found
+}
+
 /// Whether a column's range-table entry is null-extended by a join.
 pub(crate) fn null_extended(
     joined: &TableWithJoins,
     target: &TableFactor,
     inherited: bool,
 ) -> bool {
-    let extends_left = |operator: &JoinOperator| {
-        matches!(
-            operator,
-            JoinOperator::Right(_) | JoinOperator::RightOuter(_) | JoinOperator::FullOuter(_)
-        )
-    };
     let relation_extended = inherited
         || joined
             .joins
@@ -715,12 +733,10 @@ fn join_rejects_null<DB: DatabaseLike>(
         return Ok(true);
     }
     for (position, join) in joined.joins.iter().enumerate() {
-        if joined.joins[position + 1..].iter().any(|later| {
-            matches!(
-                later.join_operator,
-                JoinOperator::Right(_) | JoinOperator::RightOuter(_) | JoinOperator::FullOuter(_)
-            )
-        }) {
+        if joined.joins[position + 1..]
+            .iter()
+            .any(|later| extends_left(&later.join_operator))
+        {
             continue;
         }
         if let JoinOperator::Join(JoinConstraint::On(filter))

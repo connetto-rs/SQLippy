@@ -87,6 +87,7 @@ rule_icons! {
     "client_written_counter_key" => FaListOl,
     "client_written_scaled_numeric" => FaRuler,
     "incompatible_foreign_key" => FaLinkSlash,
+    "inner_join_nullable_foreign_key" => FaLinkSlash,
     "narrower_referencing_column" => FaRuler,
     "credential_free_write" => FaUserSlash,
     "unconditional_client_write_policy" => FaPenToSquare,
