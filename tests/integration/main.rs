@@ -56,6 +56,7 @@ mod extension_versions;
 mod failing_asserts;
 mod foreign_key_existence_oracles;
 mod foreign_key_hierarchies;
+mod foreign_keys_broken_before_repair;
 mod function_search_paths;
 mod generated_keys;
 mod implied_foreign_keys;

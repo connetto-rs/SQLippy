@@ -39,6 +39,14 @@ pub(crate) fn stored_parts(name: &ObjectName) -> Vec<Cow<'_, str>> {
         .collect()
 }
 
+/// The stored name of the last part of `name`.
+pub(crate) fn last_name(name: &ObjectName) -> Option<String> {
+    name.0
+        .last()
+        .and_then(ObjectNamePart::as_ident)
+        .map(|ident| stored(ident).into_owned())
+}
+
 /// Whether the expression, under parentheses, names `record` alone.
 pub(crate) fn names_record(expression: &Expr, record: &str) -> bool {
     match expression {

@@ -1,14 +1,16 @@
 //! Walks the syntax tree through one trait object, so the traversal compiles
 //! once per break type instead of once per visitor.
 
-use std::ops::ControlFlow;
+use std::{convert::Infallible, ops::ControlFlow};
 
 use sql_traits::errors::LookupError;
 
 use sqlparser::ast::{
     Expr, GroupByExpr, Ident, ObjectName, OrderBy, OrderByExpr, Query, Select, Statement,
-    TableFactor, ValueWithSpan, Visit, Visitor,
+    TableFactor, ValueWithSpan, Visit, Visitor, visit_expressions_mut,
 };
+
+use crate::rules::{policy_support::unnested, trigger_support::stored};
 
 /// Walks `node` with `visitor`.
 #[expect(
@@ -32,6 +34,26 @@ pub(crate) fn holds_subquery(expression: &Expr) -> bool {
         }
     }
     walk(expression, &mut Sublink).is_break()
+}
+
+/// `expression` with every identifier spelled as the quoted name it stores
+/// and without enclosing parentheses, so two spellings of one value compare
+/// equal.
+pub(crate) fn canonical(expression: &Expr) -> String {
+    let mut expression = unnested(expression).clone();
+    let ControlFlow::Continue(()) = visit_expressions_mut(&mut expression, |node| {
+        let idents = match node {
+            Expr::Identifier(ident) => std::slice::from_mut(ident),
+            Expr::CompoundIdentifier(parts) => parts.as_mut_slice(),
+            _ => return ControlFlow::<Infallible>::Continue(()),
+        };
+        for ident in idents {
+            ident.value = stored(ident).into_owned();
+            ident.quote_style = Some('"');
+        }
+        ControlFlow::Continue(())
+    });
+    expression.to_string()
 }
 
 /// Forwards every hook to a borrowed visitor, so each `Visitor` method needs

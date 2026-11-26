@@ -13,8 +13,8 @@ use testcontainers::{
 /// Database name of every live catalog.
 const DATABASE: &str = "catalog";
 
-/// Applies `sql` to a fresh PostgreSQL 18 and loads the catalog of `schema`.
-pub(super) fn catalog(schema: &str, sql: &str) -> (Container<GenericImage>, PgDieselDatabase) {
+/// A fresh PostgreSQL 18 and a connection to it.
+pub(super) fn postgres() -> (Container<GenericImage>, PgConnection) {
     let container = GenericImage::new("postgres", "18-alpine")
         .with_exposed_port(5432.tcp())
         .with_wait_for(WaitFor::message_on_stderr(
@@ -30,9 +30,15 @@ pub(super) fn catalog(schema: &str, sql: &str) -> (Container<GenericImage>, PgDi
     let port = container
         .get_host_port_ipv4(5432)
         .expect("published PostgreSQL port");
-    let mut connection = PgConnection::establish(&format!(
+    let connection = PgConnection::establish(&format!(
         "host={host} port={port} user=user password=password dbname={DATABASE} connect_timeout=10 options='-c statement_timeout=30000'"
     )).expect("PostgreSQL connection");
+    (container, connection)
+}
+
+/// Applies `sql` to a fresh PostgreSQL 18 and loads the catalog of `schema`.
+pub(super) fn catalog(schema: &str, sql: &str) -> (Container<GenericImage>, PgDieselDatabase) {
+    let (container, mut connection) = postgres();
     connection.batch_execute(sql).expect("fixture applies");
     let database = PgDieselDatabase::try_from(
         PgDieselDatabaseBuilder::default()
