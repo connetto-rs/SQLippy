@@ -3130,7 +3130,12 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                         .collect();
                     if let Some(columns) = columns
                         && let Some(required) = arm.drawn.under(arguments.as_deref())
-                        && self.implies_every(&clause, &required)?
+                        && self.implies_every(
+                            &clause,
+                            arm.drawn.table,
+                            &required,
+                            &mut Vec::new(),
+                        )?
                     {
                         add_membership(found, in_set(&columns, &set.call));
                     }
