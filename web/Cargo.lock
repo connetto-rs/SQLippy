@@ -3043,7 +3043,7 @@ checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#8ce1435731df083ce3b31d7b2b25d45e70d7bbfc"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#a3a38cf4be0edda72612efebbab889e84bee6cae"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -3102,7 +3102,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#590c51ba5741df9a60403cc125c6e4d269f4bcb7"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#323a60ea7bcd2e593cfea2f68fc851bf873f687e"
 dependencies = [
  "log",
  "recursive",
@@ -3123,7 +3123,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-expr-eval"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#b98dec250acd84397e52d893e5510bfb30e0ec51"
+source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#0747feeca17d09d257e708d14a667213350a5f88"
 dependencies = [
  "quine-mc_cluskey",
  "rpds",
@@ -3144,7 +3144,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-plpgsql-dataflow"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-plpgsql-dataflow?branch=main#33371f448377f181403f77917f3bc09f68648125"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql-dataflow?branch=main#d9353560282a17191b70bf650cbffbddf984c0c3"
 dependencies = [
  "sqlparser",
  "sqlparser-expr-eval",
@@ -3156,7 +3156,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#590c51ba5741df9a60403cc125c6e4d269f4bcb7"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#323a60ea7bcd2e593cfea2f68fc851bf873f687e"
 dependencies = [
  "proc-macro2",
  "quote",

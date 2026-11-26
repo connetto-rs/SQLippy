@@ -2463,7 +2463,7 @@ fn admits_nothing<DB: DatabaseLike>(
 pub(crate) fn writes_whole_key<'db, DB: DatabaseLike>(
     database: &'db DB,
     columns: impl IntoIterator<Item = &'db DB::Column>,
-    privilege: &ColumnPrivilege<'_, DB::Column>,
+    privilege: &ColumnPrivilege<&'db DB::Column>,
     kept: bool,
 ) -> Result<bool, LookupError> {
     let mut sets_one = false;
