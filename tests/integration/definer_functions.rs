@@ -5237,6 +5237,53 @@ fn a_function_returning_every_row_of_a_call_keeps_the_arms_the_call_returns_in_f
     }
 }
 
+#[test]
+fn a_membership_a_callee_arm_carries_is_read_through_the_function_it_names() {
+    let own = "user_id = current_setting('app.user_id', true) AND admin";
+    let layered = |filter: &str, owned: &str| {
+        format!(
+            "CREATE FUNCTION authz.own_admin_teams() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT team_id FROM public.team_members WHERE {filter} $$;
+             {owned}
+             CREATE FUNCTION authz.administered_teams() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT team.id FROM public.teams team
+                 WHERE team.id IN (SELECT authz.own_admin_teams()) $$;"
+        )
+    };
+    let cycle = "CREATE FUNCTION authz.administered_teams() RETURNS SETOF INT
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT team_id FROM public.team_members WHERE admin $$;
+        CREATE FUNCTION authz.own_admin_teams() RETURNS SETOF INT
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT team.id FROM public.teams team
+            WHERE team.id IN (SELECT authz.administered_teams()) $$;
+        CREATE OR REPLACE FUNCTION authz.administered_teams() RETURNS SETOF INT
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+            SELECT team.id FROM public.teams team
+            WHERE team.id IN (SELECT authz.own_admin_teams()) $$;";
+    let tested = "team.id IN (SELECT authz.administered_teams())";
+    assert_eq!(
+        administered_organizations(&layered(own, ""), tested),
+        Vec::<String>::new()
+    );
+    for callee in [
+        layered(
+            own,
+            "ALTER FUNCTION authz.own_admin_teams() OWNER TO auditor;",
+        ),
+        layered("admin", ""),
+        cycle.to_owned(),
+    ] {
+        assert!(
+            administered_organizations(&callee, tested)
+                .contains(&"team_admin_organizations()".to_owned()),
+            "{callee}"
+        );
+    }
+}
+
 /// Functions reported over `tables`, declaring `public.teams` and
 /// `public.team_members`, and `definer`, the body of a function returning
 /// the organizations of teams. A team and a member are visible in the

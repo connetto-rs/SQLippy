@@ -2267,7 +2267,12 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 } = self.stated(&filters, from, position)?;
                 let mut drawn = Vec::new();
                 for condition in &conditions {
-                    drawn.extend(self.drawn_condition(table, condition, &conditions)?);
+                    drawn.extend(self.drawn_condition(
+                        table,
+                        condition,
+                        &conditions,
+                        &mut Vec::new(),
+                    )?);
                 }
                 for condition in &caller_bound {
                     drawn.extend(self.implied(table, condition, &conditions)?);
@@ -2891,7 +2896,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         if self.reads_alike(condition)? {
             return Ok(Some(condition.clone()));
         }
-        self.drawn_condition(table, condition, conditions)
+        self.drawn_condition(table, condition, conditions, &mut Vec::new())
     }
 
     /// The stored table `name` reads in a subquery of a filter, which no
@@ -2936,15 +2941,17 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     /// is a literal or a parameter. A function running as the body's owner
     /// draws from the rows the body reads, so the row it draws from also
     /// stands in the sets of the policies of `table` that
-    /// [`Self::found_in_sets`] finds.
+    /// [`Self::found_in_sets`] finds. A test of the drawn row against the
+    /// set of a further function tells in turn what that function draws,
+    /// unless the function is among the `visited` ones being read.
     fn drawn_condition(
         &self,
         table: &'a DB::Table,
         condition: &Expr,
         conditions: &[Expr],
+        visited: &mut Vec<*const DB::Function>,
     ) -> Result<Option<Expr>, LookupError> {
-        let confinement = self.body.confinement;
-        let database = confinement.database;
+        let database = self.body.confinement.database;
         let Some((tested, members)) = membership(condition) else {
             return Ok(None);
         };
@@ -2964,6 +2971,29 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         let Some(function) = called(database, call)? else {
             return Ok(None);
         };
+        let address = ptr::from_ref(function);
+        if visited.contains(&address) {
+            return Ok(None);
+        }
+        visited.push(address);
+        let drawn = self.drawn_alternatives(table, &columns, call, function, conditions, visited);
+        visited.pop();
+        drawn
+    }
+
+    /// [`Self::drawn_condition`] for `call`, a call of `function`, testing
+    /// `columns` of `table`.
+    fn drawn_alternatives(
+        &self,
+        table: &'a DB::Table,
+        columns: &[&'a DB::Column],
+        call: &Function,
+        function: &'a DB::Function,
+        conditions: &[Expr],
+        visited: &mut Vec<*const DB::Function>,
+    ) -> Result<Option<Expr>, LookupError> {
+        let confinement = self.body.confinement;
+        let database = confinement.database;
         let arms = confinement.arms(function)?;
         if !arms.complete {
             return Ok(None);
@@ -2981,7 +3011,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             })
         });
         let mut tested_kinds = Vec::with_capacity(columns.len());
-        for column in &columns {
+        for column in columns {
             tested_kinds.push(discriminators(database, table, column, conditions)?);
         }
         let mut alternatives = Vec::new();
@@ -2999,9 +3029,14 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 }
             }
             let mut met = drawn.known(arguments.as_deref());
+            let mut through = Vec::new();
+            for condition in met.iter() {
+                through.extend(self.drawn_condition(drawn.table, condition, &met, visited)?);
+            }
+            met.to_mut().extend(through);
             let found = self.found_in_sets(&sets, drawn, &met)?;
             met.to_mut().extend(found);
-            let carried = carried_conditions(database, drawn, &met, table, &columns)?;
+            let carried = carried_conditions(database, drawn, &met, table, columns)?;
             if carried.is_empty() {
                 return Ok(None);
             }
