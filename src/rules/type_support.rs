@@ -144,6 +144,29 @@ pub(crate) fn written_flaws(data_type: &DataType) -> Vec<TypeFlaw> {
     }
 }
 
+/// A type spelled the way PostgreSQL prints it, with its effective limits.
+pub(crate) fn describe<T: DataTypeLike>(data_type: &T, database: &T::DB) -> String {
+    let name = data_type.normalized_name(database);
+    if let Some(length) = data_type
+        .max_character_length(database)
+        .or_else(|| data_type.max_bit_length(database))
+    {
+        format!("{name}({length})")
+    } else if let (Some(precision), Some(scale)) = (
+        data_type.numeric_precision(database),
+        data_type.numeric_scale(database),
+    ) {
+        format!("{name}({precision},{scale})")
+    } else if let Some(precision) = data_type.fractional_seconds_precision(database) {
+        match name.split_once(' ') {
+            Some((head, zone)) => format!("{head}({precision}) {zone}"),
+            None => format!("{name}({precision})"),
+        }
+    } else {
+        name.into_owned()
+    }
+}
+
 /// Whether a cast to `data_type`, or to arrays of it, applies a type
 /// modifier, which is a length, precision or scale in parentheses, the fields
 /// of an interval, the parenthesized modifiers of a user-defined type, or the

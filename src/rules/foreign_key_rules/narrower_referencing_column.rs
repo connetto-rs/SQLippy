@@ -6,6 +6,7 @@ use crate::{
     engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
+    rules::type_support::describe,
     traits::{Constrainer, ForeignKeyRule, GenericConstrainer, Reporter},
 };
 
@@ -93,29 +94,6 @@ fn integer_digits<T: DataTypeLike>(data_type: &T, database: &T::DB) -> Option<i1
         i128::from(data_type.numeric_precision(database)?)
             - i128::from(data_type.numeric_scale(database)?),
     )
-}
-
-/// A type spelled the way PostgreSQL prints it, with its effective limits.
-fn describe<T: DataTypeLike>(data_type: &T, database: &T::DB) -> String {
-    let name = data_type.normalized_name(database);
-    if let Some(length) = data_type
-        .max_character_length(database)
-        .or_else(|| data_type.max_bit_length(database))
-    {
-        format!("{name}({length})")
-    } else if let (Some(precision), Some(scale)) = (
-        data_type.numeric_precision(database),
-        data_type.numeric_scale(database),
-    ) {
-        format!("{name}({precision},{scale})")
-    } else if let Some(precision) = data_type.fractional_seconds_precision(database) {
-        match name.split_once(' ') {
-            Some((head, zone)) => format!("{head}({precision}) {zone}"),
-            None => format!("{name}({precision})"),
-        }
-    } else {
-        name.into_owned()
-    }
 }
 
 impl<DB: DatabaseLike> ForeignKeyRule for NarrowerReferencingColumn<DB> {
