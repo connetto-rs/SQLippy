@@ -272,38 +272,45 @@ use super::plpgsql_ambiguous_name::collision;
 /// filters fix with `=` to a literal stands for that literal in a row
 /// tested with `IN` against a set, and the literal for the column.
 ///
-/// A read whose column reaches, unchanged, the result of a function that is
-/// not `VOLATILE` and returns a set, through `UNION` arms and `WITH` items
-/// read whole with nothing grouping, filtering or limiting it on the way,
-/// also tests that column against the function's own call, written
-/// schema-qualified with its arguments. A policy testing the column against
-/// that call, or against a set declared to hold it, is then implied.
+/// A read whose columns reach, unchanged and in order, the result of a
+/// function that is not `VOLATILE` and returns a set, through `UNION` arms
+/// and `WITH` items read whole with nothing grouping, filtering or limiting
+/// it on the way, also tests those columns against the function's own
+/// call, written schema-qualified with its arguments, several of them as a
+/// row against `SELECT *` from the call. A policy testing the same columns,
+/// in the same order, against that call, or against a set declared to hold
+/// it, is then implied.
 ///
 /// A column tested with `IN` or `= ANY` against the set of a function that
 /// is not `VOLATILE`, sets no parameter besides `search_path` and returns
-/// one column of rows of stored tables, through `UNION` arms, `WITH` items
+/// columns of rows of stored tables, through `UNION` arms, `WITH` items
 /// and calls of such functions, also meets what the function's filters
-/// state of the row it draws the value from. A filter of the function
-/// reading one of its parameters states it of the argument the tested call
-/// passes, when that call passes each positionally as a literal or as a
-/// parameter of the calling function. A filter of a function the body
-/// reads whole in its `FROM` states the same of the argument that call
-/// passes, and states nothing otherwise. The value drawn through a
-/// `SECURITY DEFINER` function also lies in the set of its own call, with
-/// the arguments the call passes. A column held equal with `=` to the only
-/// column a call of such a function returns in a `FROM` item lies in the
-/// set of that call, written schema-qualified, when the call passes each
-/// argument positionally as a literal or a parameter. Of an `OR` of such
-/// tests and other conditions, what every arm states holds.
-/// When the function draws the value from the tested column itself, unique
-/// in its table, the row drawn is the tested row and every condition holds
-/// of it. Otherwise a condition on the returned column holds of the tested
-/// column when `=` compares both by the same identity. A condition on
-/// another column holds of the tested row when a
+/// state of the row it draws the value from, and so does a row of columns
+/// tested with `IN` against `SELECT *` from the call. A filter of the
+/// function reading one of its parameters states it of the argument the
+/// tested call passes, when that call passes each positionally as a literal
+/// or as a parameter of the calling function. A filter of a function the
+/// body reads whole in its `FROM` states the same of the argument that call
+/// passes, for the columns of the call the body projects, and states
+/// nothing otherwise. The values drawn through a `SECURITY DEFINER`
+/// function also lie in the set of its own call, with the arguments the
+/// call passes. A column held equal with `=` to the only column a call of
+/// such a function returns in a `FROM` item lies in the set of that call,
+/// written schema-qualified, when the call passes each argument
+/// positionally as a literal or a parameter. Of an `OR` of such tests and
+/// other conditions, what every arm states holds.
+/// When the function draws the values from the tested columns themselves,
+/// in their order and holding a unique key of their table, the row drawn is
+/// the tested row and every condition holds of it. Otherwise a condition on
+/// the returned columns holds of the tested columns when `=` compares each
+/// returned column and the tested column in its position by the same
+/// identity. A condition on another column holds of the tested row when a
 /// foreign key that is `NOT DEFERRABLE`, validated and checking every row
-/// holding a value maps the returned column onto the tested one, unique in
-/// its table, and maps that column onto one compared by the same identity.
-/// A row the keys keep apart from the tested one is left out first.
+/// holding a value maps each returned column onto the tested column in its
+/// position, the tested columns holding a unique key of their table, and
+/// maps that other column onto one compared by the same identity.
+/// A row the keys keep apart from the tested one in some position is left
+/// out first.
 /// Following such keys from a column, each table on which the value is
 /// unique pins its columns generated as one value, its `NOT NULL` columns a
 /// validated check holds `=` one value or `IN` a list of values as a
@@ -313,17 +320,18 @@ use super::plpgsql_ambiguous_name::collision;
 /// Keys of a table another table inherits from count for nothing, since
 /// that table's rows escape them.
 ///
-/// A column also lies in the set of a `SECURITY DEFINER` function a policy
-/// of the table tests a column against, when that function runs as the
-/// owner the body runs as and, if `STRICT`, the policy passes a literal
-/// other than `NULL` for every parameter. An arm of it has to read one table alone,
-/// every row and with no sample, and return the column of every row of it
-/// meeting its filter, where a condition reading a parameter states it of
-/// the literal the policy passes, and of no other argument. A row of that
-/// table the `SELECT` reads, or a query an `EXISTS` or `IN` of its `WHERE`
-/// finds, not filled with `NULL`s by an outer join, has to meet every
-/// condition of the filter, and the body's filters hold the column the arm
-/// returns of that row equal to the column.
+/// A column, or a row of columns, also lies in the set of a `SECURITY
+/// DEFINER` function a policy of the table tests it against, when that
+/// function runs as the owner the body runs as and, if `STRICT`, the policy
+/// passes a literal other than `NULL` for every parameter. An arm of it has
+/// to read one table alone, every row and with no sample, and return the
+/// columns of every row of it meeting its filter, where a condition reading
+/// a parameter states it of the literal the policy passes, and of no other
+/// argument. A row of that table the `SELECT` reads, or a query an `EXISTS`
+/// or `IN` of its `WHERE` finds, not filled with `NULL`s by an outer join,
+/// has to meet every condition of the filter, and the body's filters hold
+/// each column the arm returns of that row equal to the tested column in
+/// its position.
 ///
 /// The rule does not run on SQLite, which has no stored functions.
 ///
@@ -644,7 +652,9 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             function,
         };
         for arm in &arms.arms {
-            let tested = in_set(arm.drawn.column.column_name(), member.clone());
+            let Some(tested) = in_set(&arm.drawn.column_names(), &member) else {
+                return Ok(false);
+            };
             if !body.admits_every_caller(arm.drawn.table, &tested, RowStatement::Select, &[])? {
                 return Ok(false);
             }
@@ -1248,34 +1258,43 @@ impl<DB: DatabaseLike> Default for Arms<'_, DB> {
     }
 }
 
-/// One way a function draws a value it returns from a row.
+/// One way a function draws a row it returns from a row.
 struct Arm<'a, DB: DatabaseLike> {
     drawn: Rc<Drawn<'a, DB>>,
-    /// Whether the function returns the column of every row of the table
+    /// Whether the function returns the columns of every row of the table
     /// meeting the conditions, those reading a parameter for the values the
     /// call passes.
     exhaustive: bool,
 }
 
-/// A row of a stored table that a function returns one column of.
+/// A row of a stored table that a function returns columns of.
 struct Drawn<'a, DB: DatabaseLike> {
     table: &'a DB::Table,
-    /// The column returned.
-    column: &'a DB::Column,
+    /// The columns returned, in the order the function returns them.
+    columns: Vec<&'a DB::Column>,
     /// Conditions the row meets, over the stored names of the columns of
     /// `table`, each evaluating alike for every role.
     conditions: Vec<Expr>,
     /// Further such conditions reading the function's input parameters as
     /// `$n`, which the row meets for the values a call passes.
     bound: Vec<Expr>,
-    /// `"column" IN (SELECT f($1, …))`, the column in the set of the
-    /// function, a `SECURITY DEFINER` one, that returns it. The row meets it
-    /// once drawn, though the function need not return the column of a row
-    /// only for meeting it.
+    /// The columns in the set of the function, a `SECURITY DEFINER` one,
+    /// that returns them, as [`in_set`] tests them against `f($1, …)`. The
+    /// row meets it once drawn, though the function need not return the
+    /// columns of a row only for meeting it.
     member: Option<Expr>,
 }
 
 impl<DB: DatabaseLike> Drawn<'_, DB> {
+    /// The stored names of the columns returned.
+    fn column_names(&self) -> Vec<&str> {
+        self.columns
+            .iter()
+            .copied()
+            .map(ColumnLike::column_name)
+            .collect()
+    }
+
     /// The conditions the row meets for a call passing `arguments` for the
     /// input parameters in order, or `None` when one reads a parameter and
     /// the call's values are not known.
@@ -1315,33 +1334,38 @@ struct Drawing<'a, DB: DatabaseLike> {
     /// Each leaf not read yet. Every row of a leaf reaches the result.
     leaves: Vec<*const Select>,
     arms: Arms<'a, DB>,
-    /// `SELECT f($1, …)` calling the function, a `SECURITY DEFINER` one, with
-    /// its own arguments. A policy calling it with the same arguments gets
-    /// the same set, which holds the column of each row drawn.
-    member: Option<Box<Query>>,
+    /// `f($1, …)` calling the function, a `SECURITY DEFINER` one, with its
+    /// own arguments. A policy calling it with the same arguments gets the
+    /// same set, which holds the columns of each row drawn.
+    member: Option<Function>,
 }
 
 impl<'a, DB: DatabaseLike> Drawing<'a, DB> {
-    /// Adds the row of `table` whose `column` the function returns, meeting
+    /// Adds the row of `table` whose `columns` the function returns, meeting
     /// `conditions`, with its membership in the function's own set.
     fn push(
         &mut self,
         table: &'a DB::Table,
-        column: &'a DB::Column,
+        columns: Vec<&'a DB::Column>,
         conditions: Vec<Expr>,
         exhaustive: bool,
     ) {
         let (bound, conditions) = conditions.into_iter().partition(reads_parameter);
+        let member = self.member.as_ref().and_then(|member| {
+            let names: Vec<&str> = columns
+                .iter()
+                .copied()
+                .map(ColumnLike::column_name)
+                .collect();
+            in_set(&names, member)
+        });
         self.arms.arms.push(Arm {
             drawn: Rc::new(Drawn {
                 table,
-                column,
+                columns,
                 conditions,
                 bound,
-                member: self
-                    .member
-                    .as_ref()
-                    .map(|member| in_set(column.column_name(), member.clone())),
+                member,
             }),
             exhaustive,
         });
@@ -2635,7 +2659,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     .iter()
                     .map(ToString::to_string)
                     .collect();
-                Some(in_set(&column, call_of(function, &arguments)?))
+                in_set(&[column], &call_of(function, &arguments)?)
             })
     }
 
@@ -2708,14 +2732,15 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     }
 
     /// What `condition`, stated of the columns of `table`, tells of its row
-    /// when it tests a column against the set of a function, besides the
-    /// `conditions` of the row: one of the rows the function may draw the
-    /// value from that the keys do not keep apart from the row meets its
-    /// conditions that carry over to the row, those reading a parameter
-    /// stated of the argument the call passes when each is a literal or a
-    /// parameter. A function running as the body's owner draws from the
-    /// rows the body reads, so the row it draws from also stands in the
-    /// sets of the policies of `table` that [`Self::found_in_sets`] finds.
+    /// when it tests a column, or a row of columns, against the set of a
+    /// function, besides the `conditions` of the row: one of the rows the
+    /// function may draw the values from that the keys do not keep apart
+    /// from the row meets its conditions that carry over to the row, those
+    /// reading a parameter stated of the argument the call passes when each
+    /// is a literal or a parameter. A function running as the body's owner
+    /// draws from the rows the body reads, so the row it draws from also
+    /// stands in the sets of the policies of `table` that
+    /// [`Self::found_in_sets`] finds.
     fn drawn_condition(
         &self,
         table: &'a DB::Table,
@@ -2724,16 +2749,23 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     ) -> Result<Option<Expr>, LookupError> {
         let confinement = self.body.confinement;
         let database = confinement.database;
-        let Some(([tested], members)) = membership(condition) else {
+        let Some((tested, members)) = membership(condition) else {
             return Ok(None);
         };
-        let (Some(name), Expr::Function(call)) = (stored_name(tested), members.as_ref()) else {
+        let Expr::Function(call) = members.as_ref() else {
             return Ok(None);
         };
-        let (Some(column), Some(function)) = (
-            column_named(database, table, &name)?,
-            called(database, call)?,
-        ) else {
+        let mut columns = Vec::with_capacity(tested.len());
+        for tested in tested {
+            let Some(name) = stored_name(tested) else {
+                return Ok(None);
+            };
+            let Some(column) = column_named(database, table, &name)? else {
+                return Ok(None);
+            };
+            columns.push(column);
+        }
+        let Some(function) = called(database, call)? else {
             return Ok(None);
         };
         let arms = confinement.arms(function)?;
@@ -2752,19 +2784,28 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 literal(argument).is_some() || parameter_ordinal(unwrapped(argument)).is_some()
             })
         });
-        let tested_kinds = discriminators(database, table, column, conditions)?;
+        let mut tested_kinds = Vec::with_capacity(columns.len());
+        for column in &columns {
+            tested_kinds.push(discriminators(database, table, column, conditions)?);
+        }
         let mut alternatives = Vec::new();
-        for arm in &arms.arms {
+        'arms: for arm in &arms.arms {
             let drawn = arm.drawn.as_ref();
-            let source = drawn.column;
-            let kinds = discriminators(database, drawn.table, source, &drawn.conditions)?;
-            if apart(&tested_kinds, &kinds) {
-                continue;
+            if drawn.columns.len() != columns.len() {
+                return Ok(None);
+            }
+            for (source, tested) in drawn.columns.iter().zip(&tested_kinds) {
+                if apart(
+                    tested,
+                    &discriminators(database, drawn.table, source, &drawn.conditions)?,
+                ) {
+                    continue 'arms;
+                }
             }
             let mut met = drawn.known(arguments.as_deref());
             let found = self.found_in_sets(&sets, drawn, &met)?;
             met.to_mut().extend(found);
-            let carried = carried_conditions(database, drawn, &met, table, column)?;
+            let carried = carried_conditions(database, drawn, &met, table, &columns)?;
             if carried.is_empty() {
                 return Ok(None);
             }
@@ -2779,10 +2820,11 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             }))
     }
 
-    /// `column IN (SELECT helper())` over the columns of the table of
-    /// `drawn`, for each set of `sets` with an exhaustive arm over that
-    /// table whose conditions, those reading a parameter stated of the
-    /// literal its call passes, `met` implies, the column that arm returns.
+    /// The columns of the table of `drawn` in the set of a helper, as
+    /// [`in_set`] tests them, for each set of `sets` with an exhaustive arm
+    /// over that table whose conditions, those reading a parameter stated of
+    /// the literal its call passes, `met` implies, the columns that arm
+    /// returns.
     fn found_in_sets(
         &self,
         sets: &[SetCall<'a, DB>],
@@ -2803,8 +2845,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     continue;
                 };
                 if self.implies_every(&clause, &required)?
-                    && let Some(membership) =
-                        set_membership(arm.drawn.column.column_name(), &set.call)
+                    && let Some(membership) = in_set(&arm.drawn.column_names(), &set.call)
                     && !found.contains(&membership)
                 {
                     found.push(membership);
@@ -2814,15 +2855,15 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         Ok(found)
     }
 
-    /// `column IN (SELECT helper())` for `relation`, a read of `table` its
-    /// filters state `conditions` of, for each helper a policy of the table
-    /// tests a column against, when a row of a table the `SELECT` `filters`
-    /// filters reads, or a query an `EXISTS` or `IN` of its `WHERE` finds,
-    /// meets every condition of an exhaustive arm of the helper over that
-    /// table, those reading a parameter stated of the literal the policy
-    /// passes, and the filters hold the column the arm returns equal to
-    /// `column`. `owners` are the queries around whose `WITH` holds items
-    /// in reach.
+    /// The columns of `relation`, a read of `table` its filters state
+    /// `conditions` of, in the set of a helper, as [`in_set`] tests them,
+    /// for each helper a policy of the table tests columns against, when a
+    /// row of a table the `SELECT` `filters` filters reads, or a query an
+    /// `EXISTS` or `IN` of its `WHERE` finds, meets every condition of an
+    /// exhaustive arm of the helper over that table, those reading a
+    /// parameter stated of the literal the policy passes, and the filters
+    /// hold each column the arm returns equal to a column of `relation`.
+    /// `owners` are the queries around whose `WITH` holds items in reach.
     fn witnessed_sets(
         &self,
         filters: &Filters<'_>,
@@ -2886,19 +2927,25 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                         if !self.implies_every(&clause, &met)? {
                             continue;
                         }
-                        let column = if same {
-                            Some(drawn.column.column_name())
+                        let columns = if same {
+                            Some(drawn.column_names())
                         } else {
-                            equalities.of_relation(
-                                &Node::Column {
-                                    factor: joined,
-                                    name: Cow::Borrowed(drawn.column.column_name()),
-                                },
-                                relation,
-                            )
+                            drawn
+                                .columns
+                                .iter()
+                                .map(|column| {
+                                    equalities.of_relation(
+                                        &Node::Column {
+                                            factor: joined,
+                                            name: Cow::Borrowed(column.column_name()),
+                                        },
+                                        relation,
+                                    )
+                                })
+                                .collect()
                         };
-                        if let Some(column) = column
-                            && let Some(membership) = set_membership(column, members)
+                        if let Some(columns) = columns
+                            && let Some(membership) = in_set(&columns, members)
                             && !witnessed.contains(&membership)
                         {
                             witnessed.push(membership);
@@ -3028,77 +3075,122 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         }
     }
 
-    /// Adds to `drawing` the row of a stored table whose column the leaf
+    /// Adds to `drawing` the row of a stored table whose columns the leaf
     /// `select` returns, with what its filters state of the row, or the rows
-    /// of the function whose call it returns the value of, with what those
-    /// state of that function's parameters for the arguments the call passes,
-    /// and marks the arms incomplete for any other leaf.
+    /// of the function whose call it returns columns of, each returning the
+    /// columns of its row at the positions the leaf projects, with what
+    /// those state of that function's parameters for the arguments the call
+    /// passes, and marks the arms incomplete for any other leaf.
     fn draw_select(
         &self,
         select: &Select,
         drawing: &mut Drawing<'a, DB>,
     ) -> Result<(), LookupError> {
-        let projected = carried_column(select).map(|(projected, _)| projected);
-        let factor = projected
-            .and_then(|projected| self.context.reference(projected).ok().flatten())
-            .and_then(|(_, binding)| binding.entry())
-            .map(|entry| ptr::from_ref(entry.factor()));
-        let found = factor.and_then(|factor| {
-            select.from.iter().find_map(|from| {
-                relations(from)
-                    .position(|relation| ptr::eq(relation, factor))
-                    .map(|position| (from, position))
-            })
-        });
-        if let (Some(projected), Some((from, position))) = (projected, found) {
-            let relation = relation_at(from, position);
-            if let Some(table) = self.stored(relation)? {
-                let filters = self.filters(select, &[], &[])?;
-                let Stated {
-                    resolver,
-                    equalities,
-                    conditions,
-                    whole: stated,
-                    ..
-                } = self.stated(&filters, from, position)?;
-                if let Some(Term::Column(name)) = term(&resolver, projected, relation, &equalities)
-                    && let Some(column) =
-                        column_named(self.body.confinement.database, table, &name)?
-                {
-                    drawing.push(
-                        table,
-                        column,
-                        conditions,
-                        stated && select.from.len() == 1 && from.joins.is_empty(),
-                    );
-                    return Ok(());
-                }
-            } else if let Some(call) = whole_call(relation)
-                && let Some(function) = called(self.body.confinement.database, call)?
-            {
-                let called = self.body.confinement.arms(function)?;
-                let passed = self.passed(relation, function);
-                let passed: Option<Vec<&Expr>> =
-                    passed.as_ref().map(|passed| passed.iter().collect());
-                drawing.arms.complete &= called.complete;
-                for arm in &called.arms {
-                    let drawn = &arm.drawn;
-                    if drawing.member.is_none() && drawn.bound.is_empty() && drawn.member.is_none()
-                    {
-                        drawing.arms.arms.push(Arm {
-                            drawn: Rc::clone(drawn),
-                            exhaustive: false,
-                        });
-                        continue;
-                    }
-                    let conditions = drawn.known(passed.as_deref()).into_owned();
-                    drawing.push(drawn.table, drawn.column, conditions, false);
-                }
-                return Ok(());
-            }
+        if !self.draws_row(select, drawing)? {
+            drawing.arms.complete = false;
         }
-        drawing.arms.complete = false;
         Ok(())
+    }
+
+    /// [`Self::draw_select`] for a leaf projecting columns of one relation,
+    /// whether every row of the leaf is drawn.
+    fn draws_row(
+        &self,
+        select: &Select,
+        drawing: &mut Drawing<'a, DB>,
+    ) -> Result<bool, LookupError> {
+        let Some(projected) = carried_row(select) else {
+            return Ok(false);
+        };
+        let mut entries = Vec::with_capacity(projected.len());
+        for (reference, _) in &projected {
+            let Some(entry) = self
+                .context
+                .reference(reference)
+                .ok()
+                .flatten()
+                .and_then(|(_, binding)| binding.entry())
+            else {
+                return Ok(false);
+            };
+            entries.push((ptr::from_ref(entry.factor()), entry.ordinal()));
+        }
+        let factor = entries[0].0;
+        if entries.iter().any(|&(read, _)| read != factor) {
+            return Ok(false);
+        }
+        let Some((from, position)) = select.from.iter().find_map(|from| {
+            relations(from)
+                .position(|relation| ptr::eq(relation, factor))
+                .map(|position| (from, position))
+        }) else {
+            return Ok(false);
+        };
+        let relation = relation_at(from, position);
+        let database = self.body.confinement.database;
+        if let Some(table) = self.stored(relation)? {
+            let filters = self.filters(select, &[], &[])?;
+            let Stated {
+                resolver,
+                equalities,
+                conditions,
+                whole: stated,
+                ..
+            } = self.stated(&filters, from, position)?;
+            let mut columns = Vec::with_capacity(projected.len());
+            for (reference, _) in &projected {
+                let Some(Term::Column(name)) = term(&resolver, reference, relation, &equalities)
+                else {
+                    return Ok(false);
+                };
+                let Some(column) = column_named(database, table, &name)? else {
+                    return Ok(false);
+                };
+                columns.push(column);
+            }
+            drawing.push(
+                table,
+                columns,
+                conditions,
+                stated && select.from.len() == 1 && from.joins.is_empty(),
+            );
+            return Ok(true);
+        }
+        let Some(call) = whole_call(relation) else {
+            return Ok(false);
+        };
+        let Some(function) = called(database, call)? else {
+            return Ok(false);
+        };
+        let called = self.body.confinement.arms(function)?;
+        let passed = self.passed(relation, function);
+        let passed: Option<Vec<&Expr>> = passed.as_ref().map(|passed| passed.iter().collect());
+        let mut whole = called.complete;
+        for arm in &called.arms {
+            let drawn = &arm.drawn;
+            let Some(columns) = entries
+                .iter()
+                .map(|&(_, ordinal)| drawn.columns.get(ordinal).copied())
+                .collect::<Option<Vec<_>>>()
+            else {
+                whole = false;
+                continue;
+            };
+            if drawing.member.is_none()
+                && drawn.bound.is_empty()
+                && drawn.member.is_none()
+                && columns == drawn.columns
+            {
+                drawing.arms.arms.push(Arm {
+                    drawn: Rc::clone(drawn),
+                    exhaustive: false,
+                });
+                continue;
+            }
+            let conditions = drawn.known(passed.as_deref()).into_owned();
+            drawing.push(drawn.table, columns, conditions, false);
+        }
+        Ok(whole)
     }
 
     /// The arguments `relation`, a call to `function`, passes it, each a
@@ -3969,12 +4061,12 @@ impl<'r, 'q, 'a, DB: DatabaseLike> Resolver<'r, 'q, 'a, DB> {
 }
 
 /// The `SELECT`s of a function body each of whose rows reaches the
-/// function's result holding the one column it projects, unchanged.
+/// function's result holding the columns it projects, unchanged.
 #[derive(Default)]
 struct Lineage {
-    /// `SELECT f($1, …)` calling the function with its own arguments, `None`
-    /// when calls need not agree on the set it returns.
-    member: Option<Box<Query>>,
+    /// `f($1, …)` calling the function with its own arguments, `None` when
+    /// calls need not agree on the set it returns.
+    member: Option<Function>,
     selects: Vec<*const Select>,
 }
 
@@ -3998,40 +4090,45 @@ impl Lineage {
         }
     }
 
-    /// `"column" IN (SELECT f($1, …))` when `select` belongs to the lineage
-    /// and `own` names the stored column of the projection.
-    fn membership(
-        &self,
-        select: &Select,
-        own: impl FnOnce(&Expr) -> Option<String>,
-    ) -> Option<Expr> {
-        let template = self.member.as_ref()?;
+    /// The columns of the projection, as [`in_set`] tests them against the
+    /// set of `f($1, …)`, when `select` belongs to the lineage and `own`
+    /// names the stored column of each.
+    fn membership(&self, select: &Select, own: impl Fn(&Expr) -> Option<String>) -> Option<Expr> {
+        let call = self.member.as_ref()?;
         if !self.selects.iter().any(|carried| ptr::eq(*carried, select)) {
             return None;
         }
-        let (projected, _) = carried_column(select)?;
-        Some(in_set(&own(projected)?, template.clone()))
+        let columns = carried_row(select)?
+            .into_iter()
+            .map(|(projected, _)| own(projected))
+            .collect::<Option<Vec<_>>>()?;
+        in_set(&columns, call)
     }
 }
 
-/// `"column" IN query`.
-fn in_set(column: &str, query: Box<Query>) -> Expr {
-    Expr::In {
-        expr: Box::new(Expr::Identifier(Ident::with_quote('"', column))),
+/// `"column" IN (SELECT call)`, testing one column against the set `call`
+/// yields, or `("first", …) IN (SELECT * FROM call)`, testing the row of
+/// several columns against the rows it yields, `None` for no column.
+fn in_set<S: AsRef<str>>(columns: &[S], call: &Function) -> Option<Expr> {
+    let quoted = |column: &S| Expr::Identifier(Ident::with_quote('"', column.as_ref()));
+    let (tested, query) = match columns {
+        [] => return None,
+        [column] => (quoted(column), format!("SELECT {call}")),
+        _ => (
+            Expr::Tuple(columns.iter().map(quoted).collect()),
+            format!("SELECT * FROM {call}"),
+        ),
+    };
+    let query = Parser::new(&PostgreSqlDialect {})
+        .try_with_sql(&query)
+        .and_then(|mut parser| parser.parse_query())
+        .ok()?;
+    Some(Expr::In {
+        expr: Box::new(tested),
         target: InTarget::Subquery(query),
         negated: false,
         global: false,
-    }
-}
-
-/// `"column" IN (SELECT members)`, testing `column` against the set
-/// `members` yields.
-fn set_membership(column: &str, members: &Function) -> Option<Expr> {
-    Parser::new(&PostgreSqlDialect {})
-        .try_with_sql(&format!("SELECT {members}"))
-        .and_then(|mut parser| parser.parse_query())
-        .ok()
-        .map(|query| in_set(column, query))
+    })
 }
 
 /// The column of `table` whose stored name is `name`.
@@ -4078,54 +4175,63 @@ fn stored_relation_named<DB: DatabaseLike>(
     })
 }
 
-/// Whether `column` alone is a unique key of `table`.
-fn unique_alone<DB: DatabaseLike>(
+/// Whether `columns` hold a unique key of `table`, so that at most one row
+/// holds the values they take.
+fn unique_within<DB: DatabaseLike>(
     database: &DB,
     table: &DB::Table,
-    column: &DB::Column,
+    columns: &[&DB::Column],
 ) -> Result<bool, LookupError> {
     Ok(no_inheritors(database, table)?
         && equality_keys(database, table)?
             .iter()
-            .any(|key| matches!(key.as_slice(), [only] if *only == column)))
+            .any(|key| key.iter().all(|column| columns.contains(column))))
 }
 
 /// The `conditions` the row `drawn` meets that hold of the row of `table`
-/// whose `column` equals the `source` column of the row drawn, over the
-/// columns of `table`. When `source` is `column` and unique in `table`, the
-/// row drawn is that row and each condition holds of it. Otherwise the
-/// value drawn carries the conditions on `source` when `=` compares both
-/// columns by the same identity. When `column` is unique in `table`, a
-/// foreign key of the drawn row that binds it maps `source` onto `column`
-/// carries those on each column it maps onto one compared alike.
+/// whose `columns` equal, position by position, the `sources` columns of
+/// the row drawn, over the columns of `table`. When `sources` are `columns`
+/// and hold a unique key of `table`, the row drawn is that row and each
+/// condition holds of it. Otherwise a condition reading only sources that
+/// `=` compares by the identity of the column in their position holds of
+/// those columns. When `columns` hold a unique key of
+/// `table`, a foreign key of the drawn row that binds it and maps each
+/// source onto its column carries those on each column it maps onto one
+/// compared alike.
 fn carried_conditions<DB: DatabaseLike>(
     database: &DB,
     drawn: &Drawn<'_, DB>,
     conditions: &[Expr],
     table: &DB::Table,
-    column: &DB::Column,
+    columns: &[&DB::Column],
 ) -> Result<Vec<Expr>, LookupError> {
-    let source = drawn.column;
-    let unique = unique_alone(database, table, column)?;
-    if unique && source == column {
+    let sources = drawn.columns.as_slice();
+    let Some(&first) = sources.first() else {
+        return Ok(Vec::new());
+    };
+    let unique = unique_within(database, table, columns)?;
+    if unique && sources == columns {
         return Ok(conditions.to_vec());
     }
     let mut renames: Vec<(&str, &str)> = Vec::new();
-    if same_identity(database, source, column)? {
-        renames.push((source.column_name(), column.column_name()));
+    for (source, column) in sources.iter().zip(columns) {
+        if same_identity(database, source, column)? {
+            renames.push((source.column_name(), column.column_name()));
+        }
     }
     if unique {
         for foreign_key in drawn.table.foreign_keys(database)? {
             if !ptr::eq(foreign_key.referenced_table(database)?, table)
-                || !binds(database, foreign_key, source)?
+                || !binds(database, foreign_key, first)?
             {
                 continue;
             }
             let pairs = key_pairs(database, foreign_key)?;
-            if !pairs
-                .iter()
-                .any(|(host, referenced)| *host == source && *referenced == column)
-            {
+            if !sources.iter().zip(columns).all(|(source, column)| {
+                pairs
+                    .iter()
+                    .any(|(host, referenced)| host == source && referenced == column)
+            }) {
                 continue;
             }
             for (host, referenced) in pairs {
@@ -4199,7 +4305,7 @@ fn discriminators<'a, DB: DatabaseLike>(
                 fixed.extend(pin(database, held, &values)?);
             }
         }
-        if unique_alone(database, table, column)? {
+        if unique_within(database, table, slice::from_ref(&column))? {
             pinned.extend(fixed.iter().map(|(fixed_column, values)| Pinned {
                 table,
                 keyed: column.column_name().to_owned(),
@@ -5124,9 +5230,9 @@ fn present(from: &TableWithJoins, position: usize) -> bool {
         })
 }
 
-/// `SELECT schema.name($1, …)` calling `function`, its schema `public` when
-/// its name has none, or `None` when an argument is not an input.
-fn member<F: FunctionLike>(function: &F) -> Option<Box<Query>> {
+/// `schema.name($1, …)` calling `function`, its schema `public` when its
+/// name has none, or `None` when an argument is not an input.
+fn member<F: FunctionLike>(function: &F) -> Option<Function> {
     let mut arguments = Vec::new();
     for (position, mode) in function.argument_modes().enumerate() {
         if mode != ArgMode::In {
@@ -5137,9 +5243,9 @@ fn member<F: FunctionLike>(function: &F) -> Option<Box<Query>> {
     call_of(function, &arguments)
 }
 
-/// `SELECT schema.name(arguments)` calling `function`, its schema `public`
-/// when its name has none.
-fn call_of<F: FunctionLike>(function: &F, arguments: &[String]) -> Option<Box<Query>> {
+/// `schema.name(arguments)` calling `function`, its schema `public` when
+/// its name has none.
+fn call_of<F: FunctionLike>(function: &F, arguments: &[String]) -> Option<Function> {
     let written = |name: &str, quoted: bool| {
         let stored = normalize_identifier(name, quoted).into_owned();
         if quoted {
@@ -5154,10 +5260,13 @@ fn call_of<F: FunctionLike>(function: &F, arguments: &[String]) -> Option<Box<Qu
         |schema| written(schema, target.schema_is_quoted()),
     );
     let name = written(target.name(), target.name_is_quoted());
-    Parser::new(&PostgreSqlDialect {})
-        .try_with_sql(&format!("SELECT {schema}.{name}({})", arguments.join(", ")))
-        .and_then(|mut parser| parser.parse_query())
-        .ok()
+    match Parser::new(&PostgreSqlDialect {})
+        .try_with_sql(&format!("{schema}.{name}({})", arguments.join(", ")))
+        .and_then(|mut parser| parser.parse_expr())
+    {
+        Ok(Expr::Function(call)) => Some(call),
+        _ => None,
+    }
 }
 
 /// Walks down from a result to the `SELECT`s every row of which reaches it.
@@ -5232,10 +5341,10 @@ impl<'q> Carried<'q> {
         }
     }
 
-    /// Records `select` when its rows each hold its one projected column,
-    /// and follows the `WITH` item it projects whole.
+    /// Records `select` when its rows each hold the columns it projects, and
+    /// follows the `WITH` item whose every column it projects in order.
     fn select(&mut self, select: &'q Select) {
-        let Some((_, projected)) = carried_column(select) else {
+        let Some(projected) = carried_row(select) else {
             self.complete = false;
             return;
         };
@@ -5265,17 +5374,23 @@ impl<'q> Carried<'q> {
         let renamed = alias
             .as_ref()
             .map_or(&[][..], |alias| alias.columns.as_slice());
-        let column = match (renamed, cte.alias.columns.as_slice()) {
-            ([column], _) | ([], [column]) => &column.name,
-            ([], []) => match output_name(&cte.query) {
-                Some(name) => name,
-                None => return,
-            },
-            _ => return,
+        let Some(outputs) = output_names(&cte.query) else {
+            return;
         };
         let relation = alias.as_ref().map_or(written, |alias| &alias.name);
         let body = ptr::from_ref(cte.query.as_ref());
-        if !names(projected, relation, column) || self.followed.contains(&body) {
+        let projects_each =
+            projected.len() == outputs.len()
+                && projected.iter().zip(outputs).enumerate().all(
+                    |(position, ((_, parts), output))| {
+                        let column = renamed
+                            .get(position)
+                            .or_else(|| cte.alias.columns.get(position))
+                            .map_or(output, |column| &column.name);
+                        names(parts, relation, column)
+                    },
+                );
+        if !projects_each || self.followed.contains(&body) {
             return;
         }
         self.followed.push(body);
@@ -5310,15 +5425,31 @@ impl<'q> Carried<'q> {
 }
 
 /// The column reference a `SELECT` projects alone, with the parts of its
-/// name, when each row its `FROM` and filters leave yields one row holding
-/// it, with no grouping, aggregate or `DISTINCT ON` choosing among them.
+/// name, when [`carried_row`] reads it.
 fn carried_column(select: &Select) -> Option<(&Expr, &[Ident])> {
-    let [
-        SelectItem::UnnamedExpr(projected)
-        | SelectItem::ExprWithAlias {
-            expr: projected, ..
-        },
-    ] = select.projection.as_slice()
+    let [item] = select.projection.as_slice() else {
+        return None;
+    };
+    projected_column(item).filter(|_| plain(select))
+}
+
+/// The column references a `SELECT` projects, in order, with the parts of
+/// their names, when it projects nothing else and each row its `FROM` and
+/// filters leave yields one row holding them, with no grouping, aggregate
+/// or `DISTINCT ON` choosing among them.
+fn carried_row(select: &Select) -> Option<Vec<(&Expr, &[Ident])>> {
+    if select.projection.is_empty() || !plain(select) {
+        return None;
+    }
+    select.projection.iter().map(projected_column).collect()
+}
+
+/// The column reference `item` projects, with the parts of its name.
+fn projected_column(item: &SelectItem) -> Option<(&Expr, &[Ident])> {
+    let (SelectItem::UnnamedExpr(projected)
+    | SelectItem::ExprWithAlias {
+        expr: projected, ..
+    }) = item
     else {
         return None;
     };
@@ -5327,7 +5458,7 @@ fn carried_column(select: &Select) -> Option<(&Expr, &[Ident])> {
         Expr::CompoundIdentifier(parts) => parts.as_slice(),
         _ => return None,
     };
-    plain(select).then_some((projected, parts))
+    Some((projected, parts))
 }
 
 /// The `SELECT` that `condition`, an `EXISTS` or `IN` over a query, finds
@@ -5378,21 +5509,25 @@ fn projection_at(select: &Select, ordinal: usize) -> Option<&Expr> {
     projected
 }
 
-/// The name of the one column `query` yields, given by its leftmost
-/// `SELECT`.
-fn output_name(query: &Query) -> Option<&Ident> {
+/// The names of the columns `query` yields, given by its leftmost
+/// `SELECT`, when it names each.
+fn output_names(query: &Query) -> Option<Vec<&Ident>> {
     let mut body = query.body.as_ref();
     loop {
         match body {
             SetExpr::SetOperation { left, .. } => body = left,
             SetExpr::Query(query) => body = query.body.as_ref(),
             SetExpr::Select(select) => {
-                return match select.projection.as_slice() {
-                    [SelectItem::ExprWithAlias { alias, .. }] => Some(alias),
-                    [SelectItem::UnnamedExpr(Expr::Identifier(name))] => Some(name),
-                    [SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts))] => parts.last(),
-                    _ => None,
-                };
+                return select
+                    .projection
+                    .iter()
+                    .map(|item| match item {
+                        SelectItem::ExprWithAlias { alias, .. } => Some(alias),
+                        SelectItem::UnnamedExpr(Expr::Identifier(name)) => Some(name),
+                        SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts)) => parts.last(),
+                        _ => None,
+                    })
+                    .collect();
             }
             _ => return None,
         }
