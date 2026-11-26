@@ -1854,6 +1854,88 @@ fn a_key_a_definer_helper_draws_from_one_readable_row_is_clean() {
     }
 }
 
+/// Memberships whose organization pair a definer helper draws as `pending`
+/// from invitations, under an organizations read of `organizations_read`.
+fn pending_pair_schema(pending: &str, organizations_read: &str) -> String {
+    format!(
+        "CREATE ROLE app;
+         CREATE FUNCTION caller_email() RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER AS $$ SELECT 'caller' $$;
+         CREATE TABLE organizations (namespace_id INT, id INT, PRIMARY KEY (namespace_id, id));
+         CREATE TABLE invitations (id INT PRIMARY KEY, organization_namespace_id INT, organization_id INT,
+           email TEXT, accepted BOOLEAN,
+           FOREIGN KEY (organization_namespace_id, organization_id) REFERENCES organizations (namespace_id, id));
+         CREATE FUNCTION pending() RETURNS TABLE (organization_namespace_id INT, organization_id INT, id INT)
+         LANGUAGE sql STABLE SECURITY DEFINER AS $$ {pending} $$;
+         ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE invitations ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY invitations_read ON invitations FOR SELECT TO app
+           USING (email = (SELECT caller_email()));
+         CREATE POLICY organizations_read ON organizations FOR SELECT TO app USING ({organizations_read});
+         CREATE TABLE memberships (organization_namespace_id INT, organization_id INT, invitation_id INT,
+           CONSTRAINT memberships_organization FOREIGN KEY (organization_namespace_id, organization_id)
+             REFERENCES organizations (namespace_id, id));
+         ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY memberships_write ON memberships FOR INSERT TO app
+           WITH CHECK ((organization_namespace_id, organization_id, invitation_id) IN (SELECT * FROM pending()));
+         GRANT SELECT ON organizations, invitations TO app;
+         GRANT INSERT ON memberships TO app;"
+    )
+}
+
+#[test]
+fn a_key_pair_a_policy_row_value_reads_from_one_readable_row_is_clean() {
+    let caller = "SELECT invitation.organization_namespace_id, invitation.organization_id, invitation.id
+        FROM invitations invitation WHERE invitation.email = caller_email() AND invitation.accepted IS NULL";
+    let pair = "(namespace_id, id) IN (SELECT invitation.organization_namespace_id, invitation.organization_id
+        FROM invitations invitation WHERE invitation.accepted IS NULL)";
+    let reported = vec!["memberships.memberships_organization"];
+    for (pending, organizations_read, expected) in [
+        (caller, pair, vec![]),
+        (
+            caller,
+            "(id, namespace_id) IN (SELECT organization_id, organization_namespace_id FROM invitations)",
+            vec![],
+        ),
+        // The row value pairs its columns by position, so swapped columns admit another organization.
+        (
+            caller,
+            "(namespace_id, id) IN (SELECT organization_id, organization_namespace_id FROM invitations)",
+            reported.clone(),
+        ),
+        // The organization's read needs an unaccepted invitation, which the helper leaves open.
+        (
+            "SELECT invitation.organization_namespace_id, invitation.organization_id, invitation.id
+             FROM invitations invitation WHERE invitation.email = caller_email()",
+            pair,
+            reported.clone(),
+        ),
+        // Two readable invitations combine into the key of an organization neither names.
+        (
+            "SELECT other.organization_namespace_id, invitation.organization_id, invitation.id
+             FROM invitations invitation, invitations other
+             WHERE invitation.email = caller_email() AND invitation.accepted IS NULL
+               AND other.email = caller_email() AND other.accepted IS NULL",
+            pair,
+            reported.clone(),
+        ),
+        // A tested value outside the key leaves the read unproven.
+        (
+            caller,
+            "(namespace_id, id, 1) IN (SELECT organization_namespace_id, organization_id, id FROM invitations)",
+            reported.clone(),
+        ),
+    ] {
+        assert_eq!(
+            objects_under(
+                Deployment::default().with_app_role("app"),
+                &pending_pair_schema(pending, organizations_read)
+            ),
+            expected,
+            "{pending} reading {organizations_read}"
+        );
+    }
+}
+
 /// Resources each of whose kinds a child table covers, through reverse keys
 /// on generated columns, with `edge` as the kinds the edges cover.
 fn covered_schema(reverse: &str, edge: &str, privileges: &str) -> String {

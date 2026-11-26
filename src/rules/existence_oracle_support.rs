@@ -151,14 +151,13 @@ struct HelperArms<'db, DB: DatabaseLike> {
     arms: Vec<Arm<'db, DB>>,
 }
 
-/// A condition admitting a referenced column into the values one column of
-/// the rows of a table takes.
+/// A condition admitting referenced columns into the values columns of one
+/// row of a table take.
 struct Sublink<'db, DB: DatabaseLike> {
-    /// The position in the key of the key column the condition admits.
-    position: usize,
+    /// The position in the key of each key column the condition admits, with
+    /// the stored name of the column the subquery projects in its place.
+    columns: Vec<(usize, String)>,
     table: &'db DB::Table,
-    /// The stored name of the column the subquery projects.
-    column: String,
     /// The subquery's filters, stated of the table's columns.
     filters: Vec<Expr>,
 }
@@ -729,8 +728,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// the condition tests, or the arm reads the matched row itself and its
     /// filters imply the condition, or a foreign key of the matched row pins
     /// what the condition reads to a row the arm reads whose filters imply
-    /// it, or the condition admits the key of rows of a table the writer
-    /// reads and the arm reads such a row.
+    /// it, or the condition admits key columns from rows of a table the
+    /// writer reads and the arm draws every one of them from one such row.
     fn arm_implies(
         &self,
         arm: &Arm<'a, DB>,
@@ -782,25 +781,35 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             return Ok(true);
         }
         let Some(Sublink {
-            position,
+            columns,
             table,
-            column,
             filters,
         }) = self.sublink_membership(condition.original)?
         else {
             return Ok(false);
         };
-        let Some(Some((index, drawn))) = origins
-            .get(position)
-            .map(|origin| origin.and_then(|origin| origin.row.as_ref()))
-        else {
+        // Columns of two rows can combine into the key of a row neither admits.
+        let mut index = None;
+        for (position, column) in &columns {
+            let Some(Some((drawn_from, drawn))) = origins
+                .get(*position)
+                .map(|origin| origin.and_then(|origin| origin.row.as_ref()))
+            else {
+                return Ok(false);
+            };
+            if drawn != column || index.is_some_and(|first| first != *drawn_from) {
+                return Ok(false);
+            }
+            index = Some(*drawn_from);
+        }
+        let Some(index) = index else {
             return Ok(false);
         };
-        let row = &arm.rows[*index];
-        if row.table != table || *drawn != column {
+        let row = &arm.rows[index];
+        if row.table != table {
             return Ok(false);
         }
-        let facts = self.row_facts(row, *index, origins, context);
+        let facts = self.row_facts(row, index, origins, context);
         for filter in &filters {
             if !self.entails(&facts, filter)? {
                 return Ok(false);
@@ -914,20 +923,18 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         facts
     }
 
-    /// The condition admitting the referenced column into the values one
-    /// column of the rows of a table takes, as `column = ANY (ARRAY(SELECT
-    /// ...))` or `column IN (SELECT ...)` over one table with no other
-    /// clause.
+    /// The condition admitting referenced columns into the values columns of
+    /// one row of a table take, as `column = ANY (ARRAY(SELECT ...))`,
+    /// `column IN (SELECT ...)` or a row value of columns `IN (SELECT ...)`
+    /// pairing them by position with as many projected columns, over one
+    /// table with no other clause.
     fn sublink_membership(&self, condition: &Expr) -> Result<Option<Sublink<'a, DB>>, LookupError> {
-        let Some((column, query)) = sublink_operands(condition) else {
+        let Some((tested, query)) = sublink_operands(condition) else {
             return Ok(None);
         };
-        let Some(position) = self
-            .referenced_columns
-            .iter()
-            .position(|referenced| names_cast_column(column, referenced))
-        else {
-            return Ok(None);
+        let tested = match tested {
+            Expr::Tuple(items) => items.as_slice(),
+            item => slice::from_ref(item),
         };
         let Some(select) = plain_select(query) else {
             return Ok(None);
@@ -974,18 +981,30 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             .map(Cow::into_owned)
             .filter(|name| columns.contains(name))
         };
-        let [
-            SelectItem::UnnamedExpr(projected)
+        if select.projection.len() != tested.len() {
+            return Ok(None);
+        }
+        let mut admitted = Vec::with_capacity(tested.len());
+        for (item, projected) in tested.iter().zip(&select.projection) {
+            let Some(position) = self
+                .referenced_columns
+                .iter()
+                .position(|referenced| names_cast_column(item, referenced))
+            else {
+                return Ok(None);
+            };
+            let (SelectItem::UnnamedExpr(projected)
             | SelectItem::ExprWithAlias {
                 expr: projected, ..
-            },
-        ] = select.projection.as_slice()
-        else {
-            return Ok(None);
-        };
-        let Some(projected) = resolve(without_parentheses(projected)) else {
-            return Ok(None);
-        };
+            }) = projected
+            else {
+                return Ok(None);
+            };
+            let Some(projected) = resolve(without_parentheses(projected)) else {
+                return Ok(None);
+            };
+            admitted.push((position, projected));
+        }
         let mut filters = Vec::new();
         for filter in select.selection.iter().flat_map(conjuncts) {
             let Some(stated) = requalified(filter, |reference| resolve(reference)) else {
@@ -994,9 +1013,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             filters.push(normalized(&stated));
         }
         Ok(Some(Sublink {
-            position,
+            columns: admitted,
             table: instance.table,
-            column: projected,
             filters,
         }))
     }
