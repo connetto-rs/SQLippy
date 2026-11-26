@@ -1992,11 +1992,7 @@ fn an_unreadable_guard_helper_surfaces_a_lookup_error() {
         builder = builder.add_policy(Arc::new(policy.clone()), metadata);
     }
     for grant in catalog.table_grants() {
-        let metadata = catalog
-            .table_grant_metadata(grant)
-            .expect("grant metadata")
-            .clone();
-        builder = builder.add_table_grant(Arc::new(grant.clone()), metadata);
+        builder = builder.add_table_grant(Arc::new(grant.clone()), ());
     }
     let database: PgDieselDatabase = builder.into();
     let mut constrainer: GenericConstrainer<PgDieselDatabase> =
