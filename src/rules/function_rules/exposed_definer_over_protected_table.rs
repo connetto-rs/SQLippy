@@ -163,11 +163,12 @@ use super::plpgsql_ambiguous_name::collision;
 /// running as its caller only when that function is one `LANGUAGE sql`
 /// query, not `VOLATILE`, setting its own `search_path` and no other
 /// parameter, whose body reads alike in turn. A policy admits a row only to
-/// a caller who may execute every function it calls, and every function
-/// those running as their caller call. A stored table with row-level
-/// security reads alike only in a
-/// subquery the term holds true for finding a row in, a non-negated `EXISTS`
-/// or `IN` reached through `AND` and `OR` over a query inner-joining its
+/// a caller who may execute every function it calls and select every
+/// column of every table it reads, and so for every function running as
+/// its caller it calls. A stored table with row-level security reads alike
+/// only in a subquery the term holds true for finding a row in, a
+/// non-negated `EXISTS` or `IN` reached through `AND` and `OR` over a query
+/// inner-joining its
 /// relations, which an `IN` does not limit, since its own read is confined,
 /// so each caller finds every row the owner finds. A table read under an
 /// alias renaming its columns confines nothing.
@@ -1122,11 +1123,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// Whether every caller may select every column of `table`.
     fn selectable_by_every_caller(&self, table: &DB::Table) -> Result<bool, LookupError> {
         for caller in &self.callers {
-            let held = table.privileges(acting(*caller), self.database)?;
-            for column in table.columns(self.database)? {
-                if !held.select.on_column(column) {
-                    return Ok(false);
-                }
+            if !selects_every_column(self.database, table, *caller)? {
+                return Ok(false);
             }
         }
         Ok(true)
@@ -1549,7 +1547,7 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
                 Err(_) => return Ok(false),
             };
             let admitted = match security.gates() {
-                Some(gates) if !executes_every_term(database, *caller, gates)? => false,
+                Some(gates) if !evaluates_every_term(database, *caller, gates)? => false,
                 Some(gates) => {
                     let (existing, rewritten): (Vec<_>, Vec<_>) = gates
                         .iter()
@@ -1728,7 +1726,7 @@ impl<'r, 'a, DB: DatabaseLike> CallerBound<'r, 'a, DB> {
     /// reads alike in turn. A body without its own `search_path` resolves
     /// its names on the caller's, so each has to mean alike on any path, as
     /// [`names_alike_anywhere`] takes them. A policy calling it admits a
-    /// row only to a caller who may execute it, as [`executes_every_term`]
+    /// row only to a caller who may execute it, as [`evaluates_every_term`]
     /// requires.
     fn invoked_alike(&mut self, function: &'a DB::Function) -> Result<bool, LookupError> {
         let confinement = self.confinement;
@@ -1832,43 +1830,74 @@ impl<DB: DatabaseLike> Visitor for CallerBound<'_, '_, DB> {
     }
 }
 
-/// Whether `caller` may execute every function the terms of `gates` call,
-/// and every function those running as their caller call in turn, so that
-/// evaluating the policies raises no permission error, which admits no row.
-fn executes_every_term<DB: DatabaseLike>(
+/// Whether `role`, `PUBLIC` for `None`, may select every column of `table`.
+fn selects_every_column<DB: DatabaseLike>(
     database: &DB,
-    caller: Option<&DB::Role>,
-    gates: &[RowGate<'_, DB::Policy>],
+    table: &DB::Table,
+    role: Option<&DB::Role>,
 ) -> Result<bool, LookupError> {
-    let mut executing = Executing {
-        database,
-        caller,
-        reading: Vec::new(),
-    };
-    for term in gates
-        .iter()
-        .flat_map(|gate| gate.permissive().iter().chain(gate.restrictive()))
-    {
-        if !executing.executes_all(term.expression().expression())? {
+    let held = table.privileges(acting(role), database)?;
+    for column in table.columns(database)? {
+        if !held.select.on_column(column) {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
-/// The walk for whether a role may execute every function a policy term
-/// reaches.
-struct Executing<'a, DB: DatabaseLike> {
+/// Whether `caller` may evaluate every term of `gates`, executing every
+/// function the terms call and selecting every column of every table they
+/// read, and so for every function running as its caller they call in
+/// turn. PostgreSQL raises a permission error otherwise, which admits no
+/// row. A policy names a relation as the schema's search path resolves it.
+fn evaluates_every_term<DB: DatabaseLike>(
+    database: &DB,
+    caller: Option<&DB::Role>,
+    gates: &[RowGate<'_, DB::Policy>],
+) -> Result<bool, LookupError> {
+    let mut evaluating = Evaluating::new(database, caller, None);
+    for term in gates
+        .iter()
+        .flat_map(|gate| gate.permissive().iter().chain(gate.restrictive()))
+    {
+        if !evaluating.evaluates(term.expression().expression())? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The walk for whether a role may evaluate a policy term.
+struct Evaluating<'p, 'a, DB: DatabaseLike> {
     database: &'a DB,
     /// The role evaluating the term, `None` standing for `PUBLIC`.
     caller: Option<&'a DB::Role>,
+    /// The search path the names of the walked term resolve on.
+    path: Option<&'p [(Cow<'p, str>, bool)]>,
+    /// The `WITH` items of the queries the walk stands in.
+    items: WithScopes,
     /// The functions running as the caller whose bodies are walked.
     reading: Vec<*const DB::Function>,
 }
 
-impl<DB: DatabaseLike> Executing<'_, DB> {
-    /// Whether the caller may execute every function `node` reaches.
-    fn executes_all<N: Visit + ?Sized>(&mut self, node: &N) -> Result<bool, LookupError> {
+impl<'p, 'a, DB: DatabaseLike> Evaluating<'p, 'a, DB> {
+    /// The walk over a term whose names resolve on `path`.
+    fn new(
+        database: &'a DB,
+        caller: Option<&'a DB::Role>,
+        path: Option<&'p [(Cow<'p, str>, bool)]>,
+    ) -> Self {
+        Self {
+            database,
+            caller,
+            path,
+            items: WithScopes::default(),
+            reading: Vec::new(),
+        }
+    }
+
+    /// Whether the caller may evaluate `node`.
+    fn evaluates<N: Visit + ?Sized>(&mut self, node: &N) -> Result<bool, LookupError> {
         match walk(node, self) {
             ControlFlow::Continue(()) => Ok(true),
             ControlFlow::Break(found) => found.map_or(Ok(false), Err),
@@ -1876,8 +1905,7 @@ impl<DB: DatabaseLike> Executing<'_, DB> {
     }
 
     /// Whether the caller may execute every function `call` may reach, and
-    /// every function the `LANGUAGE sql` body of one running as its caller
-    /// reaches.
+    /// evaluate the `LANGUAGE sql` body of one running as its caller.
     fn executes<'c>(&mut self, call: impl Into<WrittenCall<'c>>) -> Result<bool, LookupError> {
         let database = self.database;
         for function in database.functions_reached_by(call, IdentifierCase::Folded)? {
@@ -1897,15 +1925,32 @@ impl<DB: DatabaseLike> Executing<'_, DB> {
             let Some(query) = sql_query_body(database, function)? else {
                 continue;
             };
-            self.reading.push(address);
-            if !self.executes_all(query.as_ref())? {
+            let path = function.search_path(database)?;
+            let mut within = Evaluating::new(database, self.caller, path.as_deref());
+            within.reading = mem::take(&mut self.reading);
+            within.reading.push(address);
+            let evaluates = within.evaluates(query.as_ref());
+            self.reading = within.reading;
+            if !evaluates? {
                 return Ok(false);
             }
         }
         Ok(true)
     }
 
-    /// The walk's step for whether the caller may execute a call.
+    /// Whether the caller may select every column of the stored table
+    /// `name` names, when no `WITH` item of the walked queries does.
+    fn selects(&self, name: &ObjectName) -> Result<bool, LookupError> {
+        if self.items.binding(name).is_some() {
+            return Ok(true);
+        }
+        match stored_table(self.database, name, self.path)? {
+            Some(table) => selects_every_column(self.database, table, self.caller),
+            None => Ok(true),
+        }
+    }
+
+    /// The walk's step for whether the caller may evaluate a call or read.
     fn verdict(outcome: Result<bool, LookupError>) -> ControlFlow<Option<LookupError>> {
         match outcome {
             Ok(true) => ControlFlow::Continue(()),
@@ -1915,8 +1960,18 @@ impl<DB: DatabaseLike> Executing<'_, DB> {
     }
 }
 
-impl<DB: DatabaseLike> Visitor for Executing<'_, DB> {
+impl<DB: DatabaseLike> Visitor for Evaluating<'_, '_, DB> {
     type Break = Option<LookupError>;
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        self.items.enter(query);
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        self.items.leave(query);
+        ControlFlow::Continue(())
+    }
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
         match expression {
@@ -1926,6 +1981,12 @@ impl<DB: DatabaseLike> Visitor for Executing<'_, DB> {
     }
 
     fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+        if let TableFactor::Table {
+            name, args: None, ..
+        } = factor
+        {
+            return Self::verdict(self.selects(name));
+        }
         WrittenCall::relation(factor).map_or(ControlFlow::Continue(()), |call| {
             Self::verdict(self.executes(call))
         })
