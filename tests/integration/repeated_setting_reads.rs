@@ -3,8 +3,8 @@
 use sqlippy::prelude::*;
 use sqlparser::dialect::PostgreSqlDialect;
 
-/// Counts duplicate keys across function bodies.
-fn findings(schema: &str) -> usize {
+/// The resolutions of the duplicate keys across function bodies.
+fn resolutions(schema: &str) -> Vec<String> {
     let database = ParserDB::parse::<PostgreSqlDialect>(schema).unwrap();
     let mut constrainer: GenericConstrainer<ParserDB> = RepeatedSettingRead::default().into();
     constrainer.set_deployment(Deployment::example());
@@ -12,8 +12,76 @@ fn findings(schema: &str) -> usize {
     constrainer
         .diagnostics(&database)
         .into_iter()
-        .filter(|error| matches!(error, Error::Violation(_)))
-        .count()
+        .filter_map(|error| match error {
+            Error::Violation(violation) => Some(violation.resolution().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Counts duplicate keys across function bodies.
+fn findings(schema: &str) -> usize {
+    resolutions(schema).len()
+}
+
+const ACCESSOR: &str =
+    "Read the setting in one typed accessor function and call that accessor from these functions.";
+
+const VALIDATOR: &str = "Read the settings these functions combine once, in one function returning a record with an OUT parameter per setting, and give each setting a LANGUAGE sql accessor that selects its column from that function.";
+
+#[test]
+fn a_setting_read_beside_another_setting_points_to_one_validator() {
+    assert_eq!(
+        resolutions(
+            "CREATE FUNCTION acting_installation_id() RETURNS UUID LANGUAGE plpgsql STABLE AS $$
+             DECLARE
+               identity_namespace UUID := NULLIF(current_setting('app.installation_namespace_id', true), '')::UUID;
+               identity_local UUID := NULLIF(current_setting('app.installation_id', true), '')::UUID;
+             BEGIN
+               IF (identity_namespace IS NULL) <> (identity_local IS NULL) THEN
+                 RAISE EXCEPTION 'incomplete installation identity' USING ERRCODE = '22023';
+               END IF;
+               RETURN identity_local;
+             END $$;
+             CREATE FUNCTION acting_installation_namespace_id() RETURNS UUID LANGUAGE sql STABLE AS $$
+               SELECT NULLIF(current_setting('app.installation_namespace_id', true), '')::UUID
+               WHERE (SELECT acting_installation_id()) IS NOT NULL $$;"
+        ),
+        [VALIDATOR]
+    );
+}
+
+#[test]
+fn projections_of_one_validator_pass() {
+    assert_eq!(
+        findings(
+            "CREATE FUNCTION acting_installation(OUT namespace_id UUID, OUT id UUID) RETURNS RECORD
+             LANGUAGE plpgsql STABLE AS $$
+             BEGIN
+               namespace_id := NULLIF(current_setting('app.installation_namespace_id', true), '')::UUID;
+               id := NULLIF(current_setting('app.installation_id', true), '')::UUID;
+               IF (namespace_id IS NULL) <> (id IS NULL) THEN
+                 RAISE EXCEPTION 'incomplete installation identity' USING ERRCODE = '22023';
+               END IF;
+             END $$;
+             CREATE FUNCTION acting_installation_id() RETURNS UUID LANGUAGE sql STABLE
+               AS $$ SELECT id FROM acting_installation() $$;
+             CREATE FUNCTION acting_installation_namespace_id() RETURNS UUID LANGUAGE sql STABLE
+               AS $$ SELECT CASE WHEN id IS NOT NULL THEN namespace_id END FROM acting_installation() $$;"
+        ),
+        0
+    );
+}
+
+#[test]
+fn a_setting_read_alone_points_to_one_accessor() {
+    assert_eq!(
+        resolutions(
+            "CREATE FUNCTION first() RETURNS TEXT LANGUAGE sql AS $$ SELECT current_setting('app.user_id', true) $$;
+             CREATE FUNCTION second() RETURNS TEXT LANGUAGE sql AS $$ SELECT current_setting('app.user_id', true) || current_setting('app.user_id', true) $$;"
+        ),
+        [ACCESSOR]
+    );
 }
 
 #[test]

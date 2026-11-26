@@ -57,11 +57,11 @@ use crate::{
         SecurityBarrierMissingOnFilteringView, SecurityDefinerFunctionExposed,
         SelfAssertedClaimPolicy, SelfComparison, SelfGrantingWrite, SensitiveColumnsExposed,
         SerialColumn, SessionTimeZoneDependence, SettableMembershipInBypassingRole,
-        SimpleCaseUnderUnsafeSearchPath, SingularTableName, SnapshotBeforeLock,
-        SubjectSettableAttribute, SuperkeyPrimaryKey, SurrogatePrimaryKeyInExtension,
-        TableInheritance, TableNameDispatch, TautologicalCheck, TautologicalPolicy,
-        TautologicalWithCheck, TenantLocalReference, TimeDependentCheck, TimeWithTimeZone,
-        TimestampBetween, TimestampWithoutTimeZone, TriggerFilterInBody,
+        SettingCastThroughModifier, SimpleCaseUnderUnsafeSearchPath, SingularTableName,
+        SnapshotBeforeLock, SubjectSettableAttribute, SuperkeyPrimaryKey,
+        SurrogatePrimaryKeyInExtension, TableInheritance, TableNameDispatch, TautologicalCheck,
+        TautologicalPolicy, TautologicalWithCheck, TenantLocalReference, TimeDependentCheck,
+        TimeWithTimeZone, TimestampBetween, TimestampWithoutTimeZone, TriggerFilterInBody,
         TruncateGrantedToAnonymousRole, TruncateGrantedToAppRole, TruncatedIdentifier,
         TruncatingIntegerDivision, TypeNameCaseCollision, UnauditedAuthorityTable,
         UnboundedTextColumn, UncachedHelperQuery, UncachedPolicyCall,
@@ -284,7 +284,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 35] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 36] = [
         Box::new(NullableConcatenation::default()),
         Box::new(NotInNullableSubquery::default()),
         Box::new(NotInSubquery::default()),
@@ -320,6 +320,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(RedundantTerm::default()),
         Box::new(OverlyComplexBooleanExpression::default()),
         Box::new(NonminimalBooleanExpression::default()),
+        Box::new(SettingCastThroughModifier::default()),
     ];
     for rule in query_rules {
         constrainer.register_query_rule_with_floor(rule, Level::Allow);
@@ -328,7 +329,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 81] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 82] = [
         Box::new(DuplicateIndex::default()),
         Box::new(NullableConcatenation::default()),
         Box::new(RedundantTerm::default()),
@@ -400,6 +401,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(UnauditedAuthorityTable::default()),
         Box::new(MonotonicFlagReset::default()),
         Box::new(RepeatedSettingRead::default()),
+        Box::new(SettingCastThroughModifier::default()),
         Box::new(CatalogNameAsText::default()),
         Box::new(CaseSensitiveEmail::default()),
         Box::new(RepeatedRecursionBound::default()),

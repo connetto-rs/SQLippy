@@ -66,6 +66,12 @@ impl Visitor for Settings {
 /// credential inline in each policy. Reads with different literal keys or
 /// missing-value flags are separate, and dynamic arguments are not counted.
 ///
+/// When one of those functions also reads another setting, the settings are
+/// read together, and the resolution names one function returning a record
+/// with an `OUT` parameter per setting, which reads them and checks how they
+/// combine once, and a `LANGUAGE sql` accessor per setting selecting its
+/// column from that function.
+///
 /// The rule does not run on SQLite, which has no configuration settings.
 ///
 /// # Example
@@ -143,7 +149,7 @@ impl<DB: DatabaseLike> SchemaRule for RepeatedSettingRead<DB> {
         database: &DB,
         reporter: &mut Reporter<'_, DB>,
     ) -> Result<(), Interruption> {
-        let mut readers = BTreeMap::<_, Vec<&DB::Function>>::new();
+        let mut readers = BTreeMap::<_, Vec<(&DB::Function, bool)>>::new();
         for function in database.functions() {
             let mut settings = Settings::default();
             function_body(
@@ -156,8 +162,15 @@ impl<DB: DatabaseLike> SchemaRule for RepeatedSettingRead<DB> {
             )?;
             settings.0.sort();
             settings.0.dedup();
+            let reads_several = settings
+                .0
+                .first()
+                .is_some_and(|(first, _)| settings.0.iter().any(|(key, _)| key != first));
             for setting in settings.0 {
-                readers.entry(setting).or_default().push(function);
+                readers
+                    .entry(setting)
+                    .or_default()
+                    .push((function, reads_several));
             }
         }
         for ((key, missing), functions) in readers {
@@ -166,16 +179,21 @@ impl<DB: DatabaseLike> SchemaRule for RepeatedSettingRead<DB> {
             }
             let names = functions
                 .iter()
-                .map(|function| signature(*function, database))
+                .map(|(function, _)| signature(*function, database))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let read_together = functions.iter().any(|(_, reads_several)| *reads_several);
+            let resolution = if read_together {
+                "Read the settings these functions combine once, in one function returning a record with an OUT parameter per setting, and give each setting a LANGUAGE sql accessor that selects its column from that function."
+            } else {
+                "Read the setting in one typed accessor function and call that accessor from these functions."
+            };
             reporter.function(
-                functions[0],
+                functions[0].0,
                 format!(
                     "Functions {names} each read setting '{key}' with `missing_ok = {missing}`."
                 ),
-                "Read the setting in one typed accessor function and call that accessor from these functions."
-                    .to_owned(),
+                resolution.to_owned(),
             )?;
         }
         Ok(())
