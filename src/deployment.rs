@@ -794,11 +794,13 @@ impl Deployment {
     /// yields the set of that call written as an expression. A subquery
     /// selecting one column of one call through its alias, such as
     /// `id IN (SELECT share.resource_id FROM authz.grants() share)`, yields
-    /// `(authz.grants()).resource_id`. The existence oracles read a call
-    /// taking no argument to a set-returning `LANGUAGE sql` helper as the
-    /// set its body selects, so a declaration on either spelling serves both,
-    /// and read every set an arm seeding the `WITH RECURSIVE` walk such a
-    /// helper returns selects as within the call.
+    /// `(authz.grants()).resource_id`. The existence oracles and
+    /// `exposed_definer_over_protected_table` read a call taking no argument
+    /// to a set-returning `LANGUAGE sql` helper as the set its body selects,
+    /// so a declaration on either spelling serves both. They read every set
+    /// an arm of such a helper's body selects as within a call to it, an arm
+    /// the body joins by `UNION` or one seeding the `WITH RECURSIVE` walk the
+    /// body returns, with the literal the call passes for each parameter.
     ///
     /// # Errors
     ///

@@ -55,6 +55,7 @@ use crate::{
             stored_table,
         },
         grant_support::{function_callers, granted_callers, schema_of},
+        helper_set_support::HelperSets,
         implication_support::{
             Columns, Condition, ParameterValues, StoredRelation, Term, admits, alternatives,
             clause_implies, keeps_existence, left_to_prove, membership, parameter,
@@ -63,7 +64,7 @@ use crate::{
         inline_support::selected_expression,
         key_support::{binds, equality_keys, key_pairs, no_inheritors},
         ladder_support::{
-            Ladders, called, listed_arguments, plain, positional_arguments, relation_arguments,
+            called, listed_arguments, plain, positional_arguments, relation_arguments,
         },
         literal_support::literal,
         null_support::rejects_null,
@@ -128,7 +129,11 @@ use super::plpgsql_ambiguous_name::collision;
 /// stating each condition as written, where a scalar subquery reading no
 /// relation such as `(SELECT auth.uid())` stands for its value, or testing
 /// the same column against a set within the policy's, as written, declared
-/// with [`Deployment::with_set_within`] or read off a ladder of the schema.
+/// with [`Deployment::with_set_within`], read off a ladder of the schema, or
+/// selected by an arm of the body of a helper the policy's set calls, one
+/// the body joins by `UNION` or one seeding the `WITH RECURSIVE` walk the
+/// body returns, read with the literals the call passes for the helper's
+/// parameters.
 /// A non-negated `EXISTS` or `IN` over stored tables, such as one over a
 /// membership table, implies the policy's when its names resolve to the same
 /// tables and columns and it finds a row only where the policy's does,
@@ -461,7 +466,8 @@ struct Confinement<'a, DB: DatabaseLike> {
     arms: RefCell<Vec<ReadArms<'a, DB>>>,
     /// The functions whose rows are being read, so a cycle reads none.
     drawing: RefCell<Vec<*const DB::Function>>,
-    ladders: Ladders<'a, DB>,
+    /// Which sets lie within which.
+    sets: HelperSets<'a, DB>,
     /// The function the callers execute.
     exposed: &'a DB::Function,
     /// Whether every value `exposed` returns lies in a set a `SELECT` policy
@@ -497,7 +503,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             proved: Vec::new(),
             arms: RefCell::default(),
             drawing: RefCell::default(),
-            ladders: Ladders::new(database),
+            sets: HelperSets::new(database),
             exposed: function,
             released: Cell::new(None),
         })
@@ -1455,13 +1461,9 @@ impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
     type Tested = String;
 
     fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> Result<bool, LookupError> {
-        let ladders = &self.confinement.ladders;
-        self.confinement.deployment.is_set_within(
-            narrower,
-            wider,
-            |_| Ok(None),
-            |narrower, wider| ladders.within(narrower, wider),
-        )
+        self.confinement
+            .sets
+            .is_set_within(self.confinement.deployment, narrower, wider)
     }
 
     fn rename(&self, column: Cow<'_, str>) -> Option<String> {

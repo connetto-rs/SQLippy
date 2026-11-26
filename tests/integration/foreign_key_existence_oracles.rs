@@ -683,10 +683,11 @@ fn a_referenced_policy_implied_through_the_key_part_by_part_is_clean() {
 
 /// The typed templates [`slot_schema`] reports under `readable` and `check`,
 /// beside `walk()`, a helper selecting `body` over `steps`, which links each
-/// template to the templates below it, and `seeded()`, a walk from
-/// `readable('reader')`.
+/// template to the templates below it, `seeded()`, a walk from
+/// `readable('reader')`, and `leveled(level)`, a walk from `readable(level)`.
 fn walked_slots(readable: &str, body: &str, check: &str) -> Vec<String> {
     let seeded = walk_from("SELECT readable('reader')", "SELECT walked.id FROM walked");
+    let leveled = walk_from("SELECT readable(level)", "SELECT walked.id FROM walked");
     let sql = slot_schema(
         readable,
         check,
@@ -699,6 +700,7 @@ fn walked_slots(readable: &str, body: &str, check: &str) -> Vec<String> {
              CREATE FUNCTION readable_pairs(level TEXT) RETURNS TABLE (template INT, organization INT)
                LANGUAGE sql STABLE AS $$ SELECT 1, 1 $$;
              CREATE FUNCTION seeded() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ {seeded} $$;
+             CREATE FUNCTION leveled(level TEXT) RETURNS SETOF INT LANGUAGE sql STABLE AS $$ {leveled} $$;
              CREATE FUNCTION walk() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ {body} $$;"
         ),
     );
@@ -752,6 +754,11 @@ fn a_key_confined_to_the_seed_of_a_recursive_helper_the_referenced_rows_are_read
             READER,
         ),
         (walk_from("SELECT seeded()", outer), READER),
+        (format!("SELECT readable('writer') UNION {aliased}"), READER),
+        (
+            format!("SELECT step.child_id FROM steps step UNION ({aliased})"),
+            READER,
+        ),
         (
             "SELECT granted.id FROM readable_rows('reader') granted (id)".to_owned(),
             "id IN (SELECT readable_rows('reader'))",
@@ -763,6 +770,14 @@ fn a_key_confined_to_the_seed_of_a_recursive_helper_the_referenced_rows_are_read
             "{body} under {check}"
         );
     }
+    assert_eq!(
+        walked_slots(
+            "template_id = ANY (ARRAY(SELECT leveled('reader')))",
+            aliased,
+            READER
+        ),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -848,6 +863,16 @@ fn a_key_a_recursive_helper_may_not_reach_is_reported() {
             SLOTS_READ,
             walk_from(seed, "SELECT walked.id FROM walked"),
             "id = ANY (ARRAY(SELECT walk()))",
+        ),
+        (
+            "template_id = ANY (ARRAY(SELECT leveled('writer')))",
+            walk_from(seed, "SELECT walked.id FROM walked"),
+            READER,
+        ),
+        (
+            WALKED,
+            "SELECT readable('reader') INTERSECT SELECT step.child_id FROM steps step".to_owned(),
+            READER,
         ),
     ] {
         assert_eq!(

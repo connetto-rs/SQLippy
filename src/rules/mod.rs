@@ -125,6 +125,7 @@ mod function_body_support;
 mod function_reach_support;
 mod grant_support;
 mod guarded_parent_support;
+mod helper_set_support;
 mod implication_support;
 mod index_support;
 mod inline_support;
