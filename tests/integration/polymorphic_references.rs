@@ -158,6 +158,22 @@ fn an_identifier_typed_like_a_unique_key_is_reported() {
 }
 
 #[test]
+fn an_identifier_typed_like_a_unique_index_column_is_reported() {
+    assert_eq!(
+        reported(
+            "CREATE TABLE accounts (id BIGINT PRIMARY KEY, handle TEXT NOT NULL);
+             CREATE UNIQUE INDEX accounts_handle ON accounts (handle);
+             CREATE TABLE audit_log (
+                 id BIGINT PRIMARY KEY,
+                 entity_type TEXT NOT NULL,
+                 entity_id TEXT NOT NULL
+             );"
+        ),
+        ["audit_log"]
+    );
+}
+
+#[test]
 fn columns_of_different_stems_do_not_pair() {
     assert_eq!(
         reported(
