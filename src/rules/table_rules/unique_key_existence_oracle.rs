@@ -1,5 +1,7 @@
 //! Submodule providing the `UniqueKeyExistenceOracle` rule.
 
+use std::borrow::Cow;
+
 use sql_traits::{
     errors::LookupError,
     structs::{RowStatement, RowVersion},
@@ -14,7 +16,8 @@ use crate::{
     rules::{
         consumed_key_support::consumptions,
         existence_oracle_support::{
-            Confinement, hides_rows, row_security, writes_free_key, writes_whole_key,
+            Confinement, hides_rows, row_security, writes_free_key, writes_only_pinned,
+            writes_whole_key,
         },
         policy_support::{acting, client_roles},
     },
@@ -37,6 +40,13 @@ rule_definition!(
     /// the role reads, as
     /// [`ForeignKeyExistenceOracle`](crate::prelude::ForeignKeyExistenceOracle)
     /// excuses a foreign key into the same table. A write is also excused
+    /// when its check pins a key column to a principal accessor the
+    /// deployment declares, as `namespace_id = (SELECT
+    /// authz.caller_namespace())` in a top-level `AND` term of a restrictive
+    /// policy or of every permissive one, and every client role holding
+    /// `INSERT` or `UPDATE` on that column pins it so in each check of that
+    /// write. Only rows of the writer's own principal then hold the key it
+    /// writes. A write is also excused
     /// when its check draws a key column from a set-returning `LANGUAGE sql`
     /// helper, as `IN (SELECT helper())`, `= ANY (ARRAY(SELECT helper()))` or
     /// `IN (SELECT ... FROM helper())`, and every arm of the helper's body
@@ -150,7 +160,7 @@ impl<DB: DatabaseLike> TableRule for UniqueKeyExistenceOracle<DB> {
 /// How to close the oracle on the table named `name`.
 fn resolution(name: &str) -> String {
     format!(
-        "Let the server choose the key of '{name}', such as from an identity or a random default, confine it in the WITH CHECK of '{name}' to values the writer may read, or let the writer read every row of '{name}'."
+        "Let the server choose the key of '{name}', such as from an identity or a random default, confine it in the WITH CHECK of '{name}' to values the writer may read, pin a key column there to a declared principal accessor, or let the writer read every row of '{name}'."
     )
 }
 
@@ -175,7 +185,8 @@ fn probes<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
         names,
         key.nulls_distinct(),
     )?
-    .with_consumptions(consumptions(database, deployment, table)?);
+    .with_consumptions(consumptions(database, deployment, table)?)
+    .with_principal_columns(principal_columns(database, deployment, table, &columns)?);
     let mut probes = Vec::new();
     for (name, role) in client_roles(database, deployment) {
         let held = table.privileges(acting(role), database)?;
@@ -235,4 +246,50 @@ fn probes<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
         "A unique key of '{name}' on ({list}) tells {} whether a row of '{name}' it cannot read holds a key, since the key is checked past row-level security.",
         probes.join(", ")
     )))
+}
+
+/// The stored names of `columns` that every client role writes only with the
+/// value a declared principal accessor yields for it, so that only rows of
+/// one principal hold each value.
+fn principal_columns<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    deployment: &Deployment,
+    table: &'db DB::Table,
+    columns: &[&'db DB::Column],
+) -> Result<Vec<Cow<'db, str>>, LookupError> {
+    let mut pinned = Vec::new();
+    if deployment.principal_accessors().is_empty() {
+        return Ok(pinned);
+    }
+    let mut roles = Vec::new();
+    for (_, role) in client_roles(database, deployment) {
+        roles.push((role, table.privileges(acting(role), database)?));
+    }
+    'columns: for &column in columns {
+        let name = column.stored_column_name();
+        for (role, held) in &roles {
+            for (privilege, statement, written) in [
+                (
+                    &held.insert,
+                    RowStatement::Insert { returning: false },
+                    RowVersion::Inserted,
+                ),
+                (
+                    &held.update,
+                    RowStatement::Update { reads: false },
+                    RowVersion::Updated,
+                ),
+            ] {
+                if privilege.on_column(column)
+                    && !writes_only_pinned(
+                        database, deployment, table, statement, written, *role, &name,
+                    )?
+                {
+                    continue 'columns;
+                }
+            }
+        }
+        pinned.push(name);
+    }
+    Ok(pinned)
 }

@@ -6,8 +6,8 @@ use std::{borrow::Cow, cell::RefCell, collections::HashMap, ops::ControlFlow, pt
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
     structs::{
-        ColumnDefinitionScope, ColumnPrivilege, ColumnScope, IdentifierCase, RowGate, RowSecurity,
-        RowStatement, RowVersion, TargetName, WrittenCall,
+        ColumnDefinitionScope, ColumnPrivilege, ColumnScope, GateTerm, IdentifierCase, RowGate,
+        RowSecurity, RowStatement, RowVersion, TargetName, WrittenCall,
     },
     traits::{ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
@@ -25,7 +25,7 @@ use sqlparser::{
 use crate::{
     deployment::Deployment,
     rules::{
-        closed_set_support::{names_cast_column, same_identity, stored_name},
+        closed_set_support::{names_cast_column, names_column, same_identity, stored_name},
         consumed_key_support::Consumption,
         cte_support::stored_table,
         grant_support::schema_of,
@@ -179,6 +179,9 @@ pub(crate) struct Confinement<'a, DB: DatabaseLike> {
     /// Whether a `NULL` key column skips the check, as it does for a foreign
     /// key and for a unique key whose `NULL` values are distinct.
     null_skips: bool,
+    /// The key columns whose values only rows of their writer's principal
+    /// hold, which a check pinning one to a principal accessor confines.
+    principal_columns: u64,
     /// The helper arms each clause reads, by the clause's address.
     helpers: RefCell<HashMap<*const Expr, Option<Rc<HelperArms<'a, DB>>>>>,
     /// Which sets lie within which.
@@ -223,6 +226,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             referenced_columns,
             row_keys,
             null_skips,
+            principal_columns: 0,
             helpers: RefCell::new(HashMap::new()),
             sets: HelperSets::new(database),
             consumptions: Vec::new(),
@@ -237,6 +241,38 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             consumptions,
             ..self
         }
+    }
+
+    /// This confinement, also settling a key whose check pins one of
+    /// `columns`, by stored name, to a declared principal accessor. Only
+    /// rows of the writer's principal hold its value in such a column, so a
+    /// key colliding there names a row of that principal.
+    pub(crate) fn with_principal_columns(
+        self,
+        columns: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
+        let principal_columns = columns.into_iter().fold(0, |mask, column| {
+            self.key_columns
+                .iter()
+                .position(|key| *key == column.as_ref())
+                .map_or(mask, |position| mask | 1 << position)
+        });
+        Self {
+            principal_columns,
+            ..self
+        }
+    }
+
+    /// Whether `gate` pins a principal column of the key to a declared
+    /// principal accessor for every row it admits.
+    fn pins_principal_column(&self, gate: &RowGate<'_, DB::Policy>) -> bool {
+        self.key_columns
+            .iter()
+            .enumerate()
+            .any(|(position, column)| {
+                self.principal_columns & 1 << position != 0
+                    && pins_principal(self.deployment, gate, column)
+            })
     }
 
     /// Every key column.
@@ -2229,11 +2265,108 @@ pub(crate) fn writes_free_key<'a, DB: DatabaseLike>(
         }
     }
     for gate in gates.iter().filter(|gate| gate.row() == written) {
-        if confinement.confining_gate(gate)? || reads_matched_rows(Some(gate))? {
+        if confinement.confining_gate(gate)?
+            || confinement.pins_principal_column(gate)
+            || reads_matched_rows(Some(gate))?
+        {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+/// Whether every row `role` writes through `statement` on `table` holds in
+/// `column` the value a declared principal accessor yields for it, or the
+/// statement writes nothing.
+pub(crate) fn writes_only_pinned<'a, DB: DatabaseLike>(
+    database: &'a DB,
+    deployment: &Deployment,
+    table: &'a DB::Table,
+    statement: RowStatement,
+    written: RowVersion,
+    role: Option<&'a DB::Role>,
+    column: &str,
+) -> Result<bool, LookupError> {
+    let Some(security) = row_security(database, table, statement, role)? else {
+        return Ok(false);
+    };
+    let Some(gates) = security.gates() else {
+        // An exempt role writes any value, and a refused write writes none.
+        return Ok(security.infinite_recursion().is_some());
+    };
+    for gate in gates {
+        if admits_nothing(database, table, gate)? {
+            return Ok(true);
+        }
+    }
+    Ok(gates
+        .iter()
+        .filter(|gate| gate.row() == written)
+        .all(|gate| pins_principal(deployment, gate, column)))
+}
+
+/// Whether every row `gate` admits holds in `column` the value a declared
+/// principal accessor yields, through a top-level `AND` term of a
+/// restrictive policy or of every permissive one.
+fn pins_principal<P>(deployment: &Deployment, gate: &RowGate<'_, P>, column: &str) -> bool {
+    let pinned = |term: &GateTerm<'_, P>| {
+        conjuncts(term.expression().expression())
+            .into_iter()
+            .any(|conjunct| pins_to_principal(deployment, conjunct, column))
+    };
+    gate.restrictive().iter().any(pinned)
+        || (!gate.permissive().is_empty() && gate.permissive().iter().all(pinned))
+}
+
+/// Whether `conjunct` is `column = accessor`, either way round, for a
+/// declared principal accessor reading no column.
+fn pins_to_principal(deployment: &Deployment, conjunct: &Expr, column: &str) -> bool {
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = unwrapped(conjunct)
+    else {
+        return false;
+    };
+    [(left, right), (right, left)]
+        .into_iter()
+        .any(|(tested, value)| {
+            names_column(tested, column) && !reads_any_column(value) && {
+                let value = selected(value);
+                deployment
+                    .principal_accessors()
+                    .iter()
+                    .any(|accessor| selected(accessor) == value)
+            }
+        })
+}
+
+/// `expression` under parentheses and scalar subqueries selecting one
+/// expression from nothing.
+fn selected(mut expression: &Expr) -> &Expr {
+    loop {
+        expression = match expression {
+            Expr::Nested(inner) => inner,
+            Expr::Subquery(query) => match scalar(query) {
+                Some(value) => value,
+                None => return expression,
+            },
+            _ => return expression,
+        };
+    }
+}
+
+/// Whether `expression` names a column anywhere, its subqueries included.
+fn reads_any_column(expression: &Expr) -> bool {
+    visit_expressions(expression, |inner| {
+        if is_column_reference(inner) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
 }
 
 /// Whether `gate` admits no row of `table`, holding no permissive policy, a

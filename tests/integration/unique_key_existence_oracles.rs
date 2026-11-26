@@ -1172,3 +1172,163 @@ fn a_restrictive_read_the_referenced_row_does_not_settle_is_reported() {
         assert!(reports_grants_key(edits), "{edits:?}");
     }
 }
+
+/// The deployment declaring `accessor` a principal accessor.
+fn principal(accessor: &str) -> Deployment {
+    Deployment::default()
+        .with_principal_accessor(accessor)
+        .unwrap()
+}
+
+/// Object and message of every finding on organizations whose rows `app`
+/// cannot read, under `deployment`, with `check` the insert check of `app`
+/// and `extra` appended.
+fn reported_occupancy(deployment: Deployment, check: &str, extra: &str) -> Vec<(String, String)> {
+    reported_under(
+        deployment,
+        &format!(
+            "CREATE SCHEMA authz;
+             CREATE TABLE namespaces (id UUID PRIMARY KEY, user_id UUID UNIQUE NOT NULL);
+             CREATE FUNCTION authz.caller_namespace() RETURNS UUID LANGUAGE sql STABLE AS $$
+                 SELECT namespace.id FROM namespaces namespace
+                 WHERE namespace.user_id = NULLIF(current_setting('app.user_id', true), '')::UUID
+             $$;
+             CREATE FUNCTION authz.namespace_of(owner UUID) RETURNS UUID LANGUAGE sql STABLE AS $$
+                 SELECT owner
+             $$;
+             CREATE TABLE organizations (
+                 namespace_id UUID NOT NULL REFERENCES namespaces (id),
+                 id UUID NOT NULL,
+                 owner_id UUID,
+                 slug TEXT,
+                 CONSTRAINT organizations_pkey PRIMARY KEY (namespace_id, id),
+                 CONSTRAINT organizations_slug UNIQUE (slug)
+             );
+             ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT, INSERT (namespace_id, id, owner_id) ON organizations TO app;
+             CREATE POLICY organizations_select ON organizations FOR SELECT TO app USING (false);
+             CREATE POLICY organizations_insert ON organizations FOR INSERT TO app
+                 WITH CHECK ({check});
+             {extra}"
+        ),
+    )
+}
+
+/// Objects of [`reported_occupancy`].
+fn occupancy(deployment: Deployment, check: &str, extra: &str) -> Vec<String> {
+    reported_occupancy(deployment, check, extra)
+        .into_iter()
+        .map(|(object, _)| object)
+        .collect()
+}
+
+const CALLER: &str = "authz.caller_namespace()";
+const PINNED: &str = "namespace_id = (SELECT authz.caller_namespace())";
+
+#[test]
+fn a_key_pinned_to_the_writers_principal_is_clean() {
+    for check in [
+        PINNED,
+        "authz.caller_namespace() = organizations.namespace_id AND id IS NOT NULL",
+    ] {
+        assert_eq!(
+            occupancy(principal(CALLER), check, ""),
+            Vec::<String>::new(),
+            "{check}"
+        );
+        assert_eq!(
+            occupancy(Deployment::default(), check, ""),
+            ["organizations.organizations_pkey"],
+            "{check}"
+        );
+    }
+    assert_eq!(
+        occupancy(principal("(SELECT authz.caller_namespace())"), PINNED, ""),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        occupancy(
+            principal(CALLER),
+            "true",
+            &format!(
+                "CREATE POLICY organizations_pinned ON organizations AS RESTRICTIVE FOR INSERT TO app
+                     WITH CHECK ({PINNED});"
+            )
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        occupancy(
+            principal(CALLER),
+            PINNED,
+            &format!(
+                "GRANT UPDATE (namespace_id, id) ON organizations TO app;
+                 CREATE POLICY organizations_update ON organizations FOR UPDATE TO app
+                     USING (true) WITH CHECK ({PINNED});"
+            )
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_key_the_writer_may_place_outside_its_principal_is_reported() {
+    for (accessor, check) in [
+        (CALLER, "namespace_id IS NOT NULL"),
+        (
+            CALLER,
+            "namespace_id = (SELECT authz.caller_namespace()) OR id IS NOT NULL",
+        ),
+        (
+            "authz.namespace_of(owner_id)",
+            "namespace_id = authz.namespace_of(owner_id)",
+        ),
+    ] {
+        assert_eq!(
+            occupancy(principal(accessor), check, ""),
+            ["organizations.organizations_pkey"],
+            "{check}"
+        );
+    }
+    for extra in [
+        "CREATE POLICY organizations_any ON organizations FOR INSERT TO app WITH CHECK (true);",
+        "GRANT UPDATE (id) ON organizations TO app;
+         CREATE POLICY organizations_update ON organizations FOR UPDATE TO app USING (true);",
+    ] {
+        assert_eq!(
+            occupancy(principal(CALLER), PINNED, extra),
+            ["organizations.organizations_pkey"],
+            "{extra}"
+        );
+    }
+    assert_eq!(
+        occupancy(
+            principal(CALLER),
+            PINNED,
+            "GRANT INSERT (slug) ON organizations TO app;"
+        ),
+        ["organizations.organizations_slug"]
+    );
+}
+
+#[test]
+fn another_client_role_writing_the_principal_column_freely_reports_the_key() {
+    for writes in [
+        "GRANT INSERT (namespace_id, id) ON organizations TO importer;
+         CREATE POLICY organizations_import ON organizations FOR INSERT TO importer
+             WITH CHECK (true);",
+        "GRANT UPDATE (namespace_id) ON organizations TO importer;
+         CREATE POLICY organizations_move ON organizations FOR UPDATE TO importer
+             USING (true);",
+    ] {
+        let findings = reported_occupancy(
+            principal(CALLER).with_app_role("importer"),
+            PINNED,
+            &format!("CREATE ROLE importer; GRANT SELECT ON organizations TO importer; {writes}"),
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let (object, message) = &findings[0];
+        assert_eq!(object, "organizations.organizations_pkey");
+        assert!(message.contains("'app' through INSERT"), "{message}");
+    }
+}
