@@ -167,9 +167,9 @@ pub enum AllowedObject {
 impl Display for AllowedObject {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Table => formatter.write_str("the table"),
-            Self::View => formatter.write_str("the view"),
-            Self::MaterializedView => formatter.write_str("the materialized view"),
+            Self::Table => formatter.write_str("table"),
+            Self::View => formatter.write_str("view"),
+            Self::MaterializedView => formatter.write_str("materialized view"),
             Self::ForeignKey(name) => write!(formatter, "foreign key '{name}'"),
             Self::Index(name) => write!(formatter, "index '{name}'"),
             Self::Policy(name) => write!(formatter, "policy '{name}'"),
@@ -208,22 +208,15 @@ impl SchemaAllowance {
 
 impl Display for SchemaAllowance {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (rule, relation) = (&self.rule, self.relation.name());
-        match &self.object {
-            AllowedObject::Table => {
-                write!(formatter, "the allowance for {rule} on table '{relation}'")?;
+        let (rule, relation, object) = (&self.rule, self.relation.name(), &self.object);
+        write!(formatter, "the allowance for {rule} on {object}")?;
+        match object {
+            AllowedObject::Table | AllowedObject::View | AllowedObject::MaterializedView => {
+                write!(formatter, " '{relation}'")?;
             }
-            AllowedObject::View => {
-                write!(formatter, "the allowance for {rule} on view '{relation}'")?;
+            AllowedObject::ForeignKey(_) | AllowedObject::Index(_) | AllowedObject::Policy(_) => {
+                write!(formatter, " of table '{relation}'")?;
             }
-            AllowedObject::MaterializedView => write!(
-                formatter,
-                "the allowance for {rule} on materialized view '{relation}'"
-            )?,
-            object => write!(
-                formatter,
-                "the allowance for {rule} on {object} of table '{relation}'"
-            )?,
         }
         formatter.write_str(" excuses no violation")
     }
