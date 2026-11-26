@@ -333,15 +333,13 @@ fn relations<'db, DB: DatabaseLike>(
             else {
                 return Ok(None);
             };
-            let Some(table) = stored_table(database, name, None)? else {
-                return Ok(None);
-            };
             let exposed = match alias {
-                Some(alias) => stored(&alias.name).into_owned(),
-                None => match last_name(name) {
-                    Some(name) => name,
-                    None => return Ok(None),
-                },
+                Some(alias) => Some(stored(&alias.name).into_owned()),
+                None => last_name(name),
+            };
+            let (Some(table), Some(exposed)) = (stored_table(database, name, None)?, exposed)
+            else {
+                return Ok(None);
             };
             found.push((exposed, table));
         }
@@ -402,17 +400,14 @@ fn filtered<'s, 'db, DB: DatabaseLike>(
     };
     match statement {
         Statement::Insert(insert) => {
-            let TableObject::TableName(name) = &insert.table else {
-                return Ok(None);
-            };
-            let Some(source) = insert.source.as_deref() else {
-                return Ok(None);
-            };
-            let SetExpr::Select(select) = source.body.as_ref() else {
-                return Ok(None);
-            };
-            let written = stored_table(database, name, None)?;
-            select_filter(select, written)
+            if let TableObject::TableName(name) = &insert.table
+                && let Some(source) = insert.source.as_deref()
+                && let SetExpr::Select(select) = source.body.as_ref()
+            {
+                select_filter(select, stored_table(database, name, None)?)
+            } else {
+                Ok(None)
+            }
         }
         Statement::Query(query) => {
             let SetExpr::Select(select) = query.body.as_ref() else {
@@ -447,35 +442,14 @@ fn filtered<'s, 'db, DB: DatabaseLike>(
 }
 
 /// Whether a conjunct of a SQLite trigger body statement reads only `NEW`,
-/// `OLD`, literals and subqueries over tables no earlier statement writes,
-/// so `WHEN` can test it before the body.
+/// `OLD`, literals and subqueries, collecting the relations they read so
+/// the caller can check no earlier statement writes them.
 struct Movable<'f, 'db, DB: DatabaseLike> {
-    database: &'db DB,
     relations: &'f [(String, &'db DB::Table)],
-    written: &'f [&'db DB::Table],
+    /// The stored names of the columns of the statement's relations.
+    columns: &'f [String],
     depth: usize,
-    failure: Option<LookupError>,
-}
-
-impl<DB: DatabaseLike> Movable<'_, '_, DB> {
-    /// Whether a bare `name` inside a subquery may name a column of the
-    /// statement's relations.
-    fn outer_column(&mut self, name: &str) -> ControlFlow<()> {
-        for (_, table) in self.relations {
-            match table.columns(self.database) {
-                Ok(mut columns) => {
-                    if columns.any(|column| column.stored_column_name() == name) {
-                        return ControlFlow::Break(());
-                    }
-                }
-                Err(error) => {
-                    self.failure.get_or_insert(error);
-                    return ControlFlow::Break(());
-                }
-            }
-        }
-        ControlFlow::Continue(())
-    }
+    read: Vec<ObjectName>,
 }
 
 impl<DB: DatabaseLike> Visitor for Movable<'_, '_, DB> {
@@ -492,39 +466,35 @@ impl<DB: DatabaseLike> Visitor for Movable<'_, '_, DB> {
     }
 
     fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<()> {
-        match stored_table(self.database, relation, None) {
-            Ok(Some(table))
-                if self
-                    .written
-                    .iter()
-                    .any(|written| std::ptr::eq(*written, table)) =>
-            {
-                ControlFlow::Break(())
-            }
-            Ok(_) => ControlFlow::Continue(()),
-            Err(error) => {
-                self.failure = Some(error);
-                ControlFlow::Break(())
-            }
-        }
+        self.read.push(relation.clone());
+        ControlFlow::Continue(())
     }
 
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
         match expression {
             Expr::Identifier(_) if self.depth == 0 => ControlFlow::Break(()),
-            Expr::Identifier(ident) => self.outer_column(&stored(ident)),
+            Expr::Identifier(ident) => {
+                if self.columns.iter().any(|column| *column == stored(ident)) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            }
             Expr::CompoundIdentifier(parts) => match parts.as_slice() {
                 [record, _] if row(record).is_some() => ControlFlow::Continue(()),
                 _ if self.depth == 0 => ControlFlow::Break(()),
-                [qualifier, ..] => {
-                    let qualifier = stored(qualifier);
-                    if self.relations.iter().any(|(name, _)| *name == qualifier) {
+                parts => {
+                    let qualifier = parts.first().map(stored);
+                    if self
+                        .relations
+                        .iter()
+                        .any(|(name, _)| Some(name.as_str()) == qualifier.as_deref())
+                    {
                         ControlFlow::Break(())
                     } else {
                         ControlFlow::Continue(())
                     }
                 }
-                [] => ControlFlow::Continue(()),
             },
             Expr::Function(call) if nondeterministic(call) => ControlFlow::Break(()),
             Expr::Value(value) if matches!(&value.value, Value::SingleQuotedString(text) if text.eq_ignore_ascii_case("now")) => {
@@ -556,26 +526,38 @@ fn shared_guard<'s, DB: DatabaseLike>(
     database: &DB,
     statements: &'s [Statement],
 ) -> Result<Vec<&'s Expr>, LookupError> {
-    let mut written = Vec::new();
+    let mut written: Vec<&DB::Table> = Vec::new();
     let mut shared: Option<Vec<(&'s Expr, String)>> = None;
     for statement in statements {
         let Some(filter) = filtered(database, statement)? else {
             return Ok(Vec::new());
         };
+        let mut columns = Vec::new();
+        for (_, table) in &filter.relations {
+            columns.extend(
+                table
+                    .columns(database)?
+                    .map(|column| column.stored_column_name().into_owned()),
+            );
+        }
         let mut movable = Vec::new();
         for conjunct in conjuncts(filter.selection) {
-            let mut reads = Movable {
-                database,
+            let mut reads = Movable::<DB> {
                 relations: &filter.relations,
-                written: &written,
+                columns: &columns,
                 depth: 0,
-                failure: None,
+                read: Vec::new(),
             };
-            let stopped = walk(conjunct, &mut reads).is_break();
-            if let Some(failure) = reads.failure {
-                return Err(failure);
+            if walk(conjunct, &mut reads).is_break() {
+                continue;
             }
-            if !stopped {
+            let mut rewritten = false;
+            for relation in &reads.read {
+                if let Some(table) = stored_table(database, relation, None)? {
+                    rewritten |= written.iter().any(|earlier| std::ptr::eq(*earlier, table));
+                }
+            }
+            if !rewritten {
                 movable.push((conjunct, canonical(conjunct)));
             }
         }

@@ -201,6 +201,15 @@ fn the_guard_is_the_conjuncts_every_statement_shares() {
             "SELECT RAISE(ABORT, 'orphan') WHERE NOT EXISTS (SELECT 1 FROM frames WHERE id = NEW.parent);",
             "NOT EXISTS (SELECT 1 FROM frames WHERE id = NEW.parent)",
         ),
+        (
+            "INSERT INTO records (frame, key) SELECT 1, NEW.parent WHERE EXISTS (SELECT 1 FROM elsewhere);",
+            "EXISTS (SELECT 1 FROM elsewhere)",
+        ),
+        (
+            "INSERT INTO records (frame, key) SELECT 1, NEW.parent WHERE (NEW.parent > 0 OR NEW.id > 0) AND NEW.id < 9;
+             DELETE FROM records WHERE NEW.id < 9 AND (NEW.parent > 0 OR NEW.id > 0) AND key = NEW.id;",
+            "(NEW.parent > 0 OR NEW.id > 0) AND NEW.id < 9",
+        ),
     ] {
         let found = sqlite_findings(&record(body));
         assert_eq!(found.len(), 1, "{body}: {found:?}");
@@ -232,6 +241,17 @@ fn sqlite_guards_that_cannot_move_are_not_reported() {
         record("INSERT INTO records (frame, key) SELECT max(id), NEW.parent FROM frames WHERE NEW.parent > 0;"),
         record("INSERT INTO records (frame, key) SELECT group_concat(owner), NEW.parent FROM frames WHERE NEW.parent > 0;"),
         record("INSERT INTO records (frame, key) SELECT 1, NEW.parent FROM frames WHERE NEW.parent > 0 HAVING count(*) = 0;"),
+        // A statement the rule does not read.
+        record("INSERT INTO records (frame, key) SELECT 1, NEW.parent WHERE NEW.parent > 0; INSERT INTO records (frame, key) SELECT 2, NEW.parent;"),
+        record("INSERT INTO records (frame, key) SELECT 1, NEW.parent WHERE NEW.parent > 0; SELECT 1 WHERE NEW.parent > 0 UNION SELECT 2 WHERE NEW.parent > 0;"),
+        record("INSERT INTO records (frame, key) SELECT 1, NEW.parent WHERE NEW.parent > 0; DELETE FROM records;"),
+        record("INSERT INTO records (frame, key) SELECT s.x, NEW.parent FROM (SELECT 1 AS x) AS s WHERE NEW.parent > 0;"),
+        record("INSERT INTO records (frame, key) SELECT 1, NEW.parent FROM elsewhere WHERE NEW.parent > 0;"),
+        // The guard reads the clock.
+        record("INSERT INTO records (frame, key) SELECT 1, NEW.parent WHERE NEW.id > strftime('%s', 'now');"),
+        // The trigger is on a view.
+        "CREATE VIEW children AS SELECT id, parent FROM child;
+         CREATE TRIGGER record INSTEAD OF INSERT ON children FOR EACH ROW BEGIN INSERT INTO records (frame, key) SELECT 1, NEW.parent WHERE NEW.parent > 0; END;".to_owned(),
     ] {
         assert!(sqlite_findings(&trigger).is_empty(), "{trigger}");
     }

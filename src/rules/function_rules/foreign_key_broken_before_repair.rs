@@ -13,8 +13,9 @@ use sql_traits::{
     },
 };
 use sqlparser::ast::{
-    AssignmentTarget, Delete, Expr, FromTable, Ident, Insert, ObjectName, Query, ReferentialAction,
-    SetExpr, Statement, TableFactor, TableObject, TableWithJoins, TriggerPeriod, Update, Visitor,
+    Assignment, AssignmentTarget, Delete, Expr, FromTable, Ident, Insert, ObjectName, Query,
+    ReferentialAction, SetExpr, Statement, TableFactor, TableObject, TableWithJoins, TriggerPeriod,
+    Update, Visitor,
 };
 use sqlparser_plpgsql::embedded::{Node, NodeKind};
 
@@ -230,7 +231,8 @@ struct Repairs<'db, DB: DatabaseLike> {
     reported: HashSet<(usize, usize)>,
     signature: String,
     findings: Vec<Finding>,
-    failure: Option<LookupError>,
+    /// The first lookup failure of the walk, after which it stops reading.
+    outcome: Result<(), LookupError>,
 }
 
 /// Collects the statements under a block with an `EXCEPTION` clause.
@@ -260,9 +262,11 @@ fn handled_statements(nodes: &[Node], handled: bool, found: &mut HashSet<*const 
                 for branch in &case.branches {
                     handled_statements(&branch.statements, handled, found);
                 }
-                if let Some(otherwise) = &case.otherwise {
-                    handled_statements(otherwise, handled, found);
-                }
+                handled_statements(
+                    case.otherwise.as_deref().unwrap_or_default(),
+                    handled,
+                    found,
+                );
             }
             NodeKind::Loop(repeated) => {
                 handled_statements(&repeated.statements, handled, found);
@@ -284,10 +288,10 @@ impl Target<'_> {
         let (qualifier, ident) = match expression {
             Expr::Nested(inner) => return self.column(inner),
             Expr::Identifier(ident) => (None, ident),
-            Expr::CompoundIdentifier(parts) => match parts.as_slice() {
-                [qualifier, ident] => (Some(qualifier), ident),
-                _ => return None,
-            },
+            Expr::CompoundIdentifier(parts) => {
+                let (ident, qualifiers) = parts.split_last()?;
+                (qualifiers.last(), ident)
+            }
             _ => return None,
         };
         let name = stored(ident);
@@ -364,24 +368,36 @@ fn new_column(column: &str) -> String {
 
 /// The single table a `DELETE` or `UPDATE` writes, with the name it goes by.
 fn sole_table(relation: &TableWithJoins) -> Option<(&ObjectName, String)> {
-    let TableFactor::Table {
-        name,
-        alias,
-        args: None,
-        ..
-    } = &relation.relation
-    else {
-        return None;
-    };
-    if !relation.joins.is_empty() {
-        return None;
+    match (&relation.relation, relation.joins.as_slice()) {
+        (
+            TableFactor::Table {
+                name,
+                alias: None,
+                args: None,
+                ..
+            },
+            [],
+        ) => Some((name, last_name(name)?)),
+        (
+            TableFactor::Table {
+                name,
+                alias: Some(alias),
+                args: None,
+                ..
+            },
+            [],
+        ) if alias.columns.is_empty() => Some((name, stored(&alias.name).into_owned())),
+        _ => None,
     }
-    let exposed = match alias {
-        Some(alias) if alias.columns.is_empty() => stored(&alias.name).into_owned(),
-        Some(_) => return None,
-        None => last_name(name)?,
-    };
-    Some((name, exposed))
+}
+
+/// The stored name of the column `assignment` sets, `None` for a row of
+/// columns.
+fn assigned_column(assignment: &Assignment) -> Option<String> {
+    match &assignment.target {
+        AssignmentTarget::ColumnName(column) => last_name(column),
+        AssignmentTarget::Tuple(_) => None,
+    }
 }
 
 impl<'db, DB: DatabaseLike> Repairs<'db, DB> {
@@ -416,10 +432,7 @@ impl<'db, DB: DatabaseLike> Repairs<'db, DB> {
             }) => {
                 let mut set = Vec::new();
                 for assignment in assignments {
-                    let AssignmentTarget::ColumnName(column) = &assignment.target else {
-                        return Ok(None);
-                    };
-                    let Some(column) = last_name(column) else {
+                    let Some(column) = assigned_column(assignment) else {
                         return Ok(None);
                     };
                     set.push((column, &assignment.value));
@@ -465,33 +478,19 @@ impl<'db, DB: DatabaseLike> Repairs<'db, DB> {
 
     /// The `INSERT` of one `VALUES` row.
     fn inserted_row(&self, insert: &Insert) -> Result<Option<Write<'db, DB>>, LookupError> {
-        let TableObject::TableName(name) = &insert.table else {
-            return Ok(None);
-        };
-        let Some(source) = insert.source.as_deref() else {
-            return Ok(None);
-        };
-        let SetExpr::Values(values) = source.body.as_ref() else {
-            return Ok(None);
-        };
-        let [row] = values.rows.as_slice() else {
-            return Ok(None);
-        };
-        let Some(table) = stored_table(self.database, name, None)? else {
-            return Ok(None);
-        };
-        let columns = self.columns(table)?;
-        let named: Vec<String> = if insert.columns.is_empty() {
-            columns
+        let (table, row, named) = if let TableObject::TableName(name) = &insert.table
+            && let Some(source) = insert.source.as_deref()
+            && let SetExpr::Values(values) = source.body.as_ref()
+            && let [row] = values.rows.as_slice()
+            && let Some(table) = stored_table(self.database, name, None)?
+            && let Some(named) = if insert.columns.is_empty() {
+                Some(self.columns(table)?)
+            } else {
+                insert.columns.iter().map(last_name).collect()
+            } {
+            (table, row, named)
         } else {
-            let mut named = Vec::new();
-            for column in &insert.columns {
-                let Some(column) = last_name(column) else {
-                    return Ok(None);
-                };
-                named.push(column);
-            }
-            named
+            return Ok(None);
         };
         let target = Target {
             exposed: "",
@@ -719,12 +718,8 @@ impl<DB: DatabaseLike> FlowVisitor for Repairs<'_, DB> {
     fn query(&mut self, _query: &Query, _state: &mut Self::State) {}
 
     fn statement(&mut self, statement: &Statement, state: &mut Self::State) {
-        if self.failure.is_some() {
-            return;
-        }
-        if let Err(error) = self.step(statement, state) {
-            self.failure = Some(error);
-        }
+        let outcome = std::mem::replace(&mut self.outcome, Ok(()));
+        self.outcome = outcome.and_then(|()| self.step(statement, state));
     }
 }
 
@@ -789,12 +784,10 @@ impl<DB: DatabaseLike> FunctionRule for ForeignKeyBrokenBeforeRepair<DB> {
             reported: HashSet::new(),
             signature: signature(function, database),
             findings: Vec::new(),
-            failure: None,
+            outcome: Ok(()),
         };
         walk_block(&mut repairs, &block, Pending(Vec::new()));
-        if let Some(failure) = repairs.failure {
-            return Err(failure.into());
-        }
+        repairs.outcome?;
         for Finding { message, advice } in repairs.findings {
             reporter.function(function, message, advice)?;
         }
