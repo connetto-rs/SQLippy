@@ -346,6 +346,25 @@ fn a_composite_key_whose_checks_keep_nullable_columns_null_together_is_not_repor
 }
 
 #[test]
+fn a_composite_key_whose_checks_keep_all_but_one_column_set_is_not_reported() {
+    let found = of(
+        "nullable_composite_foreign_key",
+        "CREATE TABLE w (a INT NOT NULL, b INT NOT NULL, c INT NOT NULL, PRIMARY KEY (a, b, c));
+         CREATE TABLE checked (a INT, b INT, c INT NOT NULL,
+           CHECK (b IS NOT NULL),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE kinded (kind TEXT NOT NULL CHECK (kind IN ('x', 'y')), a INT, b INT, c INT NOT NULL,
+           CHECK (b IS NOT NULL OR kind = 'z'),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE bounded (a INT, b INT, c INT NOT NULL,
+           CHECK (b > 0),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].starts_with("bounded."), "{found:?}");
+}
+
+#[test]
 fn a_foreign_key_no_index_leads_with_is_reported() {
     let found = of(
         "unindexed_foreign_key",

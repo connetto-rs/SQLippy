@@ -44,8 +44,24 @@ fn a_tenant_key_that_cannot_hold_null_is_clean() {
         "CREATE TABLE documents (organization_id INT, id INT, PRIMARY KEY (organization_id, id));",
         "CREATE TABLE documents (id INT PRIMARY KEY, organization_id INT);
          ALTER TABLE documents ALTER COLUMN organization_id SET NOT NULL;",
+        "CREATE TABLE documents (id INT PRIMARY KEY, organization_id INT, CHECK (organization_id IS NOT NULL));",
+        "CREATE TABLE documents (id INT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('a', 'b')), organization_id INT,
+           CHECK (organization_id IS NOT NULL OR kind = 'c'));",
     ] {
         assert_eq!(reported(sql), Vec::<String>::new(), "{sql}");
+    }
+}
+
+#[test]
+fn a_check_that_admits_null_or_is_not_validated_leaves_the_key_nullable() {
+    for sql in [
+        "CREATE TABLE documents (id INT PRIMARY KEY, organization_id INT CHECK (organization_id > 0));",
+        "CREATE TABLE documents (id INT PRIMARY KEY, organization_id INT,
+           CHECK (organization_id IS NOT NULL) NOT ENFORCED);",
+        "CREATE TABLE documents (id INT PRIMARY KEY, organization_id INT);
+         ALTER TABLE documents ADD CHECK (organization_id IS NOT NULL) NOT VALID;",
+    ] {
+        assert_eq!(reported(sql), ["documents"], "{sql}");
     }
 }
 

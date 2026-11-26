@@ -15,6 +15,7 @@ use sqlparser::ast::{BinaryOperator, DataType, Expr, InTarget};
 
 use crate::rules::{
     literal_support::{string_value, text_literal},
+    null_support::may_hold_null,
     policy_support::{conjuncts, unwrapped},
     type_support::underlying_type,
 };
@@ -275,14 +276,14 @@ pub(crate) fn held_values<'a, DB: DatabaseLike>(
     checked_values(database, column)
 }
 
-/// The values a `NOT NULL` column is held to by a top-level conjunct of a
-/// validated check, `=` one value or `IN` a list of values, those of the
-/// first such check.
+/// The values a column no row may hold `NULL` in is held to by a top-level
+/// conjunct of a validated check, `=` one value or `IN` a list of values,
+/// those of the first such check.
 pub(crate) fn checked_values<'a, DB: DatabaseLike>(
     database: &'a DB,
     column: &'a DB::Column,
 ) -> Result<Option<Vec<&'a Expr>>, LookupError> {
-    if column.is_nullable(database)? {
+    if may_hold_null(database, column)? {
         return Ok(None);
     }
     let stored = column.stored_column_name();

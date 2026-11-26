@@ -5,7 +5,7 @@ use std::{collections::HashSet, ops::ControlFlow};
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnDefinition, ExpressionContext, OperandType},
-    traits::{ColumnLike, DatabaseLike, FunctionLike, UserDefinedTypeLike},
+    traits::{DatabaseLike, FunctionLike, UserDefinedTypeLike},
 };
 use sqlparser::ast::{
     BinaryOperator, Delete, Expr, InTarget, JoinConstraint, JoinOperator, Select, Statement,
@@ -20,6 +20,7 @@ use crate::{
         closed_set_support::{CheckedRows, closed_set},
         literal_support::text_literal,
         not_in_support::null_extended,
+        null_support::may_hold_null,
         policy_support::{conjuncts, unnested},
         type_support::user_type_named,
         typed_site_support::{TypedFinder, TypedFinding, check_typed_sites},
@@ -325,7 +326,7 @@ impl<DB: DatabaseLike> Builder<'_, '_, '_, DB> {
                 Operand {
                     written,
                     domain: Some(domain),
-                    nullable: extended || column.is_nullable(database)?,
+                    nullable: extended || may_hold_null(database, column)?,
                 }
             }
             Some((ColumnDefinition::Parameter { function, ordinal }, _)) => Operand {

@@ -14,6 +14,7 @@ use crate::{
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         function_body_support::{BodyNode, function_body},
+        null_support::may_hold_null,
         policy_support::unnested,
         statement_support::selects,
         walk_support::walk,
@@ -180,7 +181,7 @@ impl<DB: DatabaseLike> Visitor for Concatenations<'_, '_, '_, DB> {
                     _,
                 )) = self.context.reference(operand)?
                 && column.data_type(database).base_type(database).is_none()
-                && column.is_nullable(database)?
+                && may_hold_null(database, column)?
                 && !column.is_primary_key(database)?
             {
                 nullable = Some(format!("{}.{}", table.table_name(), column.column_name()));

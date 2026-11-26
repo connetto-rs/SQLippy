@@ -1,12 +1,54 @@
 //! Predicates and expressions that cannot be true, or turn null, while a
-//! bound column is null.
+//! bound column is null, and stored columns whose rows may hold null.
 
 use sql_traits::{
     errors::LookupError,
-    structs::{CallResolution, ExpressionContext, OperatorResolution},
-    traits::{DatabaseLike, FunctionLike, OperatorLike},
+    structs::{Assumption, CallResolution, ExpressionContext, IdentifierCase, OperatorResolution},
+    traits::{
+        CheckConstraintLike, ColumnLike, DatabaseLike, FunctionLike, OperatorLike, TableLike,
+    },
 };
-use sqlparser::ast::{BinaryOperator, CastKind, Expr, InTarget, UnaryOperator};
+use sqlparser::ast::{BinaryOperator, CastKind, Expr, Ident, InTarget, UnaryOperator};
+
+/// Whether a row of the table of `column` may hold `NULL` in it, which its
+/// declaration allows and the table's enforced and validated checks do not
+/// rule out, as `CHECK (c IS NOT NULL)` does, or `CHECK (c IS NOT NULL OR
+/// kind = 'z')` with `kind` held to other values.
+///
+/// # Errors
+///
+/// Returns the lookup error reading the column or the checks of its table
+/// raised.
+pub(crate) fn may_hold_null<DB: DatabaseLike>(
+    database: &DB,
+    column: &DB::Column,
+) -> Result<bool, LookupError> {
+    if !column.is_nullable(database)? {
+        return Ok(false);
+    }
+    let mut checked = false;
+    for check in column.check_constraints(database)? {
+        checked |= check.is_enforced() && check.is_validated(database)?;
+    }
+    if !checked {
+        return Ok(true);
+    }
+    let table = column.table(database);
+    let mut checks = Vec::new();
+    for check in table.check_constraints(database)? {
+        if check.is_enforced() && check.is_validated(database)? {
+            checks.push(Assumption::Check(check));
+        }
+    }
+    let null = Expr::IsNull(Box::new(Expr::Identifier(Ident::with_quote(
+        '"',
+        column.stored_column_name().as_ref(),
+    ))));
+    Ok(table
+        .truth_under(database, &null, IdentifierCase::AsWritten, &checks)?
+        .outcomes
+        .truth)
+}
 
 /// Whether a predicate cannot be true while the column `bound` accepts is
 /// null, reading operators as `types` types them.

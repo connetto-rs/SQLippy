@@ -25,6 +25,7 @@ use crate::rules::{
     cte_support::stored_table,
     function_reach_support::Reach,
     key_support::{KeyPairs, equality_keys, key_pairs},
+    null_support::may_hold_null,
     plpgsql_flow_support::{FlowState, FlowVisitor, plpgsql_block, walk_block},
     policy_read_support::reads_every_row,
     policy_support::conjuncts,
@@ -520,15 +521,13 @@ impl<'db, DB: DatabaseLike> Parent<'db, DB> {
         keyed
             && self.pairs.iter().all(|(host, _)| {
                 matched.iter().any(|(matched, _)| matched == host)
-                    || host
-                        .is_nullable(self.database)
-                        .is_ok_and(|nullable| !nullable)
+                    || may_hold_null(self.database, host).is_ok_and(|nullable| !nullable)
             })
     }
 
     /// Whether `query` finds the constraint trigger's row whenever it
-    /// exists, since each conjunct of its filter equates a `NOT NULL` column
-    /// of the referenced table with `NEW`'s value of it.
+    /// exists, since each conjunct of its filter equates a column of the
+    /// referenced table no row holds `NULL` in with `NEW`'s value of it.
     fn finds_referenced_row(&self, query: &Query) -> bool {
         let Some((select, name)) = self.lone_select(query, self.referenced) else {
             return false;
@@ -541,8 +540,7 @@ impl<'db, DB: DatabaseLike> Parent<'db, DB> {
                         self.qualified(column, &name, self.referenced)
                             .is_some_and(|column| {
                                 self.referenced_field(value) == Some(column)
-                                    && column
-                                        .is_nullable(self.database)
+                                    && may_hold_null(self.database, column)
                                         .is_ok_and(|nullable| !nullable)
                             })
                     })

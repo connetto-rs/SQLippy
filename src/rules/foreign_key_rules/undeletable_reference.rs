@@ -26,6 +26,7 @@ use crate::{
         expression_site_support::{is_null_literal, parsed_body_statements},
         function_rules::unreadable_body,
         key_support::key_pairs,
+        null_support::may_hold_null,
         policy_support::{acting, client_roles},
         walk_support::walk,
     },
@@ -334,9 +335,9 @@ fn references_disjoint_rows<DB: DatabaseLike>(
 }
 
 /// Whether every row of its table that is not `NULL` in `held` references a
-/// row through `cascading`. Each nullable column of `cascading` must be one
-/// of `held`, unless `cascading` is `MATCH FULL` and shares one, which keeps
-/// the rest from being `NULL` too.
+/// row through `cascading`. Each column of `cascading` a row may hold `NULL`
+/// in must be one of `held`, unless `cascading` is `MATCH FULL` and shares
+/// one, which keeps the rest from being `NULL` too.
 fn holds_every_row<DB: DatabaseLike>(
     database: &DB,
     cascading: &DB::ForeignKey,
@@ -346,7 +347,7 @@ fn holds_every_row<DB: DatabaseLike>(
     for column in cascading.host_columns(database)? {
         if held.contains(&column) {
             shares = true;
-        } else if column.is_nullable(database)? {
+        } else if may_hold_null(database, column)? {
             uncovered = true;
         }
     }
@@ -587,7 +588,7 @@ fn may_clear<DB: DatabaseLike>(
         return Ok(true);
     }
     for column in foreign_key.host_columns(database)? {
-        if column.is_nullable(database)? && possible.update.on_column(column) {
+        if may_hold_null(database, column)? && possible.update.on_column(column) {
             return Ok(true);
         }
     }

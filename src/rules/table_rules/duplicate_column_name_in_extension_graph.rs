@@ -9,7 +9,7 @@ use sql_traits::{
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::key_support::key_pairs,
+    rules::{key_support::key_pairs, null_support::may_hold_null},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -203,7 +203,7 @@ fn pins<DB: DatabaseLike>(
         return Ok(true);
     }
     for (host, _) in &pairs {
-        if host.is_nullable(database)? {
+        if may_hold_null(database, *host)? {
             return Ok(false);
         }
     }

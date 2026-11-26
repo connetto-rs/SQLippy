@@ -102,6 +102,24 @@ fn a_unique_constraint_over_a_unique_key_is_not_reported() {
 }
 
 #[test]
+fn a_unique_constraint_over_columns_a_check_keeps_set_is_not_reported() {
+    let found = findings(
+        &GenericConstrainer::from(NullableUniqueColumn::default()),
+        "CREATE TABLE checked (a INT, CHECK (a IS NOT NULL), UNIQUE (a));
+         CREATE TABLE kinded (kind TEXT NOT NULL CHECK (kind IN ('x', 'y')), slug TEXT,
+           CHECK (slug IS NOT NULL OR kind = 'z'), UNIQUE (kind, slug));
+         CREATE TABLE bounded (a INT CHECK (a > 0), UNIQUE (a));",
+    );
+    let messages: Vec<&str> = found.iter().map(|(_, message)| message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "Unique constraint unique ('a') on 'bounded' covers nullable 'a' and treats NULLs as distinct, so rows with a NULL there can repeat the rest.",
+        ]
+    );
+}
+
+#[test]
 fn the_rule_is_pedantic() {
     let sql = "CREATE TABLE t (email TEXT UNIQUE);";
     let mut constrainer = DefaultConstrainer::<ParserDB>::default();

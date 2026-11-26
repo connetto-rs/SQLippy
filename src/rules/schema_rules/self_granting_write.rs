@@ -16,7 +16,7 @@ use crate::{
         authority_support::authority_columns,
         credential_support::CredentialJudge,
         grant_support::withheld,
-        null_support::{null_when, rejects_null},
+        null_support::{may_hold_null, null_when, rejects_null},
         policy_support::{
             Command, Stage, applied, covers, holds_sublink_or_call, is_column_reference,
             policy_roles, reads_row, unnested,
@@ -36,14 +36,15 @@ struct Bound {
     non_null: Vec<bool>,
 }
 
-/// A table whose new rows are checked, with its columns, those declared
-/// `NOT NULL`, those its scope or composite foreign keys hold, and those keys
-/// as the positions of their host columns with whether they match `FULL`.
+/// A table whose new rows are checked, with its columns, those no row may
+/// hold `NULL` in, those its scope or composite foreign keys hold, and those
+/// keys as the positions of their host columns with whether they match
+/// `FULL`.
 struct CheckedRow<'db, DB: DatabaseLike> {
     database: &'db DB,
     table: &'db DB::Table,
     columns: Vec<&'db DB::Column>,
-    declared_non_null: Vec<bool>,
+    never_null: Vec<bool>,
     relevant: Vec<bool>,
     keys: Vec<(Vec<usize>, bool)>,
 }
@@ -57,9 +58,9 @@ impl<'db, DB: DatabaseLike> CheckedRow<'db, DB> {
         scope_positions: &[usize],
     ) -> Result<Self, LookupError> {
         let columns: Vec<&DB::Column> = table.columns(database)?.collect();
-        let mut declared_non_null = Vec::with_capacity(columns.len());
+        let mut never_null = Vec::with_capacity(columns.len());
         for column in &columns {
-            declared_non_null.push(!column.is_nullable(database)?);
+            never_null.push(!may_hold_null(database, *column)?);
         }
         let mut relevant = vec![false; columns.len()];
         for &position in scope_positions {
@@ -85,7 +86,7 @@ impl<'db, DB: DatabaseLike> CheckedRow<'db, DB> {
             database,
             table,
             columns,
-            declared_non_null,
+            never_null,
             relevant,
             keys,
         })
@@ -152,7 +153,7 @@ impl<'db, DB: DatabaseLike> CheckedRow<'db, DB> {
     ) -> Result<Bound, LookupError> {
         let mut bound = Bound {
             constrained: vec![false; self.columns.len()],
-            non_null: self.declared_non_null.clone(),
+            non_null: self.never_null.clone(),
         };
         let holds = holds_sublink_or_call(expression);
         let mut credential = None;

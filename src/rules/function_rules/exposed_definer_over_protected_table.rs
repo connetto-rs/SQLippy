@@ -69,7 +69,7 @@ use crate::{
             called, listed_arguments, plain, positional_arguments, relation_arguments,
         },
         literal_support::literal,
-        null_support::rejects_null,
+        null_support::{may_hold_null, rejects_null},
         plpgsql_flow_support::{Ran, plpgsql_block, ran_statements, rows_query},
         policy_support::{
             acting, client_roles, conjuncts, is_column_reference, is_role_read,
@@ -684,7 +684,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 return Ok(None);
             }
         }
-        if keyed.1.is_nullable(database)?
+        if may_hold_null(database, keyed.1)?
             || !unique_within(database, keyed.0, slice::from_ref(&keyed.1))?
         {
             return Ok(None);
@@ -1537,9 +1537,11 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
         let database = self.confinement.database;
         let mut written = Vec::with_capacity(assigned.len());
         for (column, value) in assigned {
-            let refused = !column_named(database, table, column)?
-                .expect("written columns belong to their table")
-                .is_nullable(database)?;
+            let refused = !may_hold_null(
+                database,
+                column_named(database, table, column)?
+                    .expect("written columns belong to their table"),
+            )?;
             written.push((value, refused));
         }
         for caller in &self.confinement.callers {
@@ -2401,7 +2403,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                         continue;
                     }
                     for column in table.columns(database)? {
-                        if column.stored_column_name() != name || column.is_nullable(database)? {
+                        if column.stored_column_name() != name || may_hold_null(database, column)? {
                             continue;
                         }
                         let declared = column.data_type(database);

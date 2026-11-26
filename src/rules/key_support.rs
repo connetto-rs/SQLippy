@@ -16,6 +16,7 @@ use sqlparser::ast::{
 
 use crate::rules::walk_support::walk;
 use crate::rules::{
+    null_support::may_hold_null,
     policy_support::conjuncts,
     statement_support::{OwnLevel, reads_outer},
 };
@@ -174,7 +175,7 @@ fn plain_unique_keys<'db, DB: DatabaseLike>(
         let columns: Vec<&DB::Column> = index.columns(database)?.collect();
         let mut nullable = false;
         for column in &columns {
-            nullable |= column.is_nullable(database)?;
+            nullable |= may_hold_null(database, *column)?;
         }
         Ok(Some(PlainKey {
             columns,
@@ -234,15 +235,16 @@ pub(crate) fn indexed_keys<'db, DB: DatabaseLike>(
         .collect())
 }
 
-/// The nullable host columns of `foreign_key`. With at most one,
-/// `MATCH SIMPLE` checks the whole key or the row references nothing.
+/// The host columns of `foreign_key` its rows may hold `NULL` in. With at
+/// most one, `MATCH SIMPLE` checks the whole key or the row references
+/// nothing.
 pub(crate) fn nullable_host_columns<'db, DB: DatabaseLike>(
     database: &'db DB,
     foreign_key: &'db DB::ForeignKey,
 ) -> Result<Vec<&'db DB::Column>, LookupError> {
     let mut nullable = Vec::new();
     for column in foreign_key.host_columns(database)? {
-        if column.is_nullable(database)? {
+        if may_hold_null(database, column)? {
             nullable.push(column);
         }
     }
@@ -530,9 +532,9 @@ pub(crate) fn key_pairs<'db, DB: DatabaseLike>(
 }
 
 /// Whether `foreign_key` checks every row in which `column` is not `NULL`,
-/// which an enforced key does under `MATCH FULL` or when every other host
-/// column is `NOT NULL`, since `MATCH SIMPLE` skips a row with a `NULL` in
-/// its key. A `NOT ENFORCED` key checks no row.
+/// which an enforced key does under `MATCH FULL` or when no row may hold
+/// `NULL` in another host column, since `MATCH SIMPLE` skips a row with a
+/// `NULL` in its key. A `NOT ENFORCED` key checks no row.
 pub(crate) fn checked_whenever_set<DB: DatabaseLike>(
     database: &DB,
     foreign_key: &DB::ForeignKey,
@@ -545,7 +547,7 @@ pub(crate) fn checked_whenever_set<DB: DatabaseLike>(
         return Ok(true);
     }
     for host in foreign_key.host_columns(database)? {
-        if host != column && host.is_nullable(database)? {
+        if host != column && may_hold_null(database, host)? {
             return Ok(false);
         }
     }
@@ -633,7 +635,7 @@ pub(crate) fn checks_every_row_of<DB: DatabaseLike>(
         if !narrower_pairs
             .iter()
             .any(|(narrower_host, _)| narrower_host == host_column)
-            && host_column.is_nullable(database)?
+            && may_hold_null(database, host_column)?
         {
             return Ok(false);
         }

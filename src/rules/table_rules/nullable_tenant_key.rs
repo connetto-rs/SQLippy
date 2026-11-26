@@ -7,12 +7,13 @@ use crate::{
     engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::grant_support::tenant_columns,
+    rules::{grant_support::tenant_columns, null_support::may_hold_null},
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
 /// Struct defining a rule that reports a table whose declared tenant key
-/// allows `NULL` in any of its columns.
+/// allows `NULL` in any of its columns, which neither `NOT NULL` nor the
+/// table's enforced and validated checks rule out.
 ///
 /// A row whose tenant key holds `NULL` belongs to no tenant, so a policy
 /// comparing the key with `=` hides it from every tenant, and an arm such as
@@ -98,7 +99,7 @@ impl<DB: DatabaseLike> TableRule for NullableTenantKey<DB> {
         };
         let mut nullable = Vec::new();
         for column in key {
-            if column.is_nullable(database)? {
+            if may_hold_null(database, column)? {
                 nullable.push(column.column_name());
             }
         }
