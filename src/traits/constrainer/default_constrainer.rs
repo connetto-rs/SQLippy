@@ -26,7 +26,7 @@ use crate::{
         ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, ExtensionWithoutVersion,
         FailingAssert, FlagNotBoolean, FloatingPointMoney, ForbiddenColumnInExtension,
-        ForeignKeyBrokenBeforeRepair, ForeignKeyExistenceOracle, FractionalCount,
+        ForeignKeyBrokenBeforeRepair, ForeignKeyCycle, ForeignKeyExistenceOracle, FractionalCount,
         FunctionMediatedPolicyCycle, FunctionWithoutSafeSearchPath, GrantOptionToClientRole,
         ImpureImmutableFunction, IncompatibleForeignKey, InvokerWithoutSearchPath,
         JsonStoredAsText, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
@@ -325,7 +325,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 80] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 81] = [
         Box::new(DuplicateIndex::default()),
         Box::new(NullableConcatenation::default()),
         Box::new(RedundantTerm::default()),
@@ -389,6 +389,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(DefinerTakesActingUser::default()),
         Box::new(SubjectSettableAttribute::default()),
         Box::new(ParallelTables::default()),
+        Box::new(ForeignKeyCycle::default()),
         Box::new(AuthorityAttributeWritableBelowThreshold::default()),
         Box::new(UnseededPolicySet::default()),
         Box::new(CrossTenantCap::default()),
