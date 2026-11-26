@@ -5207,6 +5207,96 @@ fn a_composite_foreign_key_holds_its_other_columns_equal_once_a_key_is() {
     }
 }
 
+/// Functions reported over teams visible in the organizations of the
+/// caller's active memberships, with `administered` the body of
+/// `authz.administered_teams()`, then `owned`, and a definer returning the
+/// organizations of the teams in its set.
+fn administered_by_members(administered: &str, owned: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE ROLE auditor NOLOGIN;
+             CREATE SCHEMA authz;
+             CREATE TABLE public.teams (id INT PRIMARY KEY, organization_id INT NOT NULL,
+               UNIQUE (organization_id, id));
+             CREATE TABLE public.memberships (organization_id INT NOT NULL, user_id TEXT NOT NULL,
+               active BOOLEAN NOT NULL, PRIMARY KEY (organization_id, user_id));
+             CREATE TABLE public.team_members (team_id INT NOT NULL, organization_id INT NOT NULL,
+               user_id TEXT NOT NULL, admin BOOLEAN NOT NULL,
+               PRIMARY KEY (organization_id, team_id, user_id),
+               FOREIGN KEY (organization_id, team_id) REFERENCES public.teams (organization_id, id),
+               FOREIGN KEY (organization_id, user_id)
+                 REFERENCES public.memberships (organization_id, user_id));
+             ALTER TABLE public.teams ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE public.memberships ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE public.team_members ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON public.teams, public.memberships, public.team_members TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE FUNCTION authz.member_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT membership.organization_id FROM public.memberships membership
+                 WHERE membership.user_id = current_setting('app.user_id', true)
+                   AND membership.active $$;
+             CREATE POLICY memberships_select ON public.memberships FOR SELECT TO app
+               USING (organization_id = ANY (ARRAY(SELECT authz.member_organizations())));
+             CREATE POLICY team_members_select ON public.team_members FOR SELECT TO app
+               USING (organization_id = ANY (ARRAY(SELECT authz.member_organizations())));
+             CREATE POLICY teams_select ON public.teams FOR SELECT TO app
+               USING (organization_id = ANY (ARRAY(SELECT authz.member_organizations())));
+             CREATE FUNCTION authz.administered_teams() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 {administered} $$;
+             {owned}
+             CREATE FUNCTION authz.team_admin_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT team.organization_id FROM public.teams team
+                 WHERE team.id IN (SELECT authz.administered_teams()) $$;"
+        ),
+    )
+    .into_iter()
+    .filter(|function| function == "team_admin_organizations()")
+    .collect()
+}
+
+#[test]
+fn a_callee_arm_carries_the_rows_its_joins_bind() {
+    let administered = |join: &str, on: &str, active: &str| {
+        format!(
+            "SELECT member.team_id FROM public.team_members member
+             {join} public.memberships membership ON membership.organization_id = member.organization_id{on}
+             WHERE member.user_id = current_setting('app.user_id', true)
+               AND member.admin{active}"
+        )
+    };
+    let user = " AND membership.user_id = member.user_id";
+    let active = " AND membership.active";
+    let stated = "SELECT member.team_id FROM public.team_members member
+        WHERE member.user_id = current_setting('app.user_id', true)
+          AND member.organization_id IN (SELECT * FROM authz.member_organizations())";
+    for declared in [administered("JOIN", user, active), stated.to_owned()] {
+        assert_eq!(
+            administered_by_members(&declared, ""),
+            Vec::<String>::new(),
+            "{declared}"
+        );
+    }
+    let audited = "ALTER FUNCTION authz.administered_teams() OWNER TO auditor;";
+    for (declared, owned) in [
+        (administered("JOIN", user, ""), ""),
+        (administered("JOIN", "", active), ""),
+        (administered("LEFT JOIN", user, ""), ""),
+        (administered("JOIN", user, active), audited),
+    ] {
+        assert_eq!(
+            administered_by_members(&declared, owned),
+            ["team_admin_organizations()"],
+            "{declared} {owned}"
+        );
+    }
+}
+
 #[test]
 fn every_arm_of_a_helper_carries_its_filter_or_none_does() {
     let excluded = "member.organization_id IN (SELECT authz.member_organizations())

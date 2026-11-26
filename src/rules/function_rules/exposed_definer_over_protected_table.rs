@@ -3017,7 +3017,8 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     /// [`in_set`] tests them, for each set of `sets` with an exhaustive arm
     /// over that table whose conditions, those reading a parameter stated of
     /// the literal its call passes, `met` implies, the columns that arm
-    /// returns.
+    /// returns, and for each such arm over the table of a row an `EXISTS` of
+    /// `met` binds, as [`Self::joined_in_sets`] finds them.
     fn found_in_sets(
         &self,
         sets: &[SetCall<'a, DB>],
@@ -3042,7 +3043,98 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 }
             }
         }
+        for condition in met {
+            self.joined_in_sets(sets, met, condition, &mut found)?;
+        }
         Ok(found)
+    }
+
+    /// Adds to `found` the columns of a row meeting `met` in the set of a
+    /// helper, as [`in_set`] tests them, for each set of `sets` with an
+    /// exhaustive arm over the table of a row that `exists`, an `EXISTS` as
+    /// [`Self::joined_rows`] writes it, finds through equalities with the
+    /// row. The conditions of the found row, and those of `met` that read
+    /// only columns the equalities bind, have to imply every condition of
+    /// the arm, those reading a parameter stated of the literal its call
+    /// passes, and the equalities have to bind each column the arm returns.
+    fn joined_in_sets(
+        &self,
+        sets: &[SetCall<'a, DB>],
+        met: &[Expr],
+        exists: &Expr,
+        found: &mut Vec<Expr>,
+    ) -> Result<(), LookupError> {
+        let Some(select) = semi_join(exists) else {
+            return Ok(());
+        };
+        let filter: Vec<&Expr> = select.selection.iter().flat_map(conjuncts).collect();
+        for from in &select.from {
+            let table = self.stored(&from.relation)?;
+            let joined = alias_name(&from.relation);
+            let bound: Vec<(&str, &str)> = filter
+                .iter()
+                .filter_map(|conjunct| bound_columns(conjunct, joined))
+                .collect();
+            let rename = |reference: &Expr| {
+                let column = stored_name(reference)?;
+                let qualifier = match reference {
+                    Expr::CompoundIdentifier(parts) => {
+                        parts.first().map(|part| part.value.as_str())
+                    }
+                    _ => None,
+                };
+                if qualifier.is_some() && qualifier == joined {
+                    return Some(Term::Column(column.into_owned()));
+                }
+                qualifier
+                    .is_none_or(|qualifier| qualifier == "0")
+                    .then(|| bound.iter().find(|(_, row)| *row == column))
+                    .flatten()
+                    .map(|(column, _)| Term::Column((*column).to_owned()))
+            };
+            let row: Vec<Expr> = filter
+                .iter()
+                .copied()
+                .chain(met)
+                .filter_map(|condition| {
+                    renamed(
+                        condition,
+                        rename,
+                        |name| self.subquery_relation(name),
+                        |call| helper_value(self.body.confinement, call),
+                    )
+                })
+                .collect();
+            let clause = conjunction(row);
+            for set in sets {
+                let arguments = set.literals.then(|| listed_arguments(&set.call)).flatten();
+                for arm in set
+                    .arms
+                    .arms
+                    .iter()
+                    .filter(|arm| arm.exhaustive && Some(arm.drawn.table) == table)
+                {
+                    let columns: Option<Vec<&str>> = arm
+                        .drawn
+                        .column_names()
+                        .into_iter()
+                        .map(|name| {
+                            bound
+                                .iter()
+                                .find(|(column, _)| *column == name)
+                                .map(|(_, row)| *row)
+                        })
+                        .collect();
+                    if let Some(columns) = columns
+                        && let Some(required) = arm.drawn.under(arguments.as_deref())
+                        && self.implies_every(&clause, &required)?
+                    {
+                        add_membership(found, in_set(&columns, &set.call));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The columns of `relation`, a read of `table` its filters state
@@ -6397,4 +6489,41 @@ fn conjunction(conjuncts: Vec<Expr>) -> Expr {
             right: Box::new(right),
         })
         .unwrap_or(Expr::Value(Value::Boolean(true).into()))
+}
+
+/// The column of the relation named `joined` and the column of the row
+/// `"0"` names that `conjunct` holds equal, as [`renamed`] writes them.
+fn bound_columns<'e>(conjunct: &'e Expr, joined: Option<&str>) -> Option<(&'e str, &'e str)> {
+    if let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = unnested(conjunct)
+        && let (Expr::CompoundIdentifier(left), Expr::CompoundIdentifier(right)) =
+            (unnested(left), unnested(right))
+    {
+        return [(left, right), (right, left)]
+            .into_iter()
+            .find_map(
+                |(relation, row)| match (relation.as_slice(), row.as_slice()) {
+                    ([relation, column], [row, bound])
+                        if Some(relation.value.as_str()) == joined && row.value == "0" =>
+                    {
+                        Some((column.value.as_str(), bound.value.as_str()))
+                    }
+                    _ => None,
+                },
+            );
+    }
+    None
+}
+
+/// The name of the alias `relation` reads a table under.
+fn alias_name(relation: &TableFactor) -> Option<&str> {
+    match relation {
+        TableFactor::Table {
+            alias: Some(alias), ..
+        } => Some(alias.name.value.as_str()),
+        _ => None,
+    }
 }
