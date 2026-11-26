@@ -48,16 +48,23 @@ pub(crate) fn root_query(statement: &Statement) -> Option<Cow<'_, Query>> {
     under(statement, None)
 }
 
+/// The query whose expressions the query rules read for `query`: `query`
+/// itself, or for a query whose body is a data-modifying statement, that
+/// statement's query under the `WITH` clause `query` carries.
+pub(crate) fn query_root(query: &Query) -> Option<Cow<'_, Query>> {
+    match query.body.as_ref() {
+        SetExpr::Update(inner) | SetExpr::Delete(inner) | SetExpr::Insert(inner) => {
+            under(inner, query.with.as_ref())
+        }
+        _ => Some(Cow::Borrowed(query)),
+    }
+}
+
 /// The query of `statement` written under `with`, the `WITH` clause of a
 /// query whose body is the data-modifying statement.
 fn under<'s>(statement: &'s Statement, with: Option<&With>) -> Option<Cow<'s, Query>> {
     match statement {
-        Statement::Query(query) => match query.body.as_ref() {
-            SetExpr::Update(inner) | SetExpr::Delete(inner) | SetExpr::Insert(inner) => {
-                under(inner, query.with.as_ref())
-            }
-            _ => Some(Cow::Borrowed(query)),
-        },
+        Statement::Query(query) => query_root(query),
         Statement::Insert(Insert {
             source: Some(query),
             ..
@@ -268,14 +275,24 @@ impl<F: FnMut(&Query, bool) -> Result<(), LookupError>> Visitor for Queries<F> {
 pub(crate) fn check_queries<DB: DatabaseLike>(
     database: &DB,
     statement: &Statement,
-    mut check: impl FnMut(&ColumnScope<'_, '_, DB>, &Query, bool) -> Result<(), LookupError>,
+    check: impl FnMut(&ColumnScope<'_, '_, DB>, &Query, bool) -> Result<(), LookupError>,
 ) -> Result<(), LookupError> {
     let Some(root) = root_query(statement) else {
         return Ok(());
     };
-    let scope = ColumnScope::from_query(&root, database, IdentifierCase::Folded)?;
+    check_tree(database, &root, check)
+}
+
+/// Calls `check` with every query of `root`, from `root` down, together with
+/// `root`'s scope and whether the query is the body of an `EXISTS`.
+fn check_tree<DB: DatabaseLike>(
+    database: &DB,
+    root: &Query,
+    mut check: impl FnMut(&ColumnScope<'_, '_, DB>, &Query, bool) -> Result<(), LookupError>,
+) -> Result<(), LookupError> {
+    let scope = ColumnScope::from_query(root, database, IdentifierCase::Folded)?;
     walk(
-        &*root,
+        root,
         &mut Queries {
             check: |query: &Query, existence| check(&scope, query, existence),
             existence: Vec::new(),
@@ -295,6 +312,29 @@ pub(crate) fn check_queries<DB: DatabaseLike>(
 pub(crate) fn check_scoped_selects<DB: DatabaseLike>(
     database: &DB,
     statement: &Statement,
+    check: impl FnMut(
+        &ColumnScope<'_, '_, DB>,
+        &ColumnDefinitionScope<'_, '_, '_, DB>,
+        &Query,
+        &Select,
+    ) -> Result<(), LookupError>,
+) -> Result<(), LookupError> {
+    let Some(root) = root_query(statement) else {
+        return Ok(());
+    };
+    check_query_selects(database, &root, check)
+}
+
+/// Calls `check` with every `SELECT` of `root` and of the queries it nests,
+/// the query it belongs to, the scope its names resolve in, and `root`'s
+/// scope, which also resolves the names inside the subqueries it holds.
+///
+/// # Errors
+///
+/// Returns the first lookup failure of the scope or of `check`.
+pub(crate) fn check_query_selects<DB: DatabaseLike>(
+    database: &DB,
+    root: &Query,
     mut check: impl FnMut(
         &ColumnScope<'_, '_, DB>,
         &ColumnDefinitionScope<'_, '_, '_, DB>,
@@ -302,7 +342,7 @@ pub(crate) fn check_scoped_selects<DB: DatabaseLike>(
         &Select,
     ) -> Result<(), LookupError>,
 ) -> Result<(), LookupError> {
-    check_queries(database, statement, |full, query, _| {
+    check_tree(database, root, |full, query, _| {
         selects(&query.body).into_iter().try_for_each(|select| {
             full.scope_for_select(select)
                 .map_or(Ok(()), |local| check(full, &local, query, select))

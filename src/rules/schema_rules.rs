@@ -93,6 +93,8 @@ mod duplicating_recursive_cte;
 pub use duplicating_recursive_cte::DuplicatingRecursiveCte;
 mod unindexed_recursive_join;
 pub use unindexed_recursive_join::UnindexedRecursiveJoin;
+mod join_on_non_key_columns;
+pub use join_on_non_key_columns::JoinOnNonKeyColumns;
 mod parallel_tables;
 pub use parallel_tables::ParallelTables;
 mod foreign_key_cycle;
