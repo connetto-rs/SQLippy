@@ -31,10 +31,10 @@ use crate::{
         ImpureImmutableFunction, IncompatibleForeignKey, InvokerWithoutSearchPath,
         JsonStoredAsText, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
         LeakproofUserFunction, MaterializedViewExposed, MisquotedSearchPath, MissingPrimaryKey,
-        MixedCaseColumnName, MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText,
-        MoneyType, MonotonicFlagReset, MultiplePermissivePolicies, NarrowIntegerKey,
-        NarrowerReferencingColumn, NeedlessIndexPredicate, NestedPolicySubquery, NilUuidSentinel,
-        NonFiniteNumberAllowed, NonSnakeCaseColumnName, NonSnakeCaseTableName,
+        MixedCaseColumnName, MixedCaseForeignKeyName, MixedCaseTableName, MixedMultivaluedFacts,
+        MomentStoredAsText, MoneyType, MonotonicFlagReset, MultiplePermissivePolicies,
+        NarrowIntegerKey, NarrowerReferencingColumn, NeedlessIndexPredicate, NestedPolicySubquery,
+        NilUuidSentinel, NonFiniteNumberAllowed, NonSnakeCaseColumnName, NonSnakeCaseTableName,
         NonminimalBooleanExpression, NonterminatingRecursiveCte, NotInNullList,
         NotInNullableSubquery, NotInSubquery, NullComparison, NullCredentialRead, NullOnlyCheck,
         NullableCompositeForeignKey, NullableConcatenation, NullableTenantKey,
@@ -204,7 +204,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 68] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 69] = [
         Box::new(AlwaysRaisingExpression::default()),
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
@@ -267,6 +267,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(CredentialFreeWrite::default()),
         Box::new(SuperkeyPrimaryKey::default()),
         Box::new(OneToManyEdgeTable::default()),
+        Box::new(MixedMultivaluedFacts::default()),
         Box::new(UniqueKeyExistenceOracle::default()),
         Box::new(NullCredentialRead::default()),
         Box::new(NullableTenantKey::default()),

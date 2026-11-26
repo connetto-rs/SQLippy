@@ -244,6 +244,7 @@ rule_icons! {
     "unstreamable_replica_identity" => FaTowerBroadcast,
     "superkey_primary_key" => FaKey,
     "one_to_many_edge_table" => FaSitemap,
+    "mixed_multivalued_facts" => FaObjectGroup,
     "copied_column_through_superkey" => FaCopy,
     "parallel_tables" => FaTableList,
     "undeletable_reference" => FaLinkSlash,
