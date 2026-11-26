@@ -178,6 +178,7 @@ fn probes<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     let confinement = Confinement::new(
         database,
         deployment,
+        table,
         names.clone(),
         table,
         names,

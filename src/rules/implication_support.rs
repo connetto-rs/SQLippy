@@ -87,8 +87,12 @@ pub(crate) trait Columns {
     }
 
     /// Whether `clause` alone meets every condition.
-    fn settles(&self, _clause: &Expr) -> bool {
-        false
+    ///
+    /// # Errors
+    ///
+    /// Returns the lookup error reading what the clause leaves raised.
+    fn settles(&self, _clause: &Expr) -> Result<bool, LookupError> {
+        Ok(false)
     }
 
     /// The values the input parameter at `ordinal` may hold, `None` for one
@@ -210,8 +214,8 @@ impl<'e, T> Condition<'e, T> {
 ///
 /// # Errors
 ///
-/// Returns the lookup error [`Columns::draws_implied`] or
-/// [`Columns::is_set_within`] raised.
+/// Returns the lookup error [`Columns::settles`], [`Columns::draws_implied`]
+/// or [`Columns::is_set_within`] raised.
 pub(crate) fn clause_implies<C: Columns>(
     columns: &C,
     clause: &Expr,
@@ -219,7 +223,7 @@ pub(crate) fn clause_implies<C: Columns>(
     context: &[&Expr],
 ) -> Result<bool, LookupError> {
     let clause = unnested(clause);
-    if columns.settles(clause) {
+    if columns.settles(clause)? {
         return Ok(true);
     }
     let set_within = |narrower: &Expr, wider: &Expr| columns.is_set_within(narrower, wider);

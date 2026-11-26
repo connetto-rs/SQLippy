@@ -32,7 +32,7 @@ fn unique_constraints_over_nullable_columns_are_reported() {
            d TEXT UNIQUE NULLS NOT DISTINCT, e TEXT NOT NULL UNIQUE,
            CONSTRAINT pair UNIQUE (a, b));
          CREATE UNIQUE INDEX t_c ON t (c);
-         CREATE UNIQUE INDEX t_c_all ON t (c) NULLS NOT DISTINCT;
+         CREATE UNIQUE INDEX t_c_all ON t (c, a) NULLS NOT DISTINCT;
          CREATE INDEX t_c_plain ON t (c);",
     );
     let messages: Vec<&str> = found.iter().map(|(_, message)| message.as_str()).collect();
@@ -71,6 +71,32 @@ fn a_unique_optional_reference_is_not_reported() {
         [
             "Unique constraint unique ('invitation_id') on 'loose' covers nullable 'invitation_id' and treats NULLs as distinct, so rows with a NULL there can repeat the rest.",
             "Unique constraint unique ('note') on 'notes' covers nullable 'note' and treats NULLs as distinct, so rows with a NULL there can repeat the rest.",
+        ]
+    );
+}
+
+#[test]
+fn a_unique_constraint_over_a_unique_key_is_not_reported() {
+    let found = findings(
+        &GenericConstrainer::from(NullableUniqueColumn::default()),
+        "CREATE TABLE resources (id UUID PRIMARY KEY, parent_id UUID, UNIQUE (id, parent_id));
+         CREATE TABLE pairs (a INT NOT NULL, b INT NOT NULL, c INT, UNIQUE (a, b),
+           UNIQUE (a, b, c));
+         CREATE TABLE single (a INT UNIQUE NULLS NOT DISTINCT, c INT, UNIQUE (a, c));
+         CREATE TABLE loose (a INT UNIQUE, c INT, UNIQUE (a, c));
+         CREATE TABLE partial (a INT NOT NULL, c INT, UNIQUE (a, c));
+         CREATE UNIQUE INDEX partial_a ON partial (a) WHERE a > 0;
+         CREATE TABLE deferred (a INT NOT NULL, c INT, UNIQUE (a, c),
+           CONSTRAINT deferred_a UNIQUE (a) DEFERRABLE);",
+    );
+    let messages: Vec<&str> = found.iter().map(|(_, message)| message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "Unique constraint unique ('c') on 'deferred' covers nullable 'c' and treats NULLs as distinct, so rows with a NULL there can repeat the rest.",
+            "Unique constraint unique ('a') on 'loose' covers nullable 'a' and treats NULLs as distinct, so rows with a NULL there can repeat the rest.",
+            "Unique constraint unique ('a', 'c') on 'loose' covers nullable 'a', 'c' and treats NULLs as distinct, so rows with a NULL there can repeat the rest.",
+            "Unique constraint unique ('c') on 'partial' covers nullable 'c' and treats NULLs as distinct, so rows with a NULL there can repeat the rest.",
         ]
     );
 }

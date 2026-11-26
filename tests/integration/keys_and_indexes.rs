@@ -312,9 +312,20 @@ fn a_composite_key_whose_checks_keep_nullable_columns_null_together_is_not_repor
            FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
          CREATE TABLE partly (a INT, b INT, c INT,
            CHECK ((a IS NULL) = (b IS NULL)),
-           FOREIGN KEY (a, b, c) REFERENCES w (a, b, c));",
+           FOREIGN KEY (a, b, c) REFERENCES w (a, b, c));
+         CREATE TABLE discriminated (kind TEXT NOT NULL, a INT, b INT, c INT NOT NULL,
+           CHECK ((kind = 'root') = (a IS NULL)),
+           CHECK ((kind = 'root') = (b IS NULL)),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE undiscriminated (kind TEXT, a INT, b INT, c INT NOT NULL,
+           CHECK ((kind = 'root') = (a IS NULL)),
+           CHECK ((kind = 'root') = (b IS NULL)),
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         CREATE TABLE unvalidated (a INT, b INT, c INT NOT NULL,
+           FOREIGN KEY (a, c, b) REFERENCES w (a, b, c));
+         ALTER TABLE unvalidated ADD CHECK ((a IS NULL) = (b IS NULL)) NOT VALID;",
     );
-    assert_eq!(found.len(), 6, "{found:?}");
+    assert_eq!(found.len(), 8, "{found:?}");
     for table in [
         "crossed",
         "loose",
@@ -322,6 +333,8 @@ fn a_composite_key_whose_checks_keep_nullable_columns_null_together_is_not_repor
         "equated",
         "partly",
         "untied",
+        "undiscriminated",
+        "unvalidated",
     ] {
         assert!(
             found

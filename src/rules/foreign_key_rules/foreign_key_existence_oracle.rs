@@ -65,9 +65,13 @@ use crate::{
 /// enough when one subquery draws them all from the same row of that table,
 /// which is then the only row the key can match. A check that forces a key
 /// column `NULL` also confines the key, since PostgreSQL then looks up no
-/// row. A write is also excused when the check makes every row the key can
-/// match readable, which holds when every restrictive and at least one
-/// permissive `SELECT` policy of the referenced table tests the columns the
+/// row, whether it tests the column `IS NULL` or the referencing table's
+/// enforced and validated checks force it, as `kind IN ('folder', 'project')`
+/// does under `CHECK ((kind = 'owned') = (created_by_id IS NOT NULL))` with
+/// `kind` `NOT NULL`. A write is also excused when the check makes every row
+/// the key can match readable, which holds when every restrictive and at
+/// least one permissive `SELECT` policy of the referenced table tests the
+/// columns the
 /// key maps onto as the check tests their key columns, or tests one against a
 /// set the check confines its key column within, as written, as the body of
 /// a helper taking no argument selects it, as an arm of a helper's body
@@ -96,11 +100,12 @@ use crate::{
 /// when it reads no table and calls only definers and built-ins that read
 /// neither the acting role nor its privileges, and a helper setting a
 /// parameter other than its search path counts for nothing. An arm of the
-/// check that leaves a key column `NULL` needs neither, since PostgreSQL
-/// checks no key holding a `NULL`. A write is also excused when the
-/// referencing table's `BEFORE` row triggers, on every path that keeps the
-/// row, insert the referenced row from `NEW` with `ON CONFLICT DO NOTHING`
-/// and leave the key unchanged afterwards, while every unique index of the
+/// check that leaves a key column `NULL`, by itself or under the referencing
+/// table's checks, needs neither, since PostgreSQL checks no key holding a
+/// `NULL`. A write is also excused when the referencing table's `BEFORE` row
+/// triggers, on every path that keeps the row, insert the referenced row from
+/// `NEW` with `ON CONFLICT DO NOTHING` and leave the key unchanged afterwards,
+/// while every unique index of the
 /// referenced table takes that conflict and spans the referenced columns.
 /// The key then finds its row whether or not it existed. A write is also
 /// excused when the referencing table's `BEFORE` row triggers hold every
@@ -663,6 +668,7 @@ fn confinement<'db, DB: DatabaseLike>(
     Ok(Confinement::new(
         database,
         deployment,
+        foreign_key.host_table(database),
         key_columns
             .iter()
             .copied()
