@@ -2085,6 +2085,22 @@ fn a_key_pair_a_policy_row_value_reads_from_one_readable_row_is_clean() {
             "(namespace_id, id, 1) IN (SELECT organization_namespace_id, organization_id, id FROM invitations)",
             reported.clone(),
         ),
+        // A projection the reading cannot pair with the tested columns leaves the read unproven.
+        (
+            caller,
+            "(namespace_id, id) IN (SELECT * FROM invitations)",
+            reported.clone(),
+        ),
+        (
+            caller,
+            "id IN (SELECT * FROM invitations)",
+            reported.clone(),
+        ),
+        (
+            caller,
+            "(namespace_id, id) IN (SELECT organization_namespace_id, organization_id + 0 FROM invitations)",
+            reported.clone(),
+        ),
     ] {
         assert_eq!(
             objects_under(
