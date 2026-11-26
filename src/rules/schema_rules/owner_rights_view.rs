@@ -92,12 +92,19 @@ fn hidden_from<DB: DatabaseLike>(
 /// policies or no `SELECT` policy of the table applies to it.
 ///
 /// Without `security_invoker`, PostgreSQL applies the table's policies as the
-/// view's owner. An owner that bypasses them, being a superuser, a `BYPASSRLS`
-/// role or the table's owner without `FORCE`, shows every caller every row.
-/// An owner the schema does not name is whoever ran it, often such a role. An
-/// owner no policy applies to shows every caller no row. `current_user` keeps
-/// naming the caller inside the view, so policies on it, like those on
-/// session settings, work through it.
+/// view's owner. For an owner that bypasses them, being a superuser, a
+/// `BYPASSRLS` role or the table's owner without `FORCE`, the policies filter
+/// no row a caller reads or writes through the view, and only the view's own
+/// conditions limit them. An owner the schema does not name is whoever ran it,
+/// often such a role. An owner no policy applies to shows every caller no row.
+/// `current_user` keeps naming the caller inside the view, so policies on it,
+/// like those on session settings, work through it.
+///
+/// With `security_invoker`, PostgreSQL checks each caller's own privileges on
+/// the tables, so callers whose grants sit on the view alone, such as an
+/// `UPDATE` column grant through a checked view, need them on the tables too.
+/// An owner the `SELECT` policies apply to keeps the view's rights and its
+/// callers' grants instead.
 ///
 /// The rule does not run on SQLite, which has no row-level security policies.
 ///
@@ -143,7 +150,7 @@ impl<DB> Rule for OwnerRightsView<DB> {
         static METADATA: RuleMetadata = RuleMetadata {
             name: rule_name!(OwnerRightsView),
             group: LintGroup::Suspicious,
-            rationale: "A view without `security_invoker` applies its tables' row-level security as its owner, so an owner that bypasses the policies shows every caller every row, and an owner no policy applies to shows them none.",
+            rationale: "A view without `security_invoker` applies its tables' row-level security as its owner, so for an owner that bypasses the policies they filter no row a caller reads through the view, and an owner no policy applies to shows callers no row.",
             source: Some("https://www.postgresql.org/docs/current/sql-createview.html"),
             basis: Basis::Declared,
             example: RuleExample {
@@ -181,30 +188,28 @@ impl<DB: DatabaseLike> SchemaRule for OwnerRightsView<DB> {
             protected_reads(database, view, &mut tables)?;
             let owner = view.owner(database)?;
             let name = view.view_name();
-            let resolution = format!(
-                "ALTER VIEW {name} SET (security_invoker = true); so the tables' policies apply to each caller."
-            );
             for table in tables {
                 let table_name = table.table_name();
-                if let Some(reason) = bypass(database, owner, table)? {
-                    reporter.view(
-                        view,
-                        format!(
-                            "View '{name}' reads '{table_name}' with its owner's rights, and {reason}, so every caller sees every row."
-                        ),
-                        resolution.clone(),
-                    )?;
+                let message = if let Some(reason) = bypass(database, owner, table)? {
+                    format!(
+                        "View '{name}' reads '{table_name}' with its owner's rights, and {reason}, so the policies on '{table_name}' filter no row a caller reads or writes through it."
+                    )
                 } else if let Some(owner) = owner
                     && hidden_from(database, owner, table)?
                 {
-                    reporter.view(
-                        view,
-                        format!(
-                            "View '{name}' reads '{table_name}' with the rights of '{owner}', and no SELECT policy on '{table_name}' applies to '{owner}', so callers see no row through it."
-                        ),
-                        resolution.clone(),
-                    )?;
-                }
+                    format!(
+                        "View '{name}' reads '{table_name}' with the rights of '{owner}', and no SELECT policy on '{table_name}' applies to '{owner}', so callers see no row through it."
+                    )
+                } else {
+                    continue;
+                };
+                reporter.view(
+                    view,
+                    message,
+                    format!(
+                        "ALTER VIEW {name} SET (security_invoker = true); and grant its callers on '{table_name}' what they do through '{name}', or give '{name}' an owner the SELECT policies on '{table_name}' apply to."
+                    ),
+                )?;
             }
         }
         Ok(())
