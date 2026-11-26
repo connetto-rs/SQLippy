@@ -124,6 +124,8 @@ mod time_dependent_check;
 pub use time_dependent_check::TimeDependentCheck;
 mod superkey_primary_key;
 pub use superkey_primary_key::SuperkeyPrimaryKey;
+mod one_to_many_edge_table;
+pub use one_to_many_edge_table::OneToManyEdgeTable;
 mod unique_key_existence_oracle;
 pub use unique_key_existence_oracle::UniqueKeyExistenceOracle;
 mod sensitive_columns_exposed;

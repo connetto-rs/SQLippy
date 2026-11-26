@@ -243,6 +243,7 @@ rule_icons! {
     "unknown_binary_send" => FaPlugCircleExclamation,
     "unstreamable_replica_identity" => FaTowerBroadcast,
     "superkey_primary_key" => FaKey,
+    "one_to_many_edge_table" => FaSitemap,
     "copied_column_through_superkey" => FaCopy,
     "parallel_tables" => FaTableList,
     "undeletable_reference" => FaLinkSlash,
