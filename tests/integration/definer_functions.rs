@@ -7163,6 +7163,232 @@ fn a_column_fixed_to_a_literal_stands_for_it_in_a_tested_pair() {
     }
 }
 
+/// Functions reported over organizations keyed by `(namespace_id, id)`, the
+/// policy admitting the rows whose `tested` pair lies in the set of
+/// `authz.founded_organizations()`, which returns pairs through `body`.
+fn founded_pairs(body: &str, tested: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE SCHEMA authz;
+             CREATE TABLE public.organizations (namespace_id INT NOT NULL, id INT NOT NULL,
+               created_by_id INT NOT NULL, founded_at TIMESTAMP, PRIMARY KEY (namespace_id, id));
+             ALTER TABLE public.organizations ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON public.organizations TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE FUNCTION authz.caller_id() RETURNS INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT 1 $$;
+             CREATE FUNCTION authz.founded_organizations() RETURNS TABLE (namespace_id INT, id INT)
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ {body} $$;
+             CREATE POLICY organizations_select ON public.organizations FOR SELECT TO app
+               USING ({tested} IN (SELECT * FROM authz.founded_organizations()));"
+        ),
+    )
+}
+
+const FOUNDED_PAIRS: &str =
+    "SELECT organization.namespace_id, organization.id FROM public.organizations organization
+     WHERE organization.created_by_id = authz.caller_id() AND organization.founded_at IS NULL";
+
+#[test]
+fn a_definer_returning_the_key_pairs_its_policy_admits_through_it_is_not_reported() {
+    let pair = "(namespace_id, id)";
+    for body in [
+        FOUNDED_PAIRS.to_owned(),
+        format!("WITH found AS ({FOUNDED_PAIRS}) SELECT namespace_id, id FROM found"),
+        format!(
+            "WITH found (namespace_id, id) AS ({FOUNDED_PAIRS})
+             SELECT found.namespace_id, found.id FROM found"
+        ),
+    ] {
+        assert_eq!(founded_pairs(&body, pair), Vec::<String>::new(), "{body}");
+    }
+    for (body, tested) in [
+        (FOUNDED_PAIRS.to_owned(), "(id, namespace_id)"),
+        (
+            FOUNDED_PAIRS.replace(
+                "organization.namespace_id, organization.id FROM",
+                "organization.id, organization.namespace_id FROM",
+            ),
+            pair,
+        ),
+        (
+            FOUNDED_PAIRS.replace("organization.id FROM", "organization.id + 0 FROM"),
+            pair,
+        ),
+        (
+            format!(
+                "WITH found (id, namespace_id) AS ({FOUNDED_PAIRS}) SELECT namespace_id, id FROM found"
+            ),
+            pair,
+        ),
+        (
+            format!("WITH found AS ({FOUNDED_PAIRS}) SELECT id, namespace_id FROM found"),
+            pair,
+        ),
+    ] {
+        assert_eq!(
+            founded_pairs(&body, tested),
+            ["founded_organizations()"],
+            "{body} {tested}"
+        );
+    }
+}
+
+/// Functions reported over teams keyed by namespaced pairs, the policy of
+/// `teams` testing a pair against `authz.member_teams()`, with
+/// `authz.administered_teams()` returning the pairs of the team members
+/// `administered` keeps and `authz.team_admin_organizations()` reading the
+/// teams whose `tested` pair `authz.administered_teams()` returns.
+fn namespaced_teams(administered: &str, tested: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE SCHEMA authz;
+             CREATE TABLE teams (namespace_id INT NOT NULL, id INT NOT NULL, organization_id INT NOT NULL,
+               PRIMARY KEY (namespace_id, id));
+             CREATE TABLE team_members (team_namespace_id INT NOT NULL, team_id INT NOT NULL,
+               user_id TEXT NOT NULL, admin BOOLEAN NOT NULL,
+               PRIMARY KEY (team_namespace_id, team_id, user_id),
+               FOREIGN KEY (team_namespace_id, team_id) REFERENCES teams (namespace_id, id));
+             ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE team_members ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON teams, team_members TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE FUNCTION authz.member_teams() RETURNS TABLE (namespace_id INT, id INT)
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT member.team_namespace_id, member.team_id FROM public.team_members member
+                 WHERE member.user_id = current_setting('app.user_id', true) $$;
+             CREATE FUNCTION authz.administered_teams() RETURNS TABLE (namespace_id INT, id INT)
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT member.team_namespace_id, member.team_id FROM public.team_members member
+                 WHERE {administered} AND member.admin $$;
+             CREATE FUNCTION authz.team_admin_organizations() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT team.organization_id FROM public.teams team
+                 WHERE {tested} IN (SELECT * FROM authz.administered_teams()) $$;
+             CREATE POLICY team_members_select ON team_members FOR SELECT TO app
+               USING (user_id = current_setting('app.user_id', true));
+             CREATE POLICY teams_select ON teams FOR SELECT TO app
+               USING ((namespace_id, id) IN (SELECT * FROM authz.member_teams()));"
+        ),
+    )
+}
+
+#[test]
+fn a_row_tested_as_a_pair_against_a_helper_keeps_what_the_helper_draws_it_under() {
+    let caller = "member.user_id = current_setting('app.user_id', true)";
+    let pair = "(team.namespace_id, team.id)";
+    assert_eq!(namespaced_teams(caller, pair), Vec::<String>::new());
+    assert_eq!(
+        namespaced_teams(caller, "(team.id, team.namespace_id)"),
+        ["team_admin_organizations()"]
+    );
+    assert_eq!(
+        namespaced_teams("TRUE", pair),
+        ["administered_teams()", "team_admin_organizations()"]
+    );
+}
+
+/// Functions reported over team members whose policy tests their
+/// organization pair against `authz.member_organizations()`, which projects
+/// `organization` of the caller's active memberships, and
+/// `authz.administered_teams()` reading the members `joined` to memberships.
+fn namespaced_members(organization: &str, joined: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE SCHEMA authz;
+             CREATE TABLE memberships (organization_namespace_id INT NOT NULL,
+               organization_id INT NOT NULL, user_id TEXT NOT NULL, active BOOLEAN NOT NULL,
+               PRIMARY KEY (organization_namespace_id, organization_id, user_id));
+             CREATE TABLE team_members (team_id INT NOT NULL, organization_namespace_id INT NOT NULL,
+               organization_id INT NOT NULL, user_id TEXT NOT NULL, admin BOOLEAN NOT NULL,
+               PRIMARY KEY (team_id, user_id));
+             ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE team_members ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON memberships, team_members TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE FUNCTION authz.member_organizations() RETURNS TABLE (namespace_id INT, id INT)
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT {organization} FROM public.memberships membership
+                 WHERE membership.user_id = current_setting('app.user_id', true) AND membership.active $$;
+             CREATE FUNCTION authz.administered_teams() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT member.team_id FROM public.team_members member
+                 {joined} public.memberships membership
+                   ON membership.organization_namespace_id = member.organization_namespace_id
+                   AND membership.organization_id = member.organization_id
+                   AND membership.user_id = member.user_id AND membership.active
+                 WHERE member.user_id = current_setting('app.user_id', true) AND member.admin $$;
+             CREATE POLICY memberships_select ON memberships FOR SELECT TO app
+               USING (user_id = current_setting('app.user_id', true));
+             CREATE POLICY team_members_select ON team_members FOR SELECT TO app
+               USING ((organization_namespace_id, organization_id)
+                 IN (SELECT * FROM authz.member_organizations()));"
+        ),
+    )
+}
+
+#[test]
+fn a_joined_row_meeting_a_pair_helpers_filter_proves_the_pair_in_its_set() {
+    let organization = "membership.organization_namespace_id, membership.organization_id";
+    assert_eq!(
+        namespaced_members(organization, "JOIN"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        namespaced_members(organization, "LEFT JOIN"),
+        ["administered_teams()"]
+    );
+    assert_eq!(
+        namespaced_members(
+            "membership.organization_id, membership.organization_namespace_id",
+            "JOIN"
+        ),
+        ["administered_teams()"]
+    );
+}
+
+#[test]
+fn a_helper_projecting_one_column_of_a_pair_helper_draws_that_column() {
+    let reported = |projected: &str| {
+        exposed(
+            Deployment::default().with_app_role("app"),
+            &format!(
+                "CREATE ROLE app NOLOGIN;
+                 CREATE SCHEMA authz;
+                 CREATE TABLE resources (id INT PRIMARY KEY, parent_id INT NOT NULL,
+                   organization_id INT NOT NULL, hidden BOOLEAN NOT NULL);
+                 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+                 GRANT SELECT ON resources TO app;
+                 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+                 ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+                 CREATE POLICY readable_resources ON resources FOR SELECT TO app USING (NOT hidden);
+                 CREATE FUNCTION authz.listed() RETURNS TABLE (id INT, parent_id INT)
+                   LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.id, resource.parent_id FROM public.resources resource
+                     WHERE NOT resource.hidden $$;
+                 CREATE FUNCTION authz.visible_ids() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT listed.{projected} FROM authz.listed() listed $$;
+                 CREATE FUNCTION authz.organizations_reaching() RETURNS SETOF INT
+                   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                     SELECT resource.organization_id FROM public.resources resource
+                     WHERE resource.id IN (SELECT authz.visible_ids()) $$;"
+            ),
+        )
+    };
+    assert_eq!(reported("id"), Vec::<String>::new());
+    assert_eq!(reported("parent_id"), ["organizations_reaching()"]);
+}
+
 /// The definers the rule reports where `authz.profile_organization()` is
 /// declared by `helper` over `body`, a policy and a definer both keep the
 /// `resources` rows whose organization is `tested`, and `granted` runs last.
