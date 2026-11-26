@@ -339,8 +339,9 @@ impl<'a, DB: DatabaseLike> HelperSets<'a, DB> {
 
 /// `body`, the query `function` runs, with every reference to an input
 /// parameter, by name or as `$n`, replaced by the argument `arguments` holds
-/// for it, or `None` when the schema cannot settle whether a name references
-/// a parameter or a column.
+/// for it, or `None` when the schema cannot resolve the body's relations,
+/// settle whether a name references a parameter or a column, or a
+/// placeholder names no parameter.
 fn bound_body<DB: DatabaseLike>(
     database: &DB,
     function: &DB::Function,
@@ -348,21 +349,19 @@ fn bound_body<DB: DatabaseLike>(
     arguments: &[&Expr],
 ) -> Option<Query> {
     let mut statement = Statement::Query(Box::new(body));
-    // The parameter each name or placeholder references, in the order the
-    // walks below meet them, since both meet these leaves in the same order.
-    let mut references: Vec<Option<usize>> = Vec::new();
-    {
-        let scope = ExpressionScope::FunctionBody(function);
-        let Ok(context) = ExpressionContext::for_statement(
-            &statement,
-            &scope,
-            database,
-            IdentifierCase::AsWritten,
-        ) else {
-            return None;
-        };
-        let unsettled = visit_expressions(&statement, |expression| {
-            let reference = match expression {
+    // The argument standing for each name or placeholder that references a
+    // parameter, in the order the walks below meet them, since both meet
+    // these leaves in the same order.
+    let mut references: Vec<Option<&Expr>> = Vec::new();
+    let settled = ExpressionContext::for_statement(
+        &statement,
+        &ExpressionScope::FunctionBody(function),
+        database,
+        IdentifierCase::AsWritten,
+    )
+    .is_ok_and(|context| {
+        visit_expressions(&statement, |expression| {
+            let ordinal = match expression {
                 Expr::Value(_) => parameter_ordinal(expression),
                 Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
                     match context.reference(expression) {
@@ -373,36 +372,32 @@ fn bound_body<DB: DatabaseLike>(
                 }
                 _ => return ControlFlow::Continue(()),
             };
-            references.push(reference);
+            match ordinal.map(|ordinal| arguments.get(ordinal)) {
+                Some(None) => return ControlFlow::Break(()),
+                Some(Some(argument)) => references.push(Some(*argument)),
+                None => references.push(None),
+            }
             ControlFlow::Continue(())
-        });
-        if unsettled.is_break() {
-            return None;
-        }
-    }
-    let mut met = references.into_iter();
-    let unbound = visit_expressions_mut(&mut statement, |expression| {
-        if !matches!(
-            expression,
-            Expr::Value(_) | Expr::Identifier(_) | Expr::CompoundIdentifier(_)
-        ) {
-            return ControlFlow::Continue(());
-        }
-        match met.next().flatten() {
-            Some(ordinal) => match arguments.get(ordinal) {
-                Some(argument) => {
-                    *expression = (*argument).clone();
-                    ControlFlow::Continue(())
-                }
-                None => ControlFlow::Break(()),
-            },
-            None => ControlFlow::Continue(()),
-        }
+        })
+        .is_continue()
     });
-    let Statement::Query(body) = statement else {
-        return None;
-    };
-    unbound.is_continue().then_some(*body)
+    if settled {
+        let mut met = references.into_iter();
+        let _ = visit_expressions_mut(&mut statement, |expression| {
+            if matches!(
+                expression,
+                Expr::Value(_) | Expr::Identifier(_) | Expr::CompoundIdentifier(_)
+            ) && let Some(argument) = met.next().flatten()
+            {
+                *expression = argument.clone();
+            }
+            ControlFlow::<()>::Continue(())
+        });
+    }
+    match statement {
+        Statement::Query(body) if settled => Some(*body),
+        _ => None,
+    }
 }
 
 /// The arms whose every row the query `query` returns: the arms seeding the
@@ -556,12 +551,12 @@ fn reads_role(name: &str, call: &Function) -> bool {
                 | "current_schemas"
         )
         || (name == "current_setting"
-            && match &call.args {
-                FunctionArguments::List(list) => !matches!(
+            && !matches!(
+                &call.args,
+                FunctionArguments::List(list) if matches!(
                     list.args.first(),
                     Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))))
                         if matches!(&value.value, Value::SingleQuotedString(setting) if !setting.eq_ignore_ascii_case("search_path"))
-                ),
-                _ => true,
-            })
+                )
+            ))
 }
