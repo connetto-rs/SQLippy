@@ -137,6 +137,9 @@ fn a_later_statement_on_any_path_after_the_break_counts() {
         "DELETE FROM parents WHERE id = OLD.parent; IF FOUND THEN DELETE FROM children WHERE parent = OLD.parent; END IF;",
         "BEGIN DELETE FROM parents WHERE id = OLD.parent; END; DELETE FROM children WHERE parent = OLD.parent;",
         "IF OLD.parent > 0 THEN DELETE FROM parents WHERE id = OLD.parent; END IF; DELETE FROM children c WHERE c.parent = OLD.parent;",
+        "CASE WHEN OLD.parent > 0 THEN DELETE FROM parents WHERE id = OLD.parent; ELSE RAISE NOTICE 'kept'; END CASE; DELETE FROM children WHERE parent = OLD.parent;",
+        "DELETE FROM parents WHERE id = OLD.parent; DELETE FROM children WHERE (parent) = OLD.parent AND payload = 0 AND payload > 0;",
+        "DELETE FROM parents WHERE id = OLD.parent; DELETE FROM public.children WHERE public.children.parent = OLD.parent;",
     ] {
         assert_eq!(findings(&schema("", body, "")).len(), 1, "{body}");
     }
@@ -224,6 +227,46 @@ fn repairs_that_come_first_or_reach_other_rows_are_not_reported() {
         (
             "UPDATE children SET payload = 1 WHERE id = NEW.id; INSERT INTO parents VALUES (NEW.parent);",
             LATE_AFTER_INSERT,
+        ),
+        // The later statement names the rows by a value that may change.
+        (
+            "DELETE FROM parents WHERE id = OLD.parent; DELETE FROM children WHERE parent = id;",
+            "",
+        ),
+        (
+            "DELETE FROM parents WHERE id = OLD.parent; DELETE FROM children WHERE parent = abs(OLD.parent);",
+            "",
+        ),
+        (
+            "DELETE FROM parents WHERE id = OLD.parent; DELETE FROM children WHERE parent = (SELECT OLD.parent);",
+            "",
+        ),
+        // The later statement writes another table.
+        (
+            "DELETE FROM parents WHERE id = OLD.parent; DELETE FROM elsewhere WHERE parent = OLD.parent;",
+            "",
+        ),
+        (
+            "DELETE FROM parents WHERE id = OLD.parent; DELETE FROM children AS c (a, b, d) WHERE a = OLD.parent;",
+            "",
+        ),
+        (
+            "DELETE FROM parents WHERE id = OLD.parent; DELETE FROM children, parents WHERE parent = OLD.parent;",
+            "",
+        ),
+        // Writes the rule does not read.
+        (
+            "DELETE FROM parents WHERE id = OLD.parent; UPDATE children SET (parent, payload) = (NULL, 0) WHERE parent = OLD.parent;",
+            "",
+        ),
+        (
+            "INSERT INTO children SELECT NEW.id, NEW.parent, 0; INSERT INTO parents VALUES (NEW.parent);",
+            "",
+        ),
+        // The function's own exception handler catches the error.
+        (
+            "DELETE FROM parents WHERE id = OLD.parent; DELETE FROM children WHERE parent = OLD.parent; RETURN NULL; EXCEPTION WHEN foreign_key_violation THEN",
+            "",
         ),
     ] {
         assert!(findings(&schema("", body, trigger)).is_empty(), "{body}");
