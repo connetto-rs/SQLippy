@@ -66,6 +66,8 @@ const ENGLISH_AVERAGE_TERMS: [&str; 4] = ["avg", "average", "mean", "median"];
 /// English terms closing the name of an identifier.
 const ENGLISH_IDENTIFIER_TERMS: [&str; 1] = ["id"];
 
+const ENGLISH_DISCRIMINATOR_TERMS: [&str; 2] = ["type", "kind"];
+
 /// English terms closing the name of an email address.
 const ENGLISH_EMAIL_TERMS: [&str; 1] = ["email"];
 
@@ -103,17 +105,22 @@ fn holds(terms: &[Cow<'static, str>], word: &str) -> bool {
     terms.iter().any(|term| term.eq_ignore_ascii_case(word))
 }
 
-/// Whether the last `snake_case` words of `name` are the words of `term`,
-/// ignoring ASCII case. A term without words matches nothing.
-fn ends_with_words(name: &str, term: &str) -> bool {
-    let mut name_words = name.rsplit('_').filter(|word| !word.is_empty());
-    let mut term_words = term.rsplit('_').filter(|word| !word.is_empty()).peekable();
-    term_words.peek().is_some()
-        && term_words.all(|term_word| {
-            name_words
-                .next()
-                .is_some_and(|name_word| name_word.eq_ignore_ascii_case(term_word))
-        })
+/// The words of `name` before its last `snake_case` words, without the `_`
+/// joining them, when those last words are the words of `term`, ignoring
+/// ASCII case. A term without words matches nothing.
+fn before_words<'n>(name: &'n str, term: &str) -> Option<&'n str> {
+    let mut rest = name;
+    let mut matched = false;
+    for term_word in term.rsplit('_').filter(|word| !word.is_empty()) {
+        rest = rest.trim_end_matches('_');
+        let start = rest.rfind('_').map_or(0, |index| index + 1);
+        if !rest[start..].eq_ignore_ascii_case(term_word) {
+            return None;
+        }
+        rest = &rest[..start];
+        matched = true;
+    }
+    matched.then(|| rest.trim_end_matches('_'))
 }
 
 /// What the closing words of a column name say the column holds.
@@ -131,6 +138,8 @@ pub(crate) enum Ending {
     Count,
     /// An identifier.
     Identifier,
+    /// The table a sibling identifier names a row of.
+    Discriminator,
     /// An email address.
     Email,
 }
@@ -140,10 +149,10 @@ pub(crate) enum Ending {
 /// A rule matches each term against the whole `snake_case` words of a column
 /// name, ignoring ASCII case, so `price` matches `total_price` and not
 /// `priceless`. A flag prefix must be the first word. A uuid, moment,
-/// address, JSON, count or email term must close the name, and a term of
-/// several words such as `ip_address` matches the name's last words. A
-/// lifecycle term is the whole name, or the whole name after a flag prefix,
-/// so `revoked` and `is_revoked` match it. A deployment
+/// address, JSON, count, discriminator or email term must close the name,
+/// and a term of several words such as `ip_address` matches the name's last
+/// words. A lifecycle term is the whole name, or the whole name after a flag
+/// prefix, so `revoked` and `is_revoked` match it. A deployment
 /// selects the vocabularies its schema uses with
 /// [`Deployment::with_vocabulary`](crate::deployment::Deployment::with_vocabulary),
 /// and English applies when it selects none.
@@ -177,6 +186,7 @@ pub struct Vocabulary {
     count_terms: Vec<Cow<'static, str>>,
     average_terms: Vec<Cow<'static, str>>,
     identifier_terms: Vec<Cow<'static, str>>,
+    discriminator_terms: Vec<Cow<'static, str>>,
     email_terms: Vec<Cow<'static, str>>,
     lifecycle_terms: Vec<Cow<'static, str>>,
 }
@@ -197,6 +207,7 @@ impl Vocabulary {
             count_terms: words(&ENGLISH_COUNT_TERMS),
             average_terms: words(&ENGLISH_AVERAGE_TERMS),
             identifier_terms: words(&ENGLISH_IDENTIFIER_TERMS),
+            discriminator_terms: words(&ENGLISH_DISCRIMINATOR_TERMS),
             email_terms: words(&ENGLISH_EMAIL_TERMS),
             lifecycle_terms: words(&ENGLISH_LIFECYCLE_TERMS),
         }
@@ -281,6 +292,15 @@ impl Vocabulary {
         self
     }
 
+    /// Adds a term closing the name of a column that tells which table the
+    /// identifier beside it names a row of, such as `type`, so `target_type`
+    /// beside `target_id` is one.
+    #[must_use]
+    pub fn with_discriminator_term(mut self, term: impl Into<Cow<'static, str>>) -> Self {
+        self.discriminator_terms.push(term.into());
+        self
+    }
+
     /// Adds a term closing the name of an email address, such as `email`, so
     /// `owner_email` and the setting `app.verified_email` name one.
     #[must_use]
@@ -326,6 +346,13 @@ impl Vocabulary {
     /// `ending`, as `owner_uuid` ends with `uuid` and `server_ip_address`
     /// with `ip_address`.
     pub(crate) fn ends(&self, ending: Ending, name: &str) -> bool {
+        self.stem(ending, name).is_some()
+    }
+
+    /// Returns the words of `name` before the first term of `ending` its last
+    /// words are, as `target` comes before `type` in `target_type`, or `None`
+    /// when no term of `ending` closes `name`.
+    pub(crate) fn stem<'n>(&self, ending: Ending, name: &'n str) -> Option<&'n str> {
         let terms = match ending {
             Ending::Uuid => &self.uuid_terms,
             Ending::Moment => &self.moment_terms,
@@ -333,9 +360,10 @@ impl Vocabulary {
             Ending::Json => &self.json_terms,
             Ending::Count => &self.count_terms,
             Ending::Identifier => &self.identifier_terms,
+            Ending::Discriminator => &self.discriminator_terms,
             Ending::Email => &self.email_terms,
         };
-        terms.iter().any(|term| ends_with_words(name, term))
+        terms.iter().find_map(|term| before_words(name, term))
     }
 
     /// Returns the English vocabulary, built once.

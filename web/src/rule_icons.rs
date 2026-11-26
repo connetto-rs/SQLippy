@@ -185,6 +185,7 @@ rule_icons! {
     "empty_partial_index" => FaFilterCircleXmark,
     "needless_index_predicate" => FaFilter,
     "numbered_columns" => FaListOl,
+    "polymorphic_reference" => FaShuffle,
     "uncached_policy_call" => FaBolt,
     "uncached_helper_query" => FaBolt,
     "repeated_policy_call" => FaBolt,

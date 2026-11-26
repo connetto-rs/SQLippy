@@ -120,6 +120,8 @@ mod needless_index_predicate;
 pub use needless_index_predicate::NeedlessIndexPredicate;
 mod numbered_columns;
 pub use numbered_columns::NumberedColumns;
+mod polymorphic_reference;
+pub use polymorphic_reference::PolymorphicReference;
 mod time_dependent_check;
 pub use time_dependent_check::TimeDependentCheck;
 mod superkey_primary_key;
