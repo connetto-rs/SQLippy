@@ -271,6 +271,7 @@ rule_icons! {
     "case_without_match" => FaCircleXmark,
     "failing_assert" => FaBan,
     "unending_loop" => FaArrowsSpin,
+    "foreign_key_broken_before_repair" => FaLinkSlash,
 }
 #[cfg(test)]
 mod tests {

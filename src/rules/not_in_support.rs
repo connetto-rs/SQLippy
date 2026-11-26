@@ -542,6 +542,7 @@ fn is_aggregate(call: &sqlparser::ast::Function) -> bool {
 /// Finds an aggregate in an output without counting nested subqueries.
 struct AggregateOutput {
     depth: usize,
+    aggregate: fn(&sqlparser::ast::Function) -> bool,
 }
 
 impl Visitor for AggregateOutput {
@@ -562,12 +563,30 @@ impl Visitor for AggregateOutput {
     /// Stops at an aggregate evaluated by the enclosing select.
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
         if self.depth == 0
-            && matches!(expression, Expr::Function(call) if call.over.is_none() && is_aggregate(call))
+            && matches!(expression, Expr::Function(call) if call.over.is_none() && (self.aggregate)(call))
         {
             return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
     }
+}
+
+/// Whether `projection` calls an aggregate `aggregate` recognizes outside
+/// its nested queries.
+pub(crate) fn projects_aggregate(
+    projection: &[SelectItem],
+    aggregate: fn(&sqlparser::ast::Function) -> bool,
+) -> bool {
+    projection.iter().any(|item| {
+        walk(
+            item,
+            &mut AggregateOutput {
+                depth: 0,
+                aggregate,
+            },
+        )
+        .is_break()
+    })
 }
 
 /// Whether a scalar select returns one row even when its input is empty.
@@ -577,7 +596,7 @@ fn scalar_output_is_single(query: &Query, select: &Select) -> bool {
         && select.having.is_none()
         && matches!(&select.group_by, GroupByExpr::Expressions(expressions, _) if expressions.is_empty())
         && ((select.from.is_empty() && select.selection.is_none())
-            || walk(&select.projection, &mut AggregateOutput { depth: 0 }).is_break())
+            || projects_aggregate(&select.projection, is_aggregate))
 }
 
 /// Whether the body necessarily emits a null row that `EXCEPT` removes.

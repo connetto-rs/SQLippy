@@ -34,6 +34,8 @@ mod failing_assert;
 pub use failing_assert::FailingAssert;
 mod unending_loop;
 pub use unending_loop::UnendingLoop;
+mod foreign_key_broken_before_repair;
+pub use foreign_key_broken_before_repair::ForeignKeyBrokenBeforeRepair;
 mod function_without_safe_search_path;
 pub use function_without_safe_search_path::FunctionWithoutSafeSearchPath;
 

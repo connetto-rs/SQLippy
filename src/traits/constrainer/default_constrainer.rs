@@ -26,13 +26,13 @@ use crate::{
         ExposedDefinerOverProtectedTable, ExpressionDefeatsIndex,
         ExtensionForeignKeyOnDeleteCascade, ExtensionInExposedSchema, ExtensionWithoutVersion,
         FailingAssert, FlagNotBoolean, FloatingPointMoney, ForbiddenColumnInExtension,
-        ForeignKeyExistenceOracle, FractionalCount, FunctionMediatedPolicyCycle,
-        FunctionWithoutSafeSearchPath, GrantOptionToClientRole, ImpureImmutableFunction,
-        IncompatibleForeignKey, InvokerWithoutSearchPath, JsonStoredAsText, JsonType,
-        KeyWithoutExactEquality, LatentPolicyReadCycle, LeakproofUserFunction,
-        MaterializedViewExposed, MisquotedSearchPath, MissingPrimaryKey, MixedCaseColumnName,
-        MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText, MoneyType,
-        MonotonicFlagReset, MultiplePermissivePolicies, NarrowIntegerKey,
+        ForeignKeyBrokenBeforeRepair, ForeignKeyExistenceOracle, FractionalCount,
+        FunctionMediatedPolicyCycle, FunctionWithoutSafeSearchPath, GrantOptionToClientRole,
+        ImpureImmutableFunction, IncompatibleForeignKey, InvokerWithoutSearchPath,
+        JsonStoredAsText, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
+        LeakproofUserFunction, MaterializedViewExposed, MisquotedSearchPath, MissingPrimaryKey,
+        MixedCaseColumnName, MixedCaseForeignKeyName, MixedCaseTableName, MomentStoredAsText,
+        MoneyType, MonotonicFlagReset, MultiplePermissivePolicies, NarrowIntegerKey,
         NarrowerReferencingColumn, NeedlessIndexPredicate, NestedPolicySubquery, NilUuidSentinel,
         NonFiniteNumberAllowed, NonSnakeCaseColumnName, NonSnakeCaseTableName,
         NonminimalBooleanExpression, NonterminatingRecursiveCte, NotInNullList,
@@ -160,7 +160,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             constrainer.register_foreign_key_rule_with_floor(rule, Level::Allow);
         }
         register_schema_rules(&mut constrainer);
-        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 20] = [
+        let function_rules: [Box<dyn FunctionRule<Database = DB>>; 21] = [
             Box::new(ImpureImmutableFunction::default()),
             Box::new(WritingNonVolatileFunction::default()),
             Box::new(DefinerWithoutSearchPath::default()),
@@ -180,6 +180,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
             Box::new(CaseWithoutMatch::default()),
             Box::new(FailingAssert::default()),
             Box::new(UnendingLoop::default()),
+            Box::new(ForeignKeyBrokenBeforeRepair::default()),
             Box::new(AlwaysRaisingExpression::default()),
         ];
         for rule in function_rules {
