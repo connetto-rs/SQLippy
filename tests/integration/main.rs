@@ -83,6 +83,7 @@ mod nullable_concatenation;
 mod nullable_tenant_keys;
 mod nullable_unique;
 mod numbered_columns;
+mod one_to_many_edge_tables;
 mod overly_complex_boolean_expressions;
 mod owner_rights_views;
 mod parallel_tables;

@@ -38,16 +38,16 @@ use crate::{
         NonminimalBooleanExpression, NonterminatingRecursiveCte, NotInNullList,
         NotInNullableSubquery, NotInSubquery, NullComparison, NullCredentialRead, NullOnlyCheck,
         NullableCompositeForeignKey, NullableConcatenation, NullableTenantKey,
-        NullableUniqueColumn, NumberedColumns, OffsetPaging, OrderedSetAsDisjunction,
-        OuterColumnCapture, OverlyComplexBooleanExpression, OwnerRightsView,
-        OwnerRightsViewExposed, ParallelTables, PlpgsqlAmbiguousName, PluralColumnName,
-        PolicyExpressionDefeatsIndex, PolicyReadCycle, PolicyReadsUnprotectedTable,
-        PolicyTargetsBypassRole, PolicyToCreatingRole, PolicyWithoutRowLevelSecurity,
-        PolicyWithoutRowReference, PrefixRedundantIndex, PrimaryKeyNotNamedId,
-        PublicDefaultPrivilege, PublicSchemaCreate, QueryRewriteRule, RaisingSettingRead,
-        RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView, ReachableSequence,
-        ReachableTableWithoutRowLevelSecurity, RecursiveStepOverUnion, RedundantCheck,
-        RedundantExtensionEdge, RedundantTerm, ReferenceWithoutIdSuffix,
+        NullableUniqueColumn, NumberedColumns, OffsetPaging, OneToManyEdgeTable,
+        OrderedSetAsDisjunction, OuterColumnCapture, OverlyComplexBooleanExpression,
+        OwnerRightsView, OwnerRightsViewExposed, ParallelTables, PlpgsqlAmbiguousName,
+        PluralColumnName, PolicyExpressionDefeatsIndex, PolicyReadCycle,
+        PolicyReadsUnprotectedTable, PolicyTargetsBypassRole, PolicyToCreatingRole,
+        PolicyWithoutRowLevelSecurity, PolicyWithoutRowReference, PrefixRedundantIndex,
+        PrimaryKeyNotNamedId, PublicDefaultPrivilege, PublicSchemaCreate, QueryRewriteRule,
+        RaisingSettingRead, RandomOrderLimit, ReachableForeignTable, ReachableMaterializedView,
+        ReachableSequence, ReachableTableWithoutRowLevelSecurity, RecursiveStepOverUnion,
+        RedundantCheck, RedundantExtensionEdge, RedundantTerm, ReferenceWithoutIdSuffix,
         ReferencesGrantedToClientRole, RegColumnType, RepeatedFunctionSearchPath,
         RepeatedIndexColumn, RepeatedPolicyCall, RepeatedRecursionBound, RepeatedSettingRead,
         ReplacementWithoutTrustedCreation, ReservedKeywordIdentifier, RestrictiveWithoutPermissive,
@@ -204,7 +204,7 @@ impl<DB: DatabaseLike + 'static> Default for DefaultConstrainer<DB> {
 
 /// Registers every built-in table rule at its group's default level.
 fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let table_rules: [Box<dyn TableRule<Database = DB>>; 67] = [
+    let table_rules: [Box<dyn TableRule<Database = DB>>; 68] = [
         Box::new(AlwaysRaisingExpression::default()),
         Box::new(TimeDependentCheck::default()),
         Box::new(PrefixRedundantIndex::default()),
@@ -266,6 +266,7 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
         Box::new(RoleKeyedPolicyWhenPooled::default()),
         Box::new(CredentialFreeWrite::default()),
         Box::new(SuperkeyPrimaryKey::default()),
+        Box::new(OneToManyEdgeTable::default()),
         Box::new(UniqueKeyExistenceOracle::default()),
         Box::new(NullCredentialRead::default()),
         Box::new(NullableTenantKey::default()),
