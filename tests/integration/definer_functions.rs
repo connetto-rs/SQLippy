@@ -4301,7 +4301,10 @@ fn a_filter_term_reading_a_relation_counts_when_every_caller_reads_it_alike() {
                USING (kind = 'flag' AND EXISTS (SELECT 1 FROM public.open_flags()));
              CREATE POLICY caller_flagged ON notes FOR SELECT TO app
                USING (kind = 'caller' AND EXISTS (SELECT 1 FROM public.caller_flags()));
-             CREATE POLICY table_flagged ON notes FOR SELECT TO app
+             CREATE TABLE flag_notes (id INT, kind TEXT);
+             ALTER TABLE flag_notes ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON flag_notes TO app;
+             CREATE POLICY table_flagged ON flag_notes FOR SELECT TO app
                USING (kind = 'table' AND EXISTS (SELECT 1 FROM public.flags));
              CREATE POLICY granted_flagged ON notes FOR SELECT TO app
                USING (kind = 'granted' AND EXISTS (SELECT 1 FROM public.granted_flags));
@@ -4319,7 +4322,7 @@ fn a_filter_term_reading_a_relation_counts_when_every_caller_reads_it_alike() {
                  WHERE note.kind = 'caller' AND EXISTS (SELECT 1 FROM public.caller_flags()) $$;
              CREATE FUNCTION table_flagged_ids() RETURNS SETOF INT
                LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-                 SELECT note.id FROM public.notes note
+                 SELECT note.id FROM public.flag_notes note
                  WHERE note.kind = 'table' AND EXISTS (SELECT 1 FROM public.flags) $$;
              CREATE FUNCTION granted_flagged_ids() RETURNS SETOF INT
                LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
@@ -6299,6 +6302,53 @@ fn an_invoker_filter_of_a_keyed_helper_reads_alike_whoever_may_execute_it() {
                 "{invoker} {execute}"
             );
         }
+    }
+}
+
+/// The definers the rule reports where a policy shows the caller's own
+/// `resources` rows, a second permissive policy states `other`, `invoker`
+/// declares the functions it calls, and `granted` runs last.
+fn second_policy_exposed(other: &str, invoker: &str, granted: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE TABLE resources (id INT PRIMARY KEY, owner TEXT NOT NULL);
+             CREATE TABLE flags (resource_id INT NOT NULL);
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON resources TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE POLICY own ON resources FOR SELECT TO app
+               USING (owner = current_setting('app.user_id', true));
+             {invoker}
+             CREATE POLICY other ON resources FOR SELECT TO app USING ({other});
+             CREATE FUNCTION own_ids() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE resource.owner = current_setting('app.user_id', true) $$;
+             {granted}"
+        ),
+    )
+}
+
+#[test]
+fn a_policy_reading_a_table_the_caller_may_not_select_admits_no_row() {
+    let flagged = "EXISTS (SELECT 1 FROM public.flags flag WHERE flag.resource_id = id)";
+    let invoker = "CREATE FUNCTION public.flagged(resource INT) RETURNS BOOLEAN
+          LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+            SELECT EXISTS (SELECT 1 FROM public.flags flag WHERE flag.resource_id = flagged.resource) $$;";
+    for (other, declared) in [(flagged, ""), ("public.flagged(id)", invoker)] {
+        assert_eq!(
+            second_policy_exposed(other, declared, "GRANT SELECT ON flags TO app;"),
+            Vec::<String>::new(),
+            "{other}"
+        );
+        assert_eq!(
+            second_policy_exposed(other, declared, ""),
+            ["own_ids()"],
+            "{other}"
+        );
     }
 }
 
