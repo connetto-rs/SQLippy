@@ -80,9 +80,24 @@ fn a_value_must_agree_on_null_too() {
 
 #[test]
 fn a_form_dropping_a_term_is_left_to_overly_complex_boolean_expression() {
+    let schema =
+        "CREATE TABLE t (a BOOLEAN, b BOOLEAN NOT NULL, CHECK ((a AND b) OR (a AND NOT b)));";
+    let dropping = "(a AND b) OR (a AND NOT b)";
     assert_eq!(
-        reported("CREATE TABLE t (a BOOLEAN, b BOOLEAN, CHECK ((a AND b) OR (a AND NOT b)));"),
+        reported(&format!(
+            "{schema} CREATE MATERIALIZED VIEW m AS SELECT 1 FROM t WHERE {dropping};"
+        )),
         []
+    );
+    let constrainer: GenericConstrainer<ParserDB> = NonminimalBooleanExpression::default().into();
+    let database = ParserDB::parse::<PostgreSqlDialect>(schema).unwrap();
+    let statement = format!("DELETE FROM t WHERE {dropping}");
+    assert_eq!(statement_findings(&constrainer, &database, &statement), []);
+    let overly_complex: GenericConstrainer<ParserDB> =
+        OverlyComplexBooleanExpression::default().into();
+    assert_eq!(
+        statement_findings(&overly_complex, &database, &statement).len(),
+        1
     );
 }
 
