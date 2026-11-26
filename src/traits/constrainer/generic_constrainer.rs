@@ -3,7 +3,7 @@
 use std::ops::ControlFlow;
 
 use sql_traits::{
-    structs::{IdentifierCase, TargetName},
+    structs::TargetName,
     traits::{DatabaseLike, TableLike},
 };
 use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
@@ -330,10 +330,10 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
         self.refresh();
     }
 
-    pub(crate) fn allow(&mut self, rule: &str, table: TargetName<'_>, object: AllowedObject) {
+    pub(crate) fn allow(&mut self, rule: &str, relation: TargetName<'_>, object: AllowedObject) {
         self.allowances.push(SchemaAllowance {
             rule: rule.to_owned(),
-            table: table.into_owned(),
+            relation: relation.into_owned(),
             object,
         });
     }
@@ -407,14 +407,7 @@ impl<DB: DatabaseLike> GenericConstrainer<DB> {
             allowances: self
                 .allowances
                 .iter()
-                .map(|allowance| ResolvedAllowance {
-                    rule: &allowance.rule,
-                    table: database
-                        .table_by_target(allowance.table.clone(), IdentifierCase::Folded)
-                        .ok()
-                        .flatten(),
-                    object: &allowance.object,
-                })
+                .map(|allowance| ResolvedAllowance::new(allowance, database))
                 .collect(),
             used: vec![false; self.allowances.len()],
             statements: &[],

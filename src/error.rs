@@ -146,11 +146,15 @@ impl StatementSite {
     }
 }
 
-/// The schema object a [`SchemaAllowance`] names on its table.
+/// The schema object a [`SchemaAllowance`] names on its relation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AllowedObject {
     /// The table itself.
     Table,
+    /// The view itself.
+    View,
+    /// The materialized view itself.
+    MaterializedView,
     /// A foreign key of the table, by its constraint name.
     ForeignKey(String),
     /// An index of the table, or the unique constraint that owns one, by its
@@ -164,6 +168,8 @@ impl Display for AllowedObject {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Table => formatter.write_str("the table"),
+            Self::View => formatter.write_str("the view"),
+            Self::MaterializedView => formatter.write_str("the materialized view"),
             Self::ForeignKey(name) => write!(formatter, "foreign key '{name}'"),
             Self::Index(name) => write!(formatter, "index '{name}'"),
             Self::Policy(name) => write!(formatter, "policy '{name}'"),
@@ -175,7 +181,7 @@ impl Display for AllowedObject {
 #[derive(Debug, Clone)]
 pub struct SchemaAllowance {
     pub(crate) rule: String,
-    pub(crate) table: TargetName<'static>,
+    pub(crate) relation: TargetName<'static>,
     pub(crate) object: AllowedObject,
 }
 
@@ -186,10 +192,11 @@ impl SchemaAllowance {
         &self.rule
     }
 
-    /// Returns the table the excused object belongs to.
+    /// Returns the excused view or materialized view, or else the table the
+    /// excused object belongs to.
     #[must_use]
-    pub fn table(&self) -> &TargetName<'static> {
-        &self.table
+    pub fn relation(&self) -> &TargetName<'static> {
+        &self.relation
     }
 
     /// Returns the excused object.
@@ -201,15 +208,22 @@ impl SchemaAllowance {
 
 impl Display for SchemaAllowance {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (rule, table) = (&self.rule, self.table.name());
-        if self.object == AllowedObject::Table {
-            write!(formatter, "the allowance for {rule} on table '{table}'")?;
-        } else {
-            let object = &self.object;
-            write!(
+        let (rule, relation) = (&self.rule, self.relation.name());
+        match &self.object {
+            AllowedObject::Table => {
+                write!(formatter, "the allowance for {rule} on table '{relation}'")?;
+            }
+            AllowedObject::View => {
+                write!(formatter, "the allowance for {rule} on view '{relation}'")?;
+            }
+            AllowedObject::MaterializedView => write!(
                 formatter,
-                "the allowance for {rule} on {object} of table '{table}'"
-            )?;
+                "the allowance for {rule} on materialized view '{relation}'"
+            )?,
+            object => write!(
+                formatter,
+                "the allowance for {rule} on {object} of table '{relation}'"
+            )?,
         }
         formatter.write_str(" excuses no violation")
     }
@@ -305,7 +319,8 @@ impl Display for StatementAllowance {
 /// A reviewed exception excusing a rule's violations.
 #[derive(Debug, Clone)]
 pub enum Allowance {
-    /// An allowance naming a table or an object on it.
+    /// An allowance naming a table, an object on one, a view or a
+    /// materialized view.
     Schema(SchemaAllowance),
     /// An allowance naming a statement.
     Statement(StatementAllowance),

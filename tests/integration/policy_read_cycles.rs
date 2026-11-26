@@ -686,7 +686,7 @@ fn an_unused_allowance_names_its_table() {
     let Error::UnusedAllowance(Allowance::Schema(allowance)) = &error else {
         panic!("unexpected failure: {error}");
     };
-    assert_eq!(allowance.table().name(), "memberships");
+    assert_eq!(allowance.relation().name(), "memberships");
     assert!(error.to_string().contains("admins"));
 }
 

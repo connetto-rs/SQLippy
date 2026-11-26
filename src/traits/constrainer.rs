@@ -86,6 +86,8 @@ pub trait Constrainer: Default {
     }
 
     /// Excuses the violations of a rule reported on the given table itself.
+    /// A view takes [`Constrainer::allow_view`] and a materialized view
+    /// [`Constrainer::allow_materialized_view`].
     ///
     /// An allowance that excuses nothing, because the finding was fixed, the
     /// names do not match, the rule is at [`Level::Allow`] or the rule does
@@ -113,6 +115,43 @@ pub trait Constrainer: Default {
     fn allow_table(&mut self, rule: &str, table: TargetName<'_>) {
         self.constrainer_mut()
             .allow(rule, table, AllowedObject::Table);
+    }
+
+    /// Excuses the violations of a rule reported on the given view itself.
+    ///
+    /// An allowance that excuses nothing, because the finding was fixed, the
+    /// names do not match, the rule is at [`Level::Allow`] or the rule does
+    /// not run on the schema's [`Engine`], is reported as
+    /// [`Error::UnusedAllowance`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlippy::prelude::*;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    ///
+    /// let database = ParserDB::parse::<PostgreSqlDialect>(
+    ///     "CREATE TABLE entries (id INT, body TEXT);
+    ///      CREATE VIEW visible AS SELECT * FROM entries;",
+    /// )
+    /// .unwrap();
+    /// let mut constrainer: GenericConstrainer<ParserDB> = WildcardView::default().into();
+    /// constrainer.allow_view("wildcard_view", TargetName::new("visible", false));
+    /// assert!(constrainer.validate_schema(&database).is_ok());
+    /// ```
+    fn allow_view(&mut self, rule: &str, view: TargetName<'_>) {
+        self.constrainer_mut()
+            .allow(rule, view, AllowedObject::View);
+    }
+
+    /// Excuses the violations of a rule reported on the given materialized
+    /// view itself.
+    ///
+    /// An allowance that excuses nothing is reported as
+    /// [`Error::UnusedAllowance`].
+    fn allow_materialized_view(&mut self, rule: &str, view: TargetName<'_>) {
+        self.constrainer_mut()
+            .allow(rule, view, AllowedObject::MaterializedView);
     }
 
     /// Excuses the violations of a rule reported on one foreign key of a
