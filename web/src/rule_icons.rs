@@ -178,6 +178,7 @@ rule_icons! {
     "nonterminating_recursive_cte" => FaArrowsSpin,
     "duplicating_recursive_cte" => FaCopy,
     "unindexed_recursive_join" => FaMagnifyingGlass,
+    "join_on_non_key_columns" => FaCodeMerge,
     "recursive_step_over_union" => FaMagnifyingGlass,
     "unseeded_policy_set" => FaGlobe,
     "prefix_redundant_index" => FaTags,

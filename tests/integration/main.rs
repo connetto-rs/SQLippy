@@ -76,6 +76,7 @@ mod needless_index_predicates;
 mod nested_policy_subqueries;
 mod nil_uuid_sentinels;
 mod non_finite_numbers;
+mod non_key_joins;
 mod nonminimal_boolean_expressions;
 mod nonterminating_recursive_ctes;
 mod not_in_null_lists;
