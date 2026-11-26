@@ -5728,6 +5728,74 @@ fn a_helper_parameter_takes_the_argument_its_caller_passes() {
     );
 }
 
+/// Functions reported over [`OWNED`] with grants walked up a resource tree,
+/// a policy admitting the resources `authz.resources_with('reader')` reaches
+/// and a definer `authz.organizations_with(min_role)` drawing resources by
+/// `drawn`, with `seed` the call seeding the walk.
+fn reached(seed: &str, drawn: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "{OWNED}
+             CREATE TABLE public.grants (resource_id INT NOT NULL, user_id INT NOT NULL, role authz.role NOT NULL);
+             CREATE TABLE public.resource_parents (id INT NOT NULL, parent_id INT NOT NULL);
+             CREATE TABLE public.ownables (id INT NOT NULL, project_id INT NOT NULL);
+             CREATE FUNCTION authz.granted_resources(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT permission.resource_id FROM public.grants permission
+                 WHERE permission.user_id = authz.caller_id() AND permission.role >= min_role $$;
+             CREATE FUNCTION authz.shared_resources(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT permission.resource_id FROM public.grants permission
+                 WHERE permission.role >= min_role $$;
+             CREATE FUNCTION authz.containers_with(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH RECURSIVE reached (id) AS (
+                   SELECT granted.id FROM {seed} granted (id)
+                   UNION
+                   SELECT parent.id FROM reached JOIN public.resource_parents parent ON parent.parent_id = reached.id
+                 )
+                 SELECT id FROM reached $$;
+             CREATE FUNCTION authz.reached_with(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT reached.id FROM authz.containers_with(min_role) reached (id)
+                 UNION
+                 SELECT ownable.id FROM public.ownables ownable
+                 WHERE ownable.project_id IN (SELECT authz.containers_with(min_role)) $$;
+             CREATE FUNCTION authz.resources_with(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE resource.id IN (SELECT authz.reached_with(min_role)) $$;
+             CREATE POLICY readable_resources ON public.resources FOR SELECT TO app
+               USING (id = ANY (ARRAY(SELECT authz.resources_with('reader'))));
+             CREATE FUNCTION authz.organizations_with(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.organization_id FROM public.resources resource
+                 WHERE resource.id IN (SELECT {drawn}) $$;"
+        ),
+    )
+}
+
+#[test]
+fn a_set_seeding_the_walk_a_policy_helper_reaches_confines_a_read() {
+    let granted = "authz.granted_resources(min_role)";
+    assert_eq!(reached(granted, granted), Vec::<String>::new());
+    assert_eq!(
+        reached(granted, "authz.granted_resources('admin')"),
+        Vec::<String>::new()
+    );
+    for seed in [
+        "authz.shared_resources(min_role)",
+        "authz.granted_resources('admin')",
+    ] {
+        assert_eq!(
+            reached(seed, granted),
+            ["organizations_with(authz.role)"],
+            "{seed}"
+        );
+    }
+}
+
 const CAPPED_KINDS: &str = "
     CREATE ROLE app NOLOGIN;
     CREATE SCHEMA authz;

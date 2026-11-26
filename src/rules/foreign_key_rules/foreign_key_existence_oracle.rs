@@ -68,8 +68,10 @@ use crate::{
 /// permissive `SELECT` policy of the referenced table tests the columns the
 /// key maps onto as the check tests their key columns, or tests one against a
 /// set the check confines its key column within, as written, as the body of
-/// a helper taking no argument selects it, as an arm seeding the `WITH
-/// RECURSIVE` walk such a helper returns selects it, declared with
+/// a helper taking no argument selects it, as an arm of a helper's body
+/// selects it, one the body joins by `UNION` or one seeding the `WITH
+/// RECURSIVE` walk the body returns, read with the literals the call passes
+/// for the helper's parameters, declared with
 /// [`Deployment::with_set_within`](crate::deployment::Deployment::with_set_within),
 /// or read off a ladder of the schema, where a helper called with a higher
 /// label of an enum parameter returns only rows it returns for a lower one,
