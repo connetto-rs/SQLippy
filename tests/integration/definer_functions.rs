@@ -5186,6 +5186,57 @@ fn a_policy_helper_arm_is_met_through_the_arms_of_the_helper_it_calls() {
     }
 }
 
+#[test]
+fn a_function_returning_every_row_of_a_call_keeps_the_arms_the_call_returns_in_full() {
+    let containers = |wrapper: &str, inner: &str, owner: &str, outer: &str| {
+        format!(
+            "CREATE FUNCTION authz.granted_containers() RETURNS SETOF INT
+               LANGUAGE sql STABLE {inner} SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE resource.id IN (SELECT authz.granted_resources('reader'))
+                   AND resource.kind IN ('folder', 'project') $$;
+             CREATE FUNCTION authz.residual_read_containers() RETURNS SETOF INT
+               LANGUAGE sql STABLE {outer} SET search_path = pg_catalog, pg_temp AS $$
+                 {wrapper} $$;
+             ALTER FUNCTION authz.granted_containers() OWNER TO {owner};
+             ALTER FUNCTION authz.residual_read_containers() OWNER TO authz_owner;"
+        )
+    };
+    let definer = "SECURITY DEFINER";
+    let invoker = "SECURITY INVOKER";
+    let reached = "SELECT reached.id FROM authz.granted_containers() reached (id)";
+    let organizations = format!(
+        "{reached} UNION SELECT resource.id FROM public.resources resource WHERE resource.kind = 'organization'"
+    );
+    for declared in [
+        containers(reached, definer, "authz_owner", definer),
+        containers(&organizations, definer, "authz_owner", definer),
+        containers(reached, invoker, "auditor", definer),
+    ] {
+        assert_eq!(
+            residual_resources(&declared),
+            Vec::<String>::new(),
+            "{declared}"
+        );
+    }
+    for declared in [
+        containers(
+            &format!("{reached} WHERE reached.id <> 7"),
+            definer,
+            "authz_owner",
+            definer,
+        ),
+        containers(reached, definer, "auditor", definer),
+        containers(reached, definer, "authz_owner", invoker),
+    ] {
+        assert_eq!(
+            residual_resources(&declared),
+            ["resources_with(authz.role)"],
+            "{declared}"
+        );
+    }
+}
+
 /// Functions reported over `tables`, declaring `public.teams` and
 /// `public.team_members`, and `definer`, the body of a function returning
 /// the organizations of teams. A team and a member are visible in the
