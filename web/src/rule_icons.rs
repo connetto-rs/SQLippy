@@ -245,6 +245,7 @@ rule_icons! {
     "superkey_primary_key" => FaKey,
     "copied_column_through_superkey" => FaCopy,
     "parallel_tables" => FaTableList,
+    "foreign_key_cycle" => FaArrowsSpin,
     "undeletable_reference" => FaLinkSlash,
     "foreign_key_existence_oracle" => FaEyeSlash,
     "unique_key_existence_oracle" => FaEyeSlash,

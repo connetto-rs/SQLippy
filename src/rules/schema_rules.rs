@@ -93,6 +93,8 @@ mod unindexed_recursive_join;
 pub use unindexed_recursive_join::UnindexedRecursiveJoin;
 mod parallel_tables;
 pub use parallel_tables::ParallelTables;
+mod foreign_key_cycle;
+pub use foreign_key_cycle::ForeignKeyCycle;
 mod recursive_step_over_union;
 pub use recursive_step_over_union::RecursiveStepOverUnion;
 mod unseeded_policy_set;

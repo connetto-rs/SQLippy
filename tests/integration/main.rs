@@ -54,6 +54,7 @@ mod extension_column_names;
 mod extension_members;
 mod extension_versions;
 mod failing_asserts;
+mod foreign_key_cycles;
 mod foreign_key_existence_oracles;
 mod foreign_key_hierarchies;
 mod foreign_keys_broken_before_repair;
