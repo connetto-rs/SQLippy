@@ -38,8 +38,8 @@ use crate::{
         ladder_support::called,
         policy_read_support::{reads_every_row, sublink_reads},
         policy_support::{
-            acting, conjuncts, disjuncts, is_column_reference, is_contradiction, is_tautology,
-            sets_only_search_path, sql_set_body, unwrapped,
+            acting, client_roles, conjuncts, disjuncts, is_column_reference, is_contradiction,
+            is_tautology, sets_only_search_path, sql_set_body, unwrapped,
         },
     },
 };
@@ -245,8 +245,9 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
 
     /// This confinement, also settling a key whose check pins one of
     /// `columns`, by stored name, to a declared principal accessor. Only
-    /// rows of the writer's principal hold its value in such a column, so a
-    /// key colliding there names a row of that principal.
+    /// rows of the writer's principal hold its value in such a column, or in
+    /// the referenced column a foreign key maps it onto, so a key meeting a
+    /// row there names a row of that principal.
     pub(crate) fn with_principal_columns(
         self,
         columns: impl IntoIterator<Item = impl AsRef<str>>,
@@ -2275,10 +2276,56 @@ pub(crate) fn writes_free_key<'a, DB: DatabaseLike>(
     Ok(true)
 }
 
+/// The stored names of `columns` of `table` that every client role writes
+/// only with the value a declared principal accessor yields for it, so that
+/// only rows of one principal hold each value.
+pub(crate) fn principal_columns<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    deployment: &Deployment,
+    table: &'db DB::Table,
+    columns: &[&'db DB::Column],
+) -> Result<Vec<Cow<'db, str>>, LookupError> {
+    let mut pinned = Vec::new();
+    if deployment.principal_accessors().is_empty() {
+        return Ok(pinned);
+    }
+    let mut roles = Vec::new();
+    for (_, role) in client_roles(database, deployment) {
+        roles.push((role, table.privileges(acting(role), database)?));
+    }
+    'columns: for &column in columns {
+        let name = column.stored_column_name();
+        for (role, held) in &roles {
+            for (privilege, statement, written) in [
+                (
+                    &held.insert,
+                    RowStatement::Insert { returning: false },
+                    RowVersion::Inserted,
+                ),
+                (
+                    &held.update,
+                    RowStatement::Update { reads: false },
+                    RowVersion::Updated,
+                ),
+            ] {
+                if privilege.on_column(column)
+                    && !writes_only_pinned(
+                        database, deployment, table, statement, written, *role, &name,
+                    )?
+                {
+                    continue 'columns;
+                }
+            }
+        }
+        pinned.push(name);
+    }
+    Ok(pinned)
+}
+
 /// Whether every row `role` writes through `statement` on `table` holds in
 /// `column` the value a declared principal accessor yields for it, or the
 /// statement writes nothing.
-pub(crate) fn writes_only_pinned<'a, DB: DatabaseLike>(
+fn writes_only_pinned<'a, DB: DatabaseLike>(
     database: &'a DB,
     deployment: &Deployment,
     table: &'a DB::Table,

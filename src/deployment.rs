@@ -639,7 +639,9 @@ impl Deployment {
     /// function or a trigger, writes a principal's value only into rows of
     /// that principal, since the rules do not follow such writes.
     /// [`UniqueKeyExistenceOracle`](crate::prelude::UniqueKeyExistenceOracle)
-    /// reads it.
+    /// and
+    /// [`ForeignKeyExistenceOracle`](crate::prelude::ForeignKeyExistenceOracle)
+    /// read it.
     ///
     /// # Errors
     ///

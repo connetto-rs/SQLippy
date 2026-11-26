@@ -2142,3 +2142,168 @@ fn a_key_a_helper_confines_to_rows_a_restrictive_read_may_hide_is_reported() {
         }
     }
 }
+
+const PINNED: &str = "namespace_id = (SELECT authz.caller_namespace())";
+
+/// Teams whose subtype key into the grantees `app` reads only through its
+/// teams, with `check` the insert check of `app`, each `(from, to)` of
+/// `edits` applied and `extra` appended.
+fn subtype_schema(check: &str, edits: &[(&str, &str)], extra: &str) -> String {
+    let mut sql = format!(
+        "CREATE ROLE app;
+         CREATE SCHEMA authz;
+         CREATE TABLE namespaces (id UUID PRIMARY KEY, user_id UUID UNIQUE NOT NULL);
+         CREATE FUNCTION authz.caller_namespace() RETURNS UUID LANGUAGE sql STABLE AS $$
+             SELECT namespace.id FROM namespaces namespace
+             WHERE namespace.user_id = NULLIF(current_setting('app.user_id', true), '')::UUID
+         $$;
+         CREATE TABLE grantees (
+             namespace_id UUID NOT NULL,
+             id UUID NOT NULL,
+             kind TEXT NOT NULL,
+             PRIMARY KEY (namespace_id, id),
+             UNIQUE (namespace_id, id, kind)
+         );
+         ALTER TABLE grantees ENABLE ROW LEVEL SECURITY;
+         CREATE TABLE teams (
+             namespace_id UUID NOT NULL,
+             id UUID NOT NULL,
+             kind TEXT NOT NULL DEFAULT 'team' CHECK (kind = 'team'),
+             member_id UUID NOT NULL,
+             PRIMARY KEY (namespace_id, id),
+             CONSTRAINT teams_grantee FOREIGN KEY (namespace_id, id, kind)
+                 REFERENCES grantees (namespace_id, id, kind)
+         );
+         ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
+         GRANT SELECT ON grantees TO app;
+         GRANT SELECT, INSERT ON teams TO app;
+         CREATE POLICY teams_select ON teams FOR SELECT TO app
+             USING (member_id = NULLIF(current_setting('app.user_id', true), '')::UUID);
+         CREATE POLICY teams_insert ON teams FOR INSERT TO app WITH CHECK ({check});
+         CREATE POLICY grantees_select ON grantees FOR SELECT TO app
+             USING ((namespace_id, id) IN (SELECT team.namespace_id, team.id FROM teams team));
+         {extra}"
+    );
+    for (from, to) in edits {
+        assert!(sql.contains(from), "{from}");
+        sql = sql.replace(from, to);
+    }
+    sql
+}
+
+/// Objects of every finding on [`subtype_schema`], under a deployment
+/// declaring `authz.caller_namespace()` a principal accessor.
+fn pinned_subtypes(check: &str, edits: &[(&str, &str)], extra: &str) -> Vec<String> {
+    objects_under(
+        Deployment::default()
+            .with_app_role("app")
+            .with_principal_accessor("authz.caller_namespace()")
+            .unwrap(),
+        &subtype_schema(check, edits, extra),
+    )
+}
+
+#[test]
+fn a_key_pinned_to_the_writers_principal_matches_only_its_own_rows() {
+    assert_eq!(
+        objects_under(
+            Deployment::default().with_app_role("app"),
+            &subtype_schema(PINNED, &[], "")
+        ),
+        ["teams.teams_grantee"]
+    );
+    for extra in [
+        "",
+        "CREATE POLICY teams_pinned ON teams AS RESTRICTIVE FOR INSERT TO app
+             WITH CHECK (authz.caller_namespace() = teams.namespace_id);",
+        &format!(
+            "GRANT UPDATE (namespace_id, id) ON teams TO app;
+             CREATE POLICY teams_update ON teams FOR UPDATE TO app
+                 USING (true) WITH CHECK ({PINNED});"
+        ),
+        &format!(
+            "GRANT INSERT ON grantees TO app;
+             CREATE POLICY grantees_insert ON grantees FOR INSERT TO app
+                 WITH CHECK ({PINNED});"
+        ),
+        "CREATE FUNCTION insert_grantee() RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+         BEGIN
+             INSERT INTO grantees (namespace_id, id, kind) VALUES (NEW.namespace_id, NEW.id, NEW.kind)
+                 ON CONFLICT (namespace_id, id, kind) DO NOTHING;
+             RETURN NEW;
+         END
+         $$;
+         CREATE TRIGGER teams_grantee AFTER INSERT ON teams
+             FOR EACH ROW EXECUTE FUNCTION insert_grantee();",
+    ] {
+        assert_eq!(pinned_subtypes(PINNED, &[], extra), Vec::<String>::new(), "{extra}");
+    }
+    assert_eq!(
+        pinned_subtypes(
+            "true",
+            &[],
+            &format!(
+                "CREATE POLICY teams_pinned ON teams AS RESTRICTIVE FOR INSERT TO app
+                 WITH CHECK ({PINNED});"
+            )
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_key_that_may_match_rows_of_another_principal_is_reported() {
+    for check in [
+        "namespace_id IS NOT NULL",
+        "namespace_id = (SELECT authz.caller_namespace()) OR member_id IS NOT NULL",
+    ] {
+        assert_eq!(
+            pinned_subtypes(check, &[], ""),
+            ["teams.teams_grantee"],
+            "{check}"
+        );
+    }
+    for extra in [
+        "GRANT INSERT ON grantees TO app;
+         CREATE POLICY grantees_insert ON grantees FOR INSERT TO app WITH CHECK (true);",
+        "GRANT UPDATE (namespace_id) ON grantees TO app;
+         CREATE POLICY grantees_move ON grantees FOR UPDATE TO app USING (true);",
+        "GRANT UPDATE (namespace_id) ON teams TO app;
+         CREATE POLICY teams_move ON teams FOR UPDATE TO app USING (true);",
+    ] {
+        assert_eq!(
+            pinned_subtypes(PINNED, &[], extra),
+            ["teams.teams_grantee"],
+            "{extra}"
+        );
+    }
+    let outside_the_key = [
+        (
+            "member_id UUID NOT NULL,",
+            "member_id UUID NOT NULL,\n             grantee_namespace_id UUID NOT NULL,",
+        ),
+        (
+            "FOREIGN KEY (namespace_id, id, kind)",
+            "FOREIGN KEY (grantee_namespace_id, id, kind)",
+        ),
+    ];
+    let unlike = [
+        (
+            "CREATE SCHEMA authz;",
+            "CREATE SCHEMA authz;
+             CREATE COLLATION folded (provider = icu, locale = 'und-u-ks-level2', deterministic = false);",
+        ),
+        ("RETURNS UUID", "RETURNS TEXT"),
+        (
+            "namespace_id UUID NOT NULL",
+            "namespace_id TEXT COLLATE folded NOT NULL",
+        ),
+    ];
+    for edits in [&outside_the_key[..], &unlike] {
+        assert_eq!(
+            pinned_subtypes(PINNED, edits, ""),
+            ["teams.teams_grantee"],
+            "{edits:?}"
+        );
+    }
+}

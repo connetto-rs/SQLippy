@@ -18,14 +18,16 @@ use sqlparser::ast::{
 use sqlparser_plpgsql::embedded::{Block, Loop, LoopControl, Node, NodeKind, Target};
 
 use crate::{
+    deployment::Deployment,
     engine::Engine,
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        closed_set_support::{checked_literals, stored_name},
+        closed_set_support::{checked_literals, same_identity, stored_name},
         cte_support::stored_table,
         existence_oracle_support::{
-            Confinement, hides_rows, row_security, writes_free_key, writes_whole_key,
+            Confinement, hides_rows, principal_columns, row_security, writes_free_key,
+            writes_whole_key,
         },
         expression_site_support::is_null_literal,
         function_reach_support::Reach,
@@ -109,6 +111,13 @@ use crate::{
 /// holding a `NULL` key column or, on `UPDATE`, an unchanged key, neither of
 /// which PostgreSQL checks. An `ASSERT` holds nothing, since a session may
 /// turn assertions off.
+/// A write is also excused when its check pins a key column to a principal
+/// accessor the deployment declares, as `namespace_id = (SELECT
+/// authz.caller_namespace())` in a top-level `AND` term of a restrictive
+/// policy or of every permissive one, while the key compares that column by
+/// identity with a referenced column that every client role holding `INSERT`
+/// or `UPDATE` on it writes only so pinned. Only rows of the writer's own
+/// principal then hold the value the key looks up.
 ///
 /// An insert is also excused when every referenced row the key can match
 /// already holds a referencing row with the same values of a unique key of
@@ -545,19 +554,12 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
         }
         let child = foreign_key.host_table(database);
         let key_columns: Vec<&DB::Column> = foreign_key.host_columns(database)?.collect();
-        let confinement = Confinement::new(
+        let confinement = confinement(
             database,
             reporter.deployment(),
-            key_columns
-                .iter()
-                .map(|column| column.stored_column_name())
-                .collect(),
+            foreign_key,
             parent,
-            foreign_key
-                .referenced_columns(database)?
-                .map(ColumnLike::stored_column_name)
-                .collect(),
-            true,
+            &key_columns,
         )?;
         let covering = covering_columns(database, foreign_key)?;
         let (insert_settled, update_settled) =
@@ -631,10 +633,49 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
                 "A foreign key of '{child_name}' into '{parent_name}' tells {} whether a row of '{parent_name}' it cannot read exists, since the key is checked past row-level security.",
                 probes.join(", ")
             ),
-            format!("Keep the key server-written, confine it in the WITH CHECK of '{child_name}' to rows the writer may point at, such as `IN (SELECT ... FROM {parent_name})` or the set the SELECT policies of '{parent_name}' test the column the key maps onto against, or let the writer read every row of '{parent_name}'."),
+            format!("Keep the key server-written, confine it in the WITH CHECK of '{child_name}' to rows the writer may point at, such as `IN (SELECT ... FROM {parent_name})` or the set the SELECT policies of '{parent_name}' test the column the key maps onto against, pin a key column there to a declared principal accessor, or let the writer read every row of '{parent_name}'."),
         )?;
         Ok(())
     }
+}
+
+/// The confinement of the key columns of `foreign_key` into `parent`, also
+/// settling a key pinned to a principal accessor in a column the key
+/// compares by identity with a column of `parent` holding each value only in
+/// rows of one principal, as [`principal_columns`] decides.
+fn confinement<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    deployment: &'db Deployment,
+    foreign_key: &'db DB::ForeignKey,
+    parent: &'db DB::Table,
+    key_columns: &[&'db DB::Column],
+) -> Result<Confinement<'db, DB>, LookupError> {
+    let referenced_columns: Vec<&DB::Column> = foreign_key.referenced_columns(database)?.collect();
+    let pinned = principal_columns(database, deployment, parent, &referenced_columns)?;
+    let mut principal = Vec::new();
+    for (&column, &referenced) in key_columns.iter().zip(&referenced_columns) {
+        if pinned.contains(&referenced.stored_column_name())
+            && same_identity(database, column, referenced)?
+        {
+            principal.push(column.stored_column_name());
+        }
+    }
+    Ok(Confinement::new(
+        database,
+        deployment,
+        key_columns
+            .iter()
+            .copied()
+            .map(ColumnLike::stored_column_name)
+            .collect(),
+        parent,
+        referenced_columns
+            .into_iter()
+            .map(ColumnLike::stored_column_name)
+            .collect(),
+        true,
+    )?
+    .with_principal_columns(principal))
 }
 
 /// The columns of a unique key of the referencing table that every row of
