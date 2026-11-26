@@ -60,6 +60,22 @@ fn deferrable_keys_still_close_a_cycle() {
 }
 
 #[test]
+fn a_second_key_between_the_same_tables_is_listed_once() {
+    assert_eq!(
+        reported(
+            "CREATE TABLE parents (id BIGINT PRIMARY KEY, child_id BIGINT, heir_id BIGINT);
+             CREATE TABLE children (id BIGINT PRIMARY KEY, parent_id BIGINT REFERENCES parents (id));
+             ALTER TABLE parents ADD FOREIGN KEY (child_id) REFERENCES children (id);
+             ALTER TABLE parents ADD FOREIGN KEY (heir_id) REFERENCES children (id);"
+        ),
+        [(
+            "children".to_owned(),
+            "Tables 'children' and 'parents' reference one another through the foreign key cycle `children(parent_id) -> parents(id) -> parents(child_id) -> children(id)`. The foreign key `parents(heir_id) -> children(id)` also runs between these tables.".to_owned()
+        )]
+    );
+}
+
+#[test]
 fn the_shortest_cycle_is_spelled_whatever_the_key_order() {
     assert_eq!(
         reported(

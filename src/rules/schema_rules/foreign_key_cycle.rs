@@ -128,15 +128,19 @@ fn components<T>(edges: &[Vec<(usize, T)>]) -> Vec<Vec<usize>> {
 
 /// The edges, each as its host node and its position among the host's
 /// edges, of a shortest cycle from `start` back to `start` through the nodes
-/// `inside` accepts.
+/// `inside` accepts, which must form a strongly connected component of two
+/// or more nodes holding `start`.
 fn shortest_cycle<T>(
     edges: &[Vec<(usize, T)>],
     inside: impl Fn(usize) -> bool,
     start: usize,
-) -> Option<Vec<(usize, usize)>> {
+) -> Vec<(usize, usize)> {
     let mut reached: Vec<Option<(usize, usize)>> = vec![None; edges.len()];
     let mut queue = VecDeque::from([start]);
-    while let Some(node) = queue.pop_front() {
+    loop {
+        let node = queue
+            .pop_front()
+            .expect("a strongly connected component holds a cycle through each of its nodes");
         for (position, &(target, _)) in edges[node].iter().enumerate() {
             if target == start {
                 let mut cycle = vec![(node, position)];
@@ -146,7 +150,7 @@ fn shortest_cycle<T>(
                     current = step.0;
                 }
                 cycle.reverse();
-                return Some(cycle);
+                return cycle;
             }
             if inside(target) && reached[target].is_none() {
                 reached[target] = Some((node, position));
@@ -154,7 +158,6 @@ fn shortest_cycle<T>(
             }
         }
     }
-    None
 }
 
 /// The names of `columns`, separated by commas.
@@ -211,9 +214,7 @@ impl<DB: DatabaseLike> SchemaRule for ForeignKeyCycle<DB> {
                 if referenced == table {
                     continue;
                 }
-                if let Some(&target) = positions.get(referenced) {
-                    keys.push((target, foreign_key));
-                }
+                keys.push((positions[referenced], foreign_key));
             }
             edges.push(keys);
         }
@@ -228,10 +229,7 @@ impl<DB: DatabaseLike> SchemaRule for ForeignKeyCycle<DB> {
             let [start, _, ..] = component[..] else {
                 continue;
             };
-            let Some(cycle) = shortest_cycle(&edges, |node| component_of[node] == number, start)
-            else {
-                continue;
-            };
+            let cycle = shortest_cycle(&edges, |node| component_of[node] == number, start);
             let mut steps = Vec::with_capacity(cycle.len());
             for &(host, position) in &cycle {
                 let (target, foreign_key) = edges[host][position];
@@ -252,9 +250,12 @@ impl<DB: DatabaseLike> SchemaRule for ForeignKeyCycle<DB> {
                 .iter()
                 .map(|&member| format!("'{}'", tables[member].table_name()))
                 .collect();
-            let also = match others.as_slice() {
-                [] => String::new(),
-                [only] => format!(" The foreign key {only} also runs between these tables."),
+            let also = match others.len() {
+                0 => String::new(),
+                1 => format!(
+                    " The foreign key {} also runs between these tables.",
+                    english_list(&others)
+                ),
                 _ => format!(
                     " The foreign keys {} also run between these tables.",
                     english_list(&others)
