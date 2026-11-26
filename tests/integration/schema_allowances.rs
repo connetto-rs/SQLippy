@@ -1,5 +1,5 @@
-//! Allowances naming a table, a foreign key or a unique index, observed
-//! through the public constrainer API.
+//! Allowances naming a table, a foreign key, a unique index, a view or a
+//! materialized view, observed through the public constrainer API.
 
 use sqlippy::prelude::*;
 
@@ -267,5 +267,62 @@ fn an_index_allowance_for_an_index_the_rule_skips_is_reported_unused() {
         [
             "the allowance for unscoped_unique_constraint_on_row_level_security_table on index 'users_pkey' of table 'users' excuses no violation"
         ]
+    );
+}
+
+const VIEW_SCHEMA: &str = "
+    CREATE TABLE entries (id INT, body TEXT);
+    CREATE VIEW visible AS SELECT * FROM entries;
+    CREATE VIEW drafts AS SELECT * FROM entries;
+    CREATE MATERIALIZED VIEW digest AS SELECT * FROM entries;";
+
+fn wildcard_constrainer() -> GenericConstrainer<ParserDB> {
+    WildcardView::default().into()
+}
+
+fn wildcard_findings(objects: &[&str]) -> Vec<(&'static str, String)> {
+    objects
+        .iter()
+        .map(|object| ("wildcard_view", (*object).to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_view_allowance_excuses_its_rule_on_that_view_alone() {
+    let mut constrainer = wildcard_constrainer();
+    constrainer.allow_view("wildcard_view", TargetName::new("visible", false));
+    assert_eq!(
+        outcome(&constrainer, VIEW_SCHEMA),
+        (wildcard_findings(&["drafts", "digest"]), vec![])
+    );
+}
+
+#[test]
+fn a_materialized_view_allowance_excuses_its_rule_on_that_view_alone() {
+    let mut constrainer = wildcard_constrainer();
+    constrainer.allow_materialized_view("wildcard_view", TargetName::new("digest", false));
+    assert_eq!(
+        outcome(&constrainer, VIEW_SCHEMA),
+        (wildcard_findings(&["drafts", "visible"]), vec![])
+    );
+}
+
+#[test]
+fn an_allowance_naming_a_view_as_another_kind_of_relation_is_reported_unused() {
+    let mut constrainer = wildcard_constrainer();
+    constrainer.allow_table("wildcard_view", TargetName::new("visible", false));
+    constrainer.allow_view("wildcard_view", TargetName::new("digest", false));
+    constrainer.allow_materialized_view("wildcard_view", TargetName::new("drafts", false));
+    assert_eq!(
+        outcome(&constrainer, VIEW_SCHEMA),
+        (
+            wildcard_findings(&["drafts", "visible", "digest"]),
+            vec![
+                "the allowance for wildcard_view on table 'visible' excuses no violation".to_owned(),
+                "the allowance for wildcard_view on view 'digest' excuses no violation".to_owned(),
+                "the allowance for wildcard_view on materialized view 'drafts' excuses no violation"
+                    .to_owned(),
+            ]
+        )
     );
 }

@@ -4,11 +4,11 @@ use std::{borrow::Cow, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{DefaultPrivilege, RoleSetting},
+    structs::{DefaultPrivilege, IdentifierCase, RoleSetting, TargetName},
     traits::{
         ColumnLike, DatabaseLike, DomainLike, ExtensionLike, ForeignKeyLike, FunctionLike,
-        IndexLike, PolicyLike, RoleLike, RoleMembershipLike, SequenceLike, TableIndexLike,
-        TableLike, UserDefinedTypeLike, ViewLike,
+        IndexLike, PolicyLike, Relation, RoleLike, RoleMembershipLike, SequenceLike,
+        TableIndexLike, TableLike, UserDefinedTypeLike, ViewLike,
     },
 };
 use sqlparser::ast::{ArgMode, Statement};
@@ -17,16 +17,59 @@ use crate::{
     deployment::Deployment,
     error::{
         AllowedObject, Error, FunctionAllowance, Interruption, Location, PolicySite,
-        StatementAllowance, StatementSite, Violation,
+        SchemaAllowance, StatementAllowance, StatementSite, Violation,
     },
     lint::{Level, RuleMetadata},
 };
 
-/// A schema allowance whose table was resolved against the schema.
+/// A schema allowance whose relation was resolved against the schema.
 pub(crate) struct ResolvedAllowance<'db, DB: DatabaseLike> {
     pub(crate) rule: &'db str,
-    pub(crate) table: Option<&'db DB::Table>,
+    pub(crate) relation: Option<Relation<'db, DB>>,
     pub(crate) object: &'db AllowedObject,
+}
+
+impl<'db, DB: DatabaseLike> ResolvedAllowance<'db, DB> {
+    /// Resolves the relation `allowance` names in `database`, as the kind of
+    /// relation its object is or belongs to.
+    pub(crate) fn new(allowance: &'db SchemaAllowance, database: &'db DB) -> Self {
+        let named = &allowance.relation;
+        let mut target = TargetName::new(named.name(), named.name_is_quoted());
+        if let Some(schema) = named.schema() {
+            target = target.with_schema(schema, named.schema_is_quoted());
+        }
+        let case = IdentifierCase::Folded;
+        let relation = match allowance.object {
+            AllowedObject::View => database
+                .view_by_target(target, case)
+                .ok()
+                .flatten()
+                .map(Relation::View),
+            AllowedObject::MaterializedView => database
+                .materialized_view_by_target(target, case)
+                .ok()
+                .flatten()
+                .map(Relation::MaterializedView),
+            AllowedObject::Table
+            | AllowedObject::ForeignKey(_)
+            | AllowedObject::Index(_)
+            | AllowedObject::Policy(_) => database
+                .table_by_target(target, case)
+                .ok()
+                .flatten()
+                .map(Relation::Table),
+        };
+        Self {
+            rule: &allowance.rule,
+            relation,
+            object: &allowance.object,
+        }
+    }
+
+    /// Whether the allowance names `table` or an object on it.
+    fn names_table(&self, table: &DB::Table) -> bool {
+        matches!(self.relation, Some(Relation::Table(allowed)) if allowed == table)
+    }
 }
 
 /// The allowances a reporter consults, and which schema allowances excused a
@@ -117,7 +160,7 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
     ) -> Result<(), Interruption> {
         let excused = self.excused(|allowance| {
             sites.iter().any(|site| {
-                allowance.table == Some(site.table.as_ref())
+                allowance.names_table(site.table.as_ref())
                     && matches!(allowance.object, AllowedObject::Policy(policy) if policy == site.policy.name())
             })
         });
@@ -181,7 +224,7 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         resolution: String,
     ) -> Result<(), Interruption> {
         if self.excused(|allowance| {
-            allowance.table == Some(table) && *allowance.object == AllowedObject::Table
+            allowance.names_table(table) && *allowance.object == AllowedObject::Table
         }) {
             return Ok(());
         }
@@ -236,7 +279,7 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         let host = foreign_key.host_table(self.database);
         let name = foreign_key.constraint_name(self.database)?;
         if self.excused(|allowance| {
-            allowance.table == Some(host)
+            allowance.names_table(host)
                 && matches!(allowance.object, AllowedObject::ForeignKey(allowed) if Some(allowed.as_str()) == name.as_deref())
         }) {
             return Ok(());
@@ -310,7 +353,7 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         let table = index.table(self.database);
         let name = index_name(index, self.database)?;
         if self.excused(|allowance| {
-            allowance.table == Some(table)
+            allowance.names_table(table)
                 && matches!(allowance.object, AllowedObject::Index(allowed) if Some(allowed.as_str()) == name.as_deref())
         }) {
             return Ok(());
@@ -327,7 +370,8 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         self.emit(location(index), object, message, resolution)
     }
 
-    /// Reports a violation on a view.
+    /// Reports a violation on a view, unless an allowance for this rule
+    /// names the view.
     ///
     /// # Errors
     ///
@@ -339,6 +383,11 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         message: String,
         resolution: String,
     ) -> Result<(), Interruption> {
+        if self.excused(|allowance| {
+            matches!(allowance.relation, Some(Relation::View(allowed)) if allowed == view)
+        }) {
+            return Ok(());
+        }
         let object = view.view_name().to_owned();
         self.emit(
             Location::View(Box::new(view.clone())),
@@ -348,7 +397,8 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         )
     }
 
-    /// Reports a violation on a materialized view.
+    /// Reports a violation on a materialized view, unless an allowance for
+    /// this rule names the materialized view.
     ///
     /// # Errors
     ///
@@ -360,6 +410,11 @@ impl<'run, DB: DatabaseLike> Reporter<'run, DB> {
         message: String,
         resolution: String,
     ) -> Result<(), Interruption> {
+        if self.excused(|allowance| {
+            matches!(allowance.relation, Some(Relation::MaterializedView(allowed)) if allowed == view)
+        }) {
+            return Ok(());
+        }
         let object = view.view_name().to_owned();
         self.emit(
             Location::MaterializedView(Box::new(view.clone())),
