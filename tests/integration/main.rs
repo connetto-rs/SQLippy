@@ -62,6 +62,7 @@ mod foreign_keys_broken_before_repair;
 mod function_search_paths;
 mod generated_keys;
 mod implied_foreign_keys;
+mod inner_join_nullable_foreign_keys;
 mod invoker_search_path;
 mod json_text_columns;
 mod key_equality;

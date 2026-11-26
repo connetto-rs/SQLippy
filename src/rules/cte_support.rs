@@ -639,7 +639,7 @@ fn leftmost_select(body: &SetExpr) -> Option<&Select> {
 
 /// The expression a `SELECT` output computes, or `None` for a wildcard or a
 /// multi-name alias, whose width the query alone does not tell.
-fn output_expression(output: &SelectItem) -> Option<&Expr> {
+pub(crate) fn output_expression(output: &SelectItem) -> Option<&Expr> {
     match output {
         SelectItem::UnnamedExpr(expression)
         | SelectItem::ExprWithAlias {

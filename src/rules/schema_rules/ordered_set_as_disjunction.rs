@@ -9,7 +9,7 @@ use sql_traits::{
 };
 use sqlparser::ast::{
     BinaryOperator, Delete, Expr, InTarget, JoinConstraint, JoinOperator, Select, Statement,
-    TableFactor, TableWithJoins, UnaryOperator, Update, Visit, Visitor,
+    TableFactor, UnaryOperator, Update, Visit, Visitor,
 };
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
     rules::{
         closed_set_support::{CheckedRows, closed_set},
         literal_support::text_literal,
-        not_in_support::null_extended,
+        not_in_support::{factors, null_extended},
         null_support::may_hold_null,
         policy_support::{conjuncts, unnested},
         type_support::user_type_named,
@@ -603,21 +603,6 @@ impl<DB: DatabaseLike> Disjunctions<'_, '_, '_, DB> {
             resolution,
         }))
     }
-}
-/// Every `FROM` item `joined` holds, those of nested joins included.
-fn factors(joined: &TableWithJoins) -> Vec<&TableFactor> {
-    let mut found = Vec::new();
-    for factor in
-        std::iter::once(&joined.relation).chain(joined.joins.iter().map(|join| &join.relation))
-    {
-        match factor {
-            TableFactor::NestedJoin {
-                table_with_joins, ..
-            } => found.extend(factors(table_with_joins)),
-            _ => found.push(factor),
-        }
-    }
-    found
 }
 
 /// The operands whose `NULL` makes the disjunction `formula` answer
