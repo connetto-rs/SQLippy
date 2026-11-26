@@ -326,3 +326,21 @@ fn an_allowance_naming_a_view_as_another_kind_of_relation_is_reported_unused() {
         )
     );
 }
+
+#[test]
+fn a_schema_qualified_view_allowance_excuses_the_view_in_that_schema_alone() {
+    let mut constrainer = wildcard_constrainer();
+    constrainer.allow_view(
+        "wildcard_view",
+        TargetName::new("visible", false).with_schema("reporting", false),
+    );
+    let schema = format!(
+        "{VIEW_SCHEMA}
+        CREATE SCHEMA reporting;
+        CREATE VIEW reporting.visible AS SELECT * FROM entries;"
+    );
+    assert_eq!(
+        outcome(&constrainer, &schema),
+        (wildcard_findings(&["drafts", "visible", "digest"]), vec![])
+    );
+}
