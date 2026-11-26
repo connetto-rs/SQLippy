@@ -68,6 +68,7 @@ mod keys_and_indexes;
 mod leakproof_functions;
 mod lint_candidates;
 mod lint_levels;
+mod mixed_multivalued_facts;
 mod monotonic_flag_resets;
 mod name_type_hints;
 mod needless_index_predicates;
