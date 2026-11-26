@@ -93,6 +93,7 @@ mod policy_checks;
 mod policy_read_cycles;
 mod policy_targets_bypass_role;
 mod policy_without_row_reference;
+mod polymorphic_references;
 mod public_default_privileges;
 mod raising_setting_reads;
 mod recursive_steps_over_unions;
