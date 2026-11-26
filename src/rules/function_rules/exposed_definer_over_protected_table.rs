@@ -1323,6 +1323,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                     member: (function.security_mode() == FunctionSecurity::Definer)
                         .then(|| member(function))
                         .flatten(),
+                    function,
                 };
                 reads.draw_query(query, &mut drawing)?;
                 drawing.arms.complete &= drawing.leaves.is_empty();
@@ -1433,6 +1434,8 @@ struct Drawing<'a, DB: DatabaseLike> {
     /// own arguments. A policy calling it with the same arguments gets the
     /// same set, which holds the columns of each row drawn.
     member: Option<Function>,
+    /// The function drawn.
+    function: &'a DB::Function,
 }
 
 impl<'a, DB: DatabaseLike> Drawing<'a, DB> {
@@ -3424,6 +3427,10 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         let called = self.body.confinement.arms(function)?;
         let passed = self.passed(relation, function);
         let passed: Option<Vec<&Expr>> = passed.as_ref().map(|passed| passed.iter().collect());
+        let whole_rows = select.selection.is_none()
+            && select.from.len() == 1
+            && from.joins.is_empty()
+            && self.runs_as_drawing(function, drawing.function)?;
         let mut whole = called.complete;
         for arm in &called.arms {
             let drawn = &arm.drawn;
@@ -3435,6 +3442,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 whole = false;
                 continue;
             };
+            let exhaustive = whole_rows && arm.exhaustive;
             if drawing.member.is_none()
                 && drawn.bound.is_empty()
                 && drawn.member.is_none()
@@ -3442,14 +3450,32 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             {
                 drawing.arms.arms.push(Arm {
                     drawn: Rc::clone(drawn),
-                    exhaustive: false,
+                    exhaustive,
                 });
                 continue;
             }
+            let exhaustive = exhaustive && drawn.under(passed.as_deref()).is_some();
             let conditions = drawn.known(passed.as_deref()).into_owned();
-            drawing.push(drawn.table, columns, conditions, false);
+            drawing.push(drawn.table, columns, conditions, exhaustive);
         }
         Ok(whole)
+    }
+
+    /// Whether `called` runs as the role `drawing` runs as, so that it reads
+    /// the rows `drawing` would read in its place.
+    fn runs_as_drawing(
+        &self,
+        called: &DB::Function,
+        drawing: &DB::Function,
+    ) -> Result<bool, LookupError> {
+        let database = self.body.confinement.database;
+        Ok(match (called.security_mode(), drawing.security_mode()) {
+            (FunctionSecurity::Definer, FunctionSecurity::Definer) => {
+                called.owner(database)? == drawing.owner(database)?
+            }
+            (FunctionSecurity::Definer, _) => false,
+            _ => true,
+        })
     }
 
     /// The arguments `relation`, a call to `function`, passes it, each a
