@@ -130,6 +130,31 @@ fn a_key_confined_to_rows_the_writer_reads_is_clean() {
 }
 
 #[test]
+fn a_key_confined_to_rows_a_read_policy_the_writer_cannot_evaluate_admits_is_reported() {
+    for (granted, expected) in [
+        ("GRANT SELECT ON secrets TO app;", vec![]),
+        ("", vec!["notes.notes_pkey"]),
+    ] {
+        assert_eq!(
+            objects(&format!(
+                "CREATE FUNCTION readable() RETURNS SETOF INT LANGUAGE sql STABLE AS $$ SELECT 1 $$;
+                 CREATE TABLE secrets (id INT);
+                 {NOTES}
+                 CREATE POLICY notes_read ON notes FOR SELECT TO app USING (id IN (SELECT readable()));
+                 CREATE POLICY notes_secret ON notes FOR SELECT TO app
+                   USING (EXISTS (SELECT 1 FROM secrets secret WHERE secret.id = notes.id));
+                 CREATE POLICY notes_write ON notes FOR INSERT TO app
+                   WITH CHECK (id IN (SELECT readable()));
+                 GRANT INSERT (id, body), SELECT ON notes TO app;
+                 {granted}"
+            )),
+            expected,
+            "{granted}"
+        );
+    }
+}
+
+#[test]
 fn a_null_key_a_unique_key_compares_reaches_the_key() {
     for (nulls, expected) in [("", vec![]), ("NULLS NOT DISTINCT", vec!["tags.tags_slug"])] {
         assert_eq!(

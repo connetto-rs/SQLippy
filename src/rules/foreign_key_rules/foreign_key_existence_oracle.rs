@@ -582,7 +582,7 @@ impl<DB: DatabaseLike> ForeignKeyRule for ForeignKeyExistenceOracle<DB> {
             let Some(read) = row_security(database, parent, RowStatement::Select, role)? else {
                 continue;
             };
-            if !hides_rows(database, parent, &read)? {
+            if !hides_rows(database, parent, role, &read)? {
                 continue;
             }
             let held = child.privileges(acting(role), database)?;

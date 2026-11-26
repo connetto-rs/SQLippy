@@ -15,8 +15,8 @@ use sql_traits::{
     errors::{LookupError, RowSecurityError},
     structs::{
         ColumnBinding, ColumnDefinition, ExpressionContext, ExpressionScope, FunctionResultType,
-        IdentifierCase, OperandType, RowGate, RowStatement, RowVersion, TargetName,
-        TriggerEnablement, WrittenCall,
+        IdentifierCase, OperandType, RowStatement, RowVersion, TargetName, TriggerEnablement,
+        WrittenCall,
     },
     traits::{
         ColumnLike, DataTypeLike, DatabaseLike, EnumerationKind, ForeignKeyLike, FunctionLike,
@@ -72,8 +72,9 @@ use crate::{
         null_support::{may_hold_null, rejects_null},
         plpgsql_flow_support::{Ran, plpgsql_block, ran_statements, rows_query},
         policy_support::{
-            acting, client_roles, conjuncts, is_column_reference, is_role_read,
-            sets_only_search_path, sql_query_body, sql_statements_body, unnested, unwrapped,
+            acting, client_roles, conjuncts, evaluates_every_term, is_column_reference,
+            is_role_read, selects_every_column, sets_only_search_path, sql_query_body,
+            sql_statements_body, unnested, unwrapped,
         },
         type_support::user_type_named,
         walk_support::{holds_subquery, walk},
@@ -1828,169 +1829,6 @@ impl<DB: DatabaseLike> Visitor for CallerBound<'_, '_, DB> {
         }
         WrittenCall::relation(factor).map_or(ControlFlow::Continue(()), |call| {
             Self::verdict(self.evaluates_otherwise(call))
-        })
-    }
-}
-
-/// Whether `role`, `PUBLIC` for `None`, may select every column of `table`.
-fn selects_every_column<DB: DatabaseLike>(
-    database: &DB,
-    table: &DB::Table,
-    role: Option<&DB::Role>,
-) -> Result<bool, LookupError> {
-    let held = table.privileges(acting(role), database)?;
-    for column in table.columns(database)? {
-        if !held.select.on_column(column) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-/// Whether `caller` may evaluate every term of `gates`, executing every
-/// function the terms call and selecting every column of every table they
-/// read, and so for every function running as its caller they call in
-/// turn. PostgreSQL raises a permission error otherwise, which admits no
-/// row. A policy names a relation as the schema's search path resolves it.
-fn evaluates_every_term<DB: DatabaseLike>(
-    database: &DB,
-    caller: Option<&DB::Role>,
-    gates: &[RowGate<'_, DB::Policy>],
-) -> Result<bool, LookupError> {
-    let mut evaluating = Evaluating::new(database, caller, None);
-    for term in gates
-        .iter()
-        .flat_map(|gate| gate.permissive().iter().chain(gate.restrictive()))
-    {
-        if !evaluating.evaluates(term.expression().expression())? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-/// The walk for whether a role may evaluate a policy term.
-struct Evaluating<'p, 'a, DB: DatabaseLike> {
-    database: &'a DB,
-    /// The role evaluating the term, `None` standing for `PUBLIC`.
-    caller: Option<&'a DB::Role>,
-    /// The search path the names of the walked term resolve on.
-    path: Option<&'p [(Cow<'p, str>, bool)]>,
-    /// The `WITH` items of the queries the walk stands in.
-    items: WithScopes,
-    /// The functions running as the caller whose bodies are walked.
-    reading: Vec<*const DB::Function>,
-}
-
-impl<'p, 'a, DB: DatabaseLike> Evaluating<'p, 'a, DB> {
-    /// The walk over a term whose names resolve on `path`.
-    fn new(
-        database: &'a DB,
-        caller: Option<&'a DB::Role>,
-        path: Option<&'p [(Cow<'p, str>, bool)]>,
-    ) -> Self {
-        Self {
-            database,
-            caller,
-            path,
-            items: WithScopes::default(),
-            reading: Vec::new(),
-        }
-    }
-
-    /// Whether the caller may evaluate `node`.
-    fn evaluates<N: Visit + ?Sized>(&mut self, node: &N) -> Result<bool, LookupError> {
-        match walk(node, self) {
-            ControlFlow::Continue(()) => Ok(true),
-            ControlFlow::Break(found) => found.map_or(Ok(false), Err),
-        }
-    }
-
-    /// Whether the caller may execute every function `call` may reach, and
-    /// evaluate the `LANGUAGE sql` body of one running as its caller.
-    fn executes<'c>(&mut self, call: impl Into<WrittenCall<'c>>) -> Result<bool, LookupError> {
-        let database = self.database;
-        for function in database.functions_reached_by(call, IdentifierCase::Folded)? {
-            let executes = match self.caller {
-                Some(role) => function.can_execute(role, database)?,
-                None => function.is_executable_by_public(database)?,
-            };
-            if !executes {
-                return Ok(false);
-            }
-            let address = ptr::from_ref(function);
-            if function.security_mode() == FunctionSecurity::Definer
-                || self.reading.contains(&address)
-            {
-                continue;
-            }
-            let Some(query) = sql_query_body(database, function)? else {
-                continue;
-            };
-            let path = function.search_path(database)?;
-            let mut within = Evaluating::new(database, self.caller, path.as_deref());
-            within.reading = mem::take(&mut self.reading);
-            within.reading.push(address);
-            let evaluates = within.evaluates(query.as_ref());
-            self.reading = within.reading;
-            if !evaluates? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    /// Whether the caller may select every column of the stored table
-    /// `name` names, when no `WITH` item of the walked queries does.
-    fn selects(&self, name: &ObjectName) -> Result<bool, LookupError> {
-        if self.items.binding(name).is_some() {
-            return Ok(true);
-        }
-        match stored_table(self.database, name, self.path)? {
-            Some(table) => selects_every_column(self.database, table, self.caller),
-            None => Ok(true),
-        }
-    }
-
-    /// The walk's step for whether the caller may evaluate a call or read.
-    fn verdict(outcome: Result<bool, LookupError>) -> ControlFlow<Option<LookupError>> {
-        match outcome {
-            Ok(true) => ControlFlow::Continue(()),
-            Ok(false) => ControlFlow::Break(None),
-            Err(error) => ControlFlow::Break(Some(error)),
-        }
-    }
-}
-
-impl<DB: DatabaseLike> Visitor for Evaluating<'_, '_, DB> {
-    type Break = Option<LookupError>;
-
-    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        self.items.enter(query);
-        ControlFlow::Continue(())
-    }
-
-    fn post_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        self.items.leave(query);
-        ControlFlow::Continue(())
-    }
-
-    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
-        match expression {
-            Expr::Function(call) => Self::verdict(self.executes(call)),
-            _ => ControlFlow::Continue(()),
-        }
-    }
-
-    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
-        if let TableFactor::Table {
-            name, args: None, ..
-        } = factor
-        {
-            return Self::verdict(self.selects(name));
-        }
-        WrittenCall::relation(factor).map_or(ControlFlow::Continue(()), |call| {
-            Self::verdict(self.executes(call))
         })
     }
 }
