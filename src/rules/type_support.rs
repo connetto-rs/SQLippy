@@ -144,6 +144,40 @@ pub(crate) fn written_flaws(data_type: &DataType) -> Vec<TypeFlaw> {
     }
 }
 
+/// Whether a cast to `data_type`, or to arrays of it, applies a type
+/// modifier, which is a length, precision or scale in parentheses, the fields
+/// of an interval, the parenthesized modifiers of a user-defined type, or the
+/// length 1 PostgreSQL gives `char`, `character` and `bit` written without
+/// one, so `'abcd'::char` is `a`.
+///
+/// `float(p)` applies none, since PostgreSQL reads the precision to choose
+/// between `real` and `double precision`.
+pub(crate) fn cast_applies_modifier(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Array(
+            ArrayElemTypeDef::AngleBracket(element)
+            | ArrayElemTypeDef::SquareBracket(element, _)
+            | ArrayElemTypeDef::Parenthesis(element)
+            | ArrayElemTypeDef::ParenthesisNotNull(element)
+            | ArrayElemTypeDef::Qualified(element, _),
+        ) => cast_applies_modifier(element),
+        DataType::Character(_) | DataType::Char(_) | DataType::Bit(_) => true,
+        DataType::CharacterVarying(length)
+        | DataType::CharVarying(length)
+        | DataType::Varchar(length) => length.is_some(),
+        DataType::Numeric(info) | DataType::Decimal(info) | DataType::Dec(info) => {
+            *info != ExactNumberInfo::None
+        }
+        DataType::Time(precision, _)
+        | DataType::Timestamp(precision, _)
+        | DataType::BitVarying(precision)
+        | DataType::VarBit(precision) => precision.is_some(),
+        DataType::Interval { fields, precision } => fields.is_some() || precision.is_some(),
+        DataType::Custom(_, modifiers) => !modifiers.is_empty(),
+        _ => false,
+    }
+}
+
 /// Collects the flawed casts, typed literals and `CURRENT_TIME` calls of a
 /// node.
 #[derive(Default)]

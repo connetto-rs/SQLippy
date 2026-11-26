@@ -134,6 +134,7 @@ rule_icons! {
     "unaudited_authority_table" => FaShield,
     "monotonic_flag_reset" => FaShieldHalved,
     "repeated_setting_read" => FaSliders,
+    "setting_cast_through_modifier" => FaScissors,
     "table_inheritance" => FaCodeBranch,
     "tautological_with_check" => FaCheckDouble,
     "tautological_policy" => FaShieldHalved,

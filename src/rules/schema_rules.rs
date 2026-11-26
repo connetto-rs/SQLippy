@@ -71,6 +71,8 @@ mod monotonic_flag_reset;
 pub use monotonic_flag_reset::MonotonicFlagReset;
 mod repeated_setting_read;
 pub use repeated_setting_read::RepeatedSettingRead;
+mod setting_cast_through_modifier;
+pub use setting_cast_through_modifier::SettingCastThroughModifier;
 mod role_defined_in_schema;
 pub use role_defined_in_schema::RoleDefinedInSchema;
 mod definer_takes_acting_user;

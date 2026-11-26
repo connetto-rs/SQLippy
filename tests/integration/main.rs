@@ -112,6 +112,7 @@ mod script_rules;
 mod self_asserted_claims;
 mod self_granting_writes;
 mod sensitive_columns;
+mod setting_casts_through_modifiers;
 mod snapshots_before_locks;
 mod statement_bindings;
 mod statement_indexes;
