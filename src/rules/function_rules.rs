@@ -16,6 +16,8 @@ mod invoker_without_search_path;
 pub use invoker_without_search_path::InvokerWithoutSearchPath;
 mod leakproof_user_function;
 pub use leakproof_user_function::LeakproofUserFunction;
+mod discarded_type_modifier;
+pub use discarded_type_modifier::DiscardedTypeModifier;
 mod writing_non_volatile_function;
 pub use writing_non_volatile_function::WritingNonVolatileFunction;
 mod table_name_dispatch;

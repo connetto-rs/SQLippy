@@ -67,6 +67,7 @@ rule_icons! {
     "definer_schema_without_default_revoke" => FaUsers,
     "public_default_privilege" => FaUsers,
     "leakproof_user_function" => FaFaucetDrip,
+    "discarded_type_modifier" => FaEraser,
     "dynamic_sql_injection" => FaSyringe,
     "unsatisfiable_check" => FaCircleXmark,
     "null_only_check" => FaCircleXmark,

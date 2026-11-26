@@ -38,6 +38,7 @@ mod definer_creatable_schemas;
 mod definer_default_privileges;
 mod definer_functions;
 mod definer_maintained_columns;
+mod discarded_type_modifiers;
 mod duplicate_column_assignments;
 mod duplicate_policies;
 mod duplicating_recursive_ctes;
