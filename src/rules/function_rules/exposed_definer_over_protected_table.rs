@@ -27,13 +27,13 @@ use sql_traits::{
 use sqlparser::{
     ast::{
         ArgMode, Assignment, AssignmentTarget, BinaryOperator, CaseWhen, CastKind, DataType,
-        Delete, Expr, FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-        FunctionBehavior, FunctionCalledOnNull, FunctionSecurity, Ident, InTarget, Insert,
-        JoinConstraint, JoinOperator, LockClause, ObjectName, ObjectNamePart, Query, Select,
-        SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier,
-        Statement, TableAliasColumnDef, TableFactor, TableInheritance, TableObject, TableWithJoins,
-        TriggerEvent, TriggerObject, TriggerObjectKind, TriggerPeriod, Update, UpdateTableFromKind,
-        Value, Values, Visit, VisitMut, Visitor, VisitorMut, With,
+        Delete, Expr, FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
+        FunctionArguments, FunctionBehavior, FunctionCalledOnNull, FunctionSecurity, Ident,
+        InTarget, Insert, JoinConstraint, JoinOperator, LockClause, ObjectName, ObjectNamePart,
+        Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator,
+        SetQuantifier, Statement, TableAliasColumnDef, TableFactor, TableInheritance, TableObject,
+        TableWithJoins, TriggerEvent, TriggerObject, TriggerObjectKind, TriggerPeriod, Update,
+        UpdateTableFromKind, Value, Values, Visit, VisitMut, Visitor, VisitorMut, With,
         helpers::attached_token::AttachedToken, visit_expressions, visit_expressions_mut,
         visit_relations,
     },
@@ -756,9 +756,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             function,
         };
         for arm in &arms.arms {
-            let Some(tested) = in_set(&arm.drawn.column_names(), &member) else {
-                return Ok(false);
-            };
+            let tested = in_set(&arm.drawn.column_names(), &member);
             if !body.admits_every_caller(arm.drawn.table, &tested, RowStatement::Select, &[])? {
                 return Ok(false);
             }
@@ -1448,7 +1446,7 @@ impl<'a, DB: DatabaseLike> Drawing<'a, DB> {
         exhaustive: bool,
     ) {
         let (bound, conditions) = conditions.into_iter().partition(reads_parameter);
-        let member = self.member.as_ref().and_then(|member| {
+        let member = self.member.as_ref().map(|member| {
             let names: Vec<&str> = columns
                 .iter()
                 .copied()
@@ -2853,12 +2851,8 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 else {
                     return None;
                 };
-                let arguments: Vec<String> = self
-                    .passed(binding.entry()?.factor(), function)?
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect();
-                in_set(&[column], &call_of(function, &arguments)?)
+                let arguments = self.passed(binding.entry()?.factor(), function)?;
+                Some(in_set(&[column], &call_of(function, arguments)))
             })
     }
 
@@ -3043,11 +3037,8 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 let Some(required) = arm.drawn.under(arguments.as_deref()) else {
                     continue;
                 };
-                if self.implies_every(&clause, &required)?
-                    && let Some(membership) = in_set(&arm.drawn.column_names(), &set.call)
-                    && !found.contains(&membership)
-                {
-                    found.push(membership);
+                if self.implies_every(&clause, &required)? {
+                    add_membership(&mut found, in_set(&arm.drawn.column_names(), &set.call));
                 }
             }
         }
@@ -3143,11 +3134,8 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                                 })
                                 .collect()
                         };
-                        if let Some(columns) = columns
-                            && let Some(membership) = in_set(&columns, members)
-                            && !witnessed.contains(&membership)
-                        {
-                            witnessed.push(membership);
+                        if let Some(columns) = columns {
+                            add_membership(&mut witnessed, in_set(&columns, members));
                         }
                     }
                 }
@@ -3298,9 +3286,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         select: &Select,
         drawing: &mut Drawing<'a, DB>,
     ) -> Result<bool, LookupError> {
-        let Some(projected) = carried_row(select) else {
-            return Ok(false);
-        };
+        let projected = carried_row(select).expect("leaves are carried");
         let mut entries = Vec::with_capacity(projected.len());
         for (reference, _) in &projected {
             let Some(entry) = self
@@ -4547,17 +4533,16 @@ impl Lineage {
             .into_iter()
             .map(|(projected, _)| own(projected))
             .collect::<Option<Vec<_>>>()?;
-        in_set(&columns, call)
+        Some(in_set(&columns, call))
     }
 }
 
 /// `"column" IN (SELECT call)`, testing one column against the set `call`
 /// yields, or `("first", …) IN (SELECT * FROM call)`, testing the row of
-/// several columns against the rows it yields, `None` for no column.
-fn in_set<S: AsRef<str>>(columns: &[S], call: &Function) -> Option<Expr> {
+/// several columns against the rows it yields.
+fn in_set<S: AsRef<str>>(columns: &[S], call: &Function) -> Expr {
     let quoted = |column: &S| Expr::Identifier(Ident::with_quote('"', column.as_ref()));
     let (tested, query) = match columns {
-        [] => return None,
         [column] => (quoted(column), format!("SELECT {call}")),
         _ => (
             Expr::Tuple(columns.iter().map(quoted).collect()),
@@ -4567,13 +4552,20 @@ fn in_set<S: AsRef<str>>(columns: &[S], call: &Function) -> Option<Expr> {
     let query = Parser::new(&PostgreSqlDialect {})
         .try_with_sql(&query)
         .and_then(|mut parser| parser.parse_query())
-        .ok()?;
-    Some(Expr::In {
+        .expect("a call of a stored function parses back as a query");
+    Expr::In {
         expr: Box::new(tested),
         target: InTarget::Subquery(query),
         negated: false,
         global: false,
-    })
+    }
+}
+
+/// Adds `membership` to `memberships` unless already there.
+fn add_membership(memberships: &mut Vec<Expr>, membership: Expr) {
+    if !memberships.contains(&membership) {
+        memberships.push(membership);
+    }
 }
 
 /// The column of `table` whose stored name is `name`.
@@ -4651,9 +4643,6 @@ fn carried_conditions<DB: DatabaseLike>(
     columns: &[&DB::Column],
 ) -> Result<Vec<Expr>, LookupError> {
     let sources = drawn.columns.as_slice();
-    let Some(&first) = sources.first() else {
-        return Ok(Vec::new());
-    };
     let unique = unique_within(database, table, columns)?;
     if unique && sources == columns {
         return Ok(conditions.to_vec());
@@ -4666,9 +4655,14 @@ fn carried_conditions<DB: DatabaseLike>(
     }
     if unique {
         for foreign_key in drawn.table.foreign_keys(database)? {
-            if !ptr::eq(foreign_key.referenced_table(database)?, table)
-                || !binds(database, foreign_key, first)?
-            {
+            if !ptr::eq(foreign_key.referenced_table(database)?, table) {
+                continue;
+            }
+            let mut bound = false;
+            for source in sources {
+                bound = bound || binds(database, foreign_key, source)?;
+            }
+            if !bound {
                 continue;
             }
             let pairs = key_pairs(database, foreign_key)?;
@@ -5826,14 +5820,14 @@ fn member<F: FunctionLike>(function: &F) -> Option<Function> {
         if mode != ArgMode::In {
             return None;
         }
-        arguments.push(parameter(position).to_string());
+        arguments.push(parameter(position));
     }
-    call_of(function, &arguments)
+    Some(call_of(function, arguments))
 }
 
 /// `schema.name(arguments)` calling `function`, its schema `public` when
 /// its name has none.
-fn call_of<F: FunctionLike>(function: &F, arguments: &[String]) -> Option<Function> {
+fn call_of<F: FunctionLike>(function: &F, arguments: Vec<Expr>) -> Function {
     let written = |name: &str, quoted: bool| {
         let stored = normalize_identifier(name, quoted).into_owned();
         if quoted {
@@ -5848,12 +5842,25 @@ fn call_of<F: FunctionLike>(function: &F, arguments: &[String]) -> Option<Functi
         |schema| written(schema, target.schema_is_quoted()),
     );
     let name = written(target.name(), target.name_is_quoted());
-    match Parser::new(&PostgreSqlDialect {})
-        .try_with_sql(&format!("{schema}.{name}({})", arguments.join(", ")))
-        .and_then(|mut parser| parser.parse_expr())
-    {
-        Ok(Expr::Function(call)) => Some(call),
-        _ => None,
+    Function {
+        name: ObjectName(vec![
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Identifier(name),
+        ]),
+        uses_odbc_syntax: false,
+        parameters: FunctionArguments::None,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: arguments
+                .into_iter()
+                .map(|argument| FunctionArg::Unnamed(FunctionArgExpr::Expr(argument)))
+                .collect(),
+            clauses: Vec::new(),
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: Vec::new(),
     }
 }
 

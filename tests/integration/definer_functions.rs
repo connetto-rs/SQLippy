@@ -7934,6 +7934,91 @@ fn a_helper_projecting_one_column_of_a_pair_helper_draws_that_column() {
     assert_eq!(reported("parent_id"), ["organizations_reaching()"]);
 }
 
+/// Functions reported where `authz.listed()` returns the `listed` columns
+/// of the resources the policy admits, `authz.visible_pairs()` returns the
+/// pairs `SELECT {projected}` yields, and `authz.organizations_reaching()`
+/// reads the resources whose `tested` row `authz.visible_pairs()` returns.
+fn visible_pairs_reaching(listed: &str, projected: &str, tested: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE SCHEMA authz;
+             CREATE TABLE resources (id INT PRIMARY KEY, parent_id INT NOT NULL,
+               organization_id INT NOT NULL, hidden BOOLEAN NOT NULL);
+             ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON resources TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE POLICY readable_resources ON resources FOR SELECT TO app USING (NOT hidden);
+             CREATE FUNCTION authz.listed() RETURNS TABLE ({listed})
+               LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id, resource.parent_id FROM public.resources resource
+                 WHERE NOT resource.hidden $$;
+             CREATE FUNCTION authz.visible_pairs() RETURNS TABLE (parent_id INT, id INT)
+               LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT {projected} $$;
+             CREATE FUNCTION authz.organizations_reaching() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.organization_id FROM public.resources resource
+                 WHERE {tested} IN (SELECT * FROM authz.visible_pairs()) $$;"
+        ),
+    )
+}
+
+const LISTED: &str = "id INT, parent_id INT";
+
+const TESTED_PAIR: &str = "(resource.parent_id, resource.id)";
+
+#[test]
+fn a_pair_joining_a_helper_column_to_another_relations_column_draws_nothing() {
+    assert_eq!(
+        visible_pairs_reaching(
+            LISTED,
+            "listed.parent_id, listed.id FROM authz.listed() listed",
+            TESTED_PAIR
+        ),
+        Vec::<String>::new()
+    );
+    let joined = "FROM authz.listed() listed CROSS JOIN authz.listed() other";
+    assert_eq!(
+        visible_pairs_reaching(
+            LISTED,
+            &format!("listed.parent_id, listed.id {joined}"),
+            TESTED_PAIR
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        visible_pairs_reaching(
+            LISTED,
+            &format!("listed.parent_id, other.id {joined}"),
+            TESTED_PAIR
+        ),
+        ["organizations_reaching()"]
+    );
+}
+
+#[test]
+fn a_row_wider_or_narrower_than_the_rows_a_helper_draws_draws_nothing() {
+    assert_eq!(
+        visible_pairs_reaching(
+            LISTED,
+            "listed.parent_id, listed.id FROM authz.listed() listed",
+            "resource.id"
+        ),
+        ["organizations_reaching()"]
+    );
+    assert_eq!(
+        visible_pairs_reaching(
+            "id INT, parent_id INT, extra INT",
+            "listed.parent_id, listed.extra FROM authz.listed() listed",
+            TESTED_PAIR
+        ),
+        ["organizations_reaching()"]
+    );
+}
+
 /// The definers the rule reports where `authz.profile_organization()` is
 /// declared by `helper` over `body`, a policy and a definer both keep the
 /// `resources` rows whose organization is `tested`, and `granted` runs last.
