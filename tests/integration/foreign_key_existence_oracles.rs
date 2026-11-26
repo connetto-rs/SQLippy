@@ -883,6 +883,97 @@ fn a_key_a_recursive_helper_may_not_reach_is_reported() {
     }
 }
 
+/// The typed templates [`slot_schema`] reports when the slots policy states
+/// `readable`, the check states `check` and `helpers` defines the helpers
+/// both read.
+fn read_through(readable: &str, check: &str, helpers: &str) -> Vec<String> {
+    let mut constrainer: GenericConstrainer<ParserDB> = ForeignKeyExistenceOracle::default().into();
+    constrainer.set_deployment(Deployment::default().with_app_role("app"));
+    findings(
+        &constrainer,
+        "foreign_key_existence_oracle",
+        &slot_schema(
+            readable,
+            check,
+            "slot_id, id, organization_id",
+            "id, template_id, organization_id",
+            helpers,
+        ),
+    )
+    .into_iter()
+    .map(|(_, object, _)| object)
+    .collect()
+}
+
+/// `walk()` selecting `body`, declared with `header` before `AS`.
+fn walk(header: &str, body: &str) -> String {
+    format!(
+        "CREATE FUNCTION walk() RETURNS SETOF INT LANGUAGE sql STABLE {header} AS $$ {body} $$;"
+    )
+}
+
+#[test]
+fn a_helper_body_is_read_only_where_it_yields_what_the_check_reads() {
+    let reader = "SELECT readable('reader')";
+    let counted = "SELECT readable((SELECT count(*) FROM levels)::text)";
+    let levels = "CREATE TABLE levels (id INT);";
+    let counted_check = format!("id = ANY (ARRAY({counted}))");
+    let rows = "CREATE FUNCTION readable_rows(level TEXT) RETURNS TABLE (template INT)
+        LANGUAGE sql STABLE AS $$ SELECT 1 $$;";
+    let rows_read = "template_id IN (SELECT share.template FROM readable_rows('reader') share)";
+    let rows_check = "id IN (SELECT readable_rows('reader'))";
+    let walked = WALKED;
+    for (readable, check, helpers, expected) in [
+        (walked, READER, walk("", reader), vec![]),
+        (
+            walked,
+            READER,
+            walk("SET work_mem = '64kB'", reader),
+            vec!["typed_templates.typed_slot"],
+        ),
+        (
+            walked,
+            READER,
+            walk("SET search_path = public, pg_temp", reader),
+            vec![],
+        ),
+        (
+            walked,
+            READER,
+            walk("SET search_path = pg_catalog, pg_temp", reader),
+            vec!["typed_templates.typed_slot"],
+        ),
+        (
+            walked,
+            counted_check.as_str(),
+            format!("{levels} {}", walk("", counted)),
+            vec![],
+        ),
+        (
+            walked,
+            counted_check.as_str(),
+            format!("{levels} {}", walk("SECURITY DEFINER", counted)),
+            vec!["typed_templates.typed_slot"],
+        ),
+        (rows_read, rows_check, rows.to_owned(), vec![]),
+        (
+            rows_read,
+            rows_check,
+            format!(
+                "{rows} CREATE FUNCTION readable_rows(level INT) RETURNS TABLE (template INT)
+                   LANGUAGE sql STABLE AS $$ SELECT 1 $$;"
+            ),
+            vec!["typed_templates.typed_slot"],
+        ),
+    ] {
+        assert_eq!(
+            read_through(readable, check, &helpers),
+            expected,
+            "{helpers} under {check}"
+        );
+    }
+}
+
 const GRANTEES: &str = "CREATE TABLE grantees (id INT, kind TEXT, PRIMARY KEY (id, kind));
     ALTER TABLE grantees ENABLE ROW LEVEL SECURITY;";
 

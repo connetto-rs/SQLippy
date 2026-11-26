@@ -5869,6 +5869,7 @@ fn a_set_seeding_the_walk_a_policy_helper_reaches_confines_a_read() {
     for seed in [
         "authz.shared_resources(min_role)",
         "authz.granted_resources('admin')",
+        "authz.granted_resources($2)",
     ] {
         assert_eq!(
             reached(seed, granted),
