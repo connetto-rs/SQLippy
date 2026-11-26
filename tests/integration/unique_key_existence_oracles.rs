@@ -1082,7 +1082,96 @@ fn reports_grants_key(edits: &[(&str, &str)]) -> bool {
         assert!(sql.contains(from), "{from}");
         sql = sql.replacen(from, to, 1);
     }
-    objects(&sql).contains(&"grants.grants_pkey".to_owned())
+    reports_key(&sql)
+}
+
+/// Whether `grants_pkey` is reported on `sql`.
+fn reports_key(sql: &str) -> bool {
+    objects(sql).contains(&"grants.grants_pkey".to_owned())
+}
+
+/// [`GRANTS`] with every exclusion testing the organization against
+/// `blocking()` called in `FROM`.
+fn grants_blocked_in_from() -> String {
+    GRANTS.replace(
+        "organization_id = ANY (ARRAY(SELECT blocking()))",
+        "organization_id IN (SELECT * FROM blocking())",
+    )
+}
+
+/// [`grants_blocked_in_from`] with organizations keyed by a namespace too,
+/// so each exclusion tests the pair against `blocking()`.
+fn grants_blocked_pair() -> String {
+    grants_blocked_in_from()
+        .replace(
+            "(organization_id INT NOT NULL,",
+            "(namespace_id INT NOT NULL, organization_id INT NOT NULL,",
+        )
+        .replace(
+            "UNIQUE (organization_id, id)",
+            "UNIQUE (namespace_id, organization_id, id)",
+        )
+        .replace(
+            "blocking() RETURNS SETOF INT",
+            "blocking() RETURNS TABLE (namespace_id INT, id INT)",
+        )
+        .replace(
+            "SELECT block.organization_id",
+            "SELECT block.namespace_id, block.organization_id",
+        )
+        .replace(
+            "grants (resource_id INT NOT NULL,",
+            "grants (resource_id INT NOT NULL, namespace_id INT NOT NULL,",
+        )
+        .replace(
+            "(organization_id, resource_id) REFERENCES resources (organization_id, id)",
+            "(namespace_id, organization_id, resource_id)
+             REFERENCES resources (namespace_id, organization_id, id)",
+        )
+        .replace(
+            "NOT (resource.organization_id",
+            "NOT ((resource.namespace_id, resource.organization_id)",
+        )
+        .replace(
+            "NOT (shared.organization_id",
+            "NOT ((shared.namespace_id, shared.organization_id)",
+        )
+        .replace(
+            "NOT (organization_id",
+            "NOT ((namespace_id, organization_id)",
+        )
+}
+
+#[test]
+fn a_restrictive_read_a_helper_states_through_a_definer_called_in_from_is_clean() {
+    for sql in [grants_blocked_in_from(), grants_blocked_pair()] {
+        assert!(!reports_key(&sql), "{sql}");
+        let filtered = sql.replace(
+            "FROM blocking())",
+            "FROM blocking() WHERE EXISTS (SELECT 1))",
+        );
+        assert!(!reports_key(&filtered), "{filtered}");
+    }
+}
+
+#[test]
+fn a_restrictive_read_a_helper_states_through_a_table_or_invoker_in_from_is_reported() {
+    for sql in [grants_blocked_in_from(), grants_blocked_pair()] {
+        for (from, to) in [
+            (
+                "STABLE SECURITY DEFINER AS $$\n       SELECT block.",
+                "STABLE AS $$\n       SELECT block.",
+            ),
+            (
+                "FROM blocking())",
+                "FROM blocking() WHERE EXISTS (SELECT 1 FROM blocks))",
+            ),
+        ] {
+            let edited = sql.replace(from, to);
+            assert_ne!(edited, sql, "{from}");
+            assert!(reports_key(&edited), "{edited}");
+        }
+    }
 }
 
 #[test]

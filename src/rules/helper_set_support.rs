@@ -2,18 +2,19 @@
 //! from the declarations, the ladders of the schema and the bodies of the
 //! set-returning `LANGUAGE sql` helpers the sets call.
 
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, ops::ControlFlow, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, ops::ControlFlow, ptr, rc::Rc};
 
 use sql_traits::{
     errors::LookupError,
-    structs::{ColumnDefinition, ExpressionContext, ExpressionScope, IdentifierCase},
+    structs::{ColumnDefinition, ExpressionContext, ExpressionScope, IdentifierCase, WrittenCall},
     traits::{DatabaseLike, FunctionLike},
     utils::{identifier_resolution::normalize_identifier, scalar_family::scalar_family},
 };
 use sqlparser::ast::{
     AccessExpr, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, FunctionSecurity,
-    Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableAlias,
-    TableFactor, Value, WildcardAdditionalOptions, visit_expressions, visit_expressions_mut,
+    ObjectName, Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement,
+    TableAlias, TableFactor, TableFunctionArgs, Value, Visitor, WildcardAdditionalOptions,
+    visit_expressions, visit_expressions_mut,
 };
 
 use crate::{
@@ -26,6 +27,7 @@ use crate::{
         ladder_support::{Ladders, called, listed_arguments, positional_arguments},
         literal_support::literal,
         policy_support::{sets_only_search_path, sql_set_body},
+        walk_support::{stop_on, stopped, walk},
     },
 };
 
@@ -290,50 +292,114 @@ impl<'a, DB: DatabaseLike> HelperSets<'a, DB> {
     /// Whether `expression`, read in the body of a helper, yields there
     /// what it yields to the caller of the helper. A body that runs as its
     /// owner, as `definer` tells, reads no table in it and calls only
-    /// definers and built-ins that read neither the role nor its privileges.
+    /// definers and built-ins that read neither the role nor its privileges,
+    /// in an expression or as a `FROM` item.
     ///
     /// # Errors
     ///
     /// Returns the lookup error resolving a call raised.
     pub(crate) fn admissible(&self, expression: &Expr, definer: bool) -> Result<bool, LookupError> {
-        let mut admissible = true;
-        let mut calls: Vec<Function> = Vec::new();
-        let _ = visit_expressions(expression, |node| {
+        Ok(!stopped(walk(
+            expression,
+            &mut Inadmissible {
+                sets: self,
+                definer,
+                call_name: None,
+            },
+        ))?)
+    }
+
+    /// Whether `call`, passing `arguments`, reaches only functions a body
+    /// running as its owner, as `definer` tells, may call for
+    /// [`Self::admissible`].
+    fn admits_call<'c>(
+        &self,
+        call: impl Into<WrittenCall<'c>>,
+        arguments: Option<&[FunctionArg]>,
+        definer: bool,
+    ) -> Result<bool, LookupError> {
+        let called: Vec<&DB::Function> = self
+            .database
+            .functions_reached_by(call, IdentifierCase::Folded)?
+            .collect();
+        Ok(!called.is_empty()
+            && called.iter().all(|function| {
+                if function.target_name().schema() == Some("pg_catalog") {
+                    !(definer && reads_role(&function.stored_name(), arguments))
+                } else {
+                    !definer || function.security_mode() == FunctionSecurity::Definer
+                }
+            }))
+    }
+}
+
+/// Stops at the first table or call [`HelperSets::admissible`] refuses.
+struct Inadmissible<'s, 'a, DB: DatabaseLike> {
+    sets: &'s HelperSets<'a, DB>,
+    definer: bool,
+    /// The name of the `FROM` item last met as a call, which the walk visits
+    /// as a relation next.
+    call_name: Option<*const ObjectName>,
+}
+
+impl<DB: DatabaseLike> Visitor for Inadmissible<'_, '_, DB> {
+    type Break = Option<LookupError>;
+
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
+        let Expr::Function(function) = expression else {
+            return ControlFlow::Continue(());
+        };
+        let arguments = match &function.args {
+            FunctionArguments::List(list) => Some(list.args.as_slice()),
             // `ARRAY(SELECT ...)` constructs an array, calling nothing beyond
             // the calls its subquery holds, which the walk visits.
-            if let Expr::Function(function) = node
-                && !(matches!(function.args, FunctionArguments::Subquery(_))
-                    && function.name.to_string().eq_ignore_ascii_case("array"))
+            FunctionArguments::Subquery(_)
+                if function.name.to_string().eq_ignore_ascii_case("array") =>
             {
-                calls.push(function.clone());
+                return ControlFlow::Continue(());
             }
-            ControlFlow::<()>::Continue(())
-        });
-        if definer {
-            let _ = sqlparser::ast::visit_relations(expression, |_| {
-                admissible = false;
-                ControlFlow::<()>::Break(())
-            });
+            _ => None,
+        };
+        stop_on(
+            self.sets
+                .admits_call(function, arguments, self.definer)
+                .map(|admitted| !admitted),
+        )
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+        let (TableFactor::Table {
+            name,
+            args: Some(TableFunctionArgs {
+                args: arguments, ..
+            }),
+            ..
         }
-        for call in &calls {
-            if !admissible {
-                break;
-            }
-            let called: Vec<&DB::Function> = self
-                .database
-                .functions_reached_by(call, IdentifierCase::Folded)?
-                .collect();
-            admissible = !called.is_empty()
-                && called.iter().all(|function| {
-                    let builtin = function.target_name().schema() == Some("pg_catalog");
-                    if builtin {
-                        !(definer && reads_role(&function.stored_name(), call))
-                    } else {
-                        !definer || function.security_mode() == FunctionSecurity::Definer
-                    }
-                });
+        | TableFactor::Function {
+            name,
+            args: arguments,
+            ..
+        }) = factor
+        else {
+            return ControlFlow::Continue(());
+        };
+        let Some(call) = WrittenCall::relation(factor) else {
+            return ControlFlow::Continue(());
+        };
+        self.call_name = Some(ptr::from_ref(name));
+        stop_on(
+            self.sets
+                .admits_call(call, Some(arguments.as_slice()), self.definer)
+                .map(|admitted| !admitted),
+        )
+    }
+
+    fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
+        if self.definer && self.call_name != Some(ptr::from_ref(relation)) {
+            ControlFlow::Break(None)
+        } else {
+            ControlFlow::Continue(())
         }
-        Ok(admissible)
     }
 }
 
@@ -534,10 +600,10 @@ fn reselects(select: &Select, walk: &TableAlias) -> bool {
     }
 }
 
-/// Whether the built-in `name`, called as `call`, reads the acting role, its
-/// privileges or the search path, which differ inside a definer that sets
-/// it.
-fn reads_role(name: &str, call: &Function) -> bool {
+/// Whether the built-in `name`, called passing `arguments`, reads the acting
+/// role, its privileges or the search path, which differ inside a definer
+/// that sets it.
+fn reads_role(name: &str, arguments: Option<&[FunctionArg]>) -> bool {
     name.starts_with("has_")
         || matches!(
             name,
@@ -552,11 +618,8 @@ fn reads_role(name: &str, call: &Function) -> bool {
         )
         || (name == "current_setting"
             && !matches!(
-                &call.args,
-                FunctionArguments::List(list) if matches!(
-                    list.args.first(),
-                    Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))))
-                        if matches!(&value.value, Value::SingleQuotedString(setting) if !setting.eq_ignore_ascii_case("search_path"))
-                )
+                arguments.and_then(<[FunctionArg]>::first),
+                Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))))
+                    if matches!(&value.value, Value::SingleQuotedString(setting) if !setting.eq_ignore_ascii_case("search_path"))
             ))
 }
