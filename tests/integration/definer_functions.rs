@@ -5984,6 +5984,48 @@ fn a_private_helper_reading_more_than_the_keyed_row_or_tested_otherwise_is_repor
     }
 }
 
+/// The functions `exposed` reports where private `authz.reached()` keeps
+/// the resources `helper` reads, the caller's own of which
+/// `authz.owned_reached()` returns, `invoker` is the body of
+/// `authz.invoked()`, which runs as its caller, and `granted` runs last.
+fn reported_over_invoker_filter(helper: &str, invoker: &str, granted: &str) -> Vec<String> {
+    reported_over_resources(&format!(
+        "CREATE FUNCTION authz.invoked() RETURNS SETOF INT
+           LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$ {invoker} $$;
+         {}{}{granted}",
+        set_definer("reached()", "sql", helper),
+        set_definer(
+            "owned_reached()",
+            "sql",
+            &owned_where("resource.id IN (SELECT authz.reached())")
+        ),
+    ))
+}
+
+#[test]
+fn an_invoker_filter_of_a_keyed_helper_reads_alike_whoever_may_execute_it() {
+    let granted = "GRANT EXECUTE ON FUNCTION authz.invoked() TO app;";
+    let in_invoked = "SELECT resource.id FROM public.resources resource WHERE resource.kind_id IN (SELECT authz.invoked())";
+    let shown_kinds = "SELECT kind.id FROM public.kinds kind WHERE kind.shown";
+    for execute in ["", granted] {
+        assert_eq!(
+            reported_over_invoker_filter(in_invoked, shown_kinds, execute),
+            Vec::<String>::new(),
+            "{execute}"
+        );
+        for invoker in [
+            "SELECT secret.resource_id FROM public.secrets secret",
+            "SELECT kind.id FROM public.kinds kind WHERE length(current_user) > 3",
+        ] {
+            assert_eq!(
+                reported_over_invoker_filter(in_invoked, invoker, execute),
+                ["owned_reached()"],
+                "{invoker} {execute}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_test_of_a_private_helper_set_other_than_the_whole_call_against_the_key_is_reported() {
     for test in [
@@ -8001,6 +8043,11 @@ fn an_invoker_helper_reading_alike_for_every_caller_confines_a_filter() {
                 "",
             ),
             (alike, READS_PROFILE, revoked),
+            (
+                "LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp",
+                READS_PROFILE,
+                revoked,
+            ),
         ] {
             assert_eq!(
                 profile_helper_exposed(helper, body, tested, granted),

@@ -15,8 +15,8 @@ use sql_traits::{
     errors::{LookupError, RowSecurityError},
     structs::{
         ColumnBinding, ColumnDefinition, ExpressionContext, ExpressionScope, FunctionResultType,
-        IdentifierCase, OperandType, RowStatement, RowVersion, TargetName, TriggerEnablement,
-        WrittenCall,
+        IdentifierCase, OperandType, RowGate, RowStatement, RowVersion, TargetName,
+        TriggerEnablement, WrittenCall,
     },
     traits::{
         ColumnLike, DataTypeLike, DatabaseLike, EnumerationKind, ForeignKeyLike, FunctionLike,
@@ -162,8 +162,10 @@ use super::plpgsql_ambiguous_name::collision;
 /// of which every caller may select every column, and calls a function
 /// running as its caller only when that function is one `LANGUAGE sql`
 /// query, not `VOLATILE`, setting its own `search_path` and no other
-/// parameter, that every caller may execute and whose body reads alike in
-/// turn. A stored table with row-level security reads alike only in a
+/// parameter, whose body reads alike in turn. A policy admits a row only to
+/// a caller who may execute every function it calls, and every function
+/// those running as their caller call. A stored table with row-level
+/// security reads alike only in a
 /// subquery the term holds true for finding a row in, a non-negated `EXISTS`
 /// or `IN` reached through `AND` and `OR` over a query inner-joining its
 /// relations, which an `IN` does not limit, since its own read is confined,
@@ -1546,6 +1548,7 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
                 Err(_) => return Ok(false),
             };
             let admitted = match security.gates() {
+                Some(gates) if !executes_every_term(database, *caller, gates)? => false,
                 Some(gates) => {
                     let (existing, rewritten): (Vec<_>, Vec<_>) = gates
                         .iter()
@@ -1720,10 +1723,12 @@ impl<'r, 'a, DB: DatabaseLike> CallerBound<'r, 'a, DB> {
 
     /// Whether `function`, running as its caller, returns alike for the
     /// caller and the owner. It has to be one `LANGUAGE sql` query that is
-    /// not `VOLATILE`, sets no parameter but `search_path`, and that every
-    /// caller may execute, whose body reads alike in turn. A body without
-    /// its own `search_path` resolves its names on the caller's, so each has
-    /// to mean alike on any path, as [`names_alike_anywhere`] takes them.
+    /// not `VOLATILE` and sets no parameter but `search_path`, whose body
+    /// reads alike in turn. A body without its own `search_path` resolves
+    /// its names on the caller's, so each has to mean alike on any path, as
+    /// [`names_alike_anywhere`] takes them. A policy calling it admits a
+    /// row only to a caller who may execute it, as [`executes_every_term`]
+    /// requires.
     fn invoked_alike(&mut self, function: &'a DB::Function) -> Result<bool, LookupError> {
         let confinement = self.confinement;
         let database = confinement.database;
@@ -1731,7 +1736,6 @@ impl<'r, 'a, DB: DatabaseLike> CallerBound<'r, 'a, DB> {
         if self.reading.contains(&address)
             || function.volatility() == FunctionBehavior::Volatile
             || !sets_only_search_path(function)
-            || !confinement.executable_by_every_caller(function)?
         {
             return Ok(false);
         }
@@ -1823,6 +1827,106 @@ impl<DB: DatabaseLike> Visitor for CallerBound<'_, '_, DB> {
         }
         WrittenCall::relation(factor).map_or(ControlFlow::Continue(()), |call| {
             Self::verdict(self.evaluates_otherwise(call))
+        })
+    }
+}
+
+/// Whether `caller` may execute every function the terms of `gates` call,
+/// and every function those running as their caller call in turn, so that
+/// evaluating the policies raises no permission error, which admits no row.
+fn executes_every_term<DB: DatabaseLike>(
+    database: &DB,
+    caller: Option<&DB::Role>,
+    gates: &[RowGate<'_, DB::Policy>],
+) -> Result<bool, LookupError> {
+    let mut executing = Executing {
+        database,
+        caller,
+        reading: Vec::new(),
+    };
+    for term in gates
+        .iter()
+        .flat_map(|gate| gate.permissive().iter().chain(gate.restrictive()))
+    {
+        if !executing.executes_all(term.expression().expression())? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The walk for whether a role may execute every function a policy term
+/// reaches.
+struct Executing<'a, DB: DatabaseLike> {
+    database: &'a DB,
+    /// The role evaluating the term, `None` standing for `PUBLIC`.
+    caller: Option<&'a DB::Role>,
+    /// The functions running as the caller whose bodies are walked.
+    reading: Vec<*const DB::Function>,
+}
+
+impl<DB: DatabaseLike> Executing<'_, DB> {
+    /// Whether the caller may execute every function `node` reaches.
+    fn executes_all<N: Visit + ?Sized>(&mut self, node: &N) -> Result<bool, LookupError> {
+        match walk(node, self) {
+            ControlFlow::Continue(()) => Ok(true),
+            ControlFlow::Break(found) => found.map_or(Ok(false), Err),
+        }
+    }
+
+    /// Whether the caller may execute every function `call` may reach, and
+    /// every function the `LANGUAGE sql` body of one running as its caller
+    /// reaches.
+    fn executes<'c>(&mut self, call: impl Into<WrittenCall<'c>>) -> Result<bool, LookupError> {
+        let database = self.database;
+        for function in database.functions_reached_by(call, IdentifierCase::Folded)? {
+            let executes = match self.caller {
+                Some(role) => function.can_execute(role, database)?,
+                None => function.is_executable_by_public(database)?,
+            };
+            if !executes {
+                return Ok(false);
+            }
+            let address = ptr::from_ref(function);
+            if function.security_mode() == FunctionSecurity::Definer
+                || self.reading.contains(&address)
+            {
+                continue;
+            }
+            let Some(query) = sql_query_body(database, function)? else {
+                continue;
+            };
+            self.reading.push(address);
+            if !self.executes_all(query.as_ref())? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// The walk's step for whether the caller may execute a call.
+    fn verdict(outcome: Result<bool, LookupError>) -> ControlFlow<Option<LookupError>> {
+        match outcome {
+            Ok(true) => ControlFlow::Continue(()),
+            Ok(false) => ControlFlow::Break(None),
+            Err(error) => ControlFlow::Break(Some(error)),
+        }
+    }
+}
+
+impl<DB: DatabaseLike> Visitor for Executing<'_, DB> {
+    type Break = Option<LookupError>;
+
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
+        match expression {
+            Expr::Function(call) => Self::verdict(self.executes(call)),
+            _ => ControlFlow::Continue(()),
+        }
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+        WrittenCall::relation(factor).map_or(ControlFlow::Continue(()), |call| {
+            Self::verdict(self.executes(call))
         })
     }
 }
