@@ -273,6 +273,72 @@ fn partial_and_expression_indexes_do_not_count() {
     }
 }
 
+#[test]
+fn an_index_behind_columns_the_conjunction_pins_serves_the_filter() {
+    for sql in [
+        "CREATE INDEX docs_team_owner ON docs (team, owner);
+         CREATE POLICY p ON docs USING (team = 7 AND owner = current_user);",
+        "CREATE INDEX docs_team_owner ON docs (team, owner);
+         CREATE POLICY p ON docs USING (owner = current_user AND (docs.team = '7'::INT));",
+        "CREATE INDEX docs_team_owner ON docs (team, owner);
+         CREATE POLICY p ON docs USING (team = current_setting('app.team')::INT AND owner = current_user);",
+        "CREATE INDEX docs_team_owner ON docs (team, owner);
+         CREATE POLICY p ON docs USING (owner = tags OR (team = 7 AND owner = current_user));",
+        "CREATE INDEX docs_team_id_owner ON docs (team, id, owner);
+         CREATE POLICY p ON docs USING (team = 7 AND id = 1 AND owner = current_user);",
+        "CREATE TABLE notes (team INT, owner TEXT, PRIMARY KEY (team, owner));
+         ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY p ON notes USING (team = 7 AND owner = current_user);",
+        "CREATE TABLE notes (team INT, owner TEXT, UNIQUE (team, owner));
+         ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY p ON notes USING (team = 7 AND owner = current_user);",
+        "CREATE INDEX members_team_member ON members (team, member);
+         CREATE POLICY p ON docs USING (EXISTS (
+           SELECT 1 FROM members m WHERE m.team = 1 AND m.member = current_user));",
+    ] {
+        assert_eq!(filters(sql), Vec::<String>::new(), "{sql}");
+    }
+}
+
+#[test]
+fn columns_pinned_elsewhere_or_otherwise_do_not_serve_the_filter() {
+    for (sql, site) in [
+        (
+            "CREATE INDEX docs_team_owner ON docs (team, owner);
+             CREATE POLICY p ON docs USING (team = 7 OR owner = current_user);",
+            "owner = current_user",
+        ),
+        (
+            "CREATE INDEX docs_team_owner ON docs (team, owner);
+             CREATE POLICY p ON docs USING (team > 7 AND owner = current_user);",
+            "owner = current_user",
+        ),
+        (
+            "CREATE INDEX docs_team_owner ON docs (team, owner);
+             CREATE POLICY p ON docs USING (team = id AND owner = current_user);",
+            "owner = current_user",
+        ),
+        (
+            "CREATE INDEX docs_team_id_owner ON docs (team, id, owner);
+             CREATE POLICY p ON docs USING (team = 7 AND owner = current_user);",
+            "owner = current_user",
+        ),
+        (
+            "CREATE INDEX docs_team_owner ON docs (team, owner) WHERE id > 0;
+             CREATE POLICY p ON docs USING (team = 7 AND owner = current_user);",
+            "owner = current_user",
+        ),
+        (
+            "CREATE INDEX members_team_member ON members (team, member);
+             CREATE POLICY p ON docs USING (EXISTS (
+               SELECT 1 FROM members a, members b WHERE a.team = 1 AND b.member = current_user));",
+            "b.member = current_user",
+        ),
+    ] {
+        assert_eq!(filters(sql).join(" | "), site, "{sql}");
+    }
+}
+
 /// The `docs` and `members` columns the policies below compare, each led by
 /// an index, and a timestamped table.
 const INDEXED: &str = "CREATE INDEX docs_owner ON docs (owner);
