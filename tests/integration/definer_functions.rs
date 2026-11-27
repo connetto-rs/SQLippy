@@ -5287,6 +5287,444 @@ fn a_membership_a_callee_arm_carries_is_read_through_the_function_it_names() {
     }
 }
 
+/// Functions reported over resources reached from the resources granted to
+/// their users through `public.resource_parents`, keyed onto its own
+/// resource as `deferral` declares and onto its parent by `parent_key`,
+/// visible to a user granted their organization or, for other kinds,
+/// through `authz.residual_read_containers()` with the body `residual`.
+fn walked_resources(deferral: &str, parent_key: &str, residual: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+             CREATE SCHEMA authz;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             CREATE TYPE authz.role AS ENUM ('reader', 'writer', 'admin');
+             CREATE TYPE authz.resource_kind AS ENUM ('organization', 'folder', 'project');
+             CREATE TABLE public.resources (id INT PRIMARY KEY, kind authz.resource_kind NOT NULL,
+               organization_id INT NOT NULL, UNIQUE (organization_id, id));
+             CREATE TABLE public.resource_parents (id INT PRIMARY KEY, organization_id INT NOT NULL,
+               parent_id INT NOT NULL,
+               FOREIGN KEY (organization_id, id) REFERENCES public.resources (organization_id, id) {deferral},
+               {parent_key});
+             CREATE TABLE public.grants (resource_id INT NOT NULL, organization_id INT NOT NULL,
+               grantee_id TEXT NOT NULL, role authz.role NOT NULL, PRIMARY KEY (resource_id, grantee_id),
+               FOREIGN KEY (organization_id, resource_id) REFERENCES public.resources (organization_id, id));
+             ALTER TABLE public.resources ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE public.grants ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT ON public.resources, public.resource_parents, public.grants TO app;
+             CREATE FUNCTION authz.granted_resources(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT permission.resource_id FROM public.grants permission
+                 WHERE permission.grantee_id = current_setting('app.user_id', true)
+                   AND permission.role >= min_role $$;
+             CREATE FUNCTION authz.organizations_with(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.organization_id FROM public.resources resource
+                 WHERE resource.kind = 'organization'
+                   AND resource.id IN (SELECT authz.granted_resources(min_role)) $$;
+             CREATE FUNCTION authz.containers_with(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 WITH RECURSIVE reached (id) AS (
+                   SELECT granted.id FROM authz.granted_resources(min_role) granted (id)
+                   UNION
+                   SELECT parent.id FROM reached
+                   JOIN public.resource_parents parent ON parent.parent_id = reached.id)
+                 SELECT id FROM reached $$;
+             CREATE FUNCTION authz.residual_read_containers() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 {residual} $$;
+             CREATE FUNCTION authz.residual_read_resources() RETURNS SETOF INT
+               LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE resource.id IN (SELECT authz.residual_read_containers()) $$;
+             CREATE FUNCTION authz.resources_with(min_role authz.role) RETURNS SETOF INT
+               LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+                 SELECT resource.id FROM public.resources resource
+                 WHERE resource.id IN (SELECT authz.containers_with(min_role)) $$;
+             ALTER FUNCTION authz.granted_resources(authz.role) OWNER TO authz_owner;
+             ALTER FUNCTION authz.organizations_with(authz.role) OWNER TO authz_owner;
+             ALTER FUNCTION authz.containers_with(authz.role) OWNER TO authz_owner;
+             ALTER FUNCTION authz.residual_read_containers() OWNER TO authz_owner;
+             ALTER FUNCTION authz.residual_read_resources() OWNER TO authz_owner;
+             ALTER FUNCTION authz.resources_with(authz.role) OWNER TO authz_owner;
+             REVOKE EXECUTE ON FUNCTION authz.granted_resources(authz.role),
+               authz.containers_with(authz.role), authz.residual_read_containers() FROM app;
+             GRANT EXECUTE ON FUNCTION authz.organizations_with(authz.role),
+               authz.residual_read_resources(), authz.resources_with(authz.role) TO app;
+             CREATE POLICY grants_select ON public.grants FOR SELECT TO app
+               USING (grantee_id = current_setting('app.user_id', true));
+             CREATE POLICY resources_select ON public.resources FOR SELECT TO app
+               USING (organization_id = ANY (ARRAY(SELECT authz.organizations_with('reader')))
+                 OR id = ANY (ARRAY(SELECT authz.residual_read_resources())));"
+        ),
+    )
+    .into_iter()
+    .filter(|function| function.starts_with("resources_with"))
+    .collect()
+}
+
+#[test]
+fn a_walk_is_met_by_the_organization_it_keeps_or_by_a_policy_walk_from_its_other_seeds() {
+    let residual = |kinds: &str, step: &str| {
+        format!(
+            "WITH RECURSIVE containers (id) AS (
+               SELECT resource.id FROM public.resources resource
+               WHERE resource.id IN (SELECT authz.granted_resources('reader'))
+                 AND resource.kind IN ({kinds})
+               UNION
+               {step})
+             SELECT id FROM containers"
+        )
+    };
+    let kinds = "'folder', 'project'";
+    let down = "SELECT parent.id FROM public.resource_parents parent
+        JOIN containers ON parent.parent_id = containers.id";
+    let deferred = "DEFERRABLE INITIALLY DEFERRED";
+    let kept = "FOREIGN KEY (organization_id, parent_id) REFERENCES public.resources (organization_id, id)";
+    let unkept = "FOREIGN KEY (parent_id) REFERENCES public.resources (id)";
+    assert_eq!(
+        walked_resources("", kept, &residual(kinds, down)),
+        Vec::<String>::new()
+    );
+    for (deferral, parent_key, declared) in [
+        (deferred, kept, residual(kinds, down)),
+        ("", unkept, residual(kinds, down)),
+        ("", kept, residual("'folder'", down)),
+        (
+            "",
+            kept,
+            residual(
+                kinds,
+                "SELECT parent.parent_id FROM public.resource_parents parent
+                 JOIN containers ON parent.id = containers.id",
+            ),
+        ),
+        (
+            "",
+            kept,
+            residual(kinds, &format!("{down} WHERE parent.id <> 7")),
+        ),
+        (
+            "",
+            kept,
+            format!(
+                "SELECT resource.id FROM public.resources resource
+                 WHERE resource.id IN (SELECT authz.granted_resources('reader'))
+                   AND resource.kind IN ({kinds})"
+            ),
+        ),
+    ] {
+        assert_eq!(
+            walked_resources(deferral, parent_key, &declared),
+            ["resources_with(authz.role)"],
+            "{deferral} {parent_key} {declared}"
+        );
+    }
+}
+
+/// Resources in one table, each folder and project under an organization or
+/// a folder and each ownable under a project, the checks tying
+/// `parent_kind` to `parent_id` so that the key over both checks every
+/// child. `authz.resources_with` reaches the folders and projects walked
+/// down from the caller's grants and their children, under the caller's
+/// installation caps, and `authz.organizations_reaching` reads the
+/// organizations of those resources. The read policy splits that authority
+/// into the organizations granted whole and a residual walk from the other
+/// grants. The walk passes containers whose kind the caps leave out, which
+/// the caller cannot read.
+const FOLDED_RESOURCES: &str = "CREATE ROLE app NOLOGIN;
+     CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+     CREATE SCHEMA authz;
+     ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+     CREATE TYPE authz.role AS ENUM ('reader', 'writer', 'admin');
+     CREATE TYPE authz.resource_kind AS ENUM ('organization', 'folder', 'project', 'ownable');
+     CREATE TABLE public.resources (id INT PRIMARY KEY, kind authz.resource_kind NOT NULL,
+       organization_id INT NOT NULL, parent_id INT, parent_kind authz.resource_kind,
+       UNIQUE (organization_id, id), UNIQUE (organization_id, id, kind),
+       CHECK ((kind = 'organization') = (parent_id IS NULL)),
+       CHECK ((kind = 'organization') = (parent_kind IS NULL)),
+       CHECK (kind = 'organization'
+         OR (kind IN ('folder', 'project') AND parent_kind IN ('organization', 'folder'))
+         OR (kind = 'ownable' AND parent_kind = 'project')),
+       FOREIGN KEY (organization_id, parent_id, parent_kind)
+         REFERENCES public.resources (organization_id, id, kind));
+     CREATE TABLE public.grants (resource_id INT NOT NULL, organization_id INT NOT NULL,
+       grantee_id TEXT NOT NULL, role authz.role NOT NULL, PRIMARY KEY (resource_id, grantee_id),
+       FOREIGN KEY (organization_id, resource_id) REFERENCES public.resources (organization_id, id));
+     CREATE TABLE public.installation_permissions (installation_id TEXT NOT NULL,
+       organization_id INT NOT NULL, kind authz.resource_kind NOT NULL, max_role authz.role NOT NULL,
+       PRIMARY KEY (organization_id, installation_id, kind));
+     ALTER TABLE public.resources ENABLE ROW LEVEL SECURITY;
+     ALTER TABLE public.grants ENABLE ROW LEVEL SECURITY;
+     ALTER TABLE public.installation_permissions ENABLE ROW LEVEL SECURITY;
+     GRANT SELECT ON public.resources, public.grants, public.installation_permissions TO app;
+     CREATE FUNCTION authz.acting_installation_id() RETURNS TEXT
+       LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         SELECT NULLIF(current_setting('app.installation_id', true), '') $$;
+     CREATE FUNCTION authz.capped_kinds(min_role authz.role)
+       RETURNS TABLE (organization_id INT, kind authz.resource_kind)
+       LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         SELECT permission.organization_id, permission.kind
+         FROM public.installation_permissions permission
+         WHERE permission.installation_id = (SELECT authz.acting_installation_id())
+           AND permission.max_role >= min_role $$;
+     CREATE FUNCTION authz.granted_resources(min_role authz.role) RETURNS SETOF INT
+       LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         SELECT permission.resource_id FROM public.grants permission
+         WHERE permission.grantee_id = current_setting('app.user_id', true)
+           AND permission.role >= min_role
+           AND ((SELECT authz.acting_installation_id()) IS NULL
+             OR (permission.organization_id, 'organization'::authz.resource_kind)
+               IN (SELECT * FROM authz.capped_kinds('reader'))) $$;
+     CREATE FUNCTION authz.organizations_with(min_role authz.role) RETURNS SETOF INT
+       LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         SELECT resource.organization_id FROM public.resources resource
+         WHERE resource.kind = 'organization'
+           AND resource.id IN (SELECT authz.granted_resources(min_role))
+           AND ((SELECT authz.acting_installation_id()) IS NULL
+             OR (resource.organization_id, resource.kind)
+               IN (SELECT * FROM authz.capped_kinds(min_role))) $$;
+     CREATE FUNCTION authz.organization_resources_with(resource_kind authz.resource_kind)
+       RETURNS SETOF INT
+       LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         SELECT resource.organization_id FROM public.resources resource
+         WHERE resource.kind = 'organization'
+           AND resource.id IN (SELECT authz.granted_resources('reader'))
+           AND ((SELECT authz.acting_installation_id()) IS NULL
+             OR (resource.organization_id, resource_kind)
+               IN (SELECT * FROM authz.capped_kinds('reader'))) $$;
+     CREATE FUNCTION authz.containers_with(min_role authz.role) RETURNS SETOF INT
+       LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         WITH RECURSIVE reached (id) AS (
+           SELECT granted.id FROM authz.granted_resources(min_role) granted (id)
+           UNION
+           SELECT child.id FROM reached JOIN public.resources child ON child.parent_id = reached.id
+           WHERE child.kind IN ('folder', 'project'))
+         SELECT id FROM reached $$;
+     CREATE FUNCTION authz.reached_with(min_role authz.role) RETURNS SETOF INT
+       LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         SELECT reached.id FROM authz.containers_with(min_role) reached (id)
+         UNION
+         SELECT child.id FROM public.resources child
+         WHERE child.parent_id IN (SELECT authz.containers_with(min_role)) $$;
+     CREATE FUNCTION authz.residual_read_containers() RETURNS SETOF INT
+       LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         WITH RECURSIVE containers (id) AS (
+           SELECT resource.id FROM public.resources resource
+           WHERE resource.id IN (SELECT authz.granted_resources('reader'))
+             AND resource.kind IN ('folder', 'project', 'ownable')
+           UNION
+           SELECT child.id FROM containers
+           JOIN public.resources child ON child.parent_id = containers.id
+           WHERE child.kind IN ('folder', 'project'))
+         SELECT id FROM containers $$;
+     CREATE FUNCTION authz.residual_read_reached() RETURNS SETOF INT
+       LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         SELECT reached.id FROM authz.residual_read_containers() reached (id)
+         UNION
+         SELECT child.id FROM public.resources child
+         WHERE child.parent_id IN (SELECT authz.residual_read_containers()) $$;
+     CREATE FUNCTION authz.residual_read_resources() RETURNS SETOF INT
+       LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         SELECT resource.id FROM public.resources resource
+         WHERE resource.id IN (SELECT authz.residual_read_reached())
+           AND ((SELECT authz.acting_installation_id()) IS NULL
+             OR (resource.organization_id, resource.kind)
+               IN (SELECT * FROM authz.capped_kinds('reader'))) $$;
+     CREATE FUNCTION authz.resources_with(min_role authz.role) RETURNS SETOF INT
+       LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         SELECT resource.id FROM public.resources resource
+         WHERE resource.id IN (SELECT authz.reached_with(min_role))
+           AND ((SELECT authz.acting_installation_id()) IS NULL
+             OR (resource.organization_id, resource.kind)
+               IN (SELECT * FROM authz.capped_kinds(min_role))) $$;
+     CREATE FUNCTION authz.organizations_reaching(min_role authz.role) RETURNS SETOF INT
+       LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+         SELECT resource.organization_id FROM public.resources resource
+         WHERE resource.id IN (SELECT authz.resources_with(min_role)) $$;
+     ALTER FUNCTION authz.acting_installation_id() OWNER TO authz_owner;
+     ALTER FUNCTION authz.capped_kinds(authz.role) OWNER TO authz_owner;
+     ALTER FUNCTION authz.granted_resources(authz.role) OWNER TO authz_owner;
+     ALTER FUNCTION authz.organizations_with(authz.role) OWNER TO authz_owner;
+     ALTER FUNCTION authz.organization_resources_with(authz.resource_kind) OWNER TO authz_owner;
+     ALTER FUNCTION authz.containers_with(authz.role) OWNER TO authz_owner;
+     ALTER FUNCTION authz.reached_with(authz.role) OWNER TO authz_owner;
+     ALTER FUNCTION authz.residual_read_containers() OWNER TO authz_owner;
+     ALTER FUNCTION authz.residual_read_reached() OWNER TO authz_owner;
+     ALTER FUNCTION authz.residual_read_resources() OWNER TO authz_owner;
+     ALTER FUNCTION authz.resources_with(authz.role) OWNER TO authz_owner;
+     ALTER FUNCTION authz.organizations_reaching(authz.role) OWNER TO authz_owner;
+     REVOKE EXECUTE ON FUNCTION authz.granted_resources(authz.role),
+       authz.containers_with(authz.role), authz.reached_with(authz.role),
+       authz.residual_read_containers(), authz.residual_read_reached() FROM app;
+     GRANT EXECUTE ON FUNCTION authz.acting_installation_id(), authz.capped_kinds(authz.role),
+       authz.organizations_with(authz.role), authz.organization_resources_with(authz.resource_kind),
+       authz.residual_read_resources(), authz.resources_with(authz.role),
+       authz.organizations_reaching(authz.role) TO app;
+     CREATE POLICY grants_select ON public.grants FOR SELECT TO app
+       USING (grantee_id = current_setting('app.user_id', true));
+     CREATE POLICY installation_permissions_select ON public.installation_permissions
+       FOR SELECT TO app
+       USING (installation_id = NULLIF(current_setting('app.installation_id', true), ''));
+     CREATE POLICY resources_select ON public.resources FOR SELECT TO app
+       USING ((kind = 'ownable'
+           AND organization_id = ANY (ARRAY(SELECT authz.organization_resources_with('ownable'))))
+         OR (kind IN ('organization', 'folder', 'project')
+           AND organization_id = ANY (ARRAY(SELECT authz.organizations_with('reader')))
+           AND ((SELECT authz.acting_installation_id()) IS NULL
+             OR (organization_id, kind) IN (SELECT * FROM authz.capped_kinds('reader'))))
+         OR id = ANY (ARRAY(SELECT authz.residual_read_resources())));";
+
+/// The functions reported over [`FOLDED_RESOURCES`] among those it walks
+/// with, with `written` in place of each `original`, every replaced text
+/// written once.
+fn folded_resources(replaced: &[(&str, &str)]) -> Vec<String> {
+    let mut sql = FOLDED_RESOURCES.to_owned();
+    for (original, written) in replaced {
+        assert_eq!(sql.matches(original).count(), 1, "{original}");
+        sql = sql.replacen(original, written, 1);
+    }
+    exposed(
+        Deployment::default()
+            .with_app_role("app")
+            .with_request_setting("authz.acting_installation_id()")
+            .expect("request setting parses"),
+        &sql,
+    )
+    .into_iter()
+    .filter(|function| {
+        [
+            "resources_with",
+            "organizations_reaching",
+            "containers_with",
+            "reached_with",
+        ]
+        .iter()
+        .any(|helper| function.starts_with(helper))
+    })
+    .collect()
+}
+
+#[test]
+fn a_read_of_resources_a_walk_over_one_table_finds_is_met_by_a_partitioned_read_policy() {
+    assert_eq!(folded_resources(&[]), ["resources_with(authz.role)"]);
+}
+
+#[test]
+fn a_read_of_resources_a_walk_over_one_table_finds_beyond_its_read_policy_is_reported() {
+    let unchecked: &[(&str, &str)] = &[
+        (
+            "CHECK ((kind = 'organization') = (parent_kind IS NULL)),",
+            "",
+        ),
+        (
+            "CHECK (kind = 'organization'
+         OR (kind IN ('folder', 'project') AND parent_kind IN ('organization', 'folder'))
+         OR (kind = 'ownable' AND parent_kind = 'project')),",
+            "",
+        ),
+    ];
+    for replaced in [
+        &[(
+            "FOREIGN KEY (organization_id, parent_id, parent_kind)
+         REFERENCES public.resources (organization_id, id, kind)",
+            "FOREIGN KEY (parent_id) REFERENCES public.resources (id)",
+        )],
+        unchecked,
+        &[(
+            "JOIN public.resources child ON child.parent_id = containers.id
+           WHERE child.kind IN ('folder', 'project')",
+            "JOIN public.resources child ON child.parent_id = containers.id
+           WHERE child.kind = 'folder'",
+        )],
+        &[(
+            "WHERE resource.id IN (SELECT authz.residual_read_reached())",
+            "WHERE resource.id IN (SELECT authz.residual_read_containers())",
+        )],
+        &[(
+            "WHERE resource.id IN (SELECT authz.reached_with(min_role))
+           AND ((SELECT authz.acting_installation_id()) IS NULL
+             OR (resource.organization_id, resource.kind)
+               IN (SELECT * FROM authz.capped_kinds(min_role)))",
+            "WHERE resource.id IN (SELECT authz.reached_with(min_role))",
+        )],
+    ] {
+        assert_eq!(
+            folded_resources(replaced),
+            [
+                "organizations_reaching(authz.role)",
+                "resources_with(authz.role)"
+            ],
+            "{replaced:?}"
+        );
+    }
+    assert_eq!(
+        folded_resources(&[(
+            "authz.residual_read_resources(), authz.resources_with(authz.role),",
+            "authz.residual_read_resources(), authz.resources_with(authz.role),
+               authz.containers_with(authz.role), authz.reached_with(authz.role),",
+        )]),
+        ["containers_with(authz.role)", "reached_with(authz.role)"]
+    );
+}
+
+/// Whether `authz.organizations_reaching` is reported over
+/// [`FOLDED_RESOURCES`] with each walk stepping past the children whose
+/// kind is `skipped`, the walk the read reaches through called with
+/// `'project'` and the one the read policy reaches through with `'folder'`.
+fn skipping_reported(skipped: &str) -> bool {
+    let sql = FOLDED_RESOURCES
+        .replace(
+            "containers_with(min_role authz.role)",
+            "containers_with(skipped authz.resource_kind, min_role authz.role)",
+        )
+        .replace(
+            "containers_with(authz.role)",
+            "containers_with(authz.resource_kind, authz.role)",
+        )
+        .replace(
+            "containers_with(min_role)",
+            "containers_with('project', min_role)",
+        )
+        .replace(
+            "residual_read_containers() RETURNS",
+            "residual_read_containers(skipped authz.resource_kind) RETURNS",
+        )
+        .replace(
+            "residual_read_containers() OWNER",
+            "residual_read_containers(authz.resource_kind) OWNER",
+        )
+        .replace(
+            "residual_read_containers(),",
+            "residual_read_containers(authz.resource_kind),",
+        )
+        .replace(
+            "residual_read_containers()",
+            "residual_read_containers('folder')",
+        )
+        .replace(
+            "WHERE child.kind IN ('folder', 'project')",
+            &format!("WHERE child.kind IN ('folder', 'project') AND child.kind <> {skipped}"),
+        );
+    exposed(
+        Deployment::default()
+            .with_app_role("app")
+            .with_request_setting("authz.acting_installation_id()")
+            .expect("request setting parses"),
+        &sql,
+    )
+    .iter()
+    .any(|function| function.starts_with("organizations_reaching"))
+}
+
+#[test]
+fn a_walk_whose_step_reads_a_parameter_is_not_met_by_a_walk_over_another_argument() {
+    assert!(!skipping_reported("'project'"));
+    assert!(skipping_reported("$1"));
+}
+
 /// Functions reported over `tables`, declaring `public.teams` and
 /// `public.team_members`, and `definer`, the body of a function returning
 /// the organizations of teams. A team and a member are visible in the

@@ -750,9 +750,9 @@ struct Bound {
 }
 
 /// The stored tables `query`, nested `depth` queries deep, reads in its
-/// `FROM` list, when it reads nothing else, has no `WITH`, and names no
-/// output column where PostgreSQL also looks for a column, as `ORDER BY`,
-/// `GROUP BY` and `DISTINCT ON` do.
+/// `FROM` list, when it reads nothing else, has no `WITH`, names no output
+/// column where PostgreSQL also looks for a column, as `ORDER BY`,
+/// `GROUP BY` and `DISTINCT ON` do, and reads no table under [`KEPT`].
 fn bound(
     query: &Query,
     depth: usize,
@@ -797,9 +797,10 @@ fn bound(
             if !with_hints.is_empty()
                 || !partitions.is_empty()
                 || !index_directives.is_empty()
-                || alias
-                    .as_ref()
-                    .is_some_and(|alias| !alias.columns.is_empty())
+                || alias.as_ref().is_some_and(|alias| {
+                    !alias.columns.is_empty()
+                        || (alias.name.quote_style == Some('"') && alias.name.value == KEPT)
+                })
             {
                 return None;
             }
@@ -1081,6 +1082,10 @@ pub(crate) fn witnessed(query: &Query) -> Option<&Select> {
 /// The character joining the alias of a renamed reference to its column in
 /// [`flattened`], one no PostgreSQL identifier holds.
 const SEPARATOR: char = '\0';
+
+/// The alias of a row only the owner of a function finds, which [`bound`]
+/// refuses, so that no renamed condition a caller evaluates follows from it.
+pub(crate) const KEPT: &str = "0.kept";
 
 /// The most maps of a condition's subquery relations onto a clause's that
 /// [`finds_within`] tries.

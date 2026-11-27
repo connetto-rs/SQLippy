@@ -16,7 +16,7 @@ use sqlparser::ast::{
 
 use crate::rules::walk_support::walk;
 use crate::rules::{
-    null_support::may_hold_null,
+    null_support::{may_hold_null, may_hold_null_beside},
     policy_support::conjuncts,
     statement_support::{OwnLevel, reads_outer},
 };
@@ -533,8 +533,9 @@ pub(crate) fn key_pairs<'db, DB: DatabaseLike>(
 
 /// Whether `foreign_key` checks every row in which `column` is not `NULL`,
 /// which an enforced key does under `MATCH FULL` or when no row may hold
-/// `NULL` in another host column, since `MATCH SIMPLE` skips a row with a
-/// `NULL` in its key. A `NOT ENFORCED` key checks no row.
+/// `NULL` in another host column while `column` holds a value, since `MATCH
+/// SIMPLE` skips a row with a `NULL` in its key. A `NOT ENFORCED` key checks
+/// no row.
 pub(crate) fn checked_whenever_set<DB: DatabaseLike>(
     database: &DB,
     foreign_key: &DB::ForeignKey,
@@ -547,7 +548,7 @@ pub(crate) fn checked_whenever_set<DB: DatabaseLike>(
         return Ok(true);
     }
     for host in foreign_key.host_columns(database)? {
-        if host != column && may_hold_null(database, host)? {
+        if host != column && may_hold_null_beside(database, host, column)? {
             return Ok(false);
         }
     }

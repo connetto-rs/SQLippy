@@ -3,7 +3,9 @@
 
 use sql_traits::{
     errors::LookupError,
-    structs::{Assumption, CallResolution, ExpressionContext, IdentifierCase, OperatorResolution},
+    structs::{
+        Assumption, CallResolution, ExpressionContext, IdentifierCase, OperatorResolution, Outcomes,
+    },
     traits::{
         CheckConstraintLike, ColumnLike, DatabaseLike, FunctionLike, OperatorLike, TableLike,
     },
@@ -44,6 +46,52 @@ pub(crate) fn may_hold_null<DB: DatabaseLike>(
         '"',
         column.stored_column_name().as_ref(),
     ))));
+    Ok(table
+        .truth_under(database, &null, IdentifierCase::AsWritten, &checks)?
+        .outcomes
+        .truth)
+}
+
+/// Whether a row of the table of `column` may hold `NULL` in it while it
+/// holds a value in `set`, which [`may_hold_null`] allows and the table's
+/// enforced and validated checks do not rule out, as `CHECK ((kind = 'root')
+/// = (parent IS NULL))` beside `CHECK ((kind = 'root') = (path IS NULL))`
+/// does for `path` while `parent` holds a value.
+///
+/// # Errors
+///
+/// Returns the lookup error reading the columns or the checks of their
+/// table raised.
+pub(crate) fn may_hold_null_beside<DB: DatabaseLike>(
+    database: &DB,
+    column: &DB::Column,
+    set: &DB::Column,
+) -> Result<bool, LookupError> {
+    if !may_hold_null(database, column)? {
+        return Ok(false);
+    }
+    let table = column.table(database);
+    let mut checks = Vec::new();
+    for check in table.check_constraints(database)? {
+        if check.is_enforced() && check.is_validated(database)? {
+            checks.push(Assumption::Check(check));
+        }
+    }
+    if checks.is_empty() {
+        return Ok(true);
+    }
+    let named = |column: &DB::Column| {
+        Box::new(Expr::Identifier(Ident::with_quote(
+            '"',
+            column.stored_column_name().as_ref(),
+        )))
+    };
+    let held = Expr::IsNotNull(named(set));
+    checks.push(Assumption::Expression {
+        expression: &held,
+        outcomes: Outcomes::TRUE,
+    });
+    let null = Expr::IsNull(named(column));
     Ok(table
         .truth_under(database, &null, IdentifierCase::AsWritten, &checks)?
         .outcomes
