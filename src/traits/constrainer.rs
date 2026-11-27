@@ -169,7 +169,9 @@ pub trait Constrainer: Default {
     /// use sqlparser::dialect::PostgreSqlDialect;
     ///
     /// let database = ParserDB::parse::<PostgreSqlDialect>(
-    ///     "CREATE TABLE users (id INT PRIMARY KEY);
+    ///     "CREATE ROLE app;
+    ///      CREATE TABLE users (id INT PRIMARY KEY);
+    ///      GRANT DELETE ON users TO app;
     ///      CREATE TABLE posts (author_id INT REFERENCES users (id) ON DELETE CASCADE);
     ///      ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
     ///      CREATE POLICY posts_delete ON posts FOR DELETE USING (false);",
@@ -177,6 +179,7 @@ pub trait Constrainer: Default {
     /// .unwrap();
     /// let mut constrainer: GenericConstrainer<ParserDB> =
     ///     CascadeIntoRowLevelSecurityTable::default().into();
+    /// constrainer.set_deployment(Deployment::default().with_app_role("app"));
     /// constrainer.allow_foreign_key(
     ///     "cascade_into_row_level_security_table",
     ///     TargetName::new("posts", false),
