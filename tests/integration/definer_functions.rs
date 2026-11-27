@@ -5610,6 +5610,21 @@ fn folded_resources(replaced: &[(&str, &str)]) -> Vec<String> {
 #[test]
 fn a_read_of_resources_a_walk_over_one_table_finds_is_met_by_a_partitioned_read_policy() {
     assert_eq!(folded_resources(&[]), ["resources_with(authz.role)"]);
+    assert_eq!(
+        folded_resources(&[
+            (
+                "CREATE TABLE public.resources (",
+                "CREATE TABLE public.organizations (id INT PRIMARY KEY);
+     CREATE TABLE public.resources (",
+            ),
+            (
+                "UNIQUE (organization_id, id), UNIQUE (organization_id, id, kind),",
+                "UNIQUE (organization_id, id), UNIQUE (organization_id, id, kind),
+       FOREIGN KEY (organization_id) REFERENCES public.organizations (id),",
+            ),
+        ]),
+        ["resources_with(authz.role)"]
+    );
 }
 
 #[test]
@@ -5626,6 +5641,18 @@ fn a_read_of_resources_a_walk_over_one_table_finds_beyond_its_read_policy_is_rep
             "",
         ),
     ];
+    let unvalidated: &[(&str, &str)] = &[
+        (
+            "CHECK ((kind = 'organization') = (parent_kind IS NULL)),",
+            "",
+        ),
+        (
+            "ALTER TABLE public.resources ENABLE ROW LEVEL SECURITY;",
+            "ALTER TABLE public.resources ADD CONSTRAINT parent_kind_set
+       CHECK ((kind = 'organization') = (parent_kind IS NULL)) NOT VALID;
+     ALTER TABLE public.resources ENABLE ROW LEVEL SECURITY;",
+        ),
+    ];
     for replaced in [
         &[(
             "FOREIGN KEY (organization_id, parent_id, parent_kind)
@@ -5633,6 +5660,7 @@ fn a_read_of_resources_a_walk_over_one_table_finds_beyond_its_read_policy_is_rep
             "FOREIGN KEY (parent_id) REFERENCES public.resources (id)",
         )],
         unchecked,
+        unvalidated,
         &[(
             "JOIN public.resources child ON child.parent_id = containers.id
            WHERE child.kind IN ('folder', 'project')",
