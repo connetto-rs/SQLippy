@@ -145,6 +145,27 @@ fn columns_keyed_to_two_differently_named_columns_of_the_root_are_reported() {
 }
 
 #[test]
+fn a_column_keyed_to_a_column_its_parent_keys_to_itself_is_not_reported() {
+    assert_eq!(
+        findings(
+            "CREATE TABLE assets (
+                 id INT PRIMARY KEY,
+                 organization_id INT NOT NULL,
+                 owner_id INT NOT NULL,
+                 UNIQUE (id, owner_id),
+                 FOREIGN KEY (id, organization_id) REFERENCES assets (id, owner_id)
+             );
+             CREATE TABLE tubes (
+                 id INT PRIMARY KEY REFERENCES assets (id),
+                 organization_id INT NOT NULL,
+                 FOREIGN KEY (id, organization_id) REFERENCES assets (id, owner_id)
+             );",
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn a_column_keyed_to_a_parent_that_leaves_its_own_copy_unkeyed_is_reported() {
     assert_eq!(
         findings(
