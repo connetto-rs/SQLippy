@@ -1328,6 +1328,18 @@ fn a_restrictive_read_a_chain_of_foreign_keys_pins_to_the_confined_key_is_clean(
             "organization_id INT NOT NULL,\n       parent_id",
             "organization_id INT,\n       parent_id",
         )],
+        // `MATCH FULL` checks the parent key once its parent column holds a
+        // value.
+        &[
+            (
+                "organization_id INT NOT NULL,\n       parent_id",
+                "organization_id INT,\n       parent_id",
+            ),
+            (
+                "REFERENCES resources (id, organization_id));\n     CREATE FUNCTION",
+                "REFERENCES resources (id, organization_id) MATCH FULL);\n     CREATE FUNCTION",
+            ),
+        ],
         // Every resource names a child, a chain of rows that never repeats.
         &[(
             "UNIQUE (id, parent_id),",
@@ -1345,6 +1357,26 @@ fn a_restrictive_read_a_chain_of_foreign_keys_pins_to_the_confined_key_is_clean(
             (
                 "(parent_id, organization_id) REFERENCES resources (id, organization_id)",
                 "(parent_id, organization_id, parent_kind) REFERENCES resources (id, organization_id, kind)",
+            ),
+        ],
+        // A check PostgreSQL has not validated forces nothing, alongside one
+        // it has.
+        &[
+            (
+                "parent_id INT,",
+                "parent_id INT, kind TEXT NOT NULL, parent_kind TEXT,
+       CHECK ((kind = 'organization') = (parent_id IS NULL)),
+       CHECK ((kind = 'organization') = (parent_kind IS NULL)),
+       UNIQUE (id, organization_id, kind),",
+            ),
+            (
+                "(parent_id, organization_id) REFERENCES resources (id, organization_id)",
+                "(parent_id, organization_id, parent_kind) REFERENCES resources (id, organization_id, kind)",
+            ),
+            (
+                "\n     CREATE FUNCTION allowed()",
+                "\n     ALTER TABLE resources ADD CONSTRAINT positive CHECK (id > 0) NOT VALID;
+     CREATE FUNCTION allowed()",
             ),
         ],
     ] {
@@ -1370,6 +1402,30 @@ fn a_restrictive_read_a_broken_chain_of_foreign_keys_leaves_open_is_reported() {
                 "(parent_id, organization_id, parent_kind) REFERENCES resources (id, organization_id, kind)",
             ),
         ],
+        &[
+            (
+                "parent_id INT,",
+                "parent_id INT, kind TEXT NOT NULL, parent_kind TEXT,
+       CHECK ((kind = 'organization') = (parent_id IS NULL)),
+       UNIQUE (id, organization_id, kind),",
+            ),
+            (
+                "(parent_id, organization_id) REFERENCES resources (id, organization_id)",
+                "(parent_id, organization_id, parent_kind) REFERENCES resources (id, organization_id, kind)",
+            ),
+            (
+                "\n     CREATE FUNCTION allowed()",
+                "\n     ALTER TABLE resources ADD CONSTRAINT parent_kind_set
+       CHECK ((kind = 'organization') = (parent_kind IS NULL)) NOT VALID;
+     CREATE FUNCTION allowed()",
+            ),
+        ],
+        // Rows of a child table share no unique key with the resources.
+        &[(
+            "\n     CREATE FUNCTION allowed()",
+            "\n     CREATE TABLE archived_resources () INHERITS (resources);
+     CREATE FUNCTION allowed()",
+        )],
         &[(
             "REFERENCES resources (id, organization_id));\n     CREATE FUNCTION",
             "REFERENCES resources (id, organization_id) DEFERRABLE INITIALLY DEFERRED);\n     CREATE FUNCTION",

@@ -59,20 +59,16 @@ impl<'db, DB: DatabaseLike> TableFacts<'db, DB> {
         }
     }
 
-    /// Whether `column` holds a value in every row whose `NOT NULL` columns
-    /// and the nullable columns in `given`, of the same table and in the
-    /// order it declares them, hold one, as `NOT NULL` or the enforced and
+    /// Whether the nullable `column` holds a value in every row whose `NOT
+    /// NULL` columns and the nullable columns in `given`, of the same table
+    /// and in the order it declares them, hold one, as the enforced and
     /// validated checks of its table force.
     fn forces(
         &self,
         column: &'db DB::Column,
         given: &[&'db DB::Column],
     ) -> Result<bool, LookupError> {
-        let database = self.database;
-        if !column.is_nullable(database)? {
-            return Ok(true);
-        }
-        let checked = self.checked_columns(column.table(database))?;
+        let checked = self.checked_columns(column.table(self.database))?;
         if !checked.iter().any(|other| ptr::eq(*other, column)) {
             return Ok(false);
         }
@@ -381,9 +377,10 @@ impl<'f, 'db, DB: DatabaseLike> RowEqualities<'f, 'db, DB> {
     }
 
     /// Whether a foreign key over `pairs`, under `MATCH FULL` when `full` is
-    /// set, checks `row`, whose cell of each host column is in `hosts`. The
-    /// table's checks are read only for host columns whose cell holds no
-    /// value.
+    /// set, checks `row`, whose cell of each host column is in `hosts`, as
+    /// it does when one host column holds a value under `MATCH FULL` and
+    /// every one does otherwise. The table's checks are read only for host
+    /// columns whose cell holds no value, while too few hold one.
     fn checks_row(
         &self,
         row: usize,
@@ -391,25 +388,22 @@ impl<'f, 'db, DB: DatabaseLike> RowEqualities<'f, 'db, DB> {
         pairs: &[(&'db DB::Column, &'db DB::Column)],
         hosts: &[usize],
     ) -> Result<bool, LookupError> {
-        let unvalued: Vec<&'db DB::Column> = pairs
-            .iter()
-            .zip(hosts)
-            .filter(|(_, cell)| !self.holds_value(**cell))
-            .map(|((host, _), _)| *host)
-            .collect();
-        if unvalued.is_empty() || (full && unvalued.len() < hosts.len()) {
-            return Ok(true);
-        }
-        for host in unvalued {
-            let forced = self.checks_force_value(row, host)?;
-            if full && forced {
-                return Ok(true);
+        let needed = if full { 1 } else { hosts.len() };
+        let mut valued = hosts.iter().filter(|cell| self.holds_value(**cell)).count();
+        for ((host, _), cell) in pairs.iter().zip(hosts) {
+            if valued >= needed {
+                break;
             }
-            if !full && !forced {
+            if self.holds_value(*cell) {
+                continue;
+            }
+            if self.checks_force_value(row, host)? {
+                valued += 1;
+            } else if !full {
                 return Ok(false);
             }
         }
-        Ok(!full)
+        Ok(valued >= needed)
     }
 
     /// Whether `column` of `row` holds a value, as the enforced and
@@ -441,13 +435,11 @@ impl<'f, 'db, DB: DatabaseLike> RowEqualities<'f, 'db, DB> {
         {
             return Ok(false);
         }
-        let mut agree = false;
-        for key in self.facts.keys(table)?.iter() {
-            if !key.is_empty() && self.key_agrees(row, other, key)? {
-                agree = true;
-                break;
-            }
-        }
+        let agree = self
+            .facts
+            .keys(table)?
+            .iter()
+            .any(|key| !key.is_empty() && self.key_agrees(row, other, key));
         if !agree {
             return Ok(false);
         }
@@ -465,31 +457,16 @@ impl<'f, 'db, DB: DatabaseLike> RowEqualities<'f, 'db, DB> {
     }
 
     /// Whether `row` and `other` hold one value, never `NULL`, in every
-    /// column of `key`, stating the values the checks of their table force.
-    fn key_agrees(
-        &mut self,
-        row: usize,
-        other: usize,
-        key: &[&'db DB::Column],
-    ) -> Result<bool, LookupError> {
-        let mut cells = Vec::with_capacity(key.len());
-        for column in key {
+    /// column of `key`.
+    fn key_agrees(&self, row: usize, other: usize, key: &[&'db DB::Column]) -> bool {
+        key.iter().all(|column| {
             match (self.find_cell(row, column), self.find_cell(other, column)) {
-                (Some(left), Some(right)) if self.root(left) == self.root(right) => {
-                    cells.push((*column, left));
+                (Some(left), Some(right)) => {
+                    self.root(left) == self.root(right) && self.holds_value(left)
                 }
-                _ => return Ok(false),
+                _ => false,
             }
-        }
-        for (column, cell) in cells {
-            if !self.holds_value(cell) {
-                if !self.checks_force_value(row, column)? {
-                    return Ok(false);
-                }
-                self.hold_value(cell);
-            }
-        }
-        Ok(true)
+        })
     }
 
     /// The column of the table of `row` stored as `name`.
