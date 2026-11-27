@@ -14,9 +14,9 @@ use std::{
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
     structs::{
-        ColumnBinding, ColumnDefinition, ExpressionContext, ExpressionScope, FunctionResultType,
-        IdentifierCase, OperandType, RowStatement, RowVersion, TargetName, TriggerEnablement,
-        WrittenCall,
+        Assumption, ColumnBinding, ColumnDefinition, ExpressionContext, ExpressionScope,
+        FunctionResultType, IdentifierCase, OperandType, Outcomes, RowStatement, RowVersion,
+        TargetName, TriggerEnablement, WrittenCall,
     },
     traits::{
         ColumnLike, DataTypeLike, DatabaseLike, EnumerationKind, ForeignKeyLike, FunctionLike,
@@ -72,10 +72,11 @@ use crate::{
         null_support::{may_hold_null, rejects_null},
         plpgsql_flow_support::{Ran, plpgsql_block, ran_statements, rows_query},
         policy_support::{
-            acting, client_roles, conjuncts, evaluates_every_term, is_column_reference,
-            is_role_read, selects_every_column, sets_only_search_path, sql_query_body,
-            sql_statements_body, unnested, unwrapped,
+            acting, admits_every_row, client_roles, conjuncts, evaluates_every_term,
+            is_column_reference, is_role_read, selects_every_column, sets_only_search_path,
+            sql_query_body, sql_statements_body, unnested, unwrapped,
         },
+        table_rules::redundant_term::{assumed, guaranteed_checks},
         trigger_support::stored,
         type_support::user_type_named,
         walk_support::{holds_subquery, walk},
@@ -152,6 +153,11 @@ use super::plpgsql_ambiguous_name::collision;
 /// whose rows the policies admit case by case, each arm of an `OR` or list
 /// it states, or each label of a `NOT NULL` enum column a policy helper's
 /// rows are told apart by, meeting a policy alone.
+/// A policy condition naming a generated column, such as `NOT
+/// path_has_folder`, holds where the table's validated checks and the
+/// expressions its columns are generated as force it, given what the filter
+/// states of the row's own columns. That holds of a row the table stores,
+/// so the `WITH CHECK` of a row a write rewrites is not read so.
 /// A row a helper walks to over a `WITH RECURSIVE` step, through its own
 /// table or an edge table, keeps each column foreign keys bind alike at
 /// every step, such as the organization of the seed row it walks from, and
@@ -1600,6 +1606,15 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
             )?;
             written.push((value, refused));
         }
+        let existing_row = RowOf {
+            body: self,
+            table,
+            stored: true,
+        };
+        let written_row = RowOf {
+            stored: false,
+            ..existing_row
+        };
         for caller in &self.confinement.callers {
             let security = match table.row_security(statement, acting(*caller), database) {
                 Ok(security) => security,
@@ -1612,17 +1627,20 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
                     let (existing, rewritten): (Vec<_>, Vec<_>) = gates
                         .iter()
                         .partition(|gate| gate.row() == RowVersion::Existing);
-                    admits(database, table, existing, self, |condition| {
-                        clause_implies(self, filter, condition, &[])
-                    })? && admits(database, table, rewritten, self, |condition| {
+                    admits(database, table, existing, &existing_row, |condition| {
+                        clause_implies(&existing_row, filter, condition, &[])
+                    })? && admits(database, table, rewritten, &written_row, |condition| {
                         if names_any(condition.original, opaque) {
                             return Ok(false);
                         }
                         match new_row(condition.original, assigned) {
                             Some(new) => match left_to_prove(&new, &written) {
-                                Some(left) => {
-                                    clause_implies(self, filter, &Condition::new(self, &left), &[])
-                                }
+                                Some(left) => clause_implies(
+                                    &written_row,
+                                    filter,
+                                    &Condition::new(&written_row, &left),
+                                    &[],
+                                ),
                                 None => Ok(true),
                             },
                             None => Ok(false),
@@ -1639,15 +1657,27 @@ impl<DB: DatabaseLike> Body<'_, '_, DB> {
     }
 }
 
+/// A row of `table` a body's filter states conditions of, read against the
+/// policies of `table`.
+struct RowOf<'r, 'c, 'a, DB: DatabaseLike> {
+    body: &'r Body<'c, 'a, DB>,
+    table: &'r DB::Table,
+    /// Whether the row is one `table` stores, which meets its checks and
+    /// holds each generated column as generated, rather than one a write
+    /// rewrites, whose generated columns the written values change.
+    stored: bool,
+}
+
 /// A policy condition states the columns of its table by their stored names,
 /// as a confined filter does once renamed.
-impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
+impl<DB: DatabaseLike> Columns for RowOf<'_, '_, '_, DB> {
     type Tested = String;
 
     fn is_set_within(&self, narrower: &Expr, wider: &Expr) -> Result<bool, LookupError> {
-        self.confinement
+        let confinement = self.body.confinement;
+        confinement
             .sets
-            .is_set_within(self.confinement.deployment, narrower, wider)
+            .is_set_within(confinement.deployment, narrower, wider)
     }
 
     fn rename(&self, column: Cow<'_, str>) -> Option<String> {
@@ -1664,15 +1694,15 @@ impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
 
     /// A policy names a relation as the schema's search path resolves it.
     fn relation(&self, name: &ObjectName) -> Option<StoredRelation> {
-        stored_relation_named(self.confinement.database, name, None)
+        stored_relation_named(self.body.confinement.database, name, None)
     }
 
     fn inlined(&self, call: &Function) -> Option<Expr> {
-        helper_value(self.confinement, call)
+        helper_value(self.body.confinement, call)
     }
 
     fn parameter_values(&self, ordinal: usize) -> Option<&ParameterValues> {
-        self.parameters.get(ordinal)?.as_ref()
+        self.body.parameters.get(ordinal)?.as_ref()
     }
 
     /// Only a schema-qualified name is read, since an unqualified one may
@@ -1690,13 +1720,13 @@ impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
             .is_some_and(|(schema, name)| {
                 let target = TargetName::new(&name.value, name.quote_style.is_some())
                     .with_schema(&schema.value, schema.quote_style.is_some());
-                user_type_named(self.confinement.database, &target)
+                user_type_named(self.body.confinement.database, &target)
                     .is_some_and(|user_type| user_type.enumeration().is_some())
             })
     }
 
     fn returns_null_on_null_argument(&self, call: &Function, index: usize) -> bool {
-        let database = self.confinement.database;
+        let database = self.body.confinement.database;
         let Ok(reached) = database.functions_reached_by(call, IdentifierCase::Folded) else {
             return false;
         };
@@ -1708,6 +1738,43 @@ impl<DB: DatabaseLike> Columns for Body<'_, '_, DB> {
             any = true;
         }
         any
+    }
+
+    /// A stored row meets the table's validated checks and holds each
+    /// generated column as generated, beside what `beside` states of it.
+    /// Only a condition naming a generated column is read, the one the
+    /// filter cannot state as written.
+    fn constrained(
+        &self,
+        condition: &Expr,
+        beside: impl FnOnce() -> Vec<Expr>,
+    ) -> Result<bool, LookupError> {
+        if !self.stored {
+            return Ok(false);
+        }
+        let database = self.body.confinement.database;
+        let mut generated = Vec::new();
+        for column in self.table.columns(database)? {
+            if column.generation_expression().is_some() {
+                generated.push(column.stored_column_name());
+            }
+        }
+        if !names_any(condition, &generated) {
+            return Ok(false);
+        }
+        let beside = beside();
+        let checks = guaranteed_checks(database, self.table)?;
+        let mut assumptions = assumed(&checks, None);
+        assumptions.extend(beside.iter().map(|expression| Assumption::Expression {
+            expression,
+            outcomes: Outcomes::TRUE,
+        }));
+        Ok(admits_every_row(self.table.truth_under(
+            database,
+            condition,
+            IdentifierCase::AsWritten,
+            &assumptions,
+        )?))
     }
 }
 
@@ -3421,13 +3488,14 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         conditions: &[Expr],
         visited: &mut Vec<*const DB::Function>,
     ) -> Result<bool, LookupError> {
+        let row = RowOf {
+            body: &self.body,
+            table,
+            stored: true,
+        };
         for condition in conditions {
-            if !clause_implies(
-                &self.body,
-                clause,
-                &Condition::new(&self.body, condition),
-                &[],
-            )? && !self.met_through_callee(clause, table, condition, visited)?
+            if !clause_implies(&row, clause, &Condition::new(&row, condition), &[])?
+                && !self.met_through_callee(clause, table, condition, visited)?
             {
                 return Ok(false);
             }
@@ -6469,7 +6537,7 @@ fn selects(body: &SetExpr, found: &mut Vec<*const Select>) {
 
 /// Whether `condition` names, bare or qualified, a column whose stored name
 /// `columns` holds.
-fn names_any(condition: &Expr, columns: &[String]) -> bool {
+fn names_any<S: AsRef<str>>(condition: &Expr, columns: &[S]) -> bool {
     !columns.is_empty()
         && visit_expressions(condition, |expression| {
             let name = match expression {
@@ -6479,7 +6547,7 @@ fn names_any(condition: &Expr, columns: &[String]) -> bool {
             };
             if name.is_some_and(|name| {
                 let name = normalize_identifier(&name.value, name.quote_style.is_some());
-                columns.iter().any(|column| *column == name)
+                columns.iter().any(|column| column.as_ref() == name)
             }) {
                 ControlFlow::Break(())
             } else {

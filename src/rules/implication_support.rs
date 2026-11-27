@@ -22,7 +22,7 @@ use crate::rules::{
     policy_support::{
         conjuncts, disjuncts, is_column_reference, is_tautology, unnested, unwrapped,
     },
-    walk_support::walk,
+    walk_support::{holds_subquery, walk},
 };
 
 /// What a name a filter writes like a column's stands for.
@@ -111,6 +111,21 @@ pub(crate) trait Columns {
     /// positional argument at `index`, counted from zero, is `NULL`.
     fn returns_null_on_null_argument(&self, _call: &Function, _index: usize) -> bool {
         false
+    }
+
+    /// Whether every row meeting each condition `beside` gives meets
+    /// `condition`, by what the constraints of the row's table hold of its
+    /// columns, both naming those columns as [`renamed`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns the lookup error reading the table's constraints raised.
+    fn constrained(
+        &self,
+        _condition: &Expr,
+        _beside: impl FnOnce() -> Vec<Expr>,
+    ) -> Result<bool, LookupError> {
+        Ok(false)
     }
 
     /// Whether `clause` draws the row it tests from rows that each meet
@@ -242,6 +257,13 @@ pub(crate) fn clause_implies<C: Columns>(
     {
         return Ok(true);
     }
+    if let Some(stated) = &condition.renamed
+        && !holds_subquery(stated)
+        && references_column(stated)
+        && columns.constrained(stated, || row_conditions(columns, clause, context))?
+    {
+        return Ok(true);
+    }
     if let Some((operands, wider)) = &condition.membership
         && let Some((row, members)) = membership(clause)
         && row.len() == operands.len()
@@ -305,6 +327,32 @@ pub(crate) fn clause_implies<C: Columns>(
         }
     }
     Ok(false)
+}
+
+/// The conjuncts of `clause` and `context` that state of the tested row's
+/// columns alone, each named as [`renamed`] names them.
+fn row_conditions<C: Columns>(columns: &C, clause: &Expr, context: &[&Expr]) -> Vec<Expr> {
+    iter::once(clause)
+        .chain(context.iter().copied())
+        .flat_map(conjuncts)
+        .filter(|conjunct| !holds_subquery(conjunct) && references_column(*conjunct))
+        .filter_map(|conjunct| {
+            renamed(
+                conjunct,
+                |column| stored_name(column).map(|name| Term::Column(name.into_owned())),
+                |name| columns.relation(name),
+                |_| None,
+            )
+        })
+        .filter(|conjunct| {
+            let mut parameter = false;
+            let _ = visit_expressions(conjunct, |expression| {
+                parameter |= parameter_ordinal(expression).is_some();
+                ControlFlow::<()>::Continue(())
+            });
+            !parameter
+        })
+        .collect()
 }
 
 /// The arms of which every row `condition` admits meets one, those of an
