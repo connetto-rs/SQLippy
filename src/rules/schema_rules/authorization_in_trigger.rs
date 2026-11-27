@@ -2,7 +2,8 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    convert::Infallible,
     ops::ControlFlow,
 };
 
@@ -12,8 +13,9 @@ use sql_traits::{
     traits::{DatabaseLike, FunctionLike, PolicyLike, Relation, TableLike, TriggerLike},
 };
 use sqlparser::ast::{
-    Expr, FromTable, JoinConstraint, JoinOperator, ObjectName, Query, Select, SetExpr, Statement,
-    TableFactor, TableWithJoins, TriggerEvent, UpdateTableFromKind, Visitor,
+    BinaryOperator, Expr, FromTable, JoinConstraint, JoinOperator, ObjectName, Query, Select,
+    SetExpr, Statement, TableFactor, TableWithJoins, TriggerEvent, UnaryOperator,
+    UpdateTableFromKind, VisitMut, Visitor, VisitorMut,
 };
 use sqlparser_plpgsql::{
     condition::errcode,
@@ -32,9 +34,9 @@ use crate::{
         function_reach_support::reachable_functions,
         literal_support::text_literal,
         plpgsql_flow_support::plpgsql_block,
-        policy_support::{Command, applied, sql_query_body},
-        trigger_support::{evaluated, triggers_with_functions},
-        walk_support::{stopped, walk},
+        policy_support::{Command, applied, sql_query_body, unnested},
+        trigger_support::{evaluated, row, stored, triggers_with_functions},
+        walk_support::{holds_subquery, stopped, walk},
     },
     traits::{Constrainer, GenericConstrainer, Reporter, SchemaRule, reporter::signature},
 };
@@ -48,6 +50,12 @@ rule_definition!(
     /// The policy already decides who may run the command on which rows,
     /// so the trigger repeats the decision on a second path, which can
     /// drift from the policy that tools and readers consult.
+    ///
+    /// A helper result repeats the policy only where the trigger's term
+    /// reads no row other than `NEW` or `OLD`, and only fields the policy's
+    /// term calling the helper reads as columns of its own row. A trigger
+    /// filtering the rows of another relation with the helper decides about
+    /// those rows, which the policy never checks.
     ///
     /// The rule does not run on SQLite, which has no row-level security
     /// policies.
@@ -209,12 +217,18 @@ struct Readings<'b> {
     assignments: Vec<(String, &'b Query)>,
     /// The queries that evaluate the values the body returns.
     returns: Vec<&'b Query>,
+    /// The names the body declares, a loop's own variable included, which
+    /// its queries read as variables and never as columns.
+    variables: BTreeSet<Cow<'b, str>>,
 }
 
 /// Fills `readings` with the conditions, statements, assignments and
 /// returns of `block`.
 fn block_readings<'b>(block: &'b Block, readings: &mut Readings<'b>) {
     for declaration in &block.declarations {
+        readings
+            .variables
+            .insert(Cow::Borrowed(declaration.name.as_str()));
         if let DeclarationKind::Variable(variable) = &declaration.kind
             && let Some(default) = &variable.default
         {
@@ -274,10 +288,14 @@ fn node_readings<'b>(node: &'b Node, readings: &mut Readings<'b>) {
                     readings.conditions.push(condition);
                 }
                 LoopControl::Query { query, .. } => readings.statements.push(query),
-                LoopControl::Cursor { cursor, .. } => readings.statements.push(&cursor.query),
-                LoopControl::Unconditional
-                | LoopControl::Range { .. }
-                | LoopControl::Dynamic { .. } => {}
+                LoopControl::Cursor { variable, cursor } => {
+                    readings.variables.insert(Cow::Borrowed(variable.as_str()));
+                    readings.statements.push(&cursor.query);
+                }
+                LoopControl::Range { variable, .. } => {
+                    readings.variables.insert(Cow::Borrowed(variable.as_str()));
+                }
+                LoopControl::Unconditional | LoopControl::Dynamic { .. } => {}
             }
             for node in &repeated.statements {
                 node_readings(node, readings);
@@ -484,13 +502,225 @@ fn join_condition(operator: &JoinOperator) -> Option<&Expr> {
     }
 }
 
+/// The values of rows a boolean term reads.
+#[derive(Clone, Default)]
+struct Reads {
+    /// The columns of the row the command writes the term reads, as the
+    /// policy's own columns or as fields of `NEW` and `OLD`.
+    columns: BTreeSet<String>,
+    /// Whether the term reads a column of another row, of a relation a query
+    /// scans or of a record the body fetched.
+    elsewhere: bool,
+}
+
+impl Reads {
+    /// Adds what `other` reads, answering whether `self` read less before.
+    fn merge(&mut self, other: &Self) -> bool {
+        let known = self.columns.len();
+        self.columns.extend(other.columns.iter().cloned());
+        let grown = self.columns.len() > known || (other.elsewhere && !self.elsewhere);
+        self.elsewhere |= other.elsewhere;
+        grown
+    }
+}
+
+/// What the names of a term stand for.
+#[derive(Clone, Copy)]
+enum Row<'a> {
+    /// A policy on the table of this stored name, whose terms read the
+    /// row's columns by bare name or under the table's name.
+    Policy(&'a str),
+    /// A trigger or a function it reaches, whose terms read the row's fields
+    /// under `NEW` or `OLD` and read these names as variables.
+    Trigger(&'a BTreeSet<Cow<'a, str>>),
+}
+
+/// Where a boolean term stands.
+#[derive(Clone, Copy)]
+struct Scope<'a> {
+    /// What the term's names stand for.
+    row: Row<'a>,
+    /// Whether the term stands in a query or statement that scans a
+    /// relation, whose columns its bare names may read.
+    scanning: bool,
+}
+
+impl Scope<'_> {
+    /// The values of rows `term` reads.
+    fn reads(self, term: &Expr) -> Reads {
+        let mut reader = Reader {
+            row: self.row,
+            scanning: vec![self.scanning],
+            reads: Reads::default(),
+        };
+        let ControlFlow::Continue(()) = walk(term, &mut reader);
+        reader.reads
+    }
+}
+
+/// Collects the values of rows the names of a term read.
+struct Reader<'a> {
+    row: Row<'a>,
+    /// Whether a relation is in scope where the term stands and in each
+    /// `SELECT` around the name the walk is at.
+    scanning: Vec<bool>,
+    reads: Reads,
+}
+
+impl Visitor for Reader<'_> {
+    type Break = Infallible;
+
+    fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Infallible> {
+        let outer = self.scanning.last() == Some(&true);
+        self.scanning.push(outer || !select.from.is_empty());
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_select(&mut self, _select: &Select) -> ControlFlow<Infallible> {
+        self.scanning.pop();
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Infallible> {
+        let scanning = self.scanning.last() == Some(&true);
+        match (expression, self.row) {
+            (Expr::Identifier(ident), Row::Policy(_)) if !scanning => {
+                self.reads.columns.insert(stored(ident).into_owned());
+            }
+            (Expr::Identifier(ident), Row::Trigger(variables))
+                if !scanning
+                    || row(ident).is_some()
+                    || variables.contains(stored(ident).as_ref()) => {}
+            (Expr::CompoundIdentifier(parts), Row::Policy(table)) => match parts.as_slice() {
+                [relation, column] if !scanning && stored(relation) == table => {
+                    self.reads.columns.insert(stored(column).into_owned());
+                }
+                _ => self.reads.elsewhere = true,
+            },
+            (Expr::CompoundIdentifier(parts), Row::Trigger(_)) => match parts.as_slice() {
+                [record, field] if row(record).is_some() => {
+                    self.reads.columns.insert(stored(field).into_owned());
+                }
+                _ => self.reads.elsewhere = true,
+            },
+            (Expr::Identifier(_), _) => self.reads.elsewhere = true,
+            _ => {}
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// The boolean terms `condition` combines with `AND`, `OR` and `NOT`.
+fn terms(condition: &Expr) -> Vec<&Expr> {
+    match unnested(condition) {
+        Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr,
+        } => terms(expr),
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And | BinaryOperator::Or,
+            right,
+        } => {
+            let mut found = terms(left);
+            found.extend(terms(right));
+            found
+        }
+        term => vec![term],
+    }
+}
+
+/// `condition` split into the boolean terms it combines with `AND`, `OR`
+/// and `NOT`, pushed onto `found`.
+fn owned_terms(condition: Expr, found: &mut Vec<Expr>) {
+    match condition {
+        Expr::Nested(inner)
+        | Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr: inner,
+        } => owned_terms(*inner, found),
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And | BinaryOperator::Or,
+            right,
+        } => {
+            owned_terms(*left, found);
+            owned_terms(*right, found);
+        }
+        term => found.push(term),
+    }
+}
+
+/// Takes the `WHERE` and `HAVING` conditions out of the queries a term
+/// holds, each with whether a relation is in scope where it stands.
+struct Cut {
+    scanning: Vec<bool>,
+    conditions: Vec<(Expr, bool)>,
+}
+
+impl VisitorMut for Cut {
+    type Break = Infallible;
+
+    fn pre_visit_select(&mut self, select: &mut Select) -> ControlFlow<Infallible> {
+        let scanning = self.scanning.last() == Some(&true) || !select.from.is_empty();
+        self.scanning.push(scanning);
+        self.conditions.extend(
+            select
+                .selection
+                .take()
+                .into_iter()
+                .chain(select.having.take())
+                .map(|condition| (condition, scanning)),
+        );
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_select(&mut self, _select: &mut Select) -> ControlFlow<Infallible> {
+        self.scanning.pop();
+        ControlFlow::Continue(())
+    }
+}
+
+/// The boolean terms of `condition`, standing where `scanning` tells, and
+/// those of the `WHERE` and `HAVING` conditions of the queries within it,
+/// each cut out of the term holding it, with whether a relation is in scope
+/// where each stands. A helper's call so belongs to the one term that
+/// decides with it.
+fn standing_terms(condition: &Expr, scanning: bool) -> Vec<(Cow<'_, Expr>, bool)> {
+    let mut pending: Vec<(Cow<'_, Expr>, bool)> = terms(condition)
+        .into_iter()
+        .map(|term| (Cow::Borrowed(term), scanning))
+        .collect();
+    let mut standing = Vec::with_capacity(pending.len());
+    while let Some((term, scanning)) = pending.pop() {
+        if !holds_subquery(&term) {
+            standing.push((term, scanning));
+            continue;
+        }
+        let mut term = term.into_owned();
+        let mut cut = Cut {
+            scanning: vec![scanning],
+            conditions: Vec::new(),
+        };
+        let ControlFlow::Continue(()) = VisitMut::visit(&mut term, &mut cut);
+        for (condition, scanning) in cut.conditions {
+            let mut split = Vec::new();
+            owned_terms(condition, &mut split);
+            pending.extend(split.into_iter().map(|term| (Cow::Owned(term), scanning)));
+        }
+        standing.push((Cow::Owned(term), scanning));
+    }
+    standing
+}
+
 /// The function calls an expression makes, resolved the way the body writes
 /// them, and the values those calls return.
 struct ReachingCalls<'db, 'w, DB: DatabaseLike> {
     database: &'db DB,
     helper: &'db DB::Function,
-    /// The functions whose returned value the search already weighed.
-    carrying: &'w mut HashSet<&'db DB::Function>,
+    /// The functions whose returned value the search already weighed, with
+    /// whether it may carry the result of `helper`.
+    carrying: &'w mut HashMap<&'db DB::Function, bool>,
 }
 
 impl<DB: DatabaseLike> Visitor for ReachingCalls<'_, '_, DB> {
@@ -514,14 +744,19 @@ impl<DB: DatabaseLike> Visitor for ReachingCalls<'_, '_, DB> {
             if function.target_name().schema() == Some("pg_catalog") {
                 continue;
             }
-            if !self.carrying.insert(function) {
-                continue;
-            }
-            let carries =
-                match function_carries(self.database, function, self.helper, self.carrying) {
-                    Ok(carries) => carries,
-                    Err(error) => return ControlFlow::Break(Some(error)),
-                };
+            let carries = if let Some(&carries) = self.carrying.get(function) {
+                carries
+            } else {
+                // A call reached again while its own value is weighed adds nothing.
+                self.carrying.insert(function, false);
+                let carries =
+                    match function_carries(self.database, function, self.helper, self.carrying) {
+                        Ok(carries) => carries,
+                        Err(error) => return ControlFlow::Break(Some(error)),
+                    };
+                self.carrying.insert(function, carries);
+                carries
+            };
             if carries {
                 return ControlFlow::Break(None);
             }
@@ -536,7 +771,7 @@ fn value_reaches<'db, DB: DatabaseLike>(
     database: &'db DB,
     expression: &Expr,
     helper: &'db DB::Function,
-    carrying: &mut HashSet<&'db DB::Function>,
+    carrying: &mut HashMap<&'db DB::Function, bool>,
 ) -> Result<bool, LookupError> {
     let mut calls = ReachingCalls {
         database,
@@ -552,7 +787,7 @@ fn function_carries<'db, DB: DatabaseLike>(
     database: &'db DB,
     function: &'db DB::Function,
     helper: &'db DB::Function,
-    carrying: &mut HashSet<&'db DB::Function>,
+    carrying: &mut HashMap<&'db DB::Function, bool>,
 ) -> Result<bool, LookupError> {
     let Some(block) = plpgsql_block(function) else {
         return sql_carries(database, function, helper, carrying);
@@ -562,15 +797,19 @@ fn function_carries<'db, DB: DatabaseLike>(
     if readings.returns.is_empty() {
         return Ok(false);
     }
-    let carrying_names = if readings.assignments.is_empty() {
-        BTreeSet::new()
+    let carried = if readings.assignments.is_empty() {
+        BTreeMap::new()
     } else {
-        carrying_names(database, &readings.assignments, helper, carrying)?
+        let scope = Scope {
+            row: Row::Trigger(&readings.variables),
+            scanning: false,
+        };
+        carrying_names(database, &readings.assignments, scope, helper, carrying)?
     };
     for value in &readings.returns {
         let returned = expression(value);
         if value_reaches(database, &returned, helper, carrying)?
-            || reads_carrying_name(&returned, &carrying_names)
+            || carried_reads(&returned, &carried).is_some()
         {
             return Ok(true);
         }
@@ -586,7 +825,7 @@ fn sql_carries<'db, DB: DatabaseLike>(
     database: &'db DB,
     function: &'db DB::Function,
     helper: &'db DB::Function,
-    carrying: &mut HashSet<&'db DB::Function>,
+    carrying: &mut HashMap<&'db DB::Function, bool>,
 ) -> Result<bool, LookupError> {
     let body = sql_query_body(database, function)?;
     let atomic = if body.is_some() {
@@ -621,103 +860,183 @@ fn sql_carries<'db, DB: DatabaseLike>(
     Ok(false)
 }
 
+/// What `term`, standing in `scope`, reads when its value depends on the
+/// result of `helper`, through the calls it makes or the variables of
+/// `carried` it reads, which add what their own terms read.
+fn helper_reads<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    term: &Expr,
+    scope: Scope<'_>,
+    helper: &'db DB::Function,
+    carrying: &mut HashMap<&'db DB::Function, bool>,
+    carried: &BTreeMap<String, Reads>,
+) -> Result<Option<Reads>, LookupError> {
+    let held = carried_reads(term, carried);
+    if held.is_none() && !value_reaches(database, term, helper, carrying)? {
+        return Ok(None);
+    }
+    let mut reads = scope.reads(term);
+    if let Some(held) = held {
+        reads.merge(&held);
+    }
+    Ok(Some(reads))
+}
+
 /// The variables a body's assignments may hold the result of `helper` in,
-/// following the value each assigned expression derives.
+/// following the value each assigned expression derives, with what the
+/// terms deriving it read.
 fn carrying_names<'db, DB: DatabaseLike>(
     database: &'db DB,
     assignments: &[(String, &Query)],
+    scope: Scope<'_>,
     helper: &'db DB::Function,
-    carrying: &mut HashSet<&'db DB::Function>,
-) -> Result<BTreeSet<String>, LookupError> {
-    let mut names = BTreeSet::new();
+    carrying: &mut HashMap<&'db DB::Function, bool>,
+) -> Result<BTreeMap<String, Reads>, LookupError> {
+    let assigned: Vec<Cow<'_, Expr>> = assignments
+        .iter()
+        .map(|(_, value)| expression(value))
+        .collect();
+    let standing: Vec<Vec<(Cow<'_, Expr>, bool)>> = assigned
+        .iter()
+        .map(|value| standing_terms(value, scope.scanning))
+        .collect();
+    let mut names: BTreeMap<String, Reads> = BTreeMap::new();
     loop {
-        let grown = names.len();
-        for (name, value) in assignments {
-            if names.contains(name.as_str()) {
-                continue;
-            }
-            let assigned = expression(value);
-            if value_reaches(database, &assigned, helper, carrying)?
-                || reads_carrying_name(&assigned, &names)
-            {
-                names.insert(name.clone());
+        let mut grown = false;
+        for ((name, _), terms) in assignments.iter().zip(&standing) {
+            for (term, scanning) in terms {
+                let scope = Scope {
+                    scanning: *scanning,
+                    ..scope
+                };
+                let Some(reads) = helper_reads(database, term, scope, helper, carrying, &names)?
+                else {
+                    continue;
+                };
+                grown |= if let Some(known) = names.get_mut(name) {
+                    known.merge(&reads)
+                } else {
+                    names.insert(name.clone(), reads);
+                    true
+                };
             }
         }
-        if names.len() == grown {
+        if !grown {
             break;
         }
     }
     Ok(names)
 }
 
-/// Whether `expression` reads any of the variables named in `names`,
-/// unqualified.
-fn reads_carrying_name(expression: &Expr, names: &BTreeSet<String>) -> bool {
-    struct Readers<'n> {
-        names: &'n BTreeSet<String>,
+/// What the variables of `carried` that `expression` reads, unqualified,
+/// read through the terms deriving them, `None` when it reads none.
+fn carried_reads(expression: &Expr, carried: &BTreeMap<String, Reads>) -> Option<Reads> {
+    struct Readers<'c> {
+        carried: &'c BTreeMap<String, Reads>,
+        found: Option<Reads>,
     }
 
     impl Visitor for Readers<'_> {
-        type Break = ();
+        type Break = Infallible;
 
-        fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<()> {
+        fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Infallible> {
             if let Expr::Identifier(ident) = expression {
-                let reads = if ident.quote_style.is_some() {
-                    self.names.contains(&ident.value)
-                } else {
-                    self.names
-                        .iter()
-                        .any(|name| name.eq_ignore_ascii_case(&ident.value))
-                };
-                if reads {
-                    return ControlFlow::Break(());
+                for (name, reads) in self.carried {
+                    let named = if ident.quote_style.is_some() {
+                        *name == ident.value
+                    } else {
+                        name.eq_ignore_ascii_case(&ident.value)
+                    };
+                    if named {
+                        self.found.get_or_insert_default().merge(reads);
+                    }
                 }
             }
             ControlFlow::Continue(())
         }
     }
 
-    let mut readers = Readers { names };
-    walk(expression, &mut readers).is_break()
+    if carried.is_empty() {
+        return None;
+    }
+    let mut readers = Readers {
+        carried,
+        found: None,
+    };
+    let ControlFlow::Continue(()) = walk(expression, &mut readers);
+    readers.found
+}
+
+/// Whether a term of `condition`, standing in `scope`, decides with the
+/// result of `helper` while reading what `matches` accepts.
+fn decides_about<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    condition: &Expr,
+    scope: Scope<'_>,
+    helper: &'db DB::Function,
+    carrying: &mut HashMap<&'db DB::Function, bool>,
+    carried: &BTreeMap<String, Reads>,
+    matches: &dyn Fn(&Reads) -> bool,
+) -> Result<bool, LookupError> {
+    for (term, scanning) in standing_terms(condition, scope.scanning) {
+        let scope = Scope { scanning, ..scope };
+        if helper_reads(database, &term, scope, helper, carrying, carried)?
+            .is_some_and(|reads| matches(&reads))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether a condition of `function`'s body decides with the result of
-/// `helper`.
+/// `helper` while reading what `matches` accepts.
 fn function_decides<'db, DB: DatabaseLike>(
     database: &'db DB,
     function: &'db DB::Function,
     helper: &'db DB::Function,
-    carrying: &mut HashSet<&'db DB::Function>,
+    carrying: &mut HashMap<&'db DB::Function, bool>,
+    matches: &dyn Fn(&Reads) -> bool,
 ) -> Result<bool, LookupError> {
+    let arguments: BTreeSet<Cow<'db, str>> =
+        function.stored_argument_names(database).flatten().collect();
     if let Some(block) = plpgsql_block(function) {
-        let mut readings = Readings::default();
+        let mut readings = Readings {
+            variables: arguments,
+            ..Readings::default()
+        };
         block_readings(&block, &mut readings);
-        let mut conditions: Vec<Cow<'_, Expr>> = Vec::new();
+        if readings.conditions.is_empty() && readings.statements.is_empty() {
+            return Ok(false);
+        }
+        let evaluated = Scope {
+            row: Row::Trigger(&readings.variables),
+            scanning: false,
+        };
+        let carried = if readings.assignments.is_empty() {
+            BTreeMap::new()
+        } else {
+            carrying_names(database, &readings.assignments, evaluated, helper, carrying)?
+        };
         for condition in &readings.conditions {
             let condition = expression(condition);
-            if value_reaches(database, &condition, helper, carrying)? {
+            if decides_about(
+                database, &condition, evaluated, helper, carrying, &carried, matches,
+            )? {
                 return Ok(true);
             }
-            conditions.push(condition);
         }
+        let scanned = Scope {
+            scanning: true,
+            ..evaluated
+        };
         for statement in &readings.statements {
             for condition in statement_conditions(statement) {
-                if value_reaches(database, condition, helper, carrying)? {
+                if decides_about(
+                    database, condition, scanned, helper, carrying, &carried, matches,
+                )? {
                     return Ok(true);
                 }
-                conditions.push(Cow::Borrowed(condition));
-            }
-        }
-        if conditions.is_empty() || readings.assignments.is_empty() {
-            return Ok(false);
-        }
-        let carrying_names = carrying_names(database, &readings.assignments, helper, carrying)?;
-        if carrying_names.is_empty() {
-            return Ok(false);
-        }
-        for condition in &conditions {
-            if reads_carrying_name(condition, &carrying_names) {
-                return Ok(true);
             }
         }
         Ok(false)
@@ -725,8 +1044,20 @@ fn function_decides<'db, DB: DatabaseLike>(
         let Some(query) = sql_query_body(database, function)? else {
             return Ok(false);
         };
+        let scanned = Scope {
+            row: Row::Trigger(&arguments),
+            scanning: true,
+        };
         for condition in query_conditions(&query) {
-            if value_reaches(database, condition, helper, carrying)? {
+            if decides_about(
+                database,
+                condition,
+                scanned,
+                helper,
+                carrying,
+                &BTreeMap::new(),
+                matches,
+            )? {
                 return Ok(true);
             }
         }
@@ -734,23 +1065,37 @@ fn function_decides<'db, DB: DatabaseLike>(
     }
 }
 
-/// Whether the trigger decides with the result of `helper`: the trigger's
-/// `WHEN` clause, or a condition of the function it runs or of the functions
-/// it calls, decides with it.
+/// Whether the trigger decides with the result of `helper` while reading
+/// what `matches` accepts: the trigger's `WHEN` clause, or a condition of the
+/// function it runs or of the functions it calls, decides with it.
 fn decides_with<'db, DB: DatabaseLike>(
     database: &'db DB,
     function: &'db DB::Function,
     helper: &'db DB::Function,
     when: Option<&'db Expr>,
+    matches: &dyn Fn(&Reads) -> bool,
 ) -> Result<bool, LookupError> {
-    let mut carrying: HashSet<&'db DB::Function> = HashSet::new();
+    let mut carrying: HashMap<&'db DB::Function, bool> = HashMap::new();
+    let no_variables: BTreeSet<Cow<'_, str>> = BTreeSet::new();
+    let clause = Scope {
+        row: Row::Trigger(&no_variables),
+        scanning: false,
+    };
     if let Some(condition) = when
-        && value_reaches(database, condition, helper, &mut carrying)?
+        && decides_about(
+            database,
+            condition,
+            clause,
+            helper,
+            &mut carrying,
+            &BTreeMap::new(),
+            matches,
+        )?
     {
         return Ok(true);
     }
     for function in reachable_functions(database, function)? {
-        if function_decides(database, function, helper, &mut carrying)? {
+        if function_decides(database, function, helper, &mut carrying, matches)? {
             return Ok(true);
         }
     }
@@ -785,23 +1130,49 @@ impl<DB: DatabaseLike> SchemaRule for AuthorizationInTrigger<DB> {
             }
             let commands: Vec<Command> = trigger.events().iter().filter_map(command).collect();
             let raises = plpgsql_block(function).is_some_and(|block| block_raises(&block));
+            let policy_row = table.stored_table_name();
             let mut found = None;
             'policies: for policy in table.policies(database)? {
                 for &command in &commands {
                     if !command.covered_by(policy.command()) {
                         continue;
                     }
-                    let mut helpers = Helpers {
-                        database,
-                        found: Vec::new(),
-                    };
+                    // Each term of the policy reading no other row, with the
+                    // helpers it calls and the columns of its row it reads.
+                    let mut uses: Vec<(Vec<&DB::Function>, BTreeSet<String>)> = Vec::new();
                     for applied in applied(database, policy, command)? {
-                        if let ControlFlow::Break(error) = walk(applied.expression, &mut helpers) {
-                            return Err(error.into());
+                        for (term, scanning) in standing_terms(applied.expression, false) {
+                            let mut helpers = Helpers {
+                                database,
+                                found: Vec::new(),
+                            };
+                            if let ControlFlow::Break(error) = walk(term.as_ref(), &mut helpers) {
+                                return Err(error.into());
+                            }
+                            let reads = Scope {
+                                row: Row::Policy(&policy_row),
+                                scanning,
+                            }
+                            .reads(&term);
+                            if !reads.elsewhere && !helpers.found.is_empty() {
+                                uses.push((helpers.found, reads.columns));
+                            }
                         }
                     }
-                    for helper in helpers.found {
-                        if decides_with(database, function, helper, trigger.condition())? {
+                    let mut weighed: Vec<&DB::Function> = Vec::new();
+                    for &helper in uses.iter().flat_map(|(helpers, _)| helpers) {
+                        if weighed.contains(&helper) {
+                            continue;
+                        }
+                        weighed.push(helper);
+                        let matches = |reads: &Reads| {
+                            !reads.elsewhere
+                                && uses.iter().any(|(helpers, columns)| {
+                                    helpers.contains(&helper) && reads.columns.is_subset(columns)
+                                })
+                        };
+                        if decides_with(database, function, helper, trigger.condition(), &matches)?
+                        {
                             found = Some((policy, Repeat::<DB>::Helper(helper)));
                             break 'policies;
                         }
