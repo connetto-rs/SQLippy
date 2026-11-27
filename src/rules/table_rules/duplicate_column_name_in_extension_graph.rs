@@ -242,9 +242,6 @@ impl<DB: DatabaseLike> DuplicateColumnNameInExtensionGraph<DB> {
             next += 1;
             for foreign_key in host.foreign_keys(database)? {
                 let referenced = foreign_key.referenced_table(database)?;
-                if referenced == host {
-                    continue;
-                }
                 if let Some(pairs) = entity_equalities(database, foreign_key)? {
                     equalities.extend(pairs);
                     if !tables.contains(&referenced) {
