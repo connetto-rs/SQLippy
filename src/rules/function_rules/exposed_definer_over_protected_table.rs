@@ -1374,21 +1374,19 @@ impl<'a, DB: DatabaseLike> Arms<'a, DB> {
     /// Records the `walks` of a callee whose arm at index `i` is carried
     /// as the arm `moved[i]`, dropping a walk with an arm not carried.
     fn carry(&mut self, walks: &[Walk<'a, DB>], moved: &[Option<usize>], whole_rows: bool) {
-        for walk in walks {
-            if let Some(step) = moved[walk.step]
-                && let Some(seeds) = walk.seeds.iter().map(|&seed| moved[seed]).collect()
-            {
-                self.walks.push(Walk {
-                    seeds,
-                    step,
-                    edge: walk.edge,
-                    from: walk.from,
-                    to: walk.to,
-                    filter: Rc::clone(&walk.filter),
-                    exhaustive: whole_rows && walk.exhaustive,
-                });
-            }
-        }
+        self.walks.extend(walks.iter().filter_map(|walk| {
+            let step = moved[walk.step]?;
+            let seeds: Option<Vec<usize>> = walk.seeds.iter().map(|&seed| moved[seed]).collect();
+            seeds.map(|seeds| Walk {
+                seeds,
+                step,
+                edge: walk.edge,
+                from: walk.from,
+                to: walk.to,
+                filter: Rc::clone(&walk.filter),
+                exhaustive: whole_rows && walk.exhaustive,
+            })
+        }));
     }
 }
 
@@ -2982,14 +2980,23 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         }
         let mut alternatives = Vec::new();
         let mut walked = Vec::new();
-        for walk in arms.walks.iter().filter(|_| reads_as_body) {
+        let tested = <&[&DB::Column; 1]>::try_from(columns)
+            .ok()
+            .filter(|_| reads_as_body)
+            .map(|&[tested]| tested);
+        let walks = arms.walks.iter().filter(|walk| {
+            walk.seeds
+                .iter()
+                .all(|&seed| arms.arms[seed].drawn.columns.len() == 1)
+        });
+        for (tested, walk) in walks.filter_map(|walk| Some((tested?, walk))) {
             let mut seeded = Vec::with_capacity(walk.seeds.len());
             for &seed in &walk.seeds {
                 let drawn = arms.arms[seed].drawn.as_ref();
                 let met = self.drawn_met(drawn, arguments.as_deref(), &sets, visited)?;
                 seeded.push((drawn, met));
             }
-            if let Some(reached) = self.walked_alternatives(table, columns, walk, &seeded, &sets)? {
+            if let Some(reached) = self.walked_alternatives(table, tested, walk, &seeded, &sets)? {
                 alternatives.extend(reached);
                 walked.extend(walk.seeds.iter().copied().chain([walk.step]));
             }
@@ -3063,23 +3070,17 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     fn walked_alternatives(
         &self,
         table: &'a DB::Table,
-        columns: &[&'a DB::Column],
+        tested: &'a DB::Column,
         walk: &Walk<'a, DB>,
         seeded: &[(&Drawn<'a, DB>, Cow<'_, [Expr]>)],
         sets: &[SetCall<'a, DB>],
     ) -> Result<Option<Vec<Expr>>, LookupError> {
         let database = self.body.confinement.database;
-        let [tested] = columns else {
-            return Ok(None);
-        };
         let Some((walked, key, kept)) = walked_key(database, walk, table, tested)? else {
             return Ok(None);
         };
         let mut alternatives = Vec::new();
         for (drawn, met) in seeded {
-            if drawn.columns.len() != 1 {
-                return Ok(None);
-            }
             let seed = carried_conditions(database, drawn, met, walked, &[key])?;
             let parts = match self.label_columns(walked, &seed)?.into_iter().next() {
                 Some((column, labels)) => labels
@@ -3101,21 +3102,17 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     self.joined_in_sets(table, sets, &[], &row, &mut alternative)?;
                     alternative.push(row);
                 }
-                if alternative.is_empty() {
-                    return Ok(None);
-                }
                 alternatives.push(conjunction(alternative));
             }
         }
         Ok(Some(alternatives))
     }
 
-    /// `EXISTS`, written as [`renamed`] writes a subquery, over a row of
-    /// `table` meeting `part` whose second column of each of `kept` holds
-    /// the value the first holds in the tested row. The owner finds the row,
-    /// which a caller may not, so its relation goes by the alias [`KEPT`],
-    /// under which it shows the tested row only in sets of helpers running
-    /// as the owner.
+    /// `EXISTS` over a row of `table` under the alias [`KEPT`], meeting
+    /// `part`, whose second column of each of `kept` holds the value the
+    /// first holds in the tested row. The owner finds the row, which a
+    /// caller may not, and [`renamed`] refuses the alias, so the row shows
+    /// the tested row only in sets of helpers running as the owner.
     fn kept_row(
         &self,
         table: &DB::Table,
@@ -3125,12 +3122,13 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         if kept.is_empty() {
             return None;
         }
+        let alias = Ident::with_quote('"', KEPT);
         let mut conditions: Vec<String> = kept
             .iter()
             .map(|(tested, seeded)| {
                 let tested = Ident::with_quote('"', tested.column_name());
                 let seeded = Ident::with_quote('"', seeded.column_name());
-                format!("\"seed\".{seeded} = \"0\".{tested}")
+                format!("{alias}.{seeded} = \"0\".{tested}")
             })
             .collect();
         for condition in part {
@@ -3144,62 +3142,19 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     },
                     _ => return ControlFlow::Continue(()),
                 };
-                *expression =
-                    Expr::CompoundIdentifier(vec![Ident::with_quote('"', "seed"), column]);
+                *expression = Expr::CompoundIdentifier(vec![alias.clone(), column]);
                 ControlFlow::Continue(())
             });
             conditions.push(format!("({condition})"));
         }
-        let found = Parser::new(&PostgreSqlDialect {})
+        Parser::new(&PostgreSqlDialect {})
             .try_with_sql(&format!(
-                "EXISTS (SELECT 1 FROM {} AS \"seed\" WHERE {})",
+                "EXISTS (SELECT 1 FROM {} AS {alias} WHERE {})",
                 qualified_name(self.body.confinement.database, table),
                 conditions.join(" AND ")
             ))
             .and_then(|mut parser| parser.parse_expr())
-            .ok()?;
-        let mut kept = renamed(
-            &found,
-            |reference| match reference {
-                Expr::CompoundIdentifier(parts) => parts
-                    .last()
-                    .map(|column| Term::Column(column.value.clone())),
-                _ => None,
-            },
-            |name| self.subquery_relation(name),
-            |call| helper_value(self.body.confinement, call),
-        )?;
-        let Expr::Exists { subquery, .. } = &mut kept else {
-            return None;
-        };
-        let SetExpr::Select(select) = subquery.body.as_mut() else {
-            return None;
-        };
-        let [
-            TableWithJoins {
-                relation:
-                    TableFactor::Table {
-                        alias: Some(alias), ..
-                    },
-                ..
-            },
-        ] = select.from.as_mut_slice()
-        else {
-            return None;
-        };
-        let renamed_alias = mem::replace(&mut alias.name, Ident::with_quote('"', KEPT)).value;
-        if let Some(selection) = &mut select.selection {
-            let _ = visit_expressions_mut(selection, |expression| {
-                if let Expr::CompoundIdentifier(parts) = expression
-                    && let [qualifier, _] = parts.as_mut_slice()
-                    && qualifier.value == renamed_alias
-                {
-                    *qualifier = Ident::with_quote('"', KEPT);
-                }
-                ControlFlow::<()>::Continue(())
-            });
-        }
-        Some(kept)
+            .ok()
     }
 
     /// The columns of the table of `drawn` in the set of a helper, as
@@ -3539,14 +3494,14 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 break;
             }
         }
-        if !met {
-            met = self.walk_contained(clause, &names, &arms, arguments.as_deref(), visited)?;
+        if !met && let [name] = names.as_slice() {
+            met = self.walk_contained(clause, name, &arms, arguments.as_deref(), visited)?;
         }
         visited.pop();
         Ok(met)
     }
 
-    /// Whether a conjunct of `clause` tests the one column `names` holds as
+    /// Whether a conjunct of `clause` tests the column `name` as
     /// [`walked_from`] writes the test, against a walk taking the step of a
     /// walk of `arms` the function returns every value of, from the rows of
     /// a table each meeting every condition of an exhaustive arm of that
@@ -3556,28 +3511,20 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     fn walk_contained(
         &self,
         clause: &Expr,
-        names: &[Cow<'_, str>],
+        name: &str,
         arms: &Arms<'a, DB>,
         arguments: Option<&[&Expr]>,
         visited: &mut Vec<*const DB::Function>,
     ) -> Result<bool, LookupError> {
         let database = self.body.confinement.database;
-        let [name] = names else {
-            return Ok(false);
-        };
-        for conjunct in conjuncts(clause) {
-            let Some(walked) = walked_test(conjunct) else {
-                continue;
-            };
-            let (Some(edge), Some(seeds)) = (
+        for walked in conjuncts(clause).into_iter().filter_map(walked_test) {
+            let (true, Some(edge), Some(seeds)) = (
+                stored(walked.column) == name,
                 self.stored(walked.stepped.edge)?,
                 self.stored(walked.seeds)?,
             ) else {
                 continue;
             };
-            if stored(walked.column) != *name {
-                continue;
-            }
             let (from, to, key) = (
                 column_named(database, edge, &stored(walked.stepped.from))?,
                 column_named(database, edge, &stored(walked.stepped.to))?,
@@ -3726,22 +3673,24 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         drawn?;
         let whole = drawing.arms.complete;
         drawing.arms.complete = complete && whole;
-        if !leaves || !whole || start == step || drawing.arms.arms.len() != step + 1 {
-            return Ok(());
-        }
-        let database = self.body.confinement.database;
-        let Some(edge) = self.stored(stepped.edge)? else {
+        let edge = if leaves && whole && start != step && drawing.arms.arms.len() == step + 1 {
+            self.stored(stepped.edge)?
+        } else {
+            None
+        };
+        let Some(edge) = edge else {
             return Ok(());
         };
-        let (Some(from), Some(to)) = (
+        let database = self.body.confinement.database;
+        let (from, to) = (
             column_named(database, edge, &stored(stepped.from))?,
             column_named(database, edge, &stored(stepped.to))?,
-        ) else {
-            return Ok(());
-        };
+        );
         let reached = &drawing.arms.arms[step].drawn;
-        if reached.table == edge && reached.columns == [to] {
-            drawing.arms.walks.push(Walk {
+        let walk = from
+            .zip(to)
+            .filter(|&(_, to)| reached.table == edge && reached.columns == [to])
+            .map(|(from, to)| Walk {
                 seeds: (start..step).collect(),
                 step,
                 edge,
@@ -3750,7 +3699,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 filter: stepped.filter.into(),
                 exhaustive: true,
             });
-        }
+        drawing.arms.walks.extend(walk);
         Ok(())
     }
 
@@ -6977,10 +6926,7 @@ fn relation_name(relation: &TableFactor) -> Option<Ident> {
         } if alias.columns.is_empty() => Some(alias.name.clone()),
         TableFactor::Table {
             name, alias: None, ..
-        } => match name.0.last()? {
-            ObjectNamePart::Identifier(name) => Some(name.clone()),
-            ObjectNamePart::Function(_) => None,
-        },
+        } => name.0.last()?.as_ident().cloned(),
         _ => None,
     }
 }
@@ -7447,5 +7393,127 @@ fn alias_name(relation: &TableFactor) -> Option<&str> {
             alias: Some(alias), ..
         } => Some(alias.name.value.as_str()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::{
+        ast::{Expr, Query},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+
+    use super::{stepped, walked_test, written_conjunction};
+
+    /// `sql`, one PostgreSQL query, parsed.
+    fn query(sql: &str) -> Query {
+        *Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(sql)
+            .and_then(|mut parser| parser.parse_query())
+            .expect("query parses")
+    }
+
+    /// `sql`, one PostgreSQL expression, parsed.
+    fn expression(sql: &str) -> Expr {
+        Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(sql)
+            .and_then(|mut parser| parser.parse_expr())
+            .expect("expression parses")
+    }
+
+    /// A walk down `public.resources` from every row to the children of
+    /// the folders it reaches.
+    const WALK_ITEM: &str = "r (id) AS (SELECT seed.id FROM public.resources seed \
+        UNION SELECT child.id FROM r JOIN public.resources child ON child.parent_id = r.id \
+        WHERE child.kind = 'folder')";
+
+    /// Whether [`stepped`] reads [`WALK_ITEM`], with `written` in place of
+    /// `original`, as a walk.
+    fn steps(original: &str, written: &str) -> bool {
+        assert_eq!(WALK_ITEM.matches(original).count(), 1, "{original}");
+        let item = WALK_ITEM.replacen(original, written, 1);
+        let query = query(&format!("WITH RECURSIVE {item} SELECT id FROM r"));
+        stepped(&query.with.expect("query has a WITH").cte_tables[0]).is_some()
+    }
+
+    #[test]
+    fn a_walk_is_read_only_from_a_union_of_a_seed_and_one_joined_step() {
+        assert!(steps("r (id) AS", "r (id) AS"));
+        assert!(steps("r (id) AS", "r AS"));
+        for (original, written) in [
+            (" UNION ", " INTERSECT "),
+            (
+                "UNION SELECT child.id FROM r JOIN public.resources child ON child.parent_id = r.id \
+                 WHERE child.kind = 'folder'",
+                "UNION (SELECT child.id FROM r JOIN public.resources child \
+                 ON child.parent_id = r.id WHERE child.kind = 'folder')",
+            ),
+            ("'folder')", "'folder' ORDER BY 1)"),
+            ("r (id) AS", "r (id, kind) AS"),
+            (
+                "r (id) AS (SELECT seed.id FROM",
+                "r AS (SELECT seed.id, seed.kind FROM",
+            ),
+            (
+                "JOIN public.resources child",
+                "LEFT JOIN public.resources child",
+            ),
+            ("FROM r JOIN", "FROM public.resources parent JOIN"),
+            ("SELECT child.id FROM r", "SELECT r.id FROM r"),
+            (
+                "JOIN public.resources child",
+                "JOIN (SELECT * FROM public.resources) child",
+            ),
+            ("= r.id", "= r.id AND child.id > 0"),
+            ("= r.id", "= 1"),
+            ("= r.id", "= r.depth"),
+            ("child.kind = 'folder'", "child.id IN (SELECT 1)"),
+            ("child.kind = 'folder'", "kind = 'folder'"),
+            ("child.kind = 'folder'", "r.id > 0"),
+        ] {
+            assert!(!steps(original, written), "{written}");
+        }
+    }
+
+    /// The test `walked_from` writes for a walk down `public.resources`
+    /// from every row.
+    const WALKED: &str = "\"id\" IN (WITH RECURSIVE \"0.walk\" (\"id\") AS (SELECT \"id\" FROM \
+        public.resources WHERE TRUE UNION SELECT \"1.edge\".\"id\" FROM \"0.walk\" JOIN \
+        public.resources AS \"1.edge\" ON \"1.edge\".\"parent_id\" = \"0.walk\".\"id\") \
+        SELECT \"0.walk\".\"id\" FROM \"0.walk\")";
+
+    #[test]
+    fn only_the_test_walked_from_writes_is_read_back_as_a_walk() {
+        assert!(walked_test(&expression(WALKED)).is_some());
+        for (original, written) in [
+            (
+                "\"0.walk\".\"id\") SELECT",
+                "\"0.walk\".\"id\"), \"other\" AS (SELECT 1) SELECT",
+            ),
+            ("\"0.walk\" (\"id\")", "\"0.walk\" (\"id\", \"kind\")"),
+            ("FROM \"0.walk\")", "FROM \"0.walk\" ORDER BY 1)"),
+            (
+                "AS (SELECT \"id\" FROM public.resources WHERE TRUE UNION",
+                "AS ((SELECT \"id\" FROM public.resources WHERE TRUE) UNION",
+            ),
+            (
+                "FROM public.resources WHERE TRUE",
+                "FROM public.resources, public.grants WHERE TRUE",
+            ),
+        ] {
+            assert_eq!(WALKED.matches(original).count(), 1, "{original}");
+            let written = WALKED.replacen(original, written, 1);
+            assert!(walked_test(&expression(&written)).is_none(), "{written}");
+        }
+    }
+
+    #[test]
+    fn a_written_conjunction_keeps_each_condition_whole() {
+        assert_eq!(written_conjunction(&[]), "TRUE");
+        assert_eq!(
+            written_conjunction(&[expression("a OR b"), expression("c")]),
+            "(a OR b) AND (c)"
+        );
     }
 }
