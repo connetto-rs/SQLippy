@@ -22,13 +22,14 @@ rule_definition!(
     /// The table is reported when one foreign key, the child's, holds a
     /// unique key of the table, exactly one other foreign key, the parent's,
     /// reaches columns outside it, and every column of the table belongs to
-    /// one of the two. A foreign key whose columns shared with the child's
-    /// land on a unique key of the table it references names the row the
-    /// child's identity already fixes, so it is no parent. Each child then
-    /// has at most one parent, which a foreign key on the child stores
-    /// without the extra join. A column the two keys do not cover, or a
-    /// child key column pinned to one constant, marks a subtype carrying its
-    /// own attributes, which is left alone.
+    /// one of the two. A foreign key whose columns the child key fixes land
+    /// on a unique key of the table it references names a row the child's
+    /// identity already fixes, and so fixes its other columns too. A foreign
+    /// key over fixed columns alone is no parent. Each child then has at most
+    /// one parent, which a foreign key on the child stores without the extra
+    /// join. A column the two keys do not cover, or a child key column pinned
+    /// to one constant, marks a subtype carrying its own attributes, which is
+    /// left alone.
     ///
     /// # Example
     ///
@@ -94,31 +95,20 @@ impl<DB: DatabaseLike> TableRule for OneToManyEdgeTable<DB> {
             {
                 continue;
             }
+            let determined = determined_by(database, &foreign_keys, &child_columns)?;
             let mut parents = Vec::new();
             for &other in &foreign_keys {
-                if std::ptr::eq(other, child) {
-                    continue;
-                }
-                let pairs = key_pairs(database, other)?;
-                let shared: Vec<&DB::Column> = pairs
-                    .iter()
-                    .filter(|(host, _)| child_columns.contains(host))
-                    .map(|&(_, referenced)| referenced)
-                    .collect();
-                if identifying_keys(database, other.referenced_table(database)?)?
-                    .iter()
-                    .any(|key| key.iter().all(|column| shared.contains(column)))
+                if other
+                    .host_columns(database)?
+                    .all(|column| determined.contains(&column))
                 {
                     continue;
                 }
-                let own: Vec<&DB::Column> = pairs
-                    .into_iter()
-                    .filter(|(host, _)| !child_columns.contains(host))
-                    .map(|(host, _)| host)
+                let own: Vec<&DB::Column> = other
+                    .host_columns(database)?
+                    .filter(|column| !child_columns.contains(column))
                     .collect();
-                if !own.is_empty() {
-                    parents.push((other, own));
-                }
+                parents.push((other, own));
             }
             let [(parent, parent_columns)] = parents.as_slice() else {
                 continue;
@@ -151,6 +141,46 @@ impl<DB: DatabaseLike> TableRule for OneToManyEdgeTable<DB> {
             return Ok(());
         }
         Ok(())
+    }
+}
+
+/// The columns whose values `columns` fix: `columns` themselves, and the host
+/// columns of every foreign key whose fixed columns land on a unique key of
+/// the table it references, followed until no foreign key fixes more.
+fn determined_by<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    foreign_keys: &[&'db DB::ForeignKey],
+    columns: &[&'db DB::Column],
+) -> Result<Vec<&'db DB::Column>, LookupError> {
+    let mut determined = columns.to_vec();
+    let mut pending = foreign_keys.to_vec();
+    loop {
+        let before = pending.len();
+        let mut remaining = Vec::with_capacity(before);
+        for foreign_key in pending {
+            let pairs = key_pairs(database, foreign_key)?;
+            let reached: Vec<&DB::Column> = pairs
+                .iter()
+                .filter(|(host, _)| determined.contains(host))
+                .map(|&(_, referenced)| referenced)
+                .collect();
+            if identifying_keys(database, foreign_key.referenced_table(database)?)?
+                .iter()
+                .any(|key| key.iter().all(|column| reached.contains(column)))
+            {
+                for (host, _) in pairs {
+                    if !determined.contains(&host) {
+                        determined.push(host);
+                    }
+                }
+            } else {
+                remaining.push(foreign_key);
+            }
+        }
+        if remaining.len() == before {
+            return Ok(determined);
+        }
+        pending = remaining;
     }
 }
 
