@@ -164,6 +164,10 @@ use super::plpgsql_ambiguous_name::collision;
 /// meets what the step's `WHERE` states of each row it reaches. A foreign
 /// key over a column that may be `NULL` binds a step only where the table's
 /// checks rule that `NULL` out while the walked column holds a value. A
+/// step's `WHERE` may read the helper's parameters, stated of the arguments
+/// each call passes, and subqueries reading no column of the walked rows,
+/// such as a cap testing the reached row against `capped_kinds(min_role)`,
+/// each evaluating alike for every role. A
 /// condition of the read row carries over to a row joined to it through
 /// equal columns, each column the filter fixes to a literal written as that
 /// literal.
@@ -1378,18 +1382,27 @@ impl<DB: DatabaseLike> Default for Arms<'_, DB> {
 
 impl<'a, DB: DatabaseLike> Arms<'a, DB> {
     /// Records the `walks` of a callee whose arm at index `i` is carried
-    /// as the arm `moved[i]`, dropping a walk with an arm not carried.
-    fn carry(&mut self, walks: &[Walk<'a, DB>], moved: &[Option<usize>], whole_rows: bool) {
+    /// as the arm `moved[i]`, dropping a walk with an arm not carried or
+    /// whose step reads a parameter `passed`, the arguments of the call in
+    /// order, does not give.
+    fn carry(
+        &mut self,
+        walks: &[Walk<'a, DB>],
+        moved: &[Option<usize>],
+        whole_rows: bool,
+        passed: Option<&[&Expr]>,
+    ) {
         self.walks.extend(walks.iter().filter_map(|walk| {
             let step = moved[walk.step]?;
             let seeds: Option<Vec<usize>> = walk.seeds.iter().map(|&seed| moved[seed]).collect();
+            let filter = walk.filter_under(passed)?.into_owned();
             seeds.map(|seeds| Walk {
                 seeds,
                 step,
                 edge: walk.edge,
                 from: walk.from,
                 to: walk.to,
-                filter: Rc::clone(&walk.filter),
+                filter: filter.into(),
                 exhaustive: whole_rows && walk.exhaustive,
             })
         }));
@@ -1418,11 +1431,29 @@ struct Walk<'a, DB: DatabaseLike> {
     edge: &'a DB::Table,
     from: &'a DB::Column,
     to: &'a DB::Column,
-    /// The conditions a step states of the edge row, as [`Stepped::filter`]
-    /// holds them.
+    /// The conditions a step states of the edge row, each column by its
+    /// stored name and each input parameter of the function as `$n`, every
+    /// conjunct of the step's `WHERE` among them.
     filter: Rc<[Expr]>,
     /// Whether the function returns every value of the item.
     exhaustive: bool,
+}
+
+impl<DB: DatabaseLike> Walk<'_, DB> {
+    /// [`Self::filter`] for a call passing `arguments` for the input
+    /// parameters in order, or `None` when a condition reads a parameter
+    /// and the call's values are not known.
+    fn filter_under(&self, arguments: Option<&[&Expr]>) -> Option<Cow<'_, [Expr]>> {
+        if !self.filter.iter().any(reads_parameter) {
+            return Some(Cow::Borrowed(&self.filter));
+        }
+        let arguments = arguments?;
+        self.filter
+            .iter()
+            .map(|condition| bound_to(condition, arguments))
+            .collect::<Option<Vec<_>>>()
+            .map(Cow::Owned)
+    }
 }
 
 /// A row of a stored table that a function returns columns of.
@@ -3063,7 +3094,10 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 let met = self.drawn_met(drawn, arguments.as_deref(), &sets, visited)?;
                 seeded.push((drawn, met));
             }
-            if let Some(reached) = self.walked_alternatives(table, tested, walk, &seeded, &sets)? {
+            if let Some(filter) = walk.filter_under(arguments.as_deref())
+                && let Some(reached) =
+                    self.walked_alternatives(table, tested, walk, &filter, &seeded, &sets)?
+            {
                 alternatives.extend(reached);
                 walked.extend(walk.seeds.iter().copied().chain([walk.step]));
             }
@@ -3139,6 +3173,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         table: &'a DB::Table,
         tested: &'a DB::Column,
         walk: &Walk<'a, DB>,
+        filter: &[Expr],
         seeded: &[(&Drawn<'a, DB>, Cow<'_, [Expr]>)],
         sets: &[SetCall<'a, DB>],
     ) -> Result<Option<Vec<Expr>>, LookupError> {
@@ -3162,7 +3197,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             };
             for part in parts {
                 let mut alternative: Vec<Expr> =
-                    walked_from(database, tested, walked, key, walk, &part)
+                    walked_from(database, tested, walked, key, walk, filter, &part)
                         .into_iter()
                         .collect();
                 if let Some(row) = self.kept_row(walked, &kept, &part) {
@@ -3602,14 +3637,17 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 .part
                 .cloned()
                 .unwrap_or(Expr::Value(Value::Boolean(true).into()));
-            let filter = conjunction(walked.stepped.filter);
+            let filter = conjunction(walked.filter);
             for walk in &arms.walks {
+                let Some(required) = walk.filter_under(arguments) else {
+                    continue;
+                };
                 if !walk.exhaustive
                     || walk.edge != edge
                     || from != Some(walk.from)
                     || to != Some(walk.to)
-                    || !(walk.filter.is_empty()
-                        || self.implies_every(&filter, edge, &walk.filter, visited)?)
+                    || !(required.is_empty()
+                        || self.implies_every(&filter, edge, &required, visited)?)
                 {
                     continue;
                 }
@@ -3707,7 +3745,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     .map(move |item| (item, with.recursive.then(|| stepped(item)).flatten()))
             })
             .try_for_each(|(item, stepped)| match stepped {
-                Some(stepped) => self.draw_walk(&item.query, stepped, drawing),
+                Some(stepped) => self.draw_walk(&item.query, &stepped, drawing),
                 None => self.draw_query(&item.query, drawing),
             })
             .and_then(|()| self.draw_body(&query.body, drawing));
@@ -3721,7 +3759,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     fn draw_walk(
         &mut self,
         query: &Query,
-        stepped: Stepped<'_>,
+        stepped: &Stepped<'_>,
         drawing: &mut Drawing<'a, DB>,
     ) -> Result<(), LookupError> {
         let mut seeds = Vec::new();
@@ -3737,8 +3775,12 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         let drawn = self.draw_body(stepped.seed, drawing);
         let step = drawing.arms.arms.len();
         let drawn = drawn.and_then(|()| self.draw_body(stepped.step, drawing));
+        let filter = match drawn {
+            Ok(()) => self.step_filter(stepped),
+            Err(error) => Err(error),
+        };
         self.items.leave(query);
-        drawn?;
+        let filter = filter?;
         let whole = drawing.arms.complete;
         drawing.arms.complete = complete && whole;
         let edge = if leaves && whole && start != step && drawing.arms.arms.len() == step + 1 {
@@ -3746,7 +3788,7 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         } else {
             None
         };
-        let Some(edge) = edge else {
+        let (Some(edge), Some(filter)) = (edge, filter) else {
             return Ok(());
         };
         let database = self.body.confinement.database;
@@ -3764,11 +3806,47 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 edge,
                 from,
                 to,
-                filter: stepped.filter.into(),
+                filter: filter.into(),
                 exhaustive: true,
             });
         drawing.arms.walks.extend(walk);
         Ok(())
+    }
+
+    /// What the `WHERE` of the step of `stepped` states of the row of its
+    /// edge, each column by its stored name and each input parameter as
+    /// `$n`, when it states every conjunct, each evaluating alike for every
+    /// role.
+    fn step_filter(&self, stepped: &Stepped<'_>) -> Result<Option<Vec<Expr>>, LookupError> {
+        let SetExpr::Select(select) = stepped.step else {
+            return Ok(None);
+        };
+        let Some((from, position)) = select.from.iter().find_map(|from| {
+            relations(from)
+                .position(|relation| ptr::eq(relation, stepped.edge))
+                .map(|position| (from, position))
+        }) else {
+            return Ok(None);
+        };
+        let filters = self.filters(select, &[], &[])?;
+        let stated = self.stated(&filters, from, position)?;
+        let relation = relation_at(from, position);
+        let mut filter = Vec::new();
+        for conjunct in select.selection.iter().flat_map(conjuncts) {
+            let Some(condition) = renamed(
+                conjunct,
+                |reference| term(&stated.resolver, reference, relation, &stated.equalities),
+                |name| self.subquery_relation(name),
+                |call| helper_value(self.body.confinement, call),
+            ) else {
+                return Ok(None);
+            };
+            if !self.reads_alike(conjunct)? {
+                return Ok(None);
+            }
+            filter.push(condition);
+        }
+        Ok(Some(filter))
     }
 
     /// [`Self::draw_query`] over the arms of `body`.
@@ -3874,15 +3952,31 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             );
             return Ok(true);
         }
+        let ordinals: Vec<usize> = entries.iter().map(|&(_, ordinal)| ordinal).collect();
+        self.draws_call(select, from, relation, &ordinals, drawing)
+    }
+
+    /// [`Self::draws_row`] for `relation`, an item of `from` in `select`
+    /// reading a call whole, the leaf projecting its columns at `ordinals`,
+    /// drawing the rows of each arm of the function, with its walks.
+    fn draws_call(
+        &self,
+        select: &Select,
+        from: &TableWithJoins,
+        relation: &TableFactor,
+        ordinals: &[usize],
+        drawing: &mut Drawing<'a, DB>,
+    ) -> Result<bool, LookupError> {
         let Some(call) = whole_call(relation) else {
             return Ok(false);
         };
-        let Some(function) = called(database, call)? else {
+        let Some(function) = called(self.body.confinement.database, call)? else {
             return Ok(false);
         };
         let called = self.body.confinement.arms(function)?;
         let passed = self.passed(relation, function);
         let passed: Option<Vec<&Expr>> = passed.as_ref().map(|passed| passed.iter().collect());
+        let passed = passed.as_deref();
         let whole_rows = select.selection.is_none()
             && select.from.len() == 1
             && from.joins.is_empty()
@@ -3891,9 +3985,9 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
         let mut moved = Vec::with_capacity(called.arms.len());
         for arm in &called.arms {
             let drawn = &arm.drawn;
-            let Some(columns) = entries
+            let Some(columns) = ordinals
                 .iter()
-                .map(|&(_, ordinal)| drawn.columns.get(ordinal).copied())
+                .map(|&ordinal| drawn.columns.get(ordinal).copied())
                 .collect::<Option<Vec<_>>>()
             else {
                 whole = false;
@@ -3913,11 +4007,13 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 });
                 continue;
             }
-            let exhaustive = exhaustive && drawn.under(passed.as_deref()).is_some();
-            let conditions = drawn.known(passed.as_deref()).into_owned();
+            let exhaustive = exhaustive && drawn.under(passed).is_some();
+            let conditions = drawn.known(passed).into_owned();
             drawing.push(drawn.table, columns, conditions, exhaustive);
         }
-        drawing.arms.carry(&called.walks, &moved, whole_rows);
+        drawing
+            .arms
+            .carry(&called.walks, &moved, whole_rows, passed);
         Ok(whole)
     }
 
@@ -5339,13 +5435,17 @@ type KeptRow<'a, DB> = (
 
 /// `tested IN (…)`, testing the column `tested` of a row against the values
 /// `walk` reaches from the `key` of each row of `table` meeting `part`,
-/// through a recursive `WITH` item that [`walked_test`] reads back.
+/// through a recursive `WITH` item stepping over rows of the edge meeting
+/// `filter`, that [`walked_test`] reads back. `None` when a subquery of
+/// `filter` reads a column of the edge row, which the item reads under
+/// another name.
 fn walked_from<DB: DatabaseLike>(
     database: &DB,
     tested: &DB::Column,
     table: &DB::Table,
     key: &DB::Column,
     walk: &Walk<'_, DB>,
+    filter: &[Expr],
     part: &[Expr],
 ) -> Option<Expr> {
     let quoted = |column: &DB::Column| Ident::with_quote('"', column.column_name());
@@ -5355,20 +5455,25 @@ fn walked_from<DB: DatabaseLike>(
         quoted(walk.from),
         quoted(walk.to),
     );
-    let filter = if walk.filter.is_empty() {
+    let filter = if filter.is_empty() {
         String::new()
     } else {
-        let mut filter = walk.filter.to_vec();
-        for condition in &mut filter {
-            let _ = visit_expressions_mut(condition, |expression| {
-                if let Expr::Identifier(column) = expression {
-                    let column = mem::replace(column, Ident::new(String::new()));
-                    *expression =
-                        Expr::CompoundIdentifier(vec![Ident::with_quote('"', "1.edge"), column]);
-                }
-                ControlFlow::<()>::Continue(())
-            });
-        }
+        let filter = filter
+            .iter()
+            .map(|condition| {
+                requalified(
+                    condition,
+                    |reference| match reference {
+                        Expr::Identifier(column) => Some(Expr::CompoundIdentifier(vec![
+                            Ident::with_quote('"', "1.edge"),
+                            column.clone(),
+                        ])),
+                        _ => None,
+                    },
+                    |relation| relation.value == "0",
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
         format!(" WHERE {}", written_conjunction(&filter))
     };
     Parser::new(&PostgreSqlDialect {})
@@ -5407,13 +5512,15 @@ fn written_conjunction(conditions: &[Expr]) -> String {
 }
 
 /// A test [`walked_from`] writes, with the tested column, the relation its
-/// seed reads, the column the seed yields, the seed's filter and the step.
+/// seed reads, the column the seed yields, the seed's filter, the step and
+/// what the step states of the edge row, as [`edge_conditions`] reads it.
 struct Walked<'e> {
     column: &'e Ident,
     seeds: &'e TableFactor,
     key: &'e Ident,
     part: Option<&'e Expr>,
     stepped: Stepped<'e>,
+    filter: Vec<Expr>,
 }
 
 /// `condition` as the test [`walked_from`] writes.
@@ -5453,6 +5560,10 @@ fn walked_test(condition: &Expr) -> Option<Walked<'_>> {
         return None;
     }
     let stepped = stepped(item)?;
+    let filter = match stepped.selection {
+        Some(selection) => edge_conditions(selection, &relation_name(stepped.edge)?)?,
+        None => Vec::new(),
+    };
     let SetExpr::Select(seed) = stepped.seed else {
         return None;
     };
@@ -5465,6 +5576,7 @@ fn walked_test(condition: &Expr) -> Option<Walked<'_>> {
         key,
         part: seed.selection.as_ref(),
         stepped,
+        filter,
     })
 }
 
@@ -6898,21 +7010,19 @@ fn carried_row(select: &Select) -> Option<Vec<(&Expr, &[Ident])>> {
 /// A recursive `WITH` item read as a walk, with its seed and its step, which
 /// reads the item once, inner-joined on the column `from` of `edge` equal to
 /// the item's only column, and projects the column `to` of `edge` of the
-/// rows meeting `filter`.
+/// rows meeting `selection`.
 struct Stepped<'q> {
     seed: &'q SetExpr,
     step: &'q SetExpr,
     edge: &'q TableFactor,
     from: &'q Ident,
     to: &'q Ident,
-    /// The conditions the step's `WHERE` states of the edge row, each
-    /// column by its stored name.
-    filter: Vec<Expr>,
+    /// The `WHERE` of the step.
+    selection: Option<&'q Expr>,
 }
 
 /// `item` as a [`Stepped`] walk, when its query declares no `WITH`, orders,
-/// limits and locks nothing, and unions its seed with a step filtering
-/// nothing besides its join but columns of the edge.
+/// limits and locks nothing, and unions its seed with a step.
 fn stepped(item: &Cte) -> Option<Stepped<'_>> {
     let query = item.query.as_ref();
     let SetExpr::SetOperation {
@@ -6971,17 +7081,13 @@ fn stepped(item: &Cte) -> Option<Stepped<'_>> {
     if !same_name(qualifier, &edge_name) {
         return None;
     }
-    let filter = match &select.selection {
-        Some(selection) => edge_conditions(selection, &edge_name)?,
-        None => Vec::new(),
-    };
     Some(Stepped {
         seed,
         step,
         edge,
         from,
         to,
-        filter,
+        selection: select.selection.as_ref(),
     })
 }
 
@@ -7037,34 +7143,83 @@ fn joined_from<'q>(
 }
 
 /// The conditions `selection` states of the row of the relation `edge`
-/// names, each column by its stored name, or `None` when it reads a
-/// subquery or a column it does not qualify by `edge`.
+/// names, each column by its stored name, or `None` when it reads a column
+/// it does not qualify by `edge` or a subquery reads a column of that row.
 fn edge_conditions(selection: &Expr, edge: &Ident) -> Option<Vec<Expr>> {
-    if holds_subquery(selection) {
-        return None;
-    }
-    let mut renamed = selection.clone();
-    let mut foreign = false;
-    let _ = visit_expressions_mut(&mut renamed, |expression| {
-        match expression {
-            Expr::Identifier(_) => foreign = true,
-            Expr::Value(value) if matches!(value.value, Value::Placeholder(_)) => foreign = true,
+    let renamed = requalified(
+        selection,
+        |reference| match reference {
             Expr::CompoundIdentifier(parts) => match parts.as_slice() {
                 [relation, column] if same_name(relation, edge) => {
-                    *expression = Expr::Identifier(Ident::with_quote('"', stored(column)));
+                    Some(Expr::Identifier(Ident::with_quote('"', stored(column))))
                 }
-                _ => foreign = true,
+                _ => None,
             },
-            _ => {}
-        }
-        ControlFlow::<()>::Continue(())
-    });
-    if foreign {
-        return None;
-    }
+            _ => None,
+        },
+        |relation| same_name(relation, edge) || relation.value == "0",
+    )?;
     let mut conditions = Vec::new();
     split_conjuncts(renamed, &mut conditions);
     Some(conditions)
+}
+
+/// `condition` with each column reference outside its subqueries replaced
+/// by what `rename` gives for it, or `None` when `rename` gives nothing for
+/// one, or a subquery names a column bare or qualified by a relation
+/// `outer` holds, so that every subquery reads the same rows wherever the
+/// condition is written.
+fn requalified(
+    condition: &Expr,
+    rename: impl Fn(&Expr) -> Option<Expr>,
+    outer: impl Fn(&Ident) -> bool,
+) -> Option<Expr> {
+    struct Requalifying<R, O> {
+        rename: R,
+        outer: O,
+        depth: usize,
+    }
+    impl<R: Fn(&Expr) -> Option<Expr>, O: Fn(&Ident) -> bool> VisitorMut for Requalifying<R, O> {
+        type Break = ();
+
+        fn pre_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
+            self.depth += 1;
+            ControlFlow::Continue(())
+        }
+
+        fn post_visit_query(&mut self, _query: &mut Query) -> ControlFlow<()> {
+            self.depth -= 1;
+            ControlFlow::Continue(())
+        }
+
+        fn pre_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<()> {
+            match expression {
+                Expr::Identifier(_) | Expr::CompoundIdentifier(_) if self.depth == 0 => {
+                    match (self.rename)(expression) {
+                        Some(renamed) => *expression = renamed,
+                        None => return ControlFlow::Break(()),
+                    }
+                }
+                Expr::Identifier(_) => return ControlFlow::Break(()),
+                Expr::CompoundIdentifier(parts) if parts.first().is_some_and(&self.outer) => {
+                    return ControlFlow::Break(());
+                }
+                _ => {}
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut requalified = condition.clone();
+    VisitMut::visit(
+        &mut requalified,
+        &mut Requalifying {
+            rename,
+            outer,
+            depth: 0,
+        },
+    )
+    .is_continue()
+    .then_some(requalified)
 }
 
 /// The column reference `item` projects, with the parts of its name.
@@ -7536,9 +7691,6 @@ mod tests {
             ("= r.id", "= r.id AND child.id > 0"),
             ("= r.id", "= 1"),
             ("= r.id", "= r.depth"),
-            ("child.kind = 'folder'", "child.id IN (SELECT 1)"),
-            ("child.kind = 'folder'", "kind = 'folder'"),
-            ("child.kind = 'folder'", "r.id > 0"),
         ] {
             assert!(!steps(original, written), "{written}");
         }
@@ -7573,6 +7725,41 @@ mod tests {
             assert_eq!(WALKED.matches(original).count(), 1, "{original}");
             let written = WALKED.replacen(original, written, 1);
             assert!(walked_test(&expression(&written)).is_none(), "{written}");
+        }
+    }
+
+    /// What [`walked_test`] reads the step of [`WALKED`] to state of the
+    /// edge row once the step filters by `filter`.
+    fn walked_filter(filter: &str) -> Option<Vec<String>> {
+        let written = WALKED.replacen(
+            "\"0.walk\".\"id\") SELECT",
+            &format!("\"0.walk\".\"id\" WHERE {filter}) SELECT"),
+            1,
+        );
+        walked_test(&expression(&written))
+            .map(|walked| walked.filter.iter().map(ToString::to_string).collect())
+    }
+
+    #[test]
+    fn a_walked_step_reads_the_edge_row_only_outside_its_subqueries() {
+        assert_eq!(
+            walked_filter(
+                "\"1.edge\".\"kind\" = 'folder' AND (\"1.edge\".\"organization_id\", $1) \
+                 IN (SELECT * FROM authz.capped_kinds($1))"
+            ),
+            Some(vec![
+                "\"kind\" = 'folder'".to_owned(),
+                "(\"organization_id\", $1) IN (SELECT * FROM authz.capped_kinds($1))".to_owned(),
+            ])
+        );
+        for filter in [
+            "\"kind\" = 'folder'",
+            "\"0.walk\".\"id\" > 0",
+            "\"1.edge\".\"id\" IN (SELECT \"1.edge\".\"parent_id\")",
+            "\"1.edge\".\"id\" IN (SELECT \"0\".\"parent_id\")",
+            "EXISTS (SELECT 1 WHERE \"kind\" = 'folder')",
+        ] {
+            assert_eq!(walked_filter(filter), None, "{filter}");
         }
     }
 
