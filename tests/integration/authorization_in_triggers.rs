@@ -260,7 +260,7 @@ fn a_helper_reaching_a_condition_of_the_body_is_reported() {
         // The `WHERE` of a query the body runs.
         (
             "",
-            "PERFORM 1 FROM note_events WHERE own = owns_note(NEW.owner_id);",
+            "PERFORM 1 FROM note_events WHERE owns_note(NEW.owner_id);",
         ),
         // The `HAVING` of a query the body runs.
         (
@@ -270,7 +270,7 @@ fn a_helper_reaching_a_condition_of_the_body_is_reported() {
         // The `ON` of a join the body runs.
         (
             "",
-            "PERFORM 1 FROM note_events JOIN notes ON note_events.own = owns_note(notes.owner_id);",
+            "PERFORM 1 FROM note_events JOIN notes ON owns_note(NEW.owner_id);",
         ),
         // A variable the body declares, assigns the result to, then tests in a condition.
         (
@@ -331,13 +331,13 @@ fn a_helper_in_the_conditions_of_other_statement_kinds_is_reported() {
         (
             "",
             note_events,
-            "PERFORM own FROM (WITH c AS (SELECT own FROM note_events WHERE own = owns_note(NEW.owner_id)) SELECT own FROM c) x;",
+            "PERFORM own FROM (WITH c AS (SELECT own FROM note_events WHERE owns_note(NEW.owner_id)) SELECT own FROM c) x;",
         ),
         // The `WHERE` of one side of a set operation the body runs.
         (
             "",
             note_events,
-            "PERFORM count(*) FROM note_events UNION ALL SELECT count(*) FROM note_events WHERE own = owns_note(NEW.owner_id);",
+            "PERFORM count(*) FROM note_events UNION ALL SELECT count(*) FROM note_events WHERE owns_note(NEW.owner_id);",
         ),
         // The `WHERE` of the source and the `ON` of a `MERGE` the body runs.
         (
@@ -355,7 +355,7 @@ fn a_helper_in_the_conditions_of_other_statement_kinds_is_reported() {
         (
             "",
             note_events,
-            "DELETE FROM note_events WHERE own = owns_note(NEW.owner_id);",
+            "DELETE FROM note_events WHERE owns_note(NEW.owner_id);",
         ),
         // The `USING` source and the `WHERE` of a `DELETE` the body runs.
         (
@@ -373,17 +373,17 @@ fn a_helper_in_the_conditions_of_other_statement_kinds_is_reported() {
         (
             "",
             note_events,
-            "WITH x AS (DELETE FROM note_events WHERE own = owns_note(NEW.owner_id)) SELECT 1;",
+            "WITH x AS (DELETE FROM note_events WHERE owns_note(NEW.owner_id)) SELECT 1;",
         ),
         // The `WHERE` of a parenthesized subquery a `CTE` reads.
         (
             "",
             note_events,
-            "WITH x AS ((SELECT own FROM note_events WHERE own = owns_note(NEW.owner_id))) SELECT 1 FROM x;",
+            "WITH x AS ((SELECT own FROM note_events WHERE owns_note(NEW.owner_id))) SELECT 1 FROM x;",
         ),
         // A declared cursor an `OPEN` opens on its stored query.
         (
-            "DECLARE c CURSOR FOR SELECT id FROM note_events WHERE own = owns_note(NEW.owner_id);",
+            "DECLARE c CURSOR FOR SELECT id FROM note_events WHERE owns_note(NEW.owner_id);",
             note_events,
             "OPEN c;",
         ),
@@ -391,7 +391,7 @@ fn a_helper_in_the_conditions_of_other_statement_kinds_is_reported() {
         (
             "",
             note_events,
-            "PERFORM 1 FROM (notes JOIN note_events e2 ON e2.id = notes.id AND owns_note(notes.owner_id));",
+            "PERFORM 1 FROM (notes JOIN note_events e2 ON e2.id = notes.id AND owns_note(NEW.owner_id));",
         ),
     ] {
         let found = findings(&format!(
@@ -423,17 +423,17 @@ fn a_helper_in_the_conditions_of_control_flow_is_reported() {
         (
             "",
             note_events,
-            "FOREACH t IN ARRAY (SELECT id FROM note_events WHERE own = owns_note(NEW.owner_id)) LOOP PERFORM 1; END LOOP;",
+            "FOREACH t IN ARRAY (SELECT id FROM note_events WHERE owns_note(NEW.owner_id)) LOOP PERFORM 1; END LOOP;",
         ),
         // The query a `FOR` loop iterates.
         (
             "",
             note_events,
-            "FOR r IN SELECT id FROM note_events WHERE own = owns_note(NEW.owner_id) LOOP PERFORM 1; END LOOP;",
+            "FOR r IN SELECT id FROM note_events WHERE owns_note(NEW.owner_id) LOOP PERFORM 1; END LOOP;",
         ),
         // The query a cursor a `FOR` loop opens is bound to.
         (
-            "DECLARE c CURSOR FOR SELECT id FROM note_events WHERE own = owns_note(NEW.owner_id);",
+            "DECLARE c CURSOR FOR SELECT id FROM note_events WHERE owns_note(NEW.owner_id);",
             note_events,
             "FOR r IN c LOOP PERFORM 1; END LOOP;",
         ),
@@ -441,7 +441,7 @@ fn a_helper_in_the_conditions_of_control_flow_is_reported() {
         (
             "",
             note_events,
-            "OPEN c FOR SELECT id FROM note_events WHERE own = owns_note(NEW.owner_id);",
+            "OPEN c FOR SELECT id FROM note_events WHERE owns_note(NEW.owner_id);",
         ),
         // A plain `LOOP` with a bare `EXIT`, beside a deciding condition.
         (
@@ -475,7 +475,7 @@ fn a_helper_in_the_conditions_of_control_flow_is_reported() {
         "{SECURED} CREATE POLICY guard ON notes FOR INSERT WITH CHECK (owns_note(owner_id));
          CREATE TABLE note_events (id INT, own BOOLEAN);
          CREATE FUNCTION check_note() RETURNS trigger LANGUAGE plpgsql AS
-           $$ BEGIN RETURN QUERY SELECT id FROM note_events WHERE own = owns_note(NEW.owner_id); END $$;
+           $$ BEGIN RETURN QUERY SELECT id FROM note_events WHERE owns_note(NEW.owner_id); END $$;
          CREATE TRIGGER check_note BEFORE INSERT ON notes FOR EACH ROW EXECUTE FUNCTION check_note();"
     ));
     assert_eq!(found.len(), 1, "{found:?}");
@@ -791,4 +791,119 @@ fn a_callee_that_cannot_be_resolved_is_a_lookup_failure() {
         constrainer.validate_schema(&database),
         Err(Error::Lookup(_))
     ));
+}
+
+const RELATED: &str = "CREATE TABLE rules (id INT PRIMARY KEY, owner_id UUID NOT NULL);
+     CREATE TABLE note_events (id INT, own BOOLEAN);
+     CREATE FUNCTION blocked() RETURNS SETOF UUID LANGUAGE sql AS $$ SELECT NULL::uuid $$;";
+
+/// A helper decides about the rows its term reads, so only a trigger term
+/// reading the fields of `NEW` or `OLD` the policy's term reads as columns
+/// repeats the policy.
+#[test]
+fn a_helper_deciding_about_other_values_than_the_policy_row_is_not_reported() {
+    for (policy, declared, check) in [
+        // A bare column of the relation the trigger's query scans.
+        (
+            "NOT (owner_id IN (SELECT blocked()))",
+            "",
+            "IF EXISTS (SELECT 1 FROM rules WHERE NOT (owner_id IN (SELECT blocked()))) THEN RAISE EXCEPTION 'no'; END IF;",
+        ),
+        // A qualified column of the relation the trigger's query scans.
+        (
+            "owns_note(owner_id)",
+            "",
+            "IF NOT EXISTS (SELECT 1 FROM rules WHERE owns_note(rules.owner_id)) THEN RAISE EXCEPTION 'no'; END IF;",
+        ),
+        // A column of a relation a nested query joins, in the join's `ON`.
+        (
+            "owns_note(owner_id)",
+            "",
+            "IF EXISTS (SELECT 1 FROM rules r JOIN notes n ON owns_note(r.owner_id)) THEN RAISE EXCEPTION 'no'; END IF;",
+        ),
+        // A column of a joined relation, in the join's `ON`.
+        (
+            "owns_note(owner_id)",
+            "",
+            "PERFORM 1 FROM note_events JOIN notes ON note_events.own = owns_note(notes.owner_id);",
+        ),
+        // A column of the relation the statement filters, beside `NEW`.
+        (
+            "owns_note(owner_id)",
+            "",
+            "DELETE FROM note_events WHERE own = owns_note(NEW.owner_id);",
+        ),
+        // A field of a record a loop fetched from another relation.
+        (
+            "owns_note(owner_id)",
+            "DECLARE r RECORD;",
+            "FOR r IN SELECT owner_id FROM rules LOOP IF NOT owns_note(r.owner_id) THEN RAISE EXCEPTION 'no'; END IF; END LOOP;",
+        ),
+        // A variable holding the helper's result about another relation's row.
+        (
+            "owns_note(owner_id)",
+            "DECLARE own BOOLEAN;",
+            "own := EXISTS (SELECT 1 FROM rules WHERE owns_note(rules.owner_id)); IF NOT own THEN RAISE EXCEPTION 'no'; END IF;",
+        ),
+        // A field of `NEW` the policy's term does not read.
+        (
+            "owns_note(owner_id)",
+            "",
+            "IF NOT owns_note(NEW.body::uuid) THEN RAISE EXCEPTION 'no'; END IF;",
+        ),
+        // A policy applying the helper to another relation's row.
+        (
+            "EXISTS (SELECT 1 FROM rules WHERE rules.id = id AND owns_note(rules.owner_id))",
+            "",
+            "IF NOT owns_note(NEW.owner_id) THEN RAISE EXCEPTION 'no'; END IF;",
+        ),
+    ] {
+        let found = findings(&format!(
+            "{SECURED} {RELATED} CREATE POLICY guard ON notes FOR INSERT WITH CHECK ({policy}); {}",
+            raising("INSERT", declared, check)
+        ));
+        assert_eq!(found, Vec::<String>::new(), "{check}");
+    }
+}
+
+#[test]
+fn a_helper_deciding_about_the_policy_row_is_reported() {
+    for (policy, declared, check) in [
+        // The row tested against the set a helper yields.
+        (
+            "NOT (owner_id IN (SELECT blocked()))",
+            "",
+            "IF NEW.owner_id IN (SELECT blocked()) THEN RAISE EXCEPTION 'no'; END IF;",
+        ),
+        // A term reading `NEW` alone, in a query over another relation.
+        (
+            "owns_note(owner_id)",
+            "",
+            "PERFORM 1 FROM rules WHERE owns_note(NEW.owner_id) AND rules.id = NEW.id;",
+        ),
+        // The policy qualifying its column with its table's name.
+        (
+            "owns_note(notes.owner_id)",
+            "",
+            "IF NOT owns_note(NEW.owner_id) THEN RAISE EXCEPTION 'no'; END IF;",
+        ),
+        // A term reading `NEW` in the `WHERE` of a nested query over another relation.
+        (
+            "owns_note(owner_id)",
+            "",
+            "IF NOT EXISTS (SELECT 1 FROM rules WHERE rules.id = NEW.id AND owns_note(NEW.owner_id)) THEN RAISE EXCEPTION 'no'; END IF;",
+        ),
+        // A variable assigned beside a term reading another relation.
+        (
+            "owns_note(owner_id)",
+            "DECLARE own BOOLEAN;",
+            "own := owns_note(NEW.owner_id) AND EXISTS (SELECT 1 FROM rules); IF NOT own THEN RAISE EXCEPTION 'no'; END IF;",
+        ),
+    ] {
+        let found = findings(&format!(
+            "{SECURED} {RELATED} CREATE POLICY guard ON notes FOR INSERT WITH CHECK ({policy}); {}",
+            raising("INSERT", declared, check)
+        ));
+        assert_eq!(found.len(), 1, "{check}: {found:?}");
+    }
 }
