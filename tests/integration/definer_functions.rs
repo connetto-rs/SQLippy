@@ -5753,6 +5753,48 @@ fn a_walk_whose_step_reads_a_parameter_is_not_met_by_a_walk_over_another_argumen
     assert!(skipping_reported("$1"));
 }
 
+/// The functions [`folded_resources`] reports with the step of the walk the
+/// read reaches through capped by `capped_kinds(read)` and the step of the
+/// one the read policy reaches through by `capped_kinds(policy)`, each
+/// unless no installation acts.
+fn capped_steps(read: &str, policy: &str) -> Vec<String> {
+    let capped = |item: &str, cap: &str| {
+        format!(
+            "WHERE child.kind IN ('folder', 'project')
+             AND ((SELECT authz.acting_installation_id()) IS NULL
+               OR (child.organization_id, child.kind) IN (SELECT * FROM authz.capped_kinds({cap}))))
+         SELECT id FROM {item} $$;"
+        )
+    };
+    folded_resources(&[
+        (
+            "WHERE child.kind IN ('folder', 'project'))
+         SELECT id FROM reached $$;",
+            &capped("reached", read),
+        ),
+        (
+            "WHERE child.kind IN ('folder', 'project'))
+         SELECT id FROM containers $$;",
+            &capped("containers", policy),
+        ),
+    ])
+}
+
+#[test]
+fn a_walk_whose_step_tests_a_set_is_met_by_a_policy_walk_testing_a_set_within_it() {
+    assert_eq!(
+        capped_steps("min_role", "'reader'"),
+        ["resources_with(authz.role)"]
+    );
+    assert_eq!(
+        capped_steps("min_role", "'admin'"),
+        [
+            "organizations_reaching(authz.role)",
+            "resources_with(authz.role)"
+        ]
+    );
+}
+
 const KIND_ARM: &str =
     "OR (organization_id, kind) IN (SELECT * FROM authz.capped_kinds('reader'))))";
 
