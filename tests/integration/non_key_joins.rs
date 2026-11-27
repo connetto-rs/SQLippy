@@ -235,6 +235,37 @@ fn a_function_parameter_fixes_a_key_column() {
 }
 
 #[test]
+fn a_join_meeting_at_the_row_a_foreign_key_references_is_offered_no_other_key() {
+    let runs =
+        "CREATE TABLE runs (id INT PRIMARY KEY, parent_id INT REFERENCES runs (id), step INT);
+        CREATE TABLE notes (id INT PRIMARY KEY, run_id INT REFERENCES runs (id));";
+    assert_eq!(
+        schema_messages(&format!(
+            "{runs} CREATE VIEW siblings AS SELECT a.id FROM runs a JOIN runs b ON a.parent_id = b.parent_id;"
+        )),
+        [
+            "View 'siblings' uses a join of 'runs' and 'runs' on `a.parent_id = b.parent_id`, whose columns cover a unique key of neither table, so a row of either side can pair with several rows of the other and the result holds pairs no stored row relates."
+        ]
+    );
+    assert_eq!(
+        schema_messages(&format!(
+            "{runs} CREATE VIEW child_notes AS SELECT n.id FROM notes n JOIN runs r ON n.run_id = r.parent_id;"
+        )),
+        [
+            "View 'child_notes' uses a join of 'notes' and 'runs' on `n.run_id = r.parent_id`, whose columns cover a unique key of neither table, so a row of either side can pair with several rows of the other and the result holds pairs no stored row relates."
+        ]
+    );
+    assert_eq!(
+        schema_messages(&format!(
+            "{runs} CREATE VIEW stepped AS SELECT n.id FROM notes n JOIN runs r ON n.run_id = r.step;"
+        )),
+        [
+            "View 'stepped' uses a join of 'notes' and 'runs' on `n.run_id = r.step` instead of their foreign key `n.run_id = r.id`, whose columns cover a unique key of neither table, so a row of either side can pair with several rows of the other and the result holds pairs no stored row relates."
+        ]
+    );
+}
+
+#[test]
 fn an_ambiguous_column_fails_the_lookup() {
     let database = ParserDB::parse::<PostgreSqlDialect>(SCHEMA).expect("schema parses");
     for sql in [
