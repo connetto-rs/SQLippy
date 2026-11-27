@@ -87,7 +87,7 @@ fn every_inner_join_form_over_a_nullable_reference_is_reported() {
             "SELECT e.id FROM employees e JOIN badges b ON b.id = e.id JOIN departments d ON e.department_id = d.id AND b.id = e.id",
             "SELECT e.id FROM employees e JOIN departments d ON e.department_id = d.id AND e.name IS NULL",
             "SELECT e.id FROM employees e, departments d WHERE e.department_id = d.id AND e.name IS NULL",
-            "SELECT e.id FROM employees e JOIN departments d ON e.department_id = d.id WHERE (e.name IS NULL AND e.id IS NULL) OR e.department_id = 1",
+            "SELECT e.id FROM employees e JOIN departments d ON e.department_id = d.id WHERE (e.name IS NULL AND e.id > 0) OR e.department_id = 1",
             "SELECT s.id FROM regions JOIN (stores s JOIN employees e ON e.id = s.id) USING (region_id)",
             "SELECT p.id FROM positive p JOIN departments d ON p.department_id = d.id",
         ]),
@@ -143,6 +143,7 @@ fn a_conjunct_a_left_join_cannot_escape_documents_the_inner_join() {
             "SELECT e.id FROM employees e JOIN departments d ON e.department_id = d.id WHERE (e.department_id > 0 AND e.name = 'x') OR e.department_id < 0",
             "SELECT e.id FROM employees e JOIN departments d ON e.department_id = d.id WHERE e.id > e.department_id",
             "SELECT department_id FROM employees JOIN badges USING (department_id) JOIN departments d ON department_id = d.id",
+            "SELECT e.id FROM employees e JOIN departments d ON e.department_id = d.id WHERE (e.name IS NULL AND e.id IS NULL) OR e.department_id = 1",
         ]),
         Vec::<String>::new()
     );
@@ -209,6 +210,59 @@ fn only_the_referencing_columns_the_join_equates_are_judged() {
     );
     let objects: Vec<&str> = found.iter().map(|(_, object, _)| object.as_str()).collect();
     assert_eq!(objects, ["copied"]);
+}
+
+#[test]
+fn a_filter_a_validated_check_ties_to_the_reference_documents_the_inner_join() {
+    let found = findings(
+        &constrainer(),
+        RULE,
+        "CREATE TABLE resources (id INT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('organization', 'folder', 'project')),
+           parent_id INT REFERENCES resources (id), CHECK ((kind = 'organization') = (parent_id IS NULL)));
+         CREATE TABLE drafts (id INT PRIMARY KEY, kind TEXT NOT NULL, parent_id INT REFERENCES resources (id));
+         ALTER TABLE drafts ADD CONSTRAINT rooted CHECK ((kind = 'organization') = (parent_id IS NULL)) NOT VALID;
+         CREATE FUNCTION folders_under(root INT) RETURNS SETOF INT LANGUAGE sql STABLE AS $$
+           WITH RECURSIVE reached (id) AS (
+             SELECT resource.id FROM resources resource WHERE resource.id = root
+             UNION
+             SELECT child.id FROM reached JOIN resources child ON child.parent_id = reached.id
+             WHERE child.kind IN ('folder', 'project'))
+           SELECT id FROM reached $$;
+         CREATE FUNCTION all_under(root INT) RETURNS SETOF INT LANGUAGE sql STABLE AS $$
+           WITH RECURSIVE reached (id) AS (
+             SELECT resource.id FROM resources resource WHERE resource.id = root
+             UNION
+             SELECT child.id FROM reached JOIN resources child ON child.parent_id = reached.id)
+           SELECT id FROM reached $$;
+         CREATE FUNCTION kinds_under(wanted TEXT) RETURNS SETOF INT LANGUAGE sql STABLE AS $$
+           SELECT c.id FROM resources c JOIN resources p ON c.parent_id = p.id WHERE c.kind = wanted $$;
+         CREATE VIEW folders AS SELECT c.id FROM resources c JOIN resources p ON c.parent_id = p.id WHERE c.kind = 'folder';
+         CREATE VIEW linked_folders AS SELECT c.id FROM resources c, resources p WHERE c.parent_id = p.id AND c.kind <> 'organization';
+         CREATE VIEW folder_rows AS SELECT * FROM resources WHERE kind = 'folder';
+         CREATE VIEW over_folder_rows AS SELECT f.id FROM folder_rows f JOIN resources p ON f.parent_id = p.id;
+         CREATE VIEW derived_folders AS SELECT f.id FROM (SELECT id, parent_id FROM resources WHERE kind = 'project') f
+           JOIN resources p ON f.parent_id = p.id;
+         CREATE VIEW joined_filter AS SELECT c.id FROM resources c JOIN resources p ON c.parent_id = p.id
+           JOIN resources s ON s.id = c.id AND c.kind = 'folder';
+         CREATE VIEW own_on AS SELECT c.id FROM resources c JOIN resources p ON c.parent_id = p.id AND c.kind = 'folder';
+         CREATE VIEW any_kind AS SELECT c.id FROM resources c JOIN resources p ON c.parent_id = p.id
+           WHERE c.kind IN ('organization', 'folder');
+         CREATE VIEW either AS SELECT c.id FROM resources c JOIN resources p ON c.parent_id = p.id
+           WHERE c.kind = 'folder' OR p.kind = 'folder';
+         CREATE VIEW unvalidated AS SELECT d.id FROM drafts d JOIN resources p ON d.parent_id = p.id WHERE d.kind = 'folder';",
+    );
+    let objects: Vec<&str> = found.iter().map(|(_, object, _)| object.as_str()).collect();
+    assert_eq!(
+        objects,
+        [
+            "any_kind",
+            "either",
+            "own_on",
+            "unvalidated",
+            "all_under(INT)",
+            "kinds_under(TEXT)"
+        ]
+    );
 }
 
 #[test]

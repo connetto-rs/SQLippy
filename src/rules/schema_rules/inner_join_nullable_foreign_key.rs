@@ -1,6 +1,6 @@
 //! Submodule providing the `InnerJoinNullableForeignKey` rule.
 
-use std::{collections::BTreeSet, ops::ControlFlow, ptr, rc::Rc};
+use std::{cell::Cell, collections::BTreeSet, ops::ControlFlow, ptr, rc::Rc};
 
 use sql_traits::{
     errors::LookupError,
@@ -21,9 +21,10 @@ use crate::{
     rules::{
         cte_support::{WithScopes, output_expression},
         expression_site_support::{ExpressionFinder, check_schema, check_statement},
+        implication_support::{Term, renamed},
         key_support::key_pairs,
         not_in_support::{extends_left, factors, null_extended},
-        null_support::{may_hold_null, rejects_null},
+        null_support::{may_hold_null, may_hold_null_where, rejects_null},
         policy_support::{conjuncts, disjuncts, is_column_reference, unnested},
         statement_support::{OwnLevel, root_query},
         trigger_support::stored,
@@ -56,9 +57,13 @@ use crate::{
 /// the other inner joins of the same `SELECT`, rejecting `NULL` in the
 /// referencing column or in any column of the parent, and the `WHERE` of the
 /// derived table, `WITH` item or view the column comes through. An `OR`
-/// rejects the `NULL` when every branch does. The link between the target
-/// of an `UPDATE` or `DELETE` and its `FROM` or `USING` items is not
-/// reported, since those statements have no outer variant.
+/// rejects the `NULL` when every branch does. Those conjuncts reading only
+/// the stored table holding the referencing column also reject the `NULL`
+/// when, with the table's column declarations and validated checks, they
+/// rule it out, as `kind = 'folder'` does under `CHECK ((kind =
+/// 'organization') = (parent_id IS NULL))`. The link between the target of
+/// an `UPDATE` or `DELETE` and its `FROM` or `USING` items is not reported,
+/// since those statements have no outer variant.
 ///
 /// # Example
 ///
@@ -208,6 +213,9 @@ struct Conjunct {
     /// being `NULL` and the item being null-extended together keep the
     /// conjunct from being true.
     pairs: Vec<(Entry, *const TableFactor)>,
+    /// The stored table the conjunct reads alone, with the conjunct naming
+    /// its columns as [`may_hold_null_where`] reads them.
+    local: Option<(*const TableFactor, Expr)>,
 }
 
 /// What the rule needs of one `SELECT`.
@@ -392,7 +400,7 @@ impl<'db, DB: DatabaseLike> Collect<'_, '_, 'db, DB> {
             })
             .map(|factor| ptr::from_ref(*factor))
             .collect();
-        let items = leaves
+        let items: Vec<(*const TableFactor, Reads<'db, DB>)> = leaves
             .iter()
             .map(|factor| (ptr::from_ref(*factor), self.reads(factor)))
             .collect();
@@ -402,7 +410,7 @@ impl<'db, DB: DatabaseLike> Collect<'_, '_, 'db, DB> {
         }
         let mut found = Vec::with_capacity(conditions.len());
         for condition in conditions {
-            found.push(self.conjunct(condition)?);
+            found.push(self.conjunct(condition, &items)?);
         }
         Ok(Block {
             items,
@@ -412,8 +420,12 @@ impl<'db, DB: DatabaseLike> Collect<'_, '_, 'db, DB> {
     }
 
     /// The columns and `FROM` items whose `NULL` keeps `condition` from
-    /// being true.
-    fn conjunct(&self, condition: &Expr) -> Result<Conjunct, LookupError> {
+    /// being true, among the `FROM` items `sources` of its `SELECT`.
+    fn conjunct(
+        &self,
+        condition: &Expr,
+        sources: &[(*const TableFactor, Reads<'db, DB>)],
+    ) -> Result<Conjunct, LookupError> {
         let mut read: Vec<Entry> = Vec::new();
         OwnLevel::new(|expression: &Expr| {
             if let Some(entry) = self.entry(expression)?
@@ -460,12 +472,53 @@ impl<'db, DB: DatabaseLike> Collect<'_, '_, 'db, DB> {
                 }
             }
         }
+        let local = match items.as_slice() {
+            [factor] => self.local(condition, *factor, sources)?,
+            _ => None,
+        };
         Ok(Conjunct {
             node: ptr::from_ref(condition),
             entries,
             factors,
             pairs,
+            local,
         })
+    }
+
+    /// `condition`, reading columns of `factor` alone, with each named by
+    /// its stored name, when `factor` is a stored table among `sources` and
+    /// every reference of the condition resolves to one of its columns.
+    fn local(
+        &self,
+        condition: &Expr,
+        factor: *const TableFactor,
+        sources: &[(*const TableFactor, Reads<'db, DB>)],
+    ) -> Result<Option<(*const TableFactor, Expr)>, LookupError> {
+        let Some(table) = sources.iter().find_map(|(item, reads)| match reads {
+            Reads::Table(table) if *item == factor => Some(*table),
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+        let names: Vec<String> = table
+            .columns(self.database)?
+            .map(|column| column.stored_column_name().into_owned())
+            .collect();
+        let failure = Cell::new(None);
+        let rename = |expression: &Expr| match self.entry(expression) {
+            Ok(entry) => entry
+                .filter(|entry| entry.factor == factor)
+                .and_then(|entry| names.get(entry.ordinal).cloned())
+                .map(Term::Column),
+            Err(error) => {
+                failure.set(Some(error));
+                None
+            }
+        };
+        let written = renamed(condition, rename, |_| None, |_| None);
+        failure
+            .into_inner()
+            .map_or(Ok(written.map(|written| (factor, written))), Err)
     }
 }
 
@@ -588,11 +641,12 @@ fn within(factor: &TableFactor) -> Vec<*const TableFactor> {
 }
 
 /// How the judgment of a referencing column ends.
-enum Judgment<'db, DB: DatabaseLike> {
+enum Judgment {
     NotNull,
     Nullable,
-    /// The stored column the reference reads, whose declaration decides.
-    Declared(&'db DB::Column),
+    /// The reference reads a stored column that may hold `NULL` on the rows
+    /// it reads, unless the foreign key forces every referencing column.
+    Stored,
     Unknown,
 }
 
@@ -659,7 +713,7 @@ impl<'db, DB: DatabaseLike> Roots<'db, DB> {
         skip: &[*const Expr],
         site: Option<&[*const TableFactor]>,
         remaining: usize,
-    ) -> Result<Judgment<'db, DB>, LookupError> {
+    ) -> Result<Judgment, LookupError> {
         let block = facts.holding(entry.factor);
         if block.rejects(skip, |conjunct| conjunct.entries.contains(&entry)) {
             return Ok(Judgment::NotNull);
@@ -678,10 +732,23 @@ impl<'db, DB: DatabaseLike> Roots<'db, DB> {
         let (inner, column) = match reads {
             Reads::Table(table) => {
                 let table: &'db DB::Table = table;
-                return Ok(table
-                    .columns(self.database)?
-                    .nth(entry.ordinal)
-                    .map_or(Judgment::Unknown, Judgment::Declared));
+                let Some(column) = table.columns(self.database)?.nth(entry.ordinal) else {
+                    return Ok(Judgment::Unknown);
+                };
+                let filters: Vec<&Expr> = block
+                    .conjuncts
+                    .iter()
+                    .filter(|conjunct| !skip.contains(&conjunct.node))
+                    .filter_map(|conjunct| match &conjunct.local {
+                        Some((factor, written)) if *factor == entry.factor => Some(written),
+                        _ => None,
+                    })
+                    .collect();
+                return Ok(if may_hold_null_where(self.database, column, &filters)? {
+                    Judgment::Stored
+                } else {
+                    Judgment::NotNull
+                });
             }
             Reads::Query(query) => (None, facts.output(*query, entry.ordinal)),
             Reads::View(definition) => {
@@ -1189,7 +1256,7 @@ impl<'c, 'db: 'c, DB: DatabaseLike> Joins<'_, 'c, '_, 'db, DB> {
                     .judge(facts, host.entry, skip, site, FOLLOWED_RELATIONS)?;
                 if match judged {
                     Judgment::Nullable => true,
-                    Judgment::Declared(column) => declared_nullable(database, foreign_key, column)?,
+                    Judgment::Stored => !forced(database, foreign_key)?,
                     Judgment::NotNull | Judgment::Unknown => false,
                 } {
                     nullable.push(format!("`{}`", host.text));
@@ -1233,27 +1300,21 @@ impl<DB: DatabaseLike> Visitor for Joins<'_, '_, '_, '_, DB> {
     }
 }
 
-/// Whether the stored `column`, a referencing column of `foreign_key`, can
-/// hold `NULL`, which it can when its declaration and its table's validated
-/// checks allow it and no validated `MATCH FULL` key with a column that
-/// cannot hold `NULL` forces it.
-fn declared_nullable<DB: DatabaseLike>(
+/// Whether `foreign_key` holds every referencing column non-null, which a
+/// validated `MATCH FULL` key with a column that cannot hold `NULL` does.
+fn forced<DB: DatabaseLike>(
     database: &DB,
     foreign_key: &DB::ForeignKey,
-    column: &DB::Column,
 ) -> Result<bool, LookupError> {
-    if !may_hold_null(database, column)? {
-        return Ok(false);
-    }
     if foreign_key.match_full(database)
         && foreign_key.is_enforced(database)
         && foreign_key.is_validated(database)?
     {
         for host in foreign_key.host_columns(database)? {
             if !may_hold_null(database, host)? {
-                return Ok(false);
+                return Ok(true);
             }
         }
     }
-    Ok(true)
+    Ok(false)
 }
