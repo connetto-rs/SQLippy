@@ -78,6 +78,14 @@ fn tenant_columns_shared_by_both_keys_still_count_as_one_edge() {
              FOREIGN KEY (organization_id, id) REFERENCES teams (organization_id, id),
              FOREIGN KEY (organization_id, parent_id) REFERENCES teams (organization_id, id)
          );",
+        // The child's identity fixes the tenant, so only the parent moves.
+        "CREATE TABLE team_parents (
+             id UUID PRIMARY KEY REFERENCES teams (id),
+             organization_id UUID NOT NULL,
+             parent_id UUID NOT NULL,
+             FOREIGN KEY (organization_id, id) REFERENCES teams (organization_id, id),
+             FOREIGN KEY (organization_id, parent_id) REFERENCES teams (organization_id, id)
+         );",
     ] {
         let messages = reported(&format!("{TENANT_TEAMS} {edge}"));
         assert_eq!(messages.len(), 1, "{edge}");

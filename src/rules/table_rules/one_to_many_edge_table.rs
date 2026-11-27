@@ -106,7 +106,7 @@ impl<DB: DatabaseLike> TableRule for OneToManyEdgeTable<DB> {
                 }
                 let own: Vec<&DB::Column> = other
                     .host_columns(database)?
-                    .filter(|column| !child_columns.contains(column))
+                    .filter(|column| !determined.contains(column))
                     .collect();
                 parents.push((other, own));
             }
