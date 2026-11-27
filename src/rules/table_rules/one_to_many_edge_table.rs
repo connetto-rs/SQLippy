@@ -10,7 +10,7 @@ use crate::{
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
         closed_set_support::checked_values,
-        key_support::{Key, equality_keys, key_pairs},
+        key_support::{determined_by, identifying_keys},
     },
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
@@ -142,58 +142,6 @@ impl<DB: DatabaseLike> TableRule for OneToManyEdgeTable<DB> {
         }
         Ok(())
     }
-}
-
-/// The columns whose values `columns` fix: `columns` themselves, and the host
-/// columns of every foreign key whose fixed columns land on a unique key of
-/// the table it references, followed until no foreign key fixes more.
-fn determined_by<'db, DB: DatabaseLike>(
-    database: &'db DB,
-    foreign_keys: &[&'db DB::ForeignKey],
-    columns: &[&'db DB::Column],
-) -> Result<Vec<&'db DB::Column>, LookupError> {
-    let mut determined = columns.to_vec();
-    let mut pending = foreign_keys.to_vec();
-    loop {
-        let before = pending.len();
-        let mut remaining = Vec::with_capacity(before);
-        for foreign_key in pending {
-            let pairs = key_pairs(database, foreign_key)?;
-            let reached: Vec<&DB::Column> = pairs
-                .iter()
-                .filter(|(host, _)| determined.contains(host))
-                .map(|&(_, referenced)| referenced)
-                .collect();
-            if identifying_keys(database, foreign_key.referenced_table(database)?)?
-                .iter()
-                .any(|key| key.iter().all(|column| reached.contains(column)))
-            {
-                for (host, _) in pairs {
-                    if !determined.contains(&host) {
-                        determined.push(host);
-                    }
-                }
-            } else {
-                remaining.push(foreign_key);
-            }
-        }
-        if remaining.len() == before {
-            return Ok(determined);
-        }
-        pending = remaining;
-    }
-}
-
-/// The unique keys of `table` through which an equality matches at most one
-/// row, its primary key included.
-fn identifying_keys<'db, DB: DatabaseLike>(
-    database: &'db DB,
-    table: &'db DB::Table,
-) -> Result<Vec<Key<'db, DB>>, LookupError> {
-    let mut keys = equality_keys(database, table)?;
-    keys.push(table.primary_key_columns(database)?.collect());
-    keys.retain(|key| !key.is_empty());
-    Ok(keys)
 }
 
 /// Whether a check or a generated constant holds one of `columns` to a single

@@ -12,6 +12,12 @@ const ORGANIZATIONS: &str = "CREATE TABLE organizations (id INT PRIMARY KEY);
     CREATE TABLE users (organization_id INT REFERENCES organizations (id), id INT,
         PRIMARY KEY (organization_id, id));";
 
+const RESOURCES: &str = "CREATE TABLE organizations (id INT PRIMARY KEY);
+    CREATE TABLE tags (id INT PRIMARY KEY);
+    CREATE TABLE resources (id INT PRIMARY KEY,
+        organization_id INT NOT NULL REFERENCES organizations (id), archived BOOLEAN NOT NULL,
+        UNIQUE (organization_id, id, archived));";
+
 fn reported_under(deployment: Deployment, sql: &str) -> Vec<String> {
     let mut constrainer: GenericConstrainer<ParserDB> = MixedMultivaluedFacts::default().into();
     constrainer.set_deployment(deployment);
@@ -94,6 +100,16 @@ fn every_all_key_table_of_three_participants_is_reported() {
                  FOREIGN KEY (organization_id, team_id) REFERENCES teams (organization_id, id),
                  FOREIGN KEY (organization_id, team_id) REFERENCES teams (organization_id, id));"
         ),
+        // Columns copied with the resource are no participant, the label is.
+        format!(
+            "{RESOURCES}
+             CREATE TABLE resource_tag_labels (resource_id INT,
+                 organization_id INT REFERENCES organizations (id), archived BOOLEAN,
+                 tag_id INT REFERENCES tags (id), label TEXT,
+                 PRIMARY KEY (organization_id, resource_id, archived, tag_id, label),
+                 FOREIGN KEY (organization_id, resource_id, archived)
+                     REFERENCES resources (organization_id, id, archived));"
+        ),
     ] {
         assert_eq!(reported(&sql).len(), 1, "{sql}");
     }
@@ -167,6 +183,17 @@ fn tables_of_fewer_participants_or_with_payload_pass() {
                  PRIMARY KEY (employee_id, project_name, dependent_name),
                  FOREIGN KEY (employee_id, project_name) REFERENCES employee_projects (employee_id, project_name),
                  FOREIGN KEY (employee_id, dependent_name) REFERENCES employee_dependents (employee_id, dependent_name));"
+        ),
+        // The resource fixes the columns copied with it, whatever else they
+        // reference, so only the resource and the tag are participants.
+        format!(
+            "{RESOURCES}
+             CREATE TABLE resource_tags (resource_id INT,
+                 organization_id INT REFERENCES organizations (id), archived BOOLEAN,
+                 tag_id INT REFERENCES tags (id),
+                 PRIMARY KEY (organization_id, resource_id, archived, tag_id),
+                 FOREIGN KEY (organization_id, resource_id, archived)
+                     REFERENCES resources (organization_id, id, archived));"
         ),
     ] {
         assert_eq!(reported(&sql), Vec::<String>::new(), "{sql}");
