@@ -151,14 +151,25 @@ pub(crate) fn entry_columns<'db, DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
         .collect())
 }
 
-/// Whether an index without a predicate leads with `column`.
-fn leads<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
+/// Whether an index without a predicate lists `column` right after leading
+/// columns that are all in `pinned`.
+fn serves<DB: DatabaseLike, I: TableIndexLike<DB = DB>>(
     database: &DB,
     index: &I,
     column: &DB::Column,
+    pinned: &[&DB::Column],
 ) -> Result<bool, LookupError> {
-    Ok(index.predicate().is_none()
-        && entry_columns(database, index)?.first() == Some(&Some(column)))
+    if index.predicate().is_some() {
+        return Ok(false);
+    }
+    for entry in entry_columns(database, index)? {
+        match entry {
+            Some(entry) if entry == column => return Ok(true),
+            Some(entry) if pinned.contains(&entry) => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(false)
 }
 
 /// Whether an index without a predicate, a unique constraint or the primary
@@ -168,13 +179,25 @@ pub(crate) fn indexed<DB: DatabaseLike>(
     table: &DB::Table,
     column: &DB::Column,
 ) -> Result<bool, LookupError> {
+    indexed_behind(database, table, column, &[])
+}
+
+/// Whether an index without a predicate, a unique constraint or the primary
+/// key of `table` lists `column` right after leading columns that are all in
+/// `pinned`, the columns of `table` a filter fixes to one value each.
+pub(crate) fn indexed_behind<DB: DatabaseLike>(
+    database: &DB,
+    table: &DB::Table,
+    column: &DB::Column,
+    pinned: &[&DB::Column],
+) -> Result<bool, LookupError> {
     for index in table.indices(database)? {
-        if leads(database, index, column)? {
+        if serves(database, index, column, pinned)? {
             return Ok(true);
         }
     }
     for index in table.unique_indices(database)? {
-        if leads(database, index, column)? {
+        if serves(database, index, column, pinned)? {
             return Ok(true);
         }
     }

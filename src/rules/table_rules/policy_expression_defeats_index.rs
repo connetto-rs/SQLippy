@@ -124,7 +124,7 @@ impl<DB: DatabaseLike> TableRule for PolicyExpressionDefeatsIndex<DB> {
                 table,
                 reporter.deployment(),
                 expression,
-                &mut |scope, side| {
+                &mut |scope, side, _pinned| {
                     let Some((wrapper, reference)) = wrapping(side)? else {
                         return Ok(None);
                     };

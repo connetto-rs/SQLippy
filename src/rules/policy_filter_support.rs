@@ -2,28 +2,32 @@
 //! with, shared by the rules that ask whether PostgreSQL can find those rows
 //! through an index.
 
-use std::ops::ControlFlow;
+use std::{collections::HashMap, ops::ControlFlow};
 
 use sql_traits::{
     errors::LookupError,
     structs::{ColumnScope, IdentifierCase},
     traits::DatabaseLike,
 };
-use sqlparser::ast::{Expr, Query, Visit, Visitor};
+use sqlparser::ast::{BinaryOperator, Expr, Query, Visit, Visitor};
 
 use crate::{
     deployment::Deployment,
     rules::{
+        authority_support::is_literal,
         index_support::{Side, comparison_sides},
-        policy_support::{derives_from_caller, holds_caller, is_column_reference},
+        policy_support::{
+            conjuncts, derives_from_caller, holds_caller, is_column_reference, unnested,
+        },
         walk_support::walk,
     },
 };
 
 /// Inspects the column side of a comparison, resolved through the scope it
-/// stands in, and answers what a rule records for it.
+/// stands in, with the column sides its conjunction pins, and answers what a
+/// rule records for it.
 type Probe<'p, DB, T> =
-    dyn FnMut(&ColumnScope<'_, '_, DB>, &Expr) -> Result<Option<T>, LookupError> + 'p;
+    dyn FnMut(&ColumnScope<'_, '_, DB>, &Expr, &[Expr]) -> Result<Option<T>, LookupError> + 'p;
 
 /// Finds a column reference.
 struct ColumnReference;
@@ -73,30 +77,89 @@ struct Judge<'a, 'db, 'p, DB: DatabaseLike, T> {
     caller: Caller<'a, 'db, DB>,
     probe: &'a mut Probe<'p, DB, T>,
     found: Vec<(T, String)>,
+    /// The position in `pins` of the conjunction holding each operand of an
+    /// `AND` chain met so far, by the operand's address.
+    conjunction: HashMap<*const Expr, usize>,
+    /// The column sides each conjunction met so far pins.
+    pins: Vec<Vec<Expr>>,
 }
 
 impl<DB: DatabaseLike, T> Judge<'_, '_, '_, DB, T> {
     /// Records what the probe answers for each column side, resolved through
     /// `scope`, that `expression` compares with the caller.
+    ///
+    /// The traversal meets an `AND` chain before its operands, and its
+    /// outermost operator before the inner ones, so each operand is filed
+    /// under the whole chain holding it.
     fn consider(
         &mut self,
         scope: &ColumnScope<'_, '_, DB>,
         expression: &Expr,
         in_sublink: bool,
     ) -> Result<(), LookupError> {
+        if let Expr::BinaryOp {
+            op: BinaryOperator::And,
+            ..
+        } = expression
+        {
+            let operands = conjuncts(expression);
+            if !self
+                .conjunction
+                .contains_key(&std::ptr::from_ref(operands[0]))
+            {
+                let pins = self.pinned_sides(&operands, in_sublink)?;
+                let position = self.pins.len();
+                self.pins.push(pins);
+                self.conjunction.extend(
+                    operands
+                        .into_iter()
+                        .map(|operand| (std::ptr::from_ref(operand), position)),
+                );
+            }
+        }
         let Self {
             caller,
             probe,
             found,
+            conjunction,
+            pins,
         } = self;
+        let pinned = conjunction
+            .get(&std::ptr::from_ref(expression))
+            .map_or(&[][..], |&position| &pins[position]);
         comparison_sides(expression, |column, side| {
-            if let Some(answer) = probe(scope, column)?
+            if let Some(answer) = probe(scope, column, pinned)?
                 && caller.side(side, in_sublink)?
             {
                 found.push((answer, expression.to_string()));
             }
             Ok(())
         })
+    }
+
+    /// The column sides the operands of one `AND` chain compare by `=` with
+    /// a literal or with a side derived from the caller alone.
+    fn pinned_sides(&self, operands: &[&Expr], in_sublink: bool) -> Result<Vec<Expr>, LookupError> {
+        let mut pins = Vec::new();
+        for operand in operands {
+            let Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Eq,
+                right,
+            } = operand
+            else {
+                continue;
+            };
+            for (column, value) in [(left, right), (right, left)] {
+                let column = unnested(column);
+                if is_column_reference(column)
+                    && (is_literal(value) || self.caller.side(Side::Expr(value), in_sublink)?)
+                {
+                    pins.push(column.clone());
+                }
+            }
+        }
+        Ok(pins)
     }
 }
 
@@ -179,7 +242,9 @@ impl<DB: DatabaseLike, T> Visitor for Filters<'_, '_, '_, '_, DB, T> {
 /// or a set computed from them. Comparisons of the policy's own level are
 /// resolved against `table`, and those of each sublink's top-level query
 /// against that query's scope, where a side reading any column does not count
-/// as the caller's. The probe runs before the caller is judged.
+/// as the caller's. The probe runs before the caller is judged, and receives
+/// the column sides the `AND` chain holding the comparison compares by `=`
+/// with a literal or with the caller.
 pub(crate) fn caller_filters<DB: DatabaseLike, T>(
     database: &DB,
     table: &DB::Table,
@@ -195,6 +260,8 @@ pub(crate) fn caller_filters<DB: DatabaseLike, T>(
         },
         probe,
         found: Vec::new(),
+        conjunction: HashMap::new(),
+        pins: Vec::new(),
     };
     let mut filters = Filters {
         judge: &mut judge,

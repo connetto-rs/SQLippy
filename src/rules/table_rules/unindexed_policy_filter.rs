@@ -1,16 +1,17 @@
 //! Submodule providing the `UnindexedPolicyFilter` rule.
 
 use sql_traits::{
-    structs::{ColumnDefinition, PolicyExpression},
+    structs::{ColumnBinding, ColumnDefinition, PolicyExpression},
     traits::{ColumnLike, DatabaseLike, PolicyLike, TableLike},
 };
+use sqlparser::ast::TableFactor;
 
 use crate::{
     engine::Engine,
     error::{Interruption, PolicyClause, PolicySite},
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
     rules::{
-        index_support::indexed, policy_filter_support::caller_filters,
+        index_support::indexed_behind, policy_filter_support::caller_filters,
         policy_support::is_column_reference,
     },
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
@@ -25,8 +26,10 @@ use crate::{
 /// a `current_setting` call, a read of the current role, or a set computed
 /// from them. That holds for the policy's own table and for the table a
 /// policy subquery filters. A column counts as indexed when an index without
-/// a predicate, a unique constraint or the primary key leads with it. A small
-/// or rarely read table is a legitimate exception.
+/// a predicate, a unique constraint or the primary key lists it first, or
+/// right after columns of the same row that the `AND` chain holding the
+/// comparison compares by `=` with a literal or with the caller. A small or
+/// rarely read table is a legitimate exception.
 ///
 /// The rule does not run on SQLite, which has no row-level security policies.
 ///
@@ -117,16 +120,32 @@ impl<DB: DatabaseLike> TableRule for UnindexedPolicyFilter<DB> {
                 table,
                 reporter.deployment(),
                 expression,
-                &mut |scope, column| {
+                &mut |scope, column, pinned| {
                     if !is_column_reference(column) {
                         return Ok(None);
                     }
-                    let Some(ColumnDefinition::Base { table, column, .. }) =
-                        scope.resolve_column_definition(column)?
+                    let Some((ColumnDefinition::Base { table, column, .. }, binding)) =
+                        scope.resolve_column_binding(column)?
                     else {
                         return Ok(None);
                     };
-                    if indexed(database, table, column)? {
+                    let mut fixed = Vec::new();
+                    for pin in pinned {
+                        if let Some((
+                            ColumnDefinition::Base {
+                                table: pinned_table,
+                                column: pinned_column,
+                                ..
+                            },
+                            pinned_binding,
+                        )) = scope.resolve_column_binding(pin)?
+                            && std::ptr::eq(pinned_table, table)
+                            && relation(&pinned_binding) == relation(&binding)
+                        {
+                            fixed.push(pinned_column);
+                        }
+                    }
+                    if indexed_behind(database, table, column, &fixed)? {
                         return Ok(None);
                     }
                     Ok(Some((
@@ -160,4 +179,13 @@ impl<DB: DatabaseLike> TableRule for UnindexedPolicyFilter<DB> {
         }
         Ok(())
     }
+}
+
+/// The `FROM` item a column resolved through, which tells two readings of
+/// one table apart, or `None` when the binding names no single item, as for
+/// the policy's own row.
+fn relation(binding: &ColumnBinding<'_>) -> Option<*const TableFactor> {
+    binding
+        .entry()
+        .map(|entry| std::ptr::from_ref(entry.factor()))
 }
