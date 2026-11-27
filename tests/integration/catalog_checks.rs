@@ -72,7 +72,8 @@ fn a_materialized_view_kept_from_clients_or_over_open_tables_is_not_reported() {
     }
 }
 
-const PARENTS: &str = "CREATE TABLE parents (id INT PRIMARY KEY);";
+const PARENTS: &str = "CREATE TABLE parents (id INT PRIMARY KEY, name TEXT);
+    GRANT DELETE, UPDATE ON parents TO authenticated;";
 
 #[test]
 fn a_cascading_delete_into_a_table_with_a_delete_policy_is_reported() {
@@ -83,7 +84,7 @@ fn a_cascading_delete_into_a_table_with_a_delete_policy_is_reported() {
         assert_eq!(
             findings(
                 CascadeIntoRowLevelSecurityTable::default(),
-                Deployment::default(),
+                supabase(),
                 &format!(
                     "{PARENTS}
                      CREATE TABLE kids (id INT, parent_id INT REFERENCES parents (id) ON DELETE CASCADE);
@@ -113,7 +114,7 @@ fn every_referential_action_that_rewrites_rows_past_their_policies_is_reported()
         assert_eq!(
             findings(
                 CascadeIntoRowLevelSecurityTable::default(),
-                Deployment::default(),
+                supabase(),
                 &format!(
                     "{PARENTS}
                      CREATE TABLE kids (id INT, parent_id INT DEFAULT 0 REFERENCES parents (id) {action});
@@ -143,7 +144,7 @@ fn an_action_whose_command_has_no_policy_is_not_reported() {
         assert_eq!(
             findings(
                 CascadeIntoRowLevelSecurityTable::default(),
-                Deployment::default(),
+                supabase(),
                 &format!(
                     "{PARENTS}
                      CREATE TABLE kids (id INT, parent_id INT REFERENCES parents (id) {action});
@@ -172,13 +173,101 @@ fn a_foreign_key_that_cascades_past_no_delete_policy_is_not_reported() {
         assert_eq!(
             findings(
                 CascadeIntoRowLevelSecurityTable::default(),
-                Deployment::default(),
+                supabase(),
                 &format!("{PARENTS}{sql}"),
             ),
             [],
             "{sql}"
         );
     }
+}
+
+#[test]
+fn a_cascade_only_a_client_role_may_set_off_is_reported() {
+    for grant in [
+        "GRANT DELETE ON parents TO PUBLIC;",
+        "CREATE ROLE deleter; GRANT DELETE ON parents TO deleter; GRANT deleter TO anon;",
+        "GRANT ALL ON parents TO authenticated;",
+    ] {
+        assert_eq!(
+            findings(
+                CascadeIntoRowLevelSecurityTable::default(),
+                supabase(),
+                &format!(
+                    "CREATE TABLE parents (id INT PRIMARY KEY);
+                     {grant}
+                     CREATE TABLE kids (parent_id INT REFERENCES parents (id) ON DELETE CASCADE);
+                     ALTER TABLE kids ENABLE ROW LEVEL SECURITY;
+                     CREATE POLICY kids_delete ON kids FOR DELETE USING (false);"
+                ),
+            ),
+            [finding(
+                "cascade_into_row_level_security_table",
+                Level::Warn,
+                "kids.kids_parent_id_fkey"
+            )],
+            "{grant}"
+        );
+    }
+}
+
+#[test]
+fn a_cascade_no_client_role_may_set_off_is_not_reported() {
+    for (action, grant) in [
+        ("ON DELETE CASCADE", ""),
+        ("ON DELETE CASCADE", "GRANT DELETE ON parents TO reporting;"),
+        (
+            "ON DELETE CASCADE",
+            "GRANT SELECT, INSERT, UPDATE ON parents TO authenticated;",
+        ),
+        (
+            "ON DELETE SET NULL",
+            "GRANT UPDATE ON parents TO authenticated;",
+        ),
+        (
+            "ON UPDATE CASCADE",
+            "GRANT DELETE, UPDATE (name) ON parents TO authenticated;",
+        ),
+    ] {
+        assert_eq!(
+            findings(
+                CascadeIntoRowLevelSecurityTable::default(),
+                supabase(),
+                &format!(
+                    "CREATE TABLE parents (id INT PRIMARY KEY, name TEXT);
+                     {grant}
+                     CREATE TABLE kids (parent_id INT REFERENCES parents (id) {action});
+                     ALTER TABLE kids ENABLE ROW LEVEL SECURITY;
+                     CREATE POLICY kids_write ON kids USING (false);"
+                ),
+            ),
+            [],
+            "{action} with {grant}"
+        );
+    }
+}
+
+#[test]
+fn an_extension_key_no_client_may_delete_the_parent_of_cascades_unreported() {
+    let mut constrainer: GenericConstrainer<ParserDB> =
+        CascadeIntoRowLevelSecurityTable::default().into();
+    constrainer.register_foreign_key_rule(Box::new(ExtensionForeignKeyOnDeleteCascade::default()));
+    assert_eq!(
+        findings(
+            constrainer,
+            supabase(),
+            "CREATE ROLE writer;
+             CREATE TABLE parents (id INT PRIMARY KEY);
+             GRANT SELECT ON parents TO authenticated;
+             GRANT DELETE ON parents TO writer;
+             CREATE TABLE kids (id INT PRIMARY KEY, FOREIGN KEY (id) REFERENCES parents (id) ON DELETE CASCADE);
+             ALTER TABLE kids ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT, DELETE ON kids TO authenticated;
+             CREATE POLICY kids_select ON kids FOR SELECT TO authenticated USING (true);
+             CREATE POLICY kids_delete ON kids FOR DELETE TO authenticated USING (id > 0);"
+        ),
+        []
+    );
 }
 
 #[test]
@@ -365,9 +454,14 @@ fn bypass_rules_wait_for_a_declared_client_role() {
     let mut constrainer: GenericConstrainer<ParserDB> =
         ClientRoleBypassesRowLevelSecurity::default().into();
     constrainer.register_schema_rule(Box::new(SettableMembershipInBypassingRole::default()));
+    constrainer.register_foreign_key_rule(Box::new(CascadeIntoRowLevelSecurityTable::default()));
     assert_eq!(
         inactive_declarations(&constrainer),
         [
+            (
+                "cascade_into_row_level_security_table",
+                Declaration::ClientRoles
+            ),
             (
                 "client_role_bypasses_row_level_security",
                 Declaration::ClientRoles

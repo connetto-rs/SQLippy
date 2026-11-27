@@ -16,6 +16,7 @@ const SCHEMA: &str = "
       PRIMARY KEY (organization_id, user_id),
       UNIQUE (organization_id, user_id, state)
     );
+    GRANT DELETE, UPDATE ON grantees, memberships TO app;
     CREATE TABLE team_members (
       team_id UUID NOT NULL,
       organization_id UUID NOT NULL,
@@ -40,6 +41,7 @@ fn constrainer() -> GenericConstrainer<ParserDB> {
     let mut constrainer: GenericConstrainer<ParserDB> =
         RowLevelSecurityWithoutPolicies::default().into();
     constrainer.register_foreign_key_rule(Box::new(CascadeIntoRowLevelSecurityTable::default()));
+    constrainer.set_deployment(Deployment::default().with_app_role("app"));
     constrainer
 }
 
