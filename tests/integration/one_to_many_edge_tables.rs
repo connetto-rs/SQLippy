@@ -106,6 +106,27 @@ fn a_discriminator_open_to_several_values_does_not_mark_a_subtype() {
 }
 
 #[test]
+fn a_reference_the_child_key_already_identifies_is_no_parent() {
+    let messages = reported(
+        "CREATE TABLE resources (
+             id INT PRIMARY KEY,
+             organization_id INT NOT NULL,
+             archived BOOLEAN NOT NULL,
+             UNIQUE (organization_id, id, archived)
+         );
+         CREATE TABLE models (id INT PRIMARY KEY REFERENCES resources (id));
+         CREATE TABLE subtypes (
+             id INT PRIMARY KEY REFERENCES models (id),
+             organization_id INT NOT NULL,
+             archived BOOLEAN NOT NULL,
+             FOREIGN KEY (organization_id, id, archived)
+                 REFERENCES resources (organization_id, id, archived)
+         );",
+    );
+    assert_eq!(messages, Vec::<String>::new());
+}
+
+#[test]
 fn tables_that_are_not_one_to_many_edges_pass() {
     for edge in [
         // Both participants in the key: a many-to-many relationship.
