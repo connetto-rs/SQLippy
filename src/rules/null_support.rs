@@ -3,7 +3,9 @@
 
 use sql_traits::{
     errors::LookupError,
-    structs::{Assumption, CallResolution, ExpressionContext, IdentifierCase, OperatorResolution},
+    structs::{
+        Assumption, CallResolution, ExpressionContext, IdentifierCase, OperatorResolution, Outcomes,
+    },
     traits::{
         CheckConstraintLike, ColumnLike, DatabaseLike, FunctionLike, OperatorLike, TableLike,
     },
@@ -23,6 +25,22 @@ pub(crate) fn may_hold_null<DB: DatabaseLike>(
     database: &DB,
     column: &DB::Column,
 ) -> Result<bool, LookupError> {
+    may_hold_null_where(database, column, &[])
+}
+
+/// Whether a row of the table of `column` passing every one of `filters`
+/// may hold `NULL` in it, as [`may_hold_null`] reads the row. Each filter
+/// names the table's columns by their stored names, quoted.
+///
+/// # Errors
+///
+/// Returns the lookup error reading the column or the checks of its table
+/// raised.
+pub(crate) fn may_hold_null_where<DB: DatabaseLike>(
+    database: &DB,
+    column: &DB::Column,
+    filters: &[&Expr],
+) -> Result<bool, LookupError> {
     if !column.is_nullable(database)? {
         return Ok(false);
     }
@@ -30,22 +48,26 @@ pub(crate) fn may_hold_null<DB: DatabaseLike>(
     for check in column.check_constraints(database)? {
         checked |= check.is_enforced() && check.is_validated(database)?;
     }
-    if !checked {
+    if !checked && filters.is_empty() {
         return Ok(true);
     }
     let table = column.table(database);
-    let mut checks = Vec::new();
+    let mut assumptions = Vec::new();
     for check in table.check_constraints(database)? {
         if check.is_enforced() && check.is_validated(database)? {
-            checks.push(Assumption::Check(check));
+            assumptions.push(Assumption::Check(check));
         }
     }
+    assumptions.extend(filters.iter().map(|&expression| Assumption::Expression {
+        expression,
+        outcomes: Outcomes::TRUE,
+    }));
     let null = Expr::IsNull(Box::new(Expr::Identifier(Ident::with_quote(
         '"',
         column.stored_column_name().as_ref(),
     ))));
     Ok(table
-        .truth_under(database, &null, IdentifierCase::AsWritten, &checks)?
+        .truth_under(database, &null, IdentifierCase::AsWritten, &assumptions)?
         .outcomes
         .truth)
 }
