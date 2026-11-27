@@ -614,12 +614,21 @@ pub(crate) fn binds<DB: DatabaseLike>(
     foreign_key: &DB::ForeignKey,
     column: &DB::Column,
 ) -> Result<bool, LookupError> {
-    Ok(
-        foreign_key.deferral(database) == ConstraintDeferral::NotDeferrable
-            && foreign_key.is_validated(database)?
-            && checked_whenever_set(database, foreign_key, column)?
-            && no_inheritors(database, foreign_key.host_table(database))?,
-    )
+    Ok(checked_each_statement(database, foreign_key)?
+        && checked_whenever_set(database, foreign_key, column)?)
+}
+
+/// Whether every row of the table holding `foreign_key` that the key checks
+/// references a row at the end of every statement, as an enforced,
+/// validated and not deferrable key of a table nothing inherits from does.
+pub(crate) fn checked_each_statement<DB: DatabaseLike>(
+    database: &DB,
+    foreign_key: &DB::ForeignKey,
+) -> Result<bool, LookupError> {
+    Ok(foreign_key.is_enforced(database)
+        && foreign_key.deferral(database) == ConstraintDeferral::NotDeferrable
+        && foreign_key.is_validated(database)?
+        && no_inheritors(database, foreign_key.host_table(database))?)
 }
 
 /// Whether no table inherits from `table`, whose keys and constraints would

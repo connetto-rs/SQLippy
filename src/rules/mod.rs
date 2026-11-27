@@ -142,6 +142,7 @@ mod plpgsql_site_support;
 mod policy_filter_support;
 mod policy_read_support;
 mod policy_support;
+mod row_equality_support;
 pub mod rust_keywords;
 mod script_support;
 mod statement_support;
