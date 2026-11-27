@@ -5756,8 +5756,9 @@ fn a_walk_whose_step_reads_a_parameter_is_not_met_by_a_walk_over_another_argumen
 /// The functions [`folded_resources`] reports with the step of the walk the
 /// read reaches through capped by `capped_kinds(read)` and the step of the
 /// one the read policy reaches through by `capped_kinds(policy)`, each
-/// unless no installation acts.
-fn capped_steps(read: &str, policy: &str) -> Vec<String> {
+/// unless no installation acts, and `app` also granted `EXECUTE` on the
+/// functions `granted` lists.
+fn capped_steps(read: &str, policy: &str, granted: &str) -> Vec<String> {
     let capped = |item: &str, cap: &str| {
         format!(
             "WHERE child.kind IN ('folder', 'project')
@@ -5766,6 +5767,7 @@ fn capped_steps(read: &str, policy: &str) -> Vec<String> {
          SELECT id FROM {item} $$;"
         )
     };
+    let grants = "authz.residual_read_resources(), authz.resources_with(authz.role),";
     folded_resources(&[
         (
             "WHERE child.kind IN ('folder', 'project'))
@@ -5777,19 +5779,45 @@ fn capped_steps(read: &str, policy: &str) -> Vec<String> {
          SELECT id FROM containers $$;",
             &capped("containers", policy),
         ),
+        (grants, &format!("{grants} {granted}")),
     ])
 }
 
 #[test]
 fn a_walk_whose_step_tests_a_set_is_met_by_a_policy_walk_testing_a_set_within_it() {
     assert_eq!(
-        capped_steps("min_role", "'reader'"),
-        ["resources_with(authz.role)"]
+        capped_steps("min_role", "'reader'", ""),
+        Vec::<String>::new()
     );
     assert_eq!(
-        capped_steps("min_role", "'admin'"),
+        capped_steps("min_role", "'admin'", ""),
         [
             "organizations_reaching(authz.role)",
+            "resources_with(authz.role)"
+        ]
+    );
+}
+
+#[test]
+fn a_walk_whose_capped_step_reads_only_rows_the_read_policy_admits_confines_its_reads() {
+    assert_eq!(
+        capped_steps(
+            "min_role",
+            "'reader'",
+            "authz.containers_with(authz.role), authz.reached_with(authz.role),"
+        ),
+        ["reached_with(authz.role)"]
+    );
+    assert_eq!(
+        capped_steps(
+            "min_role",
+            "'admin'",
+            "authz.containers_with(authz.role), authz.reached_with(authz.role),"
+        ),
+        [
+            "containers_with(authz.role)",
+            "organizations_reaching(authz.role)",
+            "reached_with(authz.role)",
             "resources_with(authz.role)"
         ]
     );
@@ -6988,6 +7016,46 @@ fn a_policy_reading_a_table_the_caller_may_not_select_admits_no_row() {
             second_policy_exposed(other, declared, ""),
             ["own_ids()"],
             "{other}"
+        );
+    }
+}
+
+#[test]
+fn a_private_helper_returning_the_set_of_a_function_counts_only_where_that_function_confines_its_reads()
+ {
+    let reported = |source: &str, listed: &str| {
+        reported_over_resources(&format!(
+            "{}{}{}",
+            set_definer("source()", "sql", source),
+            set_definer(
+                "reached()",
+                "sql",
+                &format!(
+                    "SELECT listed.id FROM {listed} listed (id)
+                     UNION SELECT resource.id FROM public.resources resource WHERE NOT resource.hidden"
+                )
+            ),
+            set_definer(
+                "owned_reached()",
+                "sql",
+                &owned_where("resource.id IN (SELECT authz.reached())")
+            )
+        ))
+    };
+    let owned = "SELECT resource.id FROM public.resources resource
+        WHERE resource.owner_id = current_setting('app.user_id', true)";
+    assert_eq!(reported(owned, "authz.source()"), Vec::<String>::new());
+    for (source, listed) in [
+        (
+            "SELECT secret.resource_id FROM public.secrets secret",
+            "authz.source()",
+        ),
+        (owned, "generate_series(1, 3)"),
+    ] {
+        assert_eq!(
+            reported(source, listed),
+            ["owned_reached()"],
+            "{source} {listed}"
         );
     }
 }

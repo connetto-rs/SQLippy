@@ -324,6 +324,12 @@ use super::plpgsql_ambiguous_name::collision;
 /// written schema-qualified, when the call passes each argument
 /// positionally as a literal or a parameter. Of an `OR` of such tests and
 /// other conditions, what every arm states holds.
+/// A row a `SELECT` of the body yields unchanged into the result of a
+/// `SECURITY DEFINER` function that is not `VOLATILE` lies in the set of its
+/// own call, with its own parameters, and so meets what that set tells too.
+/// The rows the recursive step of a walk the function returns reads then
+/// meet what the walk tells of them, so a step reading only rows a policy's
+/// walk reaches is confined by that policy.
 /// When the function draws the values from the tested columns themselves,
 /// in their order and holding a unique key of their table, the row drawn is
 /// the tested row and every condition holds of it. Otherwise a condition on
@@ -635,7 +641,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// its set but the key of a row of that table it reads, as
     /// [`Reads::tests_keys_alone`] reads each statement, calling it nowhere
     /// else. A row `function` reads is then in the set exactly when the
-    /// conditions `callee` reads its rows under hold of that row, which each
+    /// conditions `callee` reads its rows under hold of that row, or its key
+    /// lies in the set of a function `callee` returns whole, which each
     /// caller could evaluate itself.
     fn keys_tested_alone(
         &mut self,
@@ -670,7 +677,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
     /// no parameter but `search_path`, and every function it calls is a
     /// built-in other than `set_config`, runs for every caller or confines
     /// its reads. Every value it returns is then the key of one row, which
-    /// it returns under conditions on that row alone.
+    /// it returns under conditions on that row alone, or a value of such a
+    /// function it returns whole.
     fn keyed_set(
         &mut self,
         function: &'a DB::Function,
@@ -2321,8 +2329,14 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                     caller_bound,
                     ..
                 } = self.stated(&filters, from, position)?;
+                let membership = self.lineage.membership(select, |column| {
+                    match term(&resolver, column, relation, &equalities)? {
+                        Term::Column(column) => Some(column),
+                        Term::Parameter(_) => None,
+                    }
+                });
                 let mut drawn = Vec::new();
-                for condition in &conditions {
+                for condition in conditions.iter().chain(&membership) {
                     drawn.extend(self.drawn_condition(
                         table,
                         condition,
@@ -2336,38 +2350,31 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
                 for condition in drawn {
                     split_conjuncts(condition, &mut conditions);
                 }
-                let admits =
-                    |conditions: &[Expr]| -> Result<bool, LookupError> {
-                        let mut conditions = conditions.to_vec();
-                        let witnessed = self.witnessed_sets(
-                            &filters,
-                            owners,
-                            table,
-                            relation,
-                            &equalities,
-                            &conditions,
-                        )?;
-                        conditions.extend(witnessed);
-                        if let Some(membership) = self.lineage.membership(select, |column| {
-                            match term(&resolver, column, relation, &equalities)? {
-                                Term::Column(column) => Some(column),
-                                Term::Parameter(_) => None,
-                            }
-                        }) {
-                            conditions.push(membership);
-                        }
-                        let filter = conjunction(conditions);
-                        let rename =
-                            |reference: &Expr| term(&resolver, reference, relation, &equalities);
-                        Ok(self
-                            .admits_relation(select, table, relation, &filter, locked, rename)?
+                let admits = |conditions: &[Expr]| -> Result<bool, LookupError> {
+                    let mut conditions = conditions.to_vec();
+                    let witnessed = self.witnessed_sets(
+                        &filters,
+                        owners,
+                        table,
+                        relation,
+                        &equalities,
+                        &conditions,
+                    )?;
+                    conditions.extend(witnessed);
+                    conditions.extend(membership.iter().cloned());
+                    let filter = conjunction(conditions);
+                    let rename =
+                        |reference: &Expr| term(&resolver, reference, relation, &equalities);
+                    Ok(
+                        self.admits_relation(select, table, relation, &filter, locked, rename)?
                             && match inserted {
                                 Some(insertion) => {
                                     self.admits_inserted(insertion, select, &filter, rename)?
                                 }
                                 None => true,
-                            })
-                    };
+                            },
+                    )
+                };
                 if !admits(&conditions)?
                     && !self.admits_by_cases(table, &conditions, &admits, CASE_SPLITS)?
                 {
@@ -4083,7 +4090,11 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
     /// The table and column every one of `leaves` projects alone, pushing
     /// onto `drawn` the relation of each it projects the column of, when each
     /// groups nothing and the relation reads the table and no outer join of
-    /// its `FROM` item fills it with `NULL`s.
+    /// its `FROM` item fills it with `NULL`s. A leaf may instead return every
+    /// value of a call of a function of the schema, read alone, which
+    /// [`Confinement::keyed_set`] holds to running for every caller or
+    /// confining its reads, so that a row's key lies in that leaf only when
+    /// it lies in a set each caller could compute too.
     fn drawn_keys(
         &self,
         leaves: &[&Select],
@@ -4101,12 +4112,22 @@ impl<'c, 'q, 'a, DB: DatabaseLike> Reads<'c, 'q, 'a, DB> {
             else {
                 return Ok(None);
             };
-            let Some((ColumnDefinition::Base { column, .. }, Some(entry))) = self
-                .context
-                .reference(unnested(projected))
-                .ok()
-                .flatten()
-                .map(|(definition, binding)| (definition, binding.entry()))
+            let reference = self.context.reference(unnested(projected)).ok().flatten();
+            if let Some((ColumnDefinition::FunctionResult { function, .. }, binding)) = &reference
+                && function.target_name().schema() != Some("pg_catalog")
+                && select.selection.is_none()
+                && plain(select)
+                && let [TableWithJoins { relation, joins }] = select.from.as_slice()
+                && joins.is_empty()
+                && whole_call(relation).is_some()
+                && binding
+                    .entry()
+                    .is_some_and(|entry| ptr::eq(entry.factor(), relation))
+            {
+                continue;
+            }
+            let Some((ColumnDefinition::Base { column, .. }, Some(entry))) =
+                reference.map(|(definition, binding)| (definition, binding.entry()))
             else {
                 return Ok(None);
             };
