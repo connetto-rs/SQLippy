@@ -312,14 +312,40 @@ impl<'s, DB: DatabaseLike> Links<'s, '_, '_, '_, '_, DB> {
     }
 
     /// The foreign key condition that links the tables of `first` and
-    /// `second`, such as `e.project_id = p.id`.
+    /// `second`, such as `e.project_id = p.id`. A key is skipped when one of
+    /// `between` equates a host column of it with a column of the other
+    /// side referencing the same column, since the two rows then meet at
+    /// the row the key references, as siblings under one parent do, and
+    /// the key would pair each row with that parent instead.
     fn link(
         &self,
         first: &Stored<'s, DB>,
         second: &Stored<'s, DB>,
+        between: &[&Equality<'s, DB>],
     ) -> Result<Option<String>, LookupError> {
         for (child, parent) in [(first, second), (second, first)] {
-            if let Some(pairs) = references(self.database, child.table, parent.table)?.first() {
+            let keys = references(self.database, child.table, parent.table)?;
+            if keys.is_empty() {
+                continue;
+            }
+            let siblings = references(self.database, parent.table, parent.table)?;
+            for pairs in keys {
+                let meets = between.iter().any(|equality| {
+                    let (host, other) = if equality.left.relation == child.relation {
+                        (&equality.left, &equality.right)
+                    } else {
+                        (&equality.right, &equality.left)
+                    };
+                    pairs.iter().any(|(column, referenced)| {
+                        *column == host.column
+                            && siblings.iter().flatten().any(|(sibling, target)| {
+                                *sibling == other.column && target == referenced
+                            })
+                    })
+                });
+                if meets {
+                    continue;
+                }
                 let conditions: Vec<String> = pairs
                     .iter()
                     .map(|(host, referenced)| {
@@ -387,9 +413,11 @@ impl<'s, DB: DatabaseLike> Links<'s, '_, '_, '_, '_, DB> {
                 .map(|equality| equality.written.as_str())
                 .collect::<Vec<_>>()
                 .join(" AND ");
-            let foreign_key = self.link(first, second)?.map_or_else(String::new, |link| {
-                format!(" instead of their foreign key `{link}`")
-            });
+            let foreign_key = self
+                .link(first, second, &between)?
+                .map_or_else(String::new, |link| {
+                    format!(" instead of their foreign key `{link}`")
+                });
             let description = format!(
                 "a join of '{}' and '{}' on `{condition}`{foreign_key}",
                 first.table.table_name(),
