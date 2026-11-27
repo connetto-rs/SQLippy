@@ -8,7 +8,10 @@ use sql_traits::{
 use crate::{
     error::Interruption,
     lint::{LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::{grant_support::tenant_columns, key_support::indexed_keys},
+    rules::{
+        grant_support::tenant_columns,
+        key_support::{determined_by, indexed_keys},
+    },
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -32,7 +35,10 @@ rule_definition!(
     /// participant of its own. Columns of the declared tenant key scope the
     /// others and are no participant, and neither is a participant that one
     /// foreign key holds exactly while two other foreign keys hold it along
-    /// with more columns, as a tenant column referencing its tenant does.
+    /// with more columns, as a tenant column referencing its tenant does. A
+    /// column the other columns fix, through a foreign key whose columns
+    /// among them land on a unique key of the table it references, is a copy
+    /// of that row's value and no participant either.
     ///
     /// # Example
     ///
@@ -124,6 +130,38 @@ fn enumerate(items: &[String]) -> String {
     format!("{} and {}", items[..last].join(", "), items[last])
 }
 
+/// The columns of `columns` that neither belong to `tenant` nor take their
+/// value from the others, through a foreign key whose columns among them
+/// land on a unique key of the table it references. Of columns fixing each
+/// other, the first stays.
+fn uncopied<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    foreign_keys: &[&'db DB::ForeignKey],
+    columns: Vec<&'db DB::Column>,
+    tenant: &[&'db DB::Column],
+) -> Result<Vec<&'db DB::Column>, LookupError> {
+    let mut kept: Vec<&DB::Column> = columns
+        .into_iter()
+        .filter(|column| !tenant.contains(column))
+        .collect();
+    let mut position = 0;
+    while position < kept.len() {
+        let column = kept[position];
+        let others: Vec<&DB::Column> = tenant
+            .iter()
+            .chain(&kept)
+            .copied()
+            .filter(|other| *other != column)
+            .collect();
+        if determined_by(database, foreign_keys, &others)?.contains(&column) {
+            kept.remove(position);
+        } else {
+            position += 1;
+        }
+    }
+    Ok(kept)
+}
+
 impl<DB: DatabaseLike> TableRule for MixedMultivaluedFacts<DB> {
     type Database = DB;
 
@@ -138,11 +176,13 @@ impl<DB: DatabaseLike> TableRule for MixedMultivaluedFacts<DB> {
             return Ok(());
         }
         let tenant = tenant_columns(database, reporter.deployment(), table)?.unwrap_or_default();
+        let all_foreign_keys: Vec<&DB::ForeignKey> = table.foreign_keys(database)?.collect();
+        let kept = uncopied(database, &all_foreign_keys, columns, &tenant)?;
         let mut foreign_keys: Vec<Vec<&DB::Column>> = Vec::new();
-        for foreign_key in table.foreign_keys(database)? {
+        for foreign_key in &all_foreign_keys {
             let mut held: Vec<&DB::Column> = foreign_key
                 .host_columns(database)?
-                .filter(|column| !tenant.contains(column))
+                .filter(|column| kept.contains(column))
                 .collect();
             held.sort_unstable();
             held.dedup();
@@ -151,10 +191,7 @@ impl<DB: DatabaseLike> TableRule for MixedMultivaluedFacts<DB> {
             }
         }
         let mut participants: Vec<Participant<'_, DB>> = Vec::new();
-        for column in columns
-            .into_iter()
-            .filter(|column| !tenant.contains(column))
-        {
+        for column in kept {
             let holders: Vec<usize> = foreign_keys
                 .iter()
                 .enumerate()
