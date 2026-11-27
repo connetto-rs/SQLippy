@@ -91,17 +91,19 @@ use crate::{
 /// draw the key column from a set the referenced policies admit, or draw the
 /// key from one row of the referenced table its filters make readable, or
 /// draw the key column from a row of a table a referenced policy reads the
-/// key from, which the role reads and which meets that read's filters. A
-/// foreign key of the referenced table carries the filters of the row an arm
-/// draws the key from onto the matched row when it binds every stored row,
-/// compares its columns by identity, and the drawn columns cover a unique
-/// key of its referenced table. A helper called in the body is read as its
-/// own arms. Inside a helper that runs as its owner, a filter counts only
-/// when it reads no table and calls only definers and built-ins that read
-/// neither the acting role nor its privileges, and a helper setting a
-/// parameter other than its search path counts for nothing. An arm of the
-/// check that leaves a key column `NULL`, by itself or under the referencing
-/// table's checks, needs neither, since PostgreSQL checks no key holding a
+/// key from, which the role reads and which meets that read's filters.
+/// Foreign keys carry the filters of the row an arm draws the key from onto
+/// the matched row along a chain linking the two. Each link is an enforced,
+/// validated and not deferrable foreign key that checks the row holding its
+/// host columns, pairing columns compared by identity, or two rows of one
+/// table holding the same values in a unique key, which are one row. A
+/// helper called in the body is read as its own arms. Inside a helper that
+/// runs as its owner, a filter counts only when it reads no table and calls
+/// only definers and built-ins that read neither the acting role nor its
+/// privileges, and a helper setting a parameter other than its search path
+/// counts for nothing. An arm of the check that leaves a key column `NULL`,
+/// by itself or under the referencing table's checks, needs neither, since
+/// PostgreSQL checks no key holding a
 /// `NULL`. A write is also excused when the referencing table's `BEFORE` row
 /// triggers, on every path that keeps the row, insert the referenced row from
 /// `NEW` with `ON CONFLICT DO NOTHING` and leave the key unchanged afterwards,

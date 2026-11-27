@@ -1,7 +1,15 @@
 //! Whether a key a client role writes tells it if a row it cannot read
 //! exists, shared by the foreign key and unique key existence oracles.
 
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, ops::ControlFlow, ptr, rc::Rc, slice};
+use std::{
+    borrow::Cow,
+    cell::{OnceCell, RefCell},
+    collections::HashMap,
+    ops::ControlFlow,
+    ptr,
+    rc::Rc,
+    slice,
+};
 
 use sql_traits::{
     errors::{LookupError, RowSecurityError},
@@ -9,9 +17,7 @@ use sql_traits::{
         Assumption, ColumnDefinitionScope, ColumnPrivilege, ColumnScope, GateTerm, IdentifierCase,
         Outcomes, RowGate, RowSecurity, RowStatement, RowVersion, TargetName, WrittenCall,
     },
-    traits::{
-        CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, TableLike,
-    },
+    traits::{CheckConstraintLike, ColumnLike, DatabaseLike, FunctionLike, TableLike},
     utils::identifier_resolution::normalize_identifier,
 };
 use sqlparser::{
@@ -27,7 +33,7 @@ use sqlparser::{
 use crate::{
     deployment::Deployment,
     rules::{
-        closed_set_support::{names_cast_column, names_column, same_identity, stored_name},
+        closed_set_support::{names_cast_column, names_column, stored_name},
         consumed_key_support::Consumption,
         cte_support::stored_table,
         grant_support::schema_of,
@@ -36,7 +42,7 @@ use crate::{
             Columns, Condition, Operand, admits, clause_implies, column_of, is_column, membership,
             reads_column_or_parameter,
         },
-        key_support::{binds, equality_keys, instances, key_pairs, named, no_inheritors},
+        key_support::{equality_keys, instances, named},
         ladder_support::called,
         null_support::may_hold_null,
         policy_read_support::{reads_every_row, sublink_reads},
@@ -44,6 +50,7 @@ use crate::{
             acting, client_roles, conjuncts, disjuncts, evaluates_every_term, is_column_reference,
             is_contradiction, is_tautology, sets_only_search_path, sql_set_body, unwrapped,
         },
+        row_equality_support::{ColumnPairs, RowEqualities, TableFacts},
     },
 };
 
@@ -158,6 +165,29 @@ struct HelperArms<'db, DB: DatabaseLike> {
     /// For each key column, the position of the item naming it.
     positions: Vec<Option<usize>>,
     arms: Vec<Arm<'db, DB>>,
+    /// For each arm, the columns of the matched row each row it reads holds
+    /// the values of, read on first use.
+    pinned: OnceCell<Vec<Vec<ColumnPairs<'db, DB>>>>,
+}
+
+impl<'db, DB: DatabaseLike> HelperArms<'db, DB> {
+    /// The arms of a helper drawing each key column from the output at its
+    /// position in `positions`.
+    fn new(positions: Vec<Option<usize>>, arms: Vec<Arm<'db, DB>>) -> Self {
+        Self {
+            positions,
+            arms,
+            pinned: OnceCell::new(),
+        }
+    }
+
+    /// The origin of each key column in `arm`.
+    fn origins<'s>(&self, arm: &'s Arm<'db, DB>) -> Vec<Option<&'s Origin>> {
+        self.positions
+            .iter()
+            .map(|position| position.and_then(|position| arm.outputs.get(position)))
+            .collect()
+    }
 }
 
 /// A condition admitting referenced columns into the values columns of one
@@ -321,6 +351,8 @@ pub(crate) struct Confinement<'a, DB: DatabaseLike> {
     /// The helpers whose bodies are being read, outermost first, so that a
     /// helper reaching itself is read as opaque.
     reading: RefCell<Vec<&'a DB::Function>>,
+    /// What the constraints of tables tell of their rows, read once.
+    facts: TableFacts<'a, DB>,
 }
 
 impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
@@ -367,6 +399,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             sets: HelperSets::new(database),
             consumptions: Vec::new(),
             reading: RefCell::new(Vec::new()),
+            facts: TableFacts::new(database),
         })
     }
 
@@ -906,35 +939,32 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         let Some(helper) = self.helper_arms(clause)? else {
             return Ok(false);
         };
-        for arm in &helper.arms {
-            let origins: Vec<Option<&Origin>> = helper
-                .positions
-                .iter()
-                .map(|position| position.and_then(|position| arm.outputs.get(position)))
-                .collect();
-            if !self.arm_implies(arm, &origins, condition, context, role)? {
+        for (arm_index, arm) in helper.arms.iter().enumerate() {
+            if !self.arm_implies(&helper, arm, arm_index, condition, context, role)? {
                 return Ok(false);
             }
         }
         Ok(!helper.arms.is_empty())
     }
 
-    /// Whether every row of the referenced table a key drawn from `arm`
-    /// matches meets `condition`. `origins` holds the origin of each key
-    /// column in the arm. The key column is drawn from a set within the one
-    /// the condition tests, or the arm reads the matched row itself and its
-    /// filters imply the condition, or a foreign key of the matched row pins
-    /// what the condition reads to a row the arm reads whose filters imply
-    /// it, or the condition admits key columns from rows of a table the
-    /// writer reads and the arm draws every one of them from one such row.
+    /// Whether every row of the referenced table a key drawn from `arm`, the
+    /// arm of `helper` at `arm_index`, matches meets `condition`. The key
+    /// column is drawn from a set within the one the condition tests, or the
+    /// arm reads the matched row itself and its filters imply the condition,
+    /// or foreign keys pin what the condition reads in the matched row to a
+    /// row the arm reads whose filters imply it, or the condition admits key
+    /// columns from rows of a table the writer reads and the arm draws every
+    /// one of them from one such row.
     fn arm_implies(
         &self,
+        helper: &HelperArms<'a, DB>,
         arm: &Arm<'a, DB>,
-        origins: &[Option<&Origin>],
+        arm_index: usize,
         condition: &Condition<'_, u64>,
         context: &[&Expr],
         role: Option<&'a DB::Role>,
     ) -> Result<bool, LookupError> {
+        let origins = helper.origins(arm);
         if let Some((operands, wider)) = &condition.membership
             && let [Operand::Tested(mapped)] = operands.as_slice()
         {
@@ -949,6 +979,8 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                 }
             }
         }
+        // The rows whose facts the condition was tested against as written.
+        let mut tested = vec![false; arm.rows.len()];
         for (index, row) in arm.rows.iter().enumerate() {
             if row.table != self.parent {
                 continue;
@@ -964,17 +996,21 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                         })
                 })
                 .fold(0, |mask, (position, _)| mask | 1 << position);
-            if self.covers_row_key(drawn)
-                && (row.read_by_writer
-                    || self.entails(
-                        &self.row_facts(row, index, origins, context),
-                        condition.original,
-                    )?)
+            if !self.covers_row_key(drawn) {
+                continue;
+            }
+            if row.read_by_writer
+                || self.entails(
+                    &self.row_facts(row, index, &origins, context),
+                    condition.original,
+                )?
             {
                 return Ok(true);
             }
+            tested[index] = true;
         }
-        if self.pinned_implies(arm, origins, condition, context)? {
+        let pinned = &self.pinned_columns(helper)?[arm_index];
+        if self.pinned_implies(arm, pinned, &origins, &tested, condition, context)? {
             return Ok(true);
         }
         let Some(Sublink {
@@ -1006,7 +1042,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         if row.table != table {
             return Ok(false);
         }
-        let facts = self.row_facts(row, index, origins, context);
+        let facts = self.row_facts(row, index, &origins, context);
         for filter in &filters {
             if !self.entails(&facts, filter)? {
                 return Ok(false);
@@ -1015,82 +1051,81 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
         Ok(row.read_by_writer || self.row_readable(table, &facts, role)?)
     }
 
-    /// Whether a foreign key of the referenced table pins every column
-    /// `condition` reads in the matched row to a column of one row `arm`
-    /// reads, whose facts imply the condition so stated. The key columns the
-    /// arm draws from that row through the foreign key cover a unique key of
-    /// its table, so the foreign key references that very row from the
-    /// matched row, which it binds since those key columns hold a value. Each
-    /// column pair of the foreign key compares by identity, so the pinned
-    /// values are the same values.
+    /// Whether foreign keys pin every column `condition` reads in the
+    /// matched row to a column of one row `arm` reads, whose facts imply the
+    /// condition so stated. `pinned` holds the columns of the matched row
+    /// each row of the arm holds the values of, and `origins` the origin of
+    /// each key column in the arm. A row in `tested` already had its facts
+    /// tested against the condition as written.
     fn pinned_implies(
         &self,
         arm: &Arm<'a, DB>,
+        pinned: &[ColumnPairs<'a, DB>],
         origins: &[Option<&Origin>],
+        tested: &[bool],
         condition: &Condition<'_, u64>,
         context: &[&Expr],
     ) -> Result<bool, LookupError> {
-        let database = self.database;
-        for foreign_key in self.parent.foreign_keys(database)? {
-            let referenced = foreign_key.referenced_table(database)?;
-            let pairs = key_pairs(database, foreign_key)?;
-            for (index, row) in arm.rows.iter().enumerate() {
-                if row.table != referenced {
-                    continue;
-                }
-                // The columns of `row` the arm draws key columns from through
-                // the foreign key, and one host column holding such a key column.
-                let mut drawn = Vec::new();
-                let mut bound = None;
-                for &(host, target) in &pairs {
-                    let name = host.stored_column_name();
-                    if self
-                        .referenced_columns
-                        .iter()
-                        .position(|column| *column == name)
-                        .and_then(|position| origins.get(position).copied().flatten())
-                        .and_then(|origin| origin.row.as_ref())
-                        .is_some_and(|(from, column)| {
-                            *from == index && *column == target.stored_column_name()
-                        })
-                    {
-                        drawn.push(target);
-                        bound = Some(host);
-                    }
-                }
-                let Some(bound) = bound else {
-                    continue;
-                };
-                if !binds(database, foreign_key, bound)?
-                    || !no_inheritors(database, referenced)?
-                    || !equality_keys(database, referenced)?
-                        .iter()
-                        .any(|key| key.iter().all(|column| drawn.contains(column)))
-                {
-                    continue;
-                }
-                let mut alike = true;
-                for &(host, target) in &pairs {
-                    alike &= same_identity(database, host, target)?;
-                }
-                if !alike {
-                    continue;
-                }
-                let Some(stated) = requalified(condition.original, |reference| {
-                    let name = stored_name(reference)?;
-                    pairs
-                        .iter()
-                        .find(|(host, _)| host.stored_column_name() == name)
-                        .map(|(_, target)| target.stored_column_name().into_owned())
-                }) else {
-                    continue;
-                };
-                if self.entails(&self.row_facts(row, index, origins, context), &stated)? {
-                    return Ok(true);
-                }
+        for (index, (row, shared)) in arm.rows.iter().zip(pinned).enumerate() {
+            let Some(stated) = requalified(condition.original, |reference| {
+                let name = stored_name(reference)?;
+                shared
+                    .iter()
+                    .find(|(own, _)| own.stored_column_name() == name)
+                    .map(|(_, other)| other.stored_column_name().into_owned())
+            }) else {
+                continue;
+            };
+            if tested[index] && stated == *condition.original {
+                continue;
+            }
+            if self.entails(&self.row_facts(row, index, origins, context), &stated)? {
+                return Ok(true);
             }
         }
         Ok(false)
+    }
+
+    /// For each arm of `helper`, the columns of the matched row each row the
+    /// arm reads holds the values of, read once per helper. The matched row
+    /// holds the key columns an arm draws, and [`RowEqualities`] follows the
+    /// foreign keys that check it and the arm's rows, and the unique keys
+    /// telling two of those rows are one, to the columns each pair of them
+    /// holds one value in.
+    fn pinned_columns<'h>(
+        &self,
+        helper: &'h HelperArms<'a, DB>,
+    ) -> Result<&'h [Vec<ColumnPairs<'a, DB>>], LookupError> {
+        if let Some(pinned) = helper.pinned.get() {
+            return Ok(pinned);
+        }
+        let mut pinned = Vec::with_capacity(helper.arms.len());
+        for arm in &helper.arms {
+            let origins = helper.origins(arm);
+            let mut equalities = RowEqualities::new(&self.facts);
+            let matched = equalities.add(self.parent);
+            let rows: Vec<usize> = arm
+                .rows
+                .iter()
+                .map(|row| equalities.add(row.table))
+                .collect();
+            let mut drawn = false;
+            for (referenced, origin) in self.referenced_columns.iter().zip(&origins) {
+                if let Some((index, column)) = origin.and_then(|origin| origin.row.as_ref()) {
+                    equalities.equate(matched, referenced, rows[*index], column)?;
+                    drawn = true;
+                }
+            }
+            let mut shared = Vec::with_capacity(rows.len());
+            if drawn {
+                equalities.close()?;
+                for row in rows {
+                    shared.push(equalities.shared_columns(matched, row)?);
+                }
+            }
+            pinned.push(shared);
+        }
+        Ok(helper.pinned.get_or_init(|| pinned))
     }
 
     /// What `row`, at `index` among the rows of its arm, is known to meet:
@@ -1359,13 +1394,13 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
             return Ok(self
                 .helper_body_arms(function, Reader::Writer)?
                 .filter(|arms| arms.iter().all(|arm| arm.outputs.len() == 1))
-                .map(|arms| HelperArms {
-                    positions: self
+                .map(|arms| {
+                    let positions = self
                         .key_columns
                         .iter()
                         .map(|column| names_cast_column(item, column).then_some(0))
-                        .collect(),
-                    arms,
+                        .collect();
+                    HelperArms::new(positions, arms)
                 }));
         }
         let Expr::In {
@@ -1405,7 +1440,7 @@ impl<'a, DB: DatabaseLike> Confinement<'a, DB> {
                     .filter(|position| arms.iter().all(|arm| *position < arm.outputs.len()))
             })
             .collect();
-        Ok(Some(HelperArms { positions, arms }))
+        Ok(Some(HelperArms::new(positions, arms)))
     }
 
     /// The arms of `select`, read by `reader`, or `None` when one of its
