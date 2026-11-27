@@ -107,23 +107,36 @@ fn a_discriminator_open_to_several_values_does_not_mark_a_subtype() {
 
 #[test]
 fn a_reference_the_child_key_already_identifies_is_no_parent() {
-    let messages = reported(
-        "CREATE TABLE resources (
-             id INT PRIMARY KEY,
-             organization_id INT NOT NULL,
-             archived BOOLEAN NOT NULL,
-             UNIQUE (organization_id, id, archived)
-         );
-         CREATE TABLE models (id INT PRIMARY KEY REFERENCES resources (id));
-         CREATE TABLE subtypes (
+    for subtype in [
+        "CREATE TABLE subtypes (
              id INT PRIMARY KEY REFERENCES models (id),
              organization_id INT NOT NULL,
              archived BOOLEAN NOT NULL,
              FOREIGN KEY (organization_id, id, archived)
                  REFERENCES resources (organization_id, id, archived)
          );",
-    );
-    assert_eq!(messages, Vec::<String>::new());
+        // A column copied from the row the child key identifies is no parent
+        // of its own, whatever else it references.
+        "CREATE TABLE subtypes (
+             id INT PRIMARY KEY REFERENCES models (id),
+             organization_id INT NOT NULL REFERENCES organizations (id),
+             FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id)
+         );",
+    ] {
+        let sql = format!(
+            "CREATE TABLE organizations (id INT PRIMARY KEY);
+             CREATE TABLE resources (
+                 id INT PRIMARY KEY,
+                 organization_id INT NOT NULL REFERENCES organizations (id),
+                 archived BOOLEAN NOT NULL,
+                 UNIQUE (organization_id, id),
+                 UNIQUE (organization_id, id, archived)
+             );
+             CREATE TABLE models (id INT PRIMARY KEY REFERENCES resources (id));
+             {subtype}"
+        );
+        assert_eq!(reported(&sql), Vec::<String>::new(), "{subtype}");
+    }
 }
 
 #[test]
