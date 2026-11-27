@@ -5753,6 +5753,138 @@ fn a_walk_whose_step_reads_a_parameter_is_not_met_by_a_walk_over_another_argumen
     assert!(skipping_reported("$1"));
 }
 
+const KIND_ARM: &str =
+    "OR (organization_id, kind) IN (SELECT * FROM authz.capped_kinds('reader'))))";
+
+const FOLDER_KIND_ARM: &str =
+    "OR ((organization_id, kind) IN (SELECT * FROM authz.capped_kinds('reader'))
+               AND (NOT path_has_folder
+                 OR (organization_id, 'folder'::authz.resource_kind)
+                   IN (SELECT * FROM authz.capped_kinds('reader'))))))";
+
+/// `organizations_with` and `organization_resources_with`, the helpers
+/// over organization rows alone, when reported over [`FOLDED_RESOURCES`]
+/// with `columns` declared after `parent_kind`, `constraint` added after
+/// its checks and the organization, folder and project arm of the read
+/// policy also capping the folder of every row whose `path_has_folder`
+/// holds.
+fn folder_capped_organizations(columns: &str, constraint: &str) -> Vec<String> {
+    let sql = FOLDED_RESOURCES
+        .replacen(
+            "parent_kind authz.resource_kind,",
+            &format!("parent_kind authz.resource_kind, {columns},"),
+            1,
+        )
+        .replacen(
+            "ALTER TABLE public.resources ENABLE ROW LEVEL SECURITY;",
+            &format!("{constraint} ALTER TABLE public.resources ENABLE ROW LEVEL SECURITY;"),
+            1,
+        )
+        .replacen(KIND_ARM, FOLDER_KIND_ARM, 1);
+    assert_eq!(sql.matches(FOLDER_KIND_ARM).count(), 1);
+    exposed(
+        Deployment::default()
+            .with_app_role("app")
+            .with_request_setting("authz.acting_installation_id()")
+            .expect("request setting parses"),
+        &sql,
+    )
+    .into_iter()
+    .filter(|function| {
+        ["organizations_with", "organization_resources_with"]
+            .iter()
+            .any(|helper| function.starts_with(helper))
+    })
+    .collect()
+}
+
+const GENERATED_FOLDER: &str = "parent_has_folder BOOLEAN NOT NULL DEFAULT FALSE,
+       path_has_folder BOOLEAN GENERATED ALWAYS AS (kind = 'folder' OR parent_has_folder) STORED NOT NULL";
+
+const ROOT_WITHOUT_FOLDER: &str = "ALTER TABLE public.resources ADD CONSTRAINT root_without_folder
+       CHECK (kind <> 'organization' OR NOT parent_has_folder)";
+
+#[test]
+fn a_policy_condition_on_a_generated_column_holds_where_the_checks_force_it() {
+    assert_eq!(
+        folder_capped_organizations(GENERATED_FOLDER, &format!("{ROOT_WITHOUT_FOLDER};")),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_policy_condition_on_a_column_nothing_forces_is_not_met() {
+    let reported = [
+        "organization_resources_with(authz.resource_kind)",
+        "organizations_with(authz.role)",
+    ];
+    for (columns, constraint) in [
+        ("path_has_folder BOOLEAN NOT NULL", String::new()),
+        (GENERATED_FOLDER, String::new()),
+        (
+            GENERATED_FOLDER,
+            format!("{ROOT_WITHOUT_FOLDER} NOT VALID;"),
+        ),
+        (
+            "parent_has_folder BOOLEAN DEFAULT FALSE,
+       path_has_folder BOOLEAN GENERATED ALWAYS AS (kind = 'folder' OR parent_has_folder) STORED",
+            format!("{ROOT_WITHOUT_FOLDER};"),
+        ),
+    ] {
+        assert_eq!(
+            folder_capped_organizations(columns, &constraint),
+            reported,
+            "{columns} {constraint}"
+        );
+    }
+}
+
+/// The definers reported over `marks`, whose `folded` column is generated
+/// from two others, under one policy for every command reading `using` of
+/// the stored row and `check` of the written one, and `mark()` running
+/// `statement` on the caller's rows where neither column holds.
+fn generated_marks(using: &str, check: &str, statement: &str) -> Vec<String> {
+    exposed(
+        Deployment::default().with_app_role("app"),
+        &format!(
+            "CREATE ROLE app NOLOGIN;
+             CREATE TABLE marks (id INT, owner TEXT, first BOOLEAN NOT NULL, second BOOLEAN NOT NULL,
+               folded BOOLEAN GENERATED ALWAYS AS (first OR second) STORED NOT NULL);
+             ALTER TABLE marks ENABLE ROW LEVEL SECURITY;
+             GRANT SELECT, UPDATE, DELETE ON marks TO app;
+             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+             ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app;
+             CREATE POLICY own ON marks FOR ALL TO app
+               USING (owner = current_setting('app.user_id', true){using})
+               WITH CHECK (owner = current_setting('app.user_id', true){check});
+             {}",
+            writing_definer(
+                "mark()",
+                &format!(
+                    "{statement} WHERE mark.owner = current_setting('app.user_id', true)
+                       AND NOT mark.first AND NOT mark.second"
+                ),
+            )
+        ),
+    )
+}
+
+#[test]
+fn a_generated_column_holds_as_generated_of_the_stored_row_only() {
+    assert_eq!(
+        generated_marks(" AND NOT folded", "", "DELETE FROM public.marks mark"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        generated_marks(
+            "",
+            " AND NOT folded",
+            "UPDATE public.marks mark SET second = TRUE"
+        ),
+        ["mark()"]
+    );
+}
+
 /// Functions reported over `tables`, declaring `public.teams` and
 /// `public.team_members`, and `definer`, the body of a function returning
 /// the organizations of teams. A team and a member are visible in the
