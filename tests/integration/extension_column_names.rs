@@ -95,6 +95,56 @@ fn columns_each_keyed_to_a_table_outside_the_hierarchy_are_not_reported() {
 }
 
 #[test]
+fn columns_each_keyed_to_one_differently_named_column_of_the_root_are_not_reported() {
+    assert_eq!(
+        findings(
+            "CREATE TABLE resources (
+                 id INT PRIMARY KEY,
+                 parent_id INT NOT NULL,
+                 UNIQUE (id, parent_id)
+             );
+             CREATE TABLE models (
+                 id INT PRIMARY KEY REFERENCES resources (id),
+                 project_id INT NOT NULL,
+                 FOREIGN KEY (id, project_id) REFERENCES resources (id, parent_id)
+             );
+             CREATE TABLE lots (
+                 id INT PRIMARY KEY REFERENCES models (id),
+                 project_id INT NOT NULL,
+                 FOREIGN KEY (id, project_id) REFERENCES resources (id, parent_id)
+             );",
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn columns_keyed_to_two_differently_named_columns_of_the_root_are_reported() {
+    assert_eq!(
+        findings(
+            "CREATE TABLE resources (
+                 id INT PRIMARY KEY,
+                 parent_id INT NOT NULL,
+                 owner_id INT NOT NULL,
+                 UNIQUE (id, parent_id),
+                 UNIQUE (id, owner_id)
+             );
+             CREATE TABLE models (
+                 id INT PRIMARY KEY REFERENCES resources (id),
+                 project_id INT NOT NULL,
+                 FOREIGN KEY (id, project_id) REFERENCES resources (id, parent_id)
+             );
+             CREATE TABLE lots (
+                 id INT PRIMARY KEY REFERENCES models (id),
+                 project_id INT NOT NULL,
+                 FOREIGN KEY (id, project_id) REFERENCES resources (id, owner_id)
+             );",
+        ),
+        ["lots.project_id"]
+    );
+}
+
+#[test]
 fn a_column_keyed_to_a_parent_that_leaves_its_own_copy_unkeyed_is_reported() {
     assert_eq!(
         findings(

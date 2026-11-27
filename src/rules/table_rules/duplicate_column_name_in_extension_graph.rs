@@ -9,7 +9,10 @@ use sql_traits::{
 use crate::{
     error::Interruption,
     lint::{Basis, LintGroup, Rule, RuleExample, RuleMetadata},
-    rules::{key_support::key_pairs, null_support::may_hold_null},
+    rules::{
+        key_support::{KeyPairs, key_pairs},
+        null_support::may_hold_null,
+    },
     traits::{Constrainer, GenericConstrainer, Reporter, TableRule},
 };
 
@@ -20,9 +23,10 @@ use crate::{
 /// A column that foreign keys keep equal to every same-named column of the
 /// hierarchy is not reported, as a tenant column is when the subtype keys
 /// `(organization_id, id)` to the same columns of its parent. Each such key
-/// pairs the primary keys of the two tables and the column with its
-/// namesake, and checks every row, through `MATCH FULL` or `NOT NULL`
-/// columns.
+/// pairs the primary keys of the two tables, so both rows describe one
+/// entity, and checks every row, through `MATCH FULL` or `NOT NULL` columns.
+/// The equality may pass through a column of another name, as when two
+/// subtypes each key their `project_id` to the `parent_id` of their root.
 ///
 /// # Example
 ///
@@ -159,24 +163,19 @@ CREATE TABLE notes (id INT PRIMARY KEY REFERENCES records (id), description TEXT
     }
 }
 
-/// Whether the enforced `foreign_key` pairs its host's primary key with the
-/// primary key of the referenced table and the host column named
-/// `column_name` with the referenced column of that name, on every row, so
-/// the two columns of one entity always hold the same value.
-fn pins<DB: DatabaseLike>(
-    database: &DB,
-    foreign_key: &DB::ForeignKey,
-    column_name: &str,
-) -> Result<bool, LookupError> {
+/// The column pairs of the enforced `foreign_key` that hold one value on
+/// every row, when the key pairs its host's primary key with the primary key
+/// of the referenced table, so the host row and the row it references
+/// describe one entity. `None` when the key may join rows of two entities or
+/// skip a row.
+fn entity_equalities<'db, DB: DatabaseLike>(
+    database: &'db DB,
+    foreign_key: &'db DB::ForeignKey,
+) -> Result<Option<KeyPairs<'db, DB>>, LookupError> {
     if !foreign_key.is_enforced(database) {
-        return Ok(false);
+        return Ok(None);
     }
     let pairs = key_pairs(database, foreign_key)?;
-    if !pairs.iter().any(|(host, referenced)| {
-        host.column_name() == column_name && referenced.column_name() == column_name
-    }) {
-        return Ok(false);
-    }
     let referenced_primary_key: Vec<&DB::Column> = foreign_key
         .referenced_table(database)?
         .primary_key_columns(database)?
@@ -187,7 +186,7 @@ fn pins<DB: DatabaseLike>(
         .primary_key_columns(database)?
     {
         let Some((_, referenced)) = pairs.iter().find(|(host, _)| *host == host_column) else {
-            return Ok(false);
+            return Ok(None);
         };
         paired.push(*referenced);
     }
@@ -197,17 +196,16 @@ fn pins<DB: DatabaseLike>(
             .iter()
             .all(|column| paired.contains(column))
     {
-        return Ok(false);
+        return Ok(None);
     }
-    if foreign_key.match_full(database) {
-        return Ok(true);
-    }
-    for (host, _) in &pairs {
-        if may_hold_null(database, *host)? {
-            return Ok(false);
+    if !foreign_key.match_full(database) {
+        for (host, _) in &pairs {
+            if may_hold_null(database, *host)? {
+                return Ok(None);
+            }
         }
     }
-    Ok(true)
+    Ok(Some(pairs))
 }
 
 impl<DB: DatabaseLike> DuplicateColumnNameInExtensionGraph<DB> {
@@ -215,9 +213,9 @@ impl<DB: DatabaseLike> DuplicateColumnNameInExtensionGraph<DB> {
     /// with a column of a table it extends, directly or transitively, and
     /// that some such column may differ from.
     ///
-    /// Foreign keys that [`pins`] the column tie the tables of the hierarchy,
-    /// and the tables they reference, which hold the row of the same entity,
-    /// into groups whose copies of the column hold one value. A column is
+    /// The pairs of [`entity_equalities`] of the tables of the hierarchy, and
+    /// of the tables they reach that way, hold the row of the same entity and
+    /// tie their columns into groups that hold one value. A column is
     /// reported unless every same-named column of the hierarchy is in its
     /// group.
     fn find_duplicate_columns<'db>(
@@ -238,10 +236,27 @@ impl<DB: DatabaseLike> DuplicateColumnNameInExtensionGraph<DB> {
             return Ok(Vec::new());
         }
 
+        let mut equalities: KeyPairs<'db, DB> = Vec::new();
+        let mut next = 0;
+        while let Some(&host) = tables.get(next) {
+            next += 1;
+            for foreign_key in host.foreign_keys(database)? {
+                let referenced = foreign_key.referenced_table(database)?;
+                if referenced == host {
+                    continue;
+                }
+                if let Some(pairs) = entity_equalities(database, foreign_key)? {
+                    equalities.extend(pairs);
+                    if !tables.contains(&referenced) {
+                        tables.push(referenced);
+                    }
+                }
+            }
+        }
+
         let primary_key: Vec<&DB::Column> = table.primary_key_columns(database)?.collect();
-        let mut carriers: Vec<&DB::Table> = Vec::new();
-        let mut edges: Vec<(&DB::Table, &DB::Table)> = Vec::new();
-        let mut tied: Vec<&DB::Table> = Vec::new();
+        let mut carriers: Vec<&DB::Column> = Vec::new();
+        let mut tied: Vec<&DB::Column> = Vec::new();
         let mut duplicates = Vec::new();
         for column in table.columns(database)? {
             if primary_key.contains(&column) {
@@ -250,39 +265,22 @@ impl<DB: DatabaseLike> DuplicateColumnNameInExtensionGraph<DB> {
             let column_name = column.column_name();
             carriers.clear();
             for &ancestor in &tables[1..hierarchy] {
-                if ancestor
-                    .columns(database)?
-                    .any(|other| other.column_name() == column_name)
-                {
-                    carriers.push(ancestor);
-                }
+                carriers.extend(
+                    ancestor
+                        .columns(database)?
+                        .filter(|other| other.column_name() == column_name),
+                );
             }
             if carriers.is_empty() {
                 continue;
             }
 
-            tables.truncate(hierarchy);
-            edges.clear();
-            let mut next = 0;
-            while let Some(&host) = tables.get(next) {
-                next += 1;
-                for foreign_key in host.foreign_keys(database)? {
-                    let referenced = foreign_key.referenced_table(database)?;
-                    if referenced != host && pins(database, foreign_key, column_name)? {
-                        edges.push((host, referenced));
-                        if !tables.contains(&referenced) {
-                            tables.push(referenced);
-                        }
-                    }
-                }
-            }
-
             tied.clear();
-            tied.push(table);
+            tied.push(column);
             let mut grown = true;
             while grown {
                 grown = false;
-                for &(host, referenced) in &edges {
+                for &(host, referenced) in &equalities {
                     if tied.contains(&host) != tied.contains(&referenced) {
                         tied.push(if tied.contains(&host) {
                             referenced
