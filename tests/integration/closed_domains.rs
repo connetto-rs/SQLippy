@@ -390,7 +390,8 @@ fn only_the_exact_subtype_discriminator_copy_is_silent() {
     let sql = format!(
         "CREATE TABLE grantees (id INT PRIMARY KEY, kind TEXT NOT NULL);
          CREATE UNIQUE INDEX ON grantees (id, kind);
-         {}{}{}{}{}{}
+         {}{}{}{}{}{}{}{}{}
+         CREATE INDEX ON bots (id);
          CREATE INDEX ON indexed (kind);
          CREATE INDEX ON filtered (id) WHERE kind = 'filtered';
          CREATE TABLE unkeyed (
@@ -417,16 +418,22 @@ fn only_the_exact_subtype_discriminator_copy_is_silent() {
         subtype("indexed", &generated("indexed"), ""),
         subtype("filtered", &generated("filtered"), ""),
         subtype("checked", &generated("checked"), ",\n CHECK (kind <> '' AND id > 0)"),
+        subtype("unenforced", &generated("unenforced"), " NOT ENFORCED"),
+        subtype("unique_kind", &generated("unique_kind"), ",\n UNIQUE (id, kind)"),
+        subtype("excluded", &generated("excluded"), ",\n EXCLUDE USING btree (kind WITH =)"),
     );
     assert_eq!(
         objects(HomogeneousColumn::default(), Deployment::default(), &sql),
         [
             "checked.kind",
+            "excluded.kind",
             "filtered.kind",
             "handled.kind",
             "indexed.kind",
             "only_kind.kind",
             "only_users.kind",
+            "unenforced.kind",
+            "unique_kind.kind",
             "unkeyed.kind"
         ]
     );

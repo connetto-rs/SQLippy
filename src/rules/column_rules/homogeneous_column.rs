@@ -16,7 +16,7 @@ use crate::{
     rules::{
         closed_set_support::{CheckedRows, names_cast_column, names_column},
         grant_support::is_subscribed,
-        key_support::{equality_keys, nullable_host_columns},
+        key_support::nullable_host_columns,
         literal_support::literal,
         null_support::may_hold_null,
         policy_support::conjuncts,
@@ -59,8 +59,8 @@ rule_definition!(
     ///   enforced and validated, whose referencing columns are the primary
     ///   key of `S` plus `d`.
     /// - That key references the primary key of `T` plus `t`, which `T`
-    ///   declares unique without a predicate, and `t` is not homogeneous in
-    ///   `T`.
+    ///   declares unique without a predicate as every referenced key must
+    ///   be, and `t` is not homogeneous in `T`.
     /// - `d` is in no key, index or index predicate of `S`, and every
     ///   conjunct of a check of `S` that names it fixes it to its value.
     ///
@@ -296,8 +296,18 @@ fn discriminator_copy<'db, DB: DatabaseLike>(
     if primary_key.is_empty() || primary_key.contains(&column) {
         return Ok(false);
     }
-    let mut foreign_keys = column.foreign_keys(database)?;
-    let (Some(foreign_key), None) = (foreign_keys.next(), foreign_keys.next()) else {
+    let mut pairings = Vec::new();
+    for foreign_key in table.foreign_keys(database)? {
+        for (host, target) in foreign_key
+            .host_columns(database)?
+            .zip(foreign_key.referenced_columns(database)?)
+        {
+            if host == column {
+                pairings.push((foreign_key, target));
+            }
+        }
+    }
+    let &[(foreign_key, discriminator)] = pairings.as_slice() else {
         return Ok(false);
     };
     if !foreign_key.is_enforced(database)
@@ -308,13 +318,6 @@ fn discriminator_copy<'db, DB: DatabaseLike>(
     }
     let hosts: Vec<_> = foreign_key.host_columns(database)?.collect();
     let targets: Vec<_> = foreign_key.referenced_columns(database)?.collect();
-    let Some(discriminator) = hosts
-        .iter()
-        .position(|host| *host == column)
-        .and_then(|position| targets.get(position).copied())
-    else {
-        return Ok(false);
-    };
     if hosts.len() != primary_key.len() + 1
         || hosts
             .iter()
@@ -329,12 +332,6 @@ fn discriminator_copy<'db, DB: DatabaseLike>(
         || targets
             .iter()
             .any(|target| *target != discriminator && !supertype_key.contains(target))
-    {
-        return Ok(false);
-    }
-    if !equality_keys(database, supertype)?
-        .iter()
-        .any(|key| key.len() == targets.len() && key.iter().all(|key| targets.contains(key)))
     {
         return Ok(false);
     }
