@@ -211,7 +211,7 @@ fn every_spelling_of_a_literal_list_closes_a_text_column() {
 }
 
 #[test]
-fn a_column_fixed_by_its_default_and_check_is_reported_only_when_not_null() {
+fn a_column_fixed_by_its_default_and_a_validated_check_is_reported() {
     let sql = "CREATE TABLE t (
                    id INT PRIMARY KEY,
                    kind TEXT NOT NULL DEFAULT 'entry'::text CHECK ('entry' = kind),
@@ -227,151 +227,208 @@ fn a_column_fixed_by_its_default_and_check_is_reported_only_when_not_null() {
                ALTER TABLE t ADD CONSTRAINT validated CHECK (validated_kind = 'entry') NOT VALID;
                ALTER TABLE t VALIDATE CONSTRAINT validated;";
     assert_eq!(
-        objects(
-            ConstantColumnNotGenerated::default(),
-            Deployment::default(),
-            sql
-        ),
-        ["t.kind", "t.version", "t.validated_kind"]
+        objects(HomogeneousColumn::default(), Deployment::default(), sql),
+        ["t.kind", "t.nullable_kind", "t.version", "t.validated_kind"]
     );
 }
 
 #[test]
-fn a_fixed_column_a_foreign_key_writes_into_is_not_reported() {
-    let sql = "CREATE TABLE resources (
+fn a_column_generated_as_a_literal_is_reported_stored_or_virtual() {
+    let sql = "CREATE TABLE t (
                    id INT PRIMARY KEY,
-                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
-                   UNIQUE (id, kind)
-               );
-               CREATE TABLE cascaded (
-                   resource_id INT NOT NULL,
-                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
-                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON UPDATE CASCADE
-               );
-               CREATE TABLE unenforced (
-                   resource_id INT NOT NULL,
-                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
-                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON UPDATE CASCADE NOT ENFORCED
-               );
-               CREATE TABLE nulled (
-                   resource_id INT,
-                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
-                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON UPDATE SET NULL
-               );
-               CREATE TABLE defaulted (
-                   resource_id INT,
-                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
-                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON UPDATE SET DEFAULT
-               );
-               CREATE TABLE deleted_null (
-                   resource_id INT,
-                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
-                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON DELETE SET NULL
-               );
-               CREATE TABLE deleted_default (
-                   resource_id INT,
-                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
-                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON DELETE SET DEFAULT
-               );
-               CREATE TABLE deleted_cascade (
-                   resource_id INT NOT NULL,
-                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project'),
-                   FOREIGN KEY (resource_id, kind) REFERENCES resources (id, kind) ON DELETE CASCADE ON UPDATE RESTRICT
-               );
-               CREATE TABLE beside (
-                   resource_id INT NOT NULL REFERENCES resources (id) ON UPDATE CASCADE,
-                   kind TEXT NOT NULL DEFAULT 'project' CHECK (kind = 'project')
+                   stored TEXT GENERATED ALWAYS AS (('entry')::text) STORED NOT NULL,
+                   computed TEXT GENERATED ALWAYS AS ('entry') VIRTUAL,
+                   negative INT GENERATED ALWAYS AS (-1) STORED,
+                   derived INT GENERATED ALWAYS AS (id * 2) STORED,
+                   nothing TEXT GENERATED ALWAYS AS (NULL) STORED
                );";
     assert_eq!(
-        objects(
-            ConstantColumnNotGenerated::default(),
-            Deployment::default(),
-            sql
-        ),
+        objects(HomogeneousColumn::default(), Deployment::default(), sql),
+        ["t.stored", "t.computed", "t.negative"]
+    );
+}
+
+#[test]
+fn a_column_a_checking_foreign_key_ties_to_a_homogeneous_column_is_reported() {
+    let sql = "CREATE TABLE users (
+                   namespace_id INT GENERATED ALWAYS AS (7) STORED NOT NULL,
+                   id INT NOT NULL,
+                   PRIMARY KEY (namespace_id, id)
+               );
+               CREATE TABLE memberships (
+                   id INT PRIMARY KEY,
+                   user_namespace_id INT NOT NULL,
+                   user_id INT NOT NULL,
+                   UNIQUE (user_namespace_id, user_id),
+                   FOREIGN KEY (user_namespace_id, user_id) REFERENCES users (namespace_id, id)
+               );
+               CREATE TABLE team_members (
+                   id INT PRIMARY KEY,
+                   user_namespace_id INT NOT NULL,
+                   user_id INT NOT NULL,
+                   FOREIGN KEY (user_namespace_id, user_id) REFERENCES memberships (user_namespace_id, user_id)
+               );
+               CREATE TABLE accepted (
+                   id INT PRIMARY KEY,
+                   user_namespace_id INT,
+                   user_id INT,
+                   FOREIGN KEY (user_namespace_id, user_id) REFERENCES users (namespace_id, id) MATCH FULL
+               );
+               CREATE TABLE loose (
+                   id INT PRIMARY KEY,
+                   user_namespace_id INT NOT NULL,
+                   user_id INT,
+                   FOREIGN KEY (user_namespace_id, user_id) REFERENCES users (namespace_id, id)
+               );
+               CREATE TABLE unenforced (
+                   id INT PRIMARY KEY,
+                   user_namespace_id INT NOT NULL,
+                   user_id INT NOT NULL,
+                   FOREIGN KEY (user_namespace_id, user_id) REFERENCES users (namespace_id, id) NOT ENFORCED
+               );
+               CREATE TABLE unvalidated (id INT PRIMARY KEY, user_namespace_id INT NOT NULL, user_id INT NOT NULL);
+               ALTER TABLE unvalidated ADD FOREIGN KEY (user_namespace_id, user_id) REFERENCES users (namespace_id, id) NOT VALID;";
+    assert_eq!(
+        objects(HomogeneousColumn::default(), Deployment::default(), sql),
         [
-            "beside.kind",
-            "deleted_cascade.kind",
-            "resources.kind",
-            "unenforced.kind"
+            "accepted.user_namespace_id",
+            "memberships.user_namespace_id",
+            "team_members.user_namespace_id",
+            "users.namespace_id"
         ]
     );
 }
 
 #[test]
-fn a_fixed_column_a_before_row_trigger_reads_from_new_is_not_reported() {
-    let fixed = |table: &str| {
+fn a_nullable_homogeneous_column_is_reported_as_holding_the_value_or_null() {
+    let sql = "CREATE TABLE users (
+                   namespace_id INT GENERATED ALWAYS AS (7) STORED NOT NULL,
+                   id INT NOT NULL,
+                   PRIMARY KEY (namespace_id, id)
+               );
+               CREATE TABLE accepted (
+                   id INT PRIMARY KEY,
+                   user_namespace_id INT,
+                   user_id INT,
+                   FOREIGN KEY (user_namespace_id, user_id) REFERENCES users (namespace_id, id) MATCH FULL
+               );";
+    let explanations = explained(HomogeneousColumn::default(), sql);
+    assert_eq!(explanations.len(), 2, "{explanations:?}");
+    assert!(
+        explanations[0].contains(
+            "Column 'accepted.user_namespace_id' references 'users.namespace_id', which holds 7 on every row, so every row holds that value or NULL."
+        ),
+        "{explanations:?}"
+    );
+    assert!(!explanations[0].contains("GENERATED"), "{explanations:?}");
+}
+
+#[test]
+fn a_cycle_of_foreign_keys_fixes_no_column() {
+    let sql = "CREATE TABLE a (id INT PRIMARY KEY, b_id INT NOT NULL UNIQUE);
+               CREATE TABLE b (id INT PRIMARY KEY, a_b_id INT NOT NULL UNIQUE REFERENCES a (b_id));
+               ALTER TABLE a ADD FOREIGN KEY (b_id) REFERENCES b (a_b_id);
+               CREATE TABLE c (id INT PRIMARY KEY, parent_id INT NOT NULL REFERENCES c (id));";
+    assert_eq!(
+        objects(HomogeneousColumn::default(), Deployment::default(), sql),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn the_subtype_discriminator_copy_is_silent_and_inside_the_key_reported() {
+    let sql = "CREATE TYPE grantee_kind AS ENUM ('user', 'team');
+               CREATE TABLE namespaces (id UUID PRIMARY KEY);
+               CREATE TABLE grantees (
+                 namespace_id UUID NOT NULL REFERENCES namespaces (id),
+                 id UUID NOT NULL,
+                 kind grantee_kind NOT NULL,
+                 PRIMARY KEY (namespace_id, id),
+                 UNIQUE (namespace_id, id, kind)
+               );
+               CREATE TABLE users (
+                 namespace_id UUID GENERATED ALWAYS AS ('bc3cf2e2-768c-4af9-bf86-65f23378a212') STORED NOT NULL,
+                 id UUID NOT NULL,
+                 kind grantee_kind GENERATED ALWAYS AS ('user') STORED NOT NULL,
+                 PRIMARY KEY (namespace_id, id),
+                 FOREIGN KEY (namespace_id, id, kind) REFERENCES grantees (namespace_id, id, kind)
+               );
+               CREATE TABLE teams (
+                 namespace_id UUID NOT NULL,
+                 id UUID NOT NULL,
+                 kind grantee_kind GENERATED ALWAYS AS ('team') STORED NOT NULL,
+                 PRIMARY KEY (namespace_id, id),
+                 FOREIGN KEY (namespace_id, id, kind) REFERENCES grantees (namespace_id, id, kind)
+               );
+               CREATE TABLE memberships (
+                 team_namespace_id UUID NOT NULL,
+                 team_id UUID NOT NULL,
+                 user_namespace_id UUID NOT NULL,
+                 user_id UUID NOT NULL,
+                 PRIMARY KEY (team_namespace_id, team_id, user_namespace_id, user_id),
+                 FOREIGN KEY (team_namespace_id, team_id) REFERENCES teams (namespace_id, id),
+                 FOREIGN KEY (user_namespace_id, user_id) REFERENCES users (namespace_id, id)
+               );";
+    assert_eq!(
+        objects(HomogeneousColumn::default(), Deployment::default(), sql),
+        ["memberships.user_namespace_id", "users.namespace_id"]
+    );
+}
+
+#[test]
+fn only_the_exact_subtype_discriminator_copy_is_silent() {
+    let subtype = |table: &str, kind: &str, extra: &str| {
         format!(
-            "CREATE TABLE {table} (id INT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'entry' CHECK (kind = 'entry'));"
+            "CREATE TABLE {table} (
+                 id INT PRIMARY KEY,
+                 kind TEXT {kind},
+                 FOREIGN KEY (id, kind) REFERENCES grantees (id, kind){extra}
+             );"
         )
     };
+    let generated = |value: &str| format!("GENERATED ALWAYS AS ('{value}') STORED NOT NULL");
     let sql = format!(
-        "{}{}{}{}{}{}{}{}
-         CREATE FUNCTION read_kind() RETURNS TRIGGER LANGUAGE plpgsql AS $$
-         BEGIN
-           IF NEW.kind <> 'entry' THEN RAISE EXCEPTION 'kind'; END IF;
-           RETURN NEW;
-         END $$;
-         CREATE FUNCTION read_qualified() RETURNS TRIGGER LANGUAGE plpgsql AS $$
-         BEGIN
-           INSERT INTO inserted (id, kind) VALUES (NEW.id, read_qualified.new.kind);
-           RETURN NEW;
-         END $$;
-         CREATE FUNCTION read_old() RETURNS TRIGGER LANGUAGE plpgsql AS $$
-         BEGIN
-           PERFORM OLD.kind, NEW.id;
-           RETURN NEW;
-         END $$;
-         CREATE FUNCTION read_shadowed() RETURNS TRIGGER LANGUAGE plpgsql AS $$
-         DECLARE new RECORD;
-         BEGIN
-           SELECT 'entry' AS kind INTO new;
-           PERFORM new.kind;
-           RETURN NULL;
-         END $$;
-         CREATE TRIGGER inserted BEFORE INSERT ON inserted FOR EACH ROW EXECUTE FUNCTION read_kind();
-         CREATE TRIGGER updated BEFORE UPDATE ON updated FOR EACH ROW EXECUTE FUNCTION read_kind();
-         CREATE TRIGGER qualified BEFORE INSERT ON qualified FOR EACH ROW EXECUTE FUNCTION read_qualified();
-         CREATE TRIGGER conditioned BEFORE INSERT ON conditioned FOR EACH ROW WHEN (NEW.kind = 'entry') EXECUTE FUNCTION read_old();
-         CREATE TRIGGER after_insert AFTER INSERT ON after_insert FOR EACH ROW EXECUTE FUNCTION read_kind();
-         CREATE TRIGGER deleted BEFORE DELETE ON deleted FOR EACH ROW EXECUTE FUNCTION read_kind();
-         CREATE TRIGGER old_read BEFORE UPDATE ON old_read FOR EACH ROW EXECUTE FUNCTION read_old();
-         CREATE TRIGGER shadowed BEFORE INSERT ON shadowed FOR EACH ROW EXECUTE FUNCTION read_shadowed();",
-        fixed("inserted"),
-        fixed("updated"),
-        fixed("qualified"),
-        fixed("conditioned"),
-        fixed("after_insert"),
-        fixed("deleted"),
-        fixed("old_read"),
-        fixed("shadowed"),
+        "CREATE TABLE grantees (id INT PRIMARY KEY, kind TEXT NOT NULL);
+         CREATE UNIQUE INDEX ON grantees (id, kind);
+         {}{}{}{}{}{}
+         CREATE INDEX ON indexed (kind);
+         CREATE INDEX ON filtered (id) WHERE kind = 'filtered';
+         CREATE TABLE unkeyed (
+             row_id INT PRIMARY KEY,
+             id INT NOT NULL,
+             kind TEXT GENERATED ALWAYS AS ('unkeyed') STORED NOT NULL,
+             FOREIGN KEY (id, kind) REFERENCES grantees (id, kind)
+         );
+         CREATE TABLE only_kind (id INT PRIMARY KEY, kind TEXT GENERATED ALWAYS AS ('only') STORED NOT NULL, UNIQUE (id, kind));
+         CREATE TABLE only_users (
+             id INT PRIMARY KEY,
+             kind TEXT GENERATED ALWAYS AS ('only') STORED NOT NULL,
+             FOREIGN KEY (id, kind) REFERENCES only_kind (id, kind)
+         );
+         CREATE TABLE owners (id INT PRIMARY KEY, handle INT NOT NULL UNIQUE, kind TEXT NOT NULL, UNIQUE (handle, kind));
+         CREATE TABLE handled (
+             handle INT PRIMARY KEY,
+             kind TEXT GENERATED ALWAYS AS ('handled') STORED NOT NULL,
+             FOREIGN KEY (handle, kind) REFERENCES owners (handle, kind)
+         );",
+        subtype("users", &generated("user"), ""),
+        subtype("teams", "NOT NULL DEFAULT 'team' CHECK (kind = 'team')", ""),
+        subtype("bots", &generated("bot"), ",\n CHECK (kind = 'bot' AND id > 0)"),
+        subtype("indexed", &generated("indexed"), ""),
+        subtype("filtered", &generated("filtered"), ""),
+        subtype("checked", &generated("checked"), ",\n CHECK (kind <> '' AND id > 0)"),
     );
     assert_eq!(
-        objects(
-            ConstantColumnNotGenerated::default(),
-            Deployment::default(),
-            &sql
-        ),
+        objects(HomogeneousColumn::default(), Deployment::default(), &sql),
         [
-            "after_insert.kind",
-            "deleted.kind",
-            "old_read.kind",
-            "shadowed.kind"
+            "checked.kind",
+            "filtered.kind",
+            "handled.kind",
+            "indexed.kind",
+            "only_kind.kind",
+            "only_users.kind",
+            "unkeyed.kind"
         ]
-    );
-}
-
-#[test]
-fn a_fixed_column_whose_before_trigger_body_cannot_be_read_is_reported() {
-    let sql = "CREATE TABLE compiled (id INT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'entry' CHECK (kind = 'entry'));
-               CREATE FUNCTION stamp() RETURNS TRIGGER LANGUAGE c AS 'stamp', 'stamp';
-               CREATE TRIGGER compiled BEFORE INSERT ON compiled FOR EACH ROW EXECUTE FUNCTION stamp();";
-    assert_eq!(
-        objects(
-            ConstantColumnNotGenerated::default(),
-            Deployment::default(),
-            sql
-        ),
-        ["compiled.kind"]
     );
 }
 
