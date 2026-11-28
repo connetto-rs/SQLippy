@@ -42,5 +42,5 @@ mod boolean_state_without_time;
 pub use boolean_state_without_time::BooleanStateWithoutTime;
 mod closed_set_as_text;
 pub use closed_set_as_text::ClosedSetAsText;
-mod constant_column_not_generated;
-pub use constant_column_not_generated::ConstantColumnNotGenerated;
+mod homogeneous_column;
+pub use homogeneous_column::HomogeneousColumn;
