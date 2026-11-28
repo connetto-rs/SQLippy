@@ -22,6 +22,7 @@ mod catalogue_rules;
 mod exposure_rules;
 mod extension_without_version;
 pub use extension_without_version::ExtensionWithoutVersion;
+mod implicit_conversion;
 mod inner_join_nullable_foreign_key;
 mod nil_uuid_sentinel;
 mod not_in_null_list;
@@ -43,6 +44,7 @@ pub use catalogue_rules::{
     PublicSchemaCreate, QueryRewriteRule, ReservedKeywordIdentifier, TableInheritance,
     TruncatedIdentifier, UnloggedTable, UnvalidatedConstraint, WildcardView,
 };
+pub use implicit_conversion::ImplicitConversion;
 pub use inner_join_nullable_foreign_key::InnerJoinNullableForeignKey;
 pub use nil_uuid_sentinel::NilUuidSentinel;
 pub use not_in_null_list::NotInNullList;

@@ -174,6 +174,7 @@ fn the_default_constrainer_warns_on_column_type_shapes() {
         .map(|(rule, level, _)| (rule, level))
         .collect::<Vec<_>>(),
         [
+            ("implicit_conversion", Level::Warn),
             ("timestamp_between", Level::Warn),
             ("session_time_zone_dependence", Level::Warn),
             ("truncating_integer_division", Level::Warn),

@@ -61,6 +61,7 @@ mod foreign_key_hierarchies;
 mod foreign_keys_broken_before_repair;
 mod function_search_paths;
 mod generated_keys;
+mod implicit_conversions;
 mod implied_foreign_keys;
 mod inner_join_nullable_foreign_keys;
 mod invoker_search_path;
