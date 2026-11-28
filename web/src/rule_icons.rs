@@ -174,6 +174,7 @@ rule_icons! {
     "not_in_subquery" => FaSquareMinus,
     "not_in_null_list" => FaGhost,
     "null_comparison" => FaEquals,
+    "implicit_precedence" => FaEquals,
     "nil_uuid_sentinel" => FaWandMagicSparkles,
     "unused_cte" => FaEraser,
     "nonterminating_recursive_cte" => FaArrowsSpin,

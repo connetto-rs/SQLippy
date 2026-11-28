@@ -28,14 +28,14 @@ use crate::{
         ForbiddenColumnInExtension, ForeignKeyBrokenBeforeRepair, ForeignKeyCycle,
         ForeignKeyExistenceOracle, FractionalCount, FunctionMediatedPolicyCycle,
         FunctionWithoutSafeSearchPath, GrantOptionToClientRole, HomogeneousColumn,
-        ImpureImmutableFunction, IncompatibleForeignKey, InnerJoinNullableForeignKey,
-        InvokerWithoutSearchPath, JoinOnNonKeyColumns, JsonStoredAsText, JsonType,
-        KeyWithoutExactEquality, LatentPolicyReadCycle, LeakproofUserFunction,
-        MaterializedViewExposed, MisquotedSearchPath, MissingPrimaryKey, MixedCaseColumnName,
-        MixedCaseForeignKeyName, MixedCaseTableName, MixedMultivaluedFacts, MomentStoredAsText,
-        MoneyType, MonotonicFlagReset, MultiplePermissivePolicies, NarrowIntegerKey,
-        NarrowerReferencingColumn, NeedlessIndexPredicate, NestedPolicySubquery, NilUuidSentinel,
-        NonFiniteNumberAllowed, NonSnakeCaseColumnName, NonSnakeCaseTableName,
+        ImplicitPrecedence, ImpureImmutableFunction, IncompatibleForeignKey,
+        InnerJoinNullableForeignKey, InvokerWithoutSearchPath, JoinOnNonKeyColumns,
+        JsonStoredAsText, JsonType, KeyWithoutExactEquality, LatentPolicyReadCycle,
+        LeakproofUserFunction, MaterializedViewExposed, MisquotedSearchPath, MissingPrimaryKey,
+        MixedCaseColumnName, MixedCaseForeignKeyName, MixedCaseTableName, MixedMultivaluedFacts,
+        MomentStoredAsText, MoneyType, MonotonicFlagReset, MultiplePermissivePolicies,
+        NarrowIntegerKey, NarrowerReferencingColumn, NeedlessIndexPredicate, NestedPolicySubquery,
+        NilUuidSentinel, NonFiniteNumberAllowed, NonSnakeCaseColumnName, NonSnakeCaseTableName,
         NonminimalBooleanExpression, NonterminatingRecursiveCte, NotInNullList,
         NotInNullableSubquery, NotInSubquery, NullComparison, NullCredentialRead, NullOnlyCheck,
         NullableCompositeForeignKey, NullableConcatenation, NullableTenantKey,
@@ -286,13 +286,14 @@ fn register_table_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in query rule at its group's default level.
 fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let query_rules: [Box<dyn QueryRule<Database = DB>>; 38] = [
+    let query_rules: [Box<dyn QueryRule<Database = DB>>; 39] = [
         Box::new(NullableConcatenation::default()),
         Box::new(NotInNullableSubquery::default()),
         Box::new(InnerJoinNullableForeignKey::default()),
         Box::new(NotInSubquery::default()),
         Box::new(NotInNullList::default()),
         Box::new(NullComparison::default()),
+        Box::new(ImplicitPrecedence::default()),
         Box::new(NilUuidSentinel::default()),
         Box::new(UnusedCte::default()),
         Box::new(CteShadowsRelation::default()),
@@ -333,7 +334,7 @@ fn register_query_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCon
 
 /// Registers every built-in schema rule at its group's default level.
 fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericConstrainer<DB>) {
-    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 84] = [
+    let schema_rules: [Box<dyn SchemaRule<Database = DB>>; 85] = [
         Box::new(DuplicateIndex::default()),
         Box::new(NullableConcatenation::default()),
         Box::new(RedundantTerm::default()),
@@ -365,6 +366,7 @@ fn register_schema_rules<DB: DatabaseLike + 'static>(constrainer: &mut GenericCo
         Box::new(NotInSubquery::default()),
         Box::new(NotInNullList::default()),
         Box::new(NullComparison::default()),
+        Box::new(ImplicitPrecedence::default()),
         Box::new(NilUuidSentinel::default()),
         Box::new(UnusedCte::default()),
         Box::new(CteShadowsRelation::default()),
