@@ -77,7 +77,7 @@ fn comparisons_resolve_either_side_and_fold_names() {
 #[test]
 fn every_assignment_clause_reports_once_per_assignment() {
     for sql in [
-        "INSERT INTO t (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET flag = true AND b = 2",
+        "INSERT INTO t (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET flag = true AND t.b = 2",
         "MERGE INTO t USING other ON t.id = other.id WHEN MATCHED THEN UPDATE SET flag = true AND b = 2",
         "WITH changed AS (UPDATE t SET flag = true AND b = 2 RETURNING *) SELECT * FROM changed",
     ] {
